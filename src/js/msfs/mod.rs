@@ -212,7 +212,33 @@ struct View {
     failed: bool,
     /// Items for `__msfsDeliver`, as JSON.
     inbox: Vec<String>,
+    /// Consecutive ticks the current `inbox` batch has failed to deliver
+    /// because the engine's own watchdog interrupted it (`Cockpit::tick`'s
+    /// doc comment on the click/event delivery retry, debug_screen_clicks.md):
+    /// a script that is merely slow this one frame gets a fresh budget next
+    /// tick instead of silently losing whatever was in the batch (a cockpit
+    /// screen click, most consequentially), but a batch that keeps timing
+    /// out is dropped after [`INBOX_RETRY_LIMIT`] tries rather than growing
+    /// forever as later frames' events keep appending to it.
+    inbox_stalls: u32,
     stats: ViewStats,
+}
+
+/// See [`View::inbox_stalls`].
+const INBOX_RETRY_LIMIT: u32 = 3;
+
+/// Whether an `__msfsDeliver` batch that just failed with `error` (the
+/// engine's own error text, [`Engine::invoke`]'s `Err`) should be kept
+/// queued for a retry on the next tick, `stalls` being [`View::inbox_stalls`]
+/// after counting this failure: only for the interrupt the engine's own
+/// watchdog raises (`js/mod.rs`'s `a_runaway_script_is_interrupted` test:
+/// its message always contains "interrupt"), never for an ordinary script
+/// error (that would just repeat forever, an infinite loop of its own), and
+/// never past [`INBOX_RETRY_LIMIT`] consecutive tries (a script that is
+/// truly hung, not merely slow this one frame, must not grow the batch
+/// forever as later frames' own events keep appending to it).
+fn should_retry_delivery(error: &str, stalls: u32) -> bool {
+    stalls <= INBOX_RETRY_LIMIT && error.to_ascii_lowercase().contains("interrupt")
 }
 
 /// Where a delivery goes.
@@ -317,7 +343,7 @@ impl Cockpit {
                 gauges: panel.gauges.iter().map(|g| g.url.clone()).collect(),
                 ..Default::default()
             };
-            views.push(View { panel, natives, engine, loaded: false, failed: false, inbox: Vec::new(), stats });
+            views.push(View { panel, natives, engine, loaded: false, failed: false, inbox: Vec::new(), inbox_stalls: 0, stats });
         }
         let store = DataStore::open(options.datastore).with_backend(options.settings);
         Ok(Self {
@@ -411,10 +437,42 @@ impl Cockpit {
             let view = &mut self.views[index];
             let mut vh = ViewHost { outer: &mut *host, shared: &mut self.shared, view: index };
             if !view.inbox.is_empty() {
+                // The batch (cockpit screen clicks/drags among the items,
+                // `Displays::dispatch_pointer`'s doc comment) is only
+                // cleared once it is actually delivered. `Engine::invoke`'s
+                // own watchdog (`js/mod.rs`'s `budgeted`) can interrupt a
+                // view mid-batch on a tick where that view's scripts happen
+                // to be slow (a busy dropdown re-layout, say) rather than
+                // genuinely hung; clearing the inbox unconditionally before
+                // the call (as this used to) permanently drops whatever was
+                // in it, which — for a batch carrying a screen click — reads
+                // exactly as "clicking the cockpit screen did nothing"
+                // (debug_screen_clicks.md). Kept for one more tick's fresh
+                // budget instead, up to `INBOX_RETRY_LIMIT` tries, so a
+                // batch that is slow once still lands; a batch that keeps
+                // timing out (a genuinely runaway script) is still dropped,
+                // rather than growing forever as later frames' own events
+                // keep appending to the same undelivered batch.
                 let batch = format!("[{}]", view.inbox.join(","));
-                view.inbox.clear();
-                if let Err(e) = view.engine.invoke(&mut vh, "__msfsDeliver", &[&batch]) {
-                    vh.log(LogLevel::Error, &format!("{}: {e}", view.panel.name));
+                match view.engine.invoke(&mut vh, "__msfsDeliver", &[&batch]) {
+                    Ok(()) => {
+                        view.inbox.clear();
+                        view.inbox_stalls = 0;
+                    }
+                    Err(e) => {
+                        vh.log(LogLevel::Error, &format!("{}: {e}", view.panel.name));
+                        view.inbox_stalls += 1;
+                        if !should_retry_delivery(&e, view.inbox_stalls) {
+                            if view.inbox_stalls > INBOX_RETRY_LIMIT {
+                                vh.log(
+                                    LogLevel::Error,
+                                    &format!("{}: dropping an undelivered batch after {INBOX_RETRY_LIMIT} interrupted retries", view.panel.name),
+                                );
+                            }
+                            view.inbox.clear();
+                            view.inbox_stalls = 0;
+                        }
+                    }
                 }
             }
             if let Err(e) = view.engine.tick(&mut vh, now_ms) {

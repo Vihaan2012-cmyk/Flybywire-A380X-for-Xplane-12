@@ -63,6 +63,7 @@ use fbw_a380_systems::test_support::{aspects, breakers, circuits, failures, inva
 pub mod controls;
 pub mod presets;
 pub mod work;
+pub mod flight_model;
 
 pub use fbw_a380_systems::test_support;
 

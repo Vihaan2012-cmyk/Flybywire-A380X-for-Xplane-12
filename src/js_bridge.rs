@@ -801,7 +801,23 @@ impl JsHost {
         };
         let mut commands = Vec::new();
         if matches!(scripts, Scripts::Cockpit { .. }) {
+            // A name seen twice in hevents.txt would still resolve to the
+            // same X-Plane CommandRef (XPLMCreateCommand is idempotent by
+            // name), but registering `on_hevent` on it a second time — under
+            // a second refcon that maps back to the identical name in
+            // `take_hevents` — would make one physical click queue that
+            // event twice: a duplicated MCDU/KCCU keystroke indistinguishable
+            // from the manipulator itself double-firing
+            // (docs/deep/debug_mcdu.md). `hevent_names_have_no_duplicates_
+            // that_would_double_register_a_command` below guards the data
+            // file; this guards the registration loop itself so a future
+            // duplicate cannot double-deliver even if that test is missed.
+            let mut registered = HashSet::new();
             for (i, name) in hevent_names().iter().enumerate() {
+                if !registered.insert(name.as_str()) {
+                    crate::log(&format!("js: fbw/hevent/{name} is listed more than once in hevents.txt; only the first registration is used"));
+                    continue;
+                }
                 if let Some(command) = xplm.create_command(&format!("fbw/hevent/{name}"), &format!("FlyByWire H:{name}")) {
                     xplm.register_command_handler(command, on_hevent, i as *mut c_void);
                     commands.push((command, i));
@@ -1269,6 +1285,64 @@ mod tests {
         let names = hevent_names();
         assert!(names.len() > 400);
         assert!(names.iter().any(|n| n == "A32NX_CHRONO_TOGGLE"));
+    }
+
+    /// Regression guard for the MCDU/KCCU "double presses" bug class
+    /// (docs/deep/debug_mcdu.md): `JsHost::find` calls
+    /// `xplm.create_command("fbw/hevent/{name}", ..)` once per line of
+    /// `hevents.txt` and registers `on_hevent` on each with that line's
+    /// index as its refcon (this file, `find`). If the same event name ever
+    /// appeared twice, X-Plane would still hand both calls the *same*
+    /// `CommandRef` (`XPLMCreateCommand` is idempotent by name), but
+    /// `register_command_handler` would attach `on_hevent` to it *twice*,
+    /// under two different refcons that both resolve back to the identical
+    /// name in `take_hevents`. A single physical click would then fire the
+    /// command's begin phase once, but `on_hevent` would run twice (once per
+    /// registered handler), queuing the same event name twice for one
+    /// keypress: exactly a duplicated MCDU/KCCU keystroke, indistinguishable
+    /// from the manipulator itself double-firing. Nothing currently
+    /// deduplicates `hevents.txt`, so this is the only thing standing
+    /// between a future edit of that file and a silent regression.
+    #[test]
+    fn hevent_names_have_no_duplicates_that_would_double_register_a_command() {
+        let names = hevent_names();
+        let mut seen = HashSet::new();
+        let dupes: Vec<&String> = names.iter().filter(|n| !seen.insert(n.as_str())).collect();
+        assert!(dupes.is_empty(), "duplicate hevent names would double-register an X-Plane command, doubling every click: {dupes:?}");
+    }
+
+    /// Regression guard for the MCDU/KCCU "wrong key" / "only some keys
+    /// working" bug class (docs/deep/debug_mcdu.md): the A380X's KCCU (its
+    /// MCDU-equivalent keyboard/cursor unit, one per side) fires
+    /// `H:A32NX_KCCU_{L,R}_{KEY}` for every one of these keys on a click
+    /// (FlyByWire's own cockpit behaviour,
+    /// `SimObjects/AirPlanes/FlyByWire_A380X/.../model/behaviour/kccu.xml`,
+    /// `FBW_A380X_KCCU_Template`'s `<KEY>` list; `KBD`/`CCD` are switches
+    /// that write `L:A32NX_KCCU_{side}_{KBD,CCD}_ON_OFF` directly and never
+    /// appear here). If a future edit to `hevents.txt` ever drops one of
+    /// these, X-Plane never creates that `fbw/hevent/...` command at all, so
+    /// a click on that one physical key becomes silently inert while every
+    /// other key keeps working — indistinguishable from a manipulator that
+    /// only sometimes registers.
+    #[test]
+    fn every_kccu_key_from_the_real_cockpits_behaviour_has_a_command() {
+        const KCCU_KEYS: &[&str] = &[
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "DOT", "PLUSMINUS", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J",
+            "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "ESC", "UP", "RIGHT", "DOWN", "LEFT",
+            "DIR", "PERF", "INIT", "NAVAID", "MAILBOX", "FPLN", "DEST", "SECINDEX", "SURV", "ATCCOM", "ND", "SLASH", "ESC2", "KBD",
+            "REWIND", "FORWARD", "ENT", "BACKSPACE", "SP", "CLRINFO",
+        ];
+        let names = hevent_names();
+        let mut missing = Vec::new();
+        for side in ["L", "R"] {
+            for key in KCCU_KEYS {
+                let name = format!("A32NX_KCCU_{side}_{key}");
+                if !names.iter().any(|n| n == &name) {
+                    missing.push(name);
+                }
+            }
+        }
+        assert!(missing.is_empty(), "these KCCU keys have no fbw/hevent/ command, so clicking them does nothing: {missing:?}");
     }
 
     #[test]

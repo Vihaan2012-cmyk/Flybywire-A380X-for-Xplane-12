@@ -72,6 +72,20 @@ impl StateDump {
         Self { sender: Some(sender), ..off }
     }
 
+    /// Whether a dump could possibly happen this tick: the writer thread is
+    /// still alive and `xphfbw.stateDumps` is (live) on. Cheap (an
+    /// `Option::is_some` plus one small `RwLock` read, see
+    /// `app_settings::current`'s own doc comment) — cheap enough that
+    /// `lib.rs`'s tick loop calls it *before* paying for the shared
+    /// snapshot `Mutex` lock, instead of locking that Mutex (which the
+    /// panel thread also reads) on every single tick only to hand
+    /// [`Self::tick`] a reference it was always going to throw away
+    /// whenever dumps are off — the common case once `stateDumps` defaults
+    /// to off (see `docs/deep/debug_start_fps.md`).
+    pub fn enabled(&self) -> bool {
+        self.sender.is_some() && crate::app_settings::current().state_dumps
+    }
+
     /// Called once a tick with the tick's state; dumps every
     /// `xphfbw.stateDumpFrames`th tick, or never while `xphfbw.stateDumps`
     /// is off — both checked live, every call.

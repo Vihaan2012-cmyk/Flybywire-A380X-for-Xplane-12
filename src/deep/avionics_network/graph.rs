@@ -1,0 +1,341 @@
+//! Runtime network state: given a `NetworkTopology` and the faults
+//! currently acting on it, is a path available between two nodes, what
+//! path does traffic actually take, how much of a frame's chance to arrive
+//! does that path cost it, and — the bandwidth-allocation-gap check — is
+//! any port asked to carry more than its line rate.
+//!
+//! Reachability uses the same breadth-first search FlyByWire's own AFDX
+//! model uses (`avionics_data_communication_network.rs`'s
+//! `switches_reachable`), generalised from "is switch X connected to
+//! switch Y" to "is node X connected to node Y" over a graph that also
+//! carries end systems, and extended to track the actual path (for latency)
+//! and a continuous pass-fraction (for partial, not just binary, faults).
+
+use super::faults::{combine_pass_fraction, EndSystemFaults, LinkFaults, ModuleFaults, SwitchFaults};
+use super::topology::{EndSystemIdx, LINK_RATE_BPS, NetworkSide, NetworkTopology, NodeId, SwitchIdx};
+use std::collections::{HashMap, VecDeque};
+
+/// All faults acting on one network side's graph plus the end
+/// systems/modules, at one instant. Missing entries mean healthy — this
+/// mirrors `Default` being "healthy" throughout this crate.
+#[derive(Default)]
+pub struct NetworkFaults {
+    pub switches: [HashMap<SwitchIdx, SwitchFaults>; 2],
+    /// Keyed by the edge's two endpoints in `NodeId`'s derived order
+    /// (smaller first) so either traversal direction finds the same entry.
+    pub segments: [HashMap<(NodeId, NodeId), LinkFaults>; 2],
+    pub end_systems: HashMap<EndSystemIdx, EndSystemFaults>,
+    pub modules: HashMap<EndSystemIdx, ModuleFaults>,
+}
+impl NetworkFaults {
+    fn edge_key(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+        if a <= b { (a, b) } else { (b, a) }
+    }
+
+    pub fn switch(&self, side: NetworkSide, idx: SwitchIdx) -> SwitchFaults {
+        self.switches[side.index()].get(&idx).cloned().unwrap_or_default()
+    }
+
+    pub fn segment(&self, side: NetworkSide, a: NodeId, b: NodeId) -> LinkFaults {
+        self.segments[side.index()].get(&Self::edge_key(a, b)).copied().unwrap_or_default()
+    }
+
+    pub fn set_segment(&mut self, side: NetworkSide, a: NodeId, b: NodeId, f: LinkFaults) {
+        self.segments[side.index()].insert(Self::edge_key(a, b), f);
+    }
+
+    pub fn end_system(&self, idx: EndSystemIdx) -> EndSystemFaults {
+        self.end_systems.get(&idx).copied().unwrap_or_default()
+    }
+
+    pub fn module(&self, idx: EndSystemIdx) -> ModuleFaults {
+        self.modules.get(&idx).cloned().unwrap_or_else(|| ModuleFaults { powered: true, ..Default::default() })
+    }
+}
+
+/// The offered load and capacity of one physical link segment, for the
+/// bandwidth-allocation-gap check: an AFDX network is only correctly
+/// configured if every segment's committed VL bandwidth (plus whatever an
+/// unregulated, babbling end system adds) stays under the line rate: if it
+/// does not, frames queue past the switch's buffer and are dropped —
+/// modelled here as a loss fraction proportional to how far over capacity
+/// the offered load is (a standard queueing-overflow approximation, not a
+/// full M/D/1 buffer simulation; GENERIC in that sense, but the inputs —
+/// each VL's allocated bandwidth from its BAG and frame size, and the line
+/// rate — are the real ARINC 664 Part 7 numbers).
+#[derive(Clone, Copy, Debug)]
+pub struct PortLoad {
+    pub offered_bps: f64,
+    pub capacity_bps: f64,
+}
+impl PortLoad {
+    pub fn oversubscribed(&self) -> bool {
+        self.offered_bps > self.capacity_bps
+    }
+
+    /// Fraction of offered frames a full queue has to drop once offered
+    /// load exceeds capacity; `0.0` while there is margin.
+    pub fn overflow_loss_fraction(&self) -> f64 {
+        if self.offered_bps <= self.capacity_bps || self.offered_bps <= 0.0 {
+            0.0
+        } else {
+            ((self.offered_bps - self.capacity_bps) / self.offered_bps).clamp(0.0, 1.0)
+        }
+    }
+}
+
+pub struct NetworkGraph<'t> {
+    topology: &'t NetworkTopology,
+}
+impl<'t> NetworkGraph<'t> {
+    pub fn new(topology: &'t NetworkTopology) -> Self {
+        Self { topology }
+    }
+
+    fn adjacency(&self, side: NetworkSide) -> HashMap<NodeId, Vec<NodeId>> {
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for (a, b) in self.topology.edges(side) {
+            adj.entry(a).or_default().push(b);
+            adj.entry(b).or_default().push(a);
+        }
+        adj
+    }
+
+    fn node_up(&self, side: NetworkSide, node: NodeId, faults: &NetworkFaults) -> bool {
+        match node {
+            NodeId::Switch(i) => faults.switch(side, i).is_available(),
+            // An end system node is only ever a path endpoint (traffic is
+            // never relayed *through* a CPIOM/IOM onto the same AFDX
+            // network), so its own availability is checked by the message
+            // layer, not the graph walk.
+            NodeId::End(_) => true,
+        }
+    }
+
+    /// Chance a frame crossing this one segment, in either direction,
+    /// makes it: the cable itself, and — only for a switch endpoint — that
+    /// switch's port facing the other end.
+    pub fn edge_pass_fraction(&self, side: NetworkSide, a: NodeId, b: NodeId, faults: &NetworkFaults) -> f64 {
+        let seg = faults.segment(side, a, b);
+        let port_a = if let NodeId::Switch(i) = a { faults.switch(side, i).port_towards(b) } else { 0.0 };
+        let port_b = if let NodeId::Switch(i) = b { faults.switch(side, i).port_towards(a) } else { 0.0 };
+        combine_pass_fraction(&[seg.open, port_a, port_b])
+    }
+
+    fn edge_usable(&self, side: NetworkSide, a: NodeId, b: NodeId, faults: &NetworkFaults) -> bool {
+        faults.segment(side, a, b).is_available() && self.edge_pass_fraction(side, a, b, faults) > 0.0
+    }
+
+    /// Breadth-first search, exactly FlyByWire's algorithm generalised to
+    /// this graph's node type: is there any path at all, ignoring how lossy
+    /// it is.
+    pub fn reachable(&self, side: NetworkSide, from: NodeId, to: NodeId, faults: &NetworkFaults) -> bool {
+        self.shortest_path(side, from, to, faults).is_some()
+    }
+
+    /// The shortest usable path (fewest hops), or `None` if the two nodes
+    /// are partitioned from each other on this network side. AFDX's real
+    /// virtual links use fixed, designed-in routes rather than a live
+    /// shortest-path recomputation; shortest-hop is this model's stand-in
+    /// (GENERIC) since the real per-VL static routing tables are not
+    /// public.
+    pub fn shortest_path(&self, side: NetworkSide, from: NodeId, to: NodeId, faults: &NetworkFaults) -> Option<Vec<NodeId>> {
+        if !self.node_up(side, from, faults) || !self.node_up(side, to, faults) {
+            return None;
+        }
+        if from == to {
+            return Some(vec![from]);
+        }
+        let adj = self.adjacency(side);
+        let mut came_from: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut visited: HashMap<NodeId, bool> = HashMap::new();
+        let mut frontier = VecDeque::new();
+        frontier.push_back(from);
+        visited.insert(from, true);
+        while let Some(node) = frontier.pop_front() {
+            if node == to {
+                let mut path = vec![to];
+                let mut cur = to;
+                while let Some(&prev) = came_from.get(&cur) {
+                    path.push(prev);
+                    cur = prev;
+                }
+                path.reverse();
+                return Some(path);
+            }
+            for &next in adj.get(&node).into_iter().flatten() {
+                if visited.contains_key(&next) {
+                    continue;
+                }
+                if !self.node_up(side, next, faults) || !self.edge_usable(side, node, next, faults) {
+                    continue;
+                }
+                visited.insert(next, true);
+                came_from.insert(next, node);
+                frontier.push_back(next);
+            }
+        }
+        None
+    }
+
+    /// The chance a single frame sent along `path` arrives: every
+    /// segment's pass fraction, times every intermediate switch's own
+    /// relay pass fraction (a switch that is up but partially failed still
+    /// drops some fraction of what it forwards).
+    pub fn path_pass_fraction(&self, side: NetworkSide, path: &[NodeId], faults: &NetworkFaults) -> f64 {
+        if path.len() < 2 {
+            return 1.0;
+        }
+        let mut pass = 1.0;
+        for w in path.windows(2) {
+            pass *= self.edge_pass_fraction(side, w[0], w[1], faults);
+        }
+        for &node in &path[1..path.len() - 1] {
+            if let NodeId::Switch(i) = node {
+                pass *= 1.0 - faults.switch(side, i).failure.clamp(0.0, 1.0);
+            }
+        }
+        pass
+    }
+
+    /// Hop count switching latency and one-way propagation are charged
+    /// against; used by `message` for store-and-forward latency.
+    pub fn hop_count(path: &[NodeId]) -> usize {
+        path.len().saturating_sub(1)
+    }
+
+    /// Offered load and capacity of the segment between `a` and `b`: every
+    /// virtual link whose shortest path (to any of its destinations)
+    /// crosses this edge, counted once per VL even if several destinations
+    /// share it (an AFDX switch replicates a multicast VL's frame to each
+    /// egress port that needs it, but sends only one copy per port), plus
+    /// any babbling end system directly on this edge flooding past its
+    /// regulated share.
+    pub fn port_load(&self, side: NetworkSide, a: NodeId, b: NodeId, faults: &NetworkFaults) -> PortLoad {
+        let mut offered = 0.0;
+        for vl in &self.topology.virtual_links {
+            let source = NodeId::End(vl.source);
+            let crosses = vl.destinations.iter().any(|&d| {
+                self.shortest_path(side, source, NodeId::End(d), faults)
+                    .is_some_and(|p| p.windows(2).any(|w| (w[0] == a && w[1] == b) || (w[0] == b && w[1] == a)))
+            });
+            if crosses {
+                offered += vl.allocated_bps();
+            }
+        }
+        for node in [a, b] {
+            if let NodeId::End(i) = node {
+                let babble = faults.end_system(i).babbling.clamp(0.0, 1.0);
+                if babble > 0.0 {
+                    let regulated: f64 = self.topology.virtual_links.iter().filter(|vl| vl.source == i).map(|vl| vl.allocated_bps()).sum();
+                    offered += (LINK_RATE_BPS - regulated).max(0.0) * babble;
+                }
+            }
+        }
+        PortLoad { offered_bps: offered, capacity_bps: LINK_RATE_BPS }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::faults::PartitionFaults;
+    use super::super::topology::a380_reference_topology;
+
+    #[test]
+    fn healthy_network_reaches_every_end_system_from_every_other() {
+        let t = a380_reference_topology();
+        let g = NetworkGraph::new(&t);
+        let faults = NetworkFaults::default();
+        for side in NetworkSide::BOTH {
+            for i in 0..t.end_systems.len() {
+                for j in 0..t.end_systems.len() {
+                    if i != j {
+                        assert!(g.reachable(side, NodeId::End(i), NodeId::End(j), &faults));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fully_failed_switch_removes_it_from_reachability() {
+        let t = a380_reference_topology();
+        let g = NetworkGraph::new(&t);
+        let mut faults = NetworkFaults::default();
+        // CPIOM-A1's own attach switch on network A is its only way onto
+        // the network at all; failing it isolates CPIOM-A1 completely.
+        let cpiom_a1_switch = t.end_systems[1].attach[NetworkSide::A.index()];
+        faults.switches[0].insert(cpiom_a1_switch, SwitchFaults { failure: 1.0, ..Default::default() });
+        assert!(!g.reachable(NetworkSide::A, NodeId::End(1), NodeId::End(0), &faults));
+        // Network B is untouched.
+        assert!(g.reachable(NetworkSide::B, NodeId::End(1), NodeId::End(0), &faults));
+    }
+
+    #[test]
+    fn a_severed_segment_blocks_only_that_edge() {
+        let t = a380_reference_topology();
+        let g = NetworkGraph::new(&t);
+        let mut faults = NetworkFaults::default();
+        faults.set_segment(NetworkSide::A, NodeId::Switch(0), NodeId::Switch(1), LinkFaults { open: 1.0 });
+        // Switches 0 and 1 are still each reachable via other routes
+        // (0-2-1, since 0-2 and 2-1 both stand).
+        assert!(g.reachable(NetworkSide::A, NodeId::Switch(0), NodeId::Switch(1), &faults));
+    }
+
+    #[test]
+    fn cutting_every_alternate_route_isolates_the_pair() {
+        let t = a380_reference_topology();
+        let g = NetworkGraph::new(&t);
+        let mut faults = NetworkFaults::default();
+        // Switch "1" (index 0) neighbours are 1, 2, 7 (indices). Sever all
+        // three to isolate it completely.
+        for n in [1usize, 2, 7] {
+            faults.set_segment(NetworkSide::A, NodeId::Switch(0), NodeId::Switch(n), LinkFaults { open: 1.0 });
+        }
+        assert!(!g.reachable(NetworkSide::A, NodeId::Switch(0), NodeId::Switch(3), &faults));
+        // Its own attached end system (none at switch 0 in the reference
+        // topology) would likewise be unreachable; check the switch itself
+        // still resolves to itself.
+        assert!(g.reachable(NetworkSide::A, NodeId::Switch(0), NodeId::Switch(0), &faults));
+    }
+
+    #[test]
+    fn partial_switch_failure_costs_pass_fraction_without_losing_reachability() {
+        let t = a380_reference_topology();
+        let g = NetworkGraph::new(&t);
+        let mut faults = NetworkFaults::default();
+        let path = g.shortest_path(NetworkSide::A, NodeId::End(1), NodeId::End(0), &faults).unwrap();
+        let healthy_pass = g.path_pass_fraction(NetworkSide::A, &path, &faults);
+        assert_eq!(healthy_pass, 1.0);
+        if let Some(&NodeId::Switch(mid)) = path.get(1) {
+            faults.switches[0].insert(mid, SwitchFaults { failure: 0.5, ..Default::default() });
+        }
+        assert!(g.reachable(NetworkSide::A, NodeId::End(1), NodeId::End(0), &faults));
+        let degraded_pass = g.path_pass_fraction(NetworkSide::A, &path, &faults);
+        assert!(degraded_pass < healthy_pass);
+    }
+
+    #[test]
+    fn a_babbling_end_system_oversubscribes_its_own_port() {
+        let t = a380_reference_topology();
+        let g = NetworkGraph::new(&t);
+        let mut faults = NetworkFaults::default();
+        let es = 0usize; // CPIOM-C1
+        let switch = NodeId::Switch(t.end_systems[es].attach[0]);
+        let node = NodeId::End(es);
+        let quiet = g.port_load(NetworkSide::A, node, switch, &faults);
+        assert!(!quiet.oversubscribed());
+        faults.end_systems.insert(es, EndSystemFaults { babbling: 1.0 });
+        let flooded = g.port_load(NetworkSide::A, node, switch, &faults);
+        assert!(flooded.oversubscribed());
+        assert!(flooded.overflow_loss_fraction() > 0.0);
+    }
+
+    #[test]
+    fn module_faults_default_to_available_when_absent() {
+        let faults = NetworkFaults::default();
+        assert!(faults.module(0).is_available());
+        let _ = PartitionFaults::default();
+    }
+}

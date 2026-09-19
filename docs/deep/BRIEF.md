@@ -27,6 +27,7 @@ scripted symptom. You are one of 20 agents working in parallel for a fixed time 
    (conservation, limits, a failure changing the outcome, no NaN at zero/rest).
 5. Do not read or copy the CL650 install or any proprietary manual. Public data only.
 6. Never run whole-disk searches (`find /`, recursive listing of drive roots).
+7. **Never start sub-agents** of your own (no Agent/Task tool use): do all research yourself.
 
 ## Working style
 

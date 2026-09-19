@@ -163,7 +163,9 @@ fn spawn_efb_view(tag: &str, fps: i32) -> Option<Browser> {
     let window_info = WindowInfo::default().set_as_windowless(unsafe { std::mem::zeroed() });
     let browser_settings = BrowserSettings { windowless_frame_rate: fps.max(1), background_color: 0, ..Default::default() };
     let url = format!("http://127.0.0.1:{port}/");
-    browser_host_create_browser_sync(Some(&window_info), Some(&mut client), Some(&CefString::from(url.as_str())), Some(&browser_settings), None, None)
+    let browser = browser_host_create_browser_sync(Some(&window_info), Some(&mut client), Some(&CefString::from(url.as_str())), Some(&browser_settings), None, None)?;
+    focus(&browser);
+    Some(browser)
 }
 
 fn spawn_view(tag: &str, def: &ViewDef, fps: i32) -> Option<Browser> {
@@ -190,14 +192,27 @@ fn spawn_view(tag: &str, def: &ViewDef, fps: i32) -> Option<Browser> {
     extra.set_int(Some(&CefString::from("view")), def.index as i32);
     extra.set_string(Some(&CefString::from("screen")), Some(&CefString::from(def.screen.as_str())));
     let url = gauge_url(def);
-    browser_host_create_browser_sync(
+    let browser = browser_host_create_browser_sync(
         Some(&window_info),
         Some(&mut client),
         Some(&CefString::from(url.as_str())),
         Some(&browser_settings),
         Some(&mut extra),
         None,
-    )
+    )?;
+    focus(&browser);
+    Some(browser)
+}
+
+/// An off-screen browser has no OS window to carry focus, so CEF never
+/// infers it: without this, `document.hasFocus()` stays false and focus-
+/// dependent controls (the MFD's text fields) ignore clicks
+/// (docs/deep/debug_screen_clicks.md). Each view is its own browser, so this
+/// takes focus from no other screen.
+fn focus(browser: &Browser) {
+    if let Some(host) = browser.host() {
+        host.set_focus(1);
+    }
 }
 
 fn display_fps(aircraft_root: &Path) -> i32 {

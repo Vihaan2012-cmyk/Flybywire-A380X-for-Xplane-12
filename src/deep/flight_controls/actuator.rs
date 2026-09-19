@@ -1,0 +1,537 @@
+//! Generic servo-hydraulic linear actuator ("power control unit", PCU) that
+//! drives one control surface's hinge through a crank arm, the way a real
+//! aileron/elevator/rudder/spoiler ram does and the way FlyByWire's own
+//! `LinearActuator` does (fbw-common/src/wasm/systems/systems/src/hydraulic/
+//! linear_actuator.rs), reduced here to the physics this crate needs.
+//!
+//! A servo valve meters hydraulic (or, for an EHA/EBHA, electrically pumped)
+//! flow to a piston. Two real physical limits fall straight out of the
+//! geometry: piston force is bounded by supply pressure times piston area
+//! (F = P*A), and piston rate is bounded by the valve's rated flow divided
+//! by that same area (v = Q/A); the valve itself is an orifice, so at a
+//! fraction f of rated supply pressure the flow (and hence rate) available
+//! scales with sqrt(f), not f (Q ~ Cd*A*sqrt(2*deltaP/rho), the standard
+//! orifice equation used the same way in `physics::engine::oil`). The crank
+//! arm turning piston stroke into hinge rotation converts both into a torque
+//! and an angular rate limit.
+//!
+//! Three functional modes, matching FlyByWire's own `LinearActuatorMode`
+//! (linear_actuator.rs:55, doc comment at 363-373):
+//! - `Active`: a position servo (outer position loop -> rate demand -> inner
+//!   rate loop -> torque, saturated at the actuator's own force limit).
+//! - `Damping`: the valves resist the piece's own motion (used when a PCU
+//!   is depowered/idle but still hydraulically connected, so 2-out-of-3
+//!   actuators on a surface don't fight the one that is `Active`).
+//! - `Standby`: both ports closed; trapped, near-incompressible fluid acts
+//!   as a very stiff spring/damper holding whatever position the mode was
+//!   entered at (FlyByWire's `ClosedValves`).
+//!
+//! Piston bore/rod diameters and rated flows below are cited from FlyByWire's
+//! A380 actuator constructions where its source comments give real values;
+//! crank arms are cited where the same file's body geometry gives them,
+//! GENERIC (a representative large-transport horn length) otherwise, since
+//! the actual 3-D attachment point is not published for every surface.
+
+use std::f64::consts::PI;
+
+/// psi -> Pa.
+pub const PSI_PA: f64 = 6894.757;
+/// US liquid gallon -> m^3 (NIST).
+pub const GALLON_M3: f64 = 0.003785411784;
+
+/// A380 green/yellow hydraulic system regulated pressure
+/// (`A380HydraulicCircuitFactory::HYDRAULIC_TARGET_PRESSURE_PSI`,
+/// a380_systems/src/hydraulic/mod.rs:214).
+pub const HYDRAULIC_SUPPLY_PSI: f64 = 5250.0;
+pub const HYDRAULIC_SUPPLY_PA: f64 = HYDRAULIC_SUPPLY_PSI * PSI_PA;
+
+/// One PCU's fixed geometry: piston areas, rated valve flow and the crank
+/// arm from hinge to actuator attachment.
+#[derive(Clone, Copy, Debug)]
+pub struct ActuatorGeometry {
+    pub bore_area_m2: f64,
+    /// 0 for a symmetric (double rod, e.g. aileron/elevator/rudder) ram.
+    pub rod_area_m2: f64,
+    pub max_flow_m3_s: f64,
+    pub arm_m: f64,
+}
+
+impl ActuatorGeometry {
+    pub fn new(bore_diameter_m: f64, rod_diameter_m: f64, max_flow_gal_s: f64, arm_m: f64) -> Self {
+        let area = |d: f64| PI * (d * 0.5).powi(2);
+        Self {
+            bore_area_m2: area(bore_diameter_m),
+            rod_area_m2: area(rod_diameter_m),
+            max_flow_m3_s: max_flow_gal_s * GALLON_M3,
+            arm_m: arm_m.max(1e-3),
+        }
+    }
+
+    /// Aileron PCU: 0.07 m bore, symmetric ram (13500 daN @ 350 bar nominal
+    /// gives this bore, 0.0825 US gal/s rated flow at the 81 mm/s rated
+    /// travel speed; a380_systems/src/hydraulic/mod.rs:402-420). Crank arm
+    /// 0.119 m is the aileron body's own `control_arm` y-offset (mod.rs:464).
+    pub fn aileron() -> Self {
+        Self::new(0.07, 0.0, 0.0825, 0.119)
+    }
+
+    /// Elevator PCU: 0.08 m bore, symmetric ram, 0.15 US gal/s
+    /// (mod.rs:744-758). Crank arm GENERIC (not published for this surface):
+    /// 0.15 m, a representative horn length for a surface this size.
+    pub fn elevator() -> Self {
+        Self::new(0.08, 0.0, 0.15, 0.15)
+    }
+
+    /// Rudder PCU: piston area 77.18 cm^2 (mod.rs:928), giving a 0.0991 m
+    /// bore; 0.25 US gal/s rated flow (mod.rs:923; FBW's own comment there
+    /// notes the 236.5 mm/s rated speed implies 0.4822 gal/s for its real
+    /// piston area, so this is the more conservative of the two figures in
+    /// that source). Crank arm GENERIC: 0.18 m.
+    pub fn rudder() -> Self {
+        let bore = 2.0 * (77.18e-4 / PI).sqrt();
+        Self::new(bore, 0.0, 0.25, 0.18)
+    }
+
+    /// Spoiler PCU: 0.09 m bore, 0.05 m rod (asymmetric ram), 0.23 US gal/s
+    /// (mod.rs:584-594). Crank arm derived from the spoiler body's own
+    /// `control_arm`/`anchor` offsets, 0.10 and 0.26 of its 0.685 m size
+    /// (mod.rs:624-629): `0.685 * hypot(0.10, 0.26)` = 0.191 m.
+    pub fn spoiler() -> Self {
+        let arm = 0.685 * 0.10_f64.hypot(0.26);
+        Self::new(0.09, 0.05, 0.23, arm)
+    }
+
+    pub fn max_force_n(&self, pressure_pa: f64) -> f64 {
+        pressure_pa.max(0.0) * self.bore_area_m2
+    }
+
+    pub fn max_torque_nm(&self, pressure_pa: f64) -> f64 {
+        self.max_force_n(pressure_pa) * self.arm_m
+    }
+
+    /// Piston (hence hinge) rate available at `pressure_fraction` (0..1) of
+    /// [`HYDRAULIC_SUPPLY_PA`], via the orifice sqrt(pressure) law.
+    pub fn rate_limit_rad_s(&self, pressure_fraction: f64) -> f64 {
+        let f = pressure_fraction.max(0.0).sqrt();
+        (self.max_flow_m3_s * f / self.bore_area_m2) / self.arm_m
+    }
+}
+
+/// Which power source an actuator draws from, matching FlyByWire's
+/// `ElectroHydrostaticActuatorType` (linear_actuator.rs:268-272).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActuatorPower {
+    /// A conventional servo-hydraulic PCU fed only from a central
+    /// (green/yellow) hydraulic circuit.
+    Hydraulic,
+    /// Electro-Hydrostatic Actuator: its own motor-pump only, never the
+    /// central hydraulics.
+    ElectroHydrostatic,
+    /// Electrical Backup Hydraulic Actuator: normally fed from a central
+    /// circuit, falls back to its own motor-pump when that supply is lost.
+    ElectricalBackupHydraulic,
+}
+
+/// Functional mode, matching FlyByWire's `LinearActuatorMode` (see module
+/// doc comment).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ActuatorMode {
+    #[default]
+    Standby,
+    Active,
+    Damping,
+}
+
+/// Faults one PCU can carry, each a fraction 0 (healthy) .. 1 (fully
+/// failed) unless noted.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ActuatorFaults {
+    /// Loss of hydraulic supply (or, for an EHA/EBHA on electric power, loss
+    /// of its motor-pump output).
+    pub supply_loss: f64,
+    /// Mechanical seizure: at 1.0 the mechanism is pinned at the angle it
+    /// jammed at, resistible only by a large enough external torque.
+    pub jam: f64,
+    /// Servo valve hardover: at 1.0 the valve drives full-rate in
+    /// `runaway_sign`'s direction regardless of the commanded position.
+    pub runaway: f64,
+    /// Direction of the hardover; only its sign matters.
+    pub runaway_sign: f64,
+    /// The position transducer feeding the actuator's own position loop is
+    /// stuck: it keeps reporting whatever angle it saw the instant this
+    /// went true.
+    pub transducer_frozen: bool,
+    /// A transducer that reads a fixed offset high/low rather than freezing.
+    pub transducer_bias_rad: f64,
+    /// Servo valve internal (null-position spool) leakage: continuous flow
+    /// bypasses from pressure to return without doing work on the piston.
+    /// 0 healthy .. 1 fully worn. Bypassed flow comes straight out of the
+    /// flow otherwise available to move the piston (it derates rate more
+    /// than force, since force only needs *pressure*, which the leak path
+    /// barely loads) and, more importantly, it means a "closed" valve never
+    /// truly traps the piston: standby stiffness (the trapped-fluid spring)
+    /// falls, so the surface creeps/droops under a sustained external load
+    /// between position-loop corrections.
+    pub valve_leakage: f64,
+    /// Piston seal wear: continuous flow bypasses across the piston head
+    /// itself (bore side to rod side), independent of the servo valve.
+    /// 0 healthy .. 1 fully worn. This derates force more than rate (some
+    /// of the delivered flow recirculates internally instead of displacing
+    /// the piston against load) and, like valve leakage, softens the
+    /// actuator's holding stiffness.
+    pub piston_seal_wear: f64,
+}
+
+/// What one `step` gives back: the torque the PCU is applying about the
+/// hinge this tick, its current torque ceiling (for surface.rs's blow-back
+/// bookkeeping) and whether it is at that ceiling.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ActuatorOutput {
+    pub torque_nm: f64,
+    pub max_torque_nm: f64,
+    pub saturated: bool,
+}
+
+/// One servo-hydraulic (or EHA/EBHA) power control unit.
+pub struct PowerControlUnit {
+    pub geometry: ActuatorGeometry,
+    kp_rate_per_rad: f64,
+    k_torque_per_rate: f64,
+    k_damping: f64,
+    k_standby_spring: f64,
+    k_standby_damp: f64,
+    k_jam_spring: f64,
+    k_jam_damp: f64,
+    prev_mode: ActuatorMode,
+    standby_angle_rad: f64,
+    jam_angle_rad: Option<f64>,
+    frozen_transducer_rad: Option<f64>,
+}
+
+impl PowerControlUnit {
+    pub fn new(geometry: ActuatorGeometry) -> Self {
+        let max_t = geometry.max_torque_nm(HYDRAULIC_SUPPLY_PA).max(1.0);
+        let rated_rate = geometry.rate_limit_rad_s(1.0).max(1e-3);
+        Self {
+            geometry,
+            // GENERIC servo-loop gains: an outer position loop commanding a
+            // rate (saturating at the rated rate well inside a few degrees
+            // of error) feeding an inner rate loop stiff enough to reach the
+            // torque ceiling well within the rated rate's error band. This
+            // is the standard cascaded position/rate/force PCU architecture
+            // (e.g. Roskam, "Airplane Flight Dynamics and Automatic Flight
+            // Controls" Part II, ch. 4 on hydraulic servo actuators), not a
+            // specific FlyByWire or Airbus number.
+            kp_rate_per_rad: 8.0,
+            k_torque_per_rate: max_t / rated_rate * 4.0,
+            k_damping: max_t / rated_rate,
+            k_standby_spring: max_t * 200.0,
+            k_standby_damp: max_t * 20.0,
+            k_jam_spring: max_t * 50.0,
+            k_jam_damp: max_t * 5.0,
+            prev_mode: ActuatorMode::Standby,
+            standby_angle_rad: 0.0,
+            jam_angle_rad: None,
+            frozen_transducer_rad: None,
+        }
+    }
+
+    /// `pressure_fraction`: 0..1 of [`HYDRAULIC_SUPPLY_PA`] (or, for an
+    /// electric supply, of an equivalent EHA/EBHA pump pressure) actually
+    /// reaching this actuator, from the hydraulic/electrical system model.
+    pub fn step(
+        &mut self,
+        mode: ActuatorMode,
+        commanded_angle_rad: f64,
+        angle_rad: f64,
+        rate_rad_s: f64,
+        pressure_fraction: f64,
+        faults: &ActuatorFaults,
+    ) -> ActuatorOutput {
+        let supply = pressure_fraction.clamp(0.0, 1.0) * (1.0 - faults.supply_loss.clamp(0.0, 1.0));
+        let jam = faults.jam.clamp(0.0, 1.0);
+        let leak = faults.valve_leakage.clamp(0.0, 1.0);
+        let wear = faults.piston_seal_wear.clamp(0.0, 1.0);
+        // GENERIC derates: valve leakage bypasses flow (so it costs rate
+        // more than force), seal wear bypasses pressure across the piston
+        // (so it costs force more than rate). Neither reaches zero on its
+        // own at full magnitude, since some residual capability survives
+        // even a badly worn actuator; a jam still overrides everything.
+        let rate_derate = (1.0 - 0.6 * leak - 0.2 * wear).clamp(0.05, 1.0);
+        let force_derate = (1.0 - 0.5 * wear - 0.2 * leak).clamp(0.05, 1.0);
+        let max_torque = self.geometry.max_torque_nm(HYDRAULIC_SUPPLY_PA * supply) * force_derate * (1.0 - jam);
+        let rate_limit = self.geometry.rate_limit_rad_s(supply) * rate_derate;
+        // A leaking valve or a worn seal both mean the "trapped fluid" a
+        // closed/holding actuator relies on isn't fully trapped: the whole
+        // servo loop (not just its force ceiling) gets softer, so a
+        // sustained external load produces steady-state droop instead of
+        // being held at zero error. Applied to every mode's gain, not only
+        // Standby's spring, since Active mode's own inner loop is what a
+        // real degraded PCU also loses stiffness in.
+        let stiffness_factor = (rate_derate * force_derate).clamp(0.05, 1.0);
+
+        if mode == ActuatorMode::Standby && self.prev_mode != ActuatorMode::Standby {
+            self.standby_angle_rad = angle_rad;
+        }
+        self.prev_mode = mode;
+
+        if jam > 0.0 {
+            if self.jam_angle_rad.is_none() {
+                self.jam_angle_rad = Some(angle_rad);
+            }
+        } else {
+            self.jam_angle_rad = None;
+        }
+
+        let feedback = if faults.transducer_frozen {
+            *self.frozen_transducer_rad.get_or_insert(angle_rad)
+        } else {
+            self.frozen_transducer_rad = None;
+            angle_rad + faults.transducer_bias_rad
+        };
+
+        let mut torque = match mode {
+            ActuatorMode::Active => {
+                let normal_rate_cmd =
+                    (self.kp_rate_per_rad * (commanded_angle_rad - feedback)).clamp(-rate_limit, rate_limit);
+                let r = faults.runaway.clamp(0.0, 1.0);
+                let rate_cmd = if r > 0.0 {
+                    let sign = if faults.runaway_sign >= 0.0 { 1.0 } else { -1.0 };
+                    (1.0 - r) * normal_rate_cmd + r * sign * rate_limit
+                } else {
+                    normal_rate_cmd
+                };
+                stiffness_factor * self.k_torque_per_rate * (rate_cmd - rate_rad_s)
+            }
+            ActuatorMode::Damping => -stiffness_factor * self.k_damping * rate_rad_s,
+            ActuatorMode::Standby => {
+                stiffness_factor
+                    * (-self.k_standby_spring * (angle_rad - self.standby_angle_rad) - self.k_standby_damp * rate_rad_s)
+            }
+        };
+        let saturated = torque.abs() > max_torque;
+        torque = torque.clamp(-max_torque, max_torque);
+
+        // The seized mechanism's own resistance is additive to whatever the
+        // (now authority-reduced) servo can still do, so a partial jam
+        // fights the servo rather than simply capping it.
+        if let Some(seize_angle) = self.jam_angle_rad {
+            torque += -self.k_jam_spring * jam * (angle_rad - seize_angle) - self.k_jam_damp * jam * rate_rad_s;
+        }
+
+        ActuatorOutput { torque_nm: torque, max_torque_nm: max_torque, saturated }
+    }
+}
+
+/// Faults an EHA/EBHA's own electric motor-pump can carry.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ElectricPumpFaults {
+    /// 0 healthy .. 1 dead motor/pump.
+    pub motor_failure: f64,
+}
+
+/// The electric motor and small local hydraulic pump behind an EHA or EBHA,
+/// spinning up/down with a first-order lag (GENERIC time constant,
+/// representative of a several-kW variable-speed pump motor) rather than
+/// instantaneously, so the pressure it can deliver ramps rather than steps
+/// when the bus comes up or a failure occurs -- the same exact-exponential
+/// convention used by `physics::engine::oil`'s chamber temperatures.
+pub struct ElectricMotorPump {
+    speed_frac: f64,
+    time_constant_s: f64,
+}
+
+impl ElectricMotorPump {
+    pub fn new(time_constant_s: f64) -> Self {
+        Self { speed_frac: 0.0, time_constant_s: time_constant_s.max(1e-3) }
+    }
+
+    /// `electrical_power_fraction`: 0 (bus dead) .. 1 (bus healthy). Returns
+    /// the pressure fraction (of [`HYDRAULIC_SUPPLY_PA`]) now available.
+    pub fn step(&mut self, electrical_power_fraction: f64, faults: &ElectricPumpFaults, dt_s: f64) -> f64 {
+        let target = electrical_power_fraction.clamp(0.0, 1.0) * (1.0 - faults.motor_failure.clamp(0.0, 1.0));
+        let k = 1.0 / self.time_constant_s;
+        self.speed_frac = target + (self.speed_frac - target) * (-k * dt_s.max(0.0)).exp();
+        self.speed_frac.clamp(0.0, 1.0)
+    }
+
+    pub fn pressure_fraction(&self) -> f64 {
+        self.speed_frac
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DT: f64 = 0.01;
+
+    #[test]
+    fn aileron_geometry_reproduces_flybywires_cited_force_and_rate() {
+        let g = ActuatorGeometry::aileron();
+        // 13500 daN @ 350 bar nominal (mod.rs:407); a380_systems runs the
+        // circuit at 5250 psi (362 bar) so this reads a little higher.
+        let force_dan = g.max_force_n(HYDRAULIC_SUPPLY_PA) / 10.0;
+        assert!((force_dan - 13934.0).abs() < 50.0, "{force_dan} daN");
+        // 81 mm/s rated piston speed (mod.rs:410); this actuator's
+        // rate_limit_rad_s is per-radian-of-hinge, so undo the crank arm to
+        // get piston speed back for the comparison.
+        let piston_mm_s = g.rate_limit_rad_s(1.0) * g.arm_m * 1000.0;
+        assert!((piston_mm_s - 81.0).abs() < 1.0, "{piston_mm_s} mm/s");
+    }
+
+    #[test]
+    fn no_nan_at_rest_or_zero_dt() {
+        let mut pcu = PowerControlUnit::new(ActuatorGeometry::elevator());
+        let out = pcu.step(ActuatorMode::Active, 0.0, 0.0, 0.0, 0.0, &ActuatorFaults::default());
+        assert!(out.torque_nm.is_finite() && out.max_torque_nm.is_finite());
+        let mut pump = ElectricMotorPump::new(0.5);
+        let p = pump.step(1.0, &ElectricPumpFaults::default(), 0.0);
+        assert!(p.is_finite());
+    }
+
+    #[test]
+    fn active_mode_drives_toward_the_commanded_angle() {
+        let mut pcu = PowerControlUnit::new(ActuatorGeometry::aileron());
+        // Below commanded angle: torque should push positive (toward it).
+        let out = pcu.step(ActuatorMode::Active, 0.2, 0.0, 0.0, 1.0, &ActuatorFaults::default());
+        assert!(out.torque_nm > 0.0);
+        assert!(out.torque_nm <= out.max_torque_nm + 1e-6);
+        // Above commanded angle: torque should push negative.
+        let out = pcu.step(ActuatorMode::Active, -0.2, 0.0, 0.0, 1.0, &ActuatorFaults::default());
+        assert!(out.torque_nm < 0.0);
+    }
+
+    #[test]
+    fn valve_leakage_and_seal_wear_cause_standby_droop_under_a_sustained_load() {
+        // A leaking valve or worn seal means the "trapped fluid" standby
+        // relies on isn't fully trapped: the actuator should visibly droop
+        // further, in standby, under the same constant external load than
+        // a healthy one -- not just lose peak force.
+        const FINE_DT: f64 = 0.0005;
+        let mut healthy = PowerControlUnit::new(ActuatorGeometry::elevator());
+        let mut degraded = PowerControlUnit::new(ActuatorGeometry::elevator());
+        let degraded_faults = ActuatorFaults { valve_leakage: 1.0, piston_seal_wear: 1.0, ..Default::default() };
+        let inertia = 50.0;
+        let external_torque = 2000.0; // well under either's force ceiling: stays in the linear regime
+        let (mut ha, mut hr, mut da, mut dr) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+        for _ in 0..200_000 {
+            let ho = healthy.step(ActuatorMode::Standby, 0.0, ha, hr, 1.0, &ActuatorFaults::default());
+            hr += (ho.torque_nm + external_torque) / inertia * FINE_DT;
+            ha += hr * FINE_DT;
+
+            let deg_out = degraded.step(ActuatorMode::Standby, 0.0, da, dr, 1.0, &degraded_faults);
+            dr += (deg_out.torque_nm + external_torque) / inertia * FINE_DT;
+            da += dr * FINE_DT;
+        }
+        assert!(ha.abs() > 0.0 && da.abs() > 0.0);
+        assert!(da.abs() > ha.abs() * 5.0, "degraded droop {da} should far exceed healthy droop {ha}");
+    }
+
+    #[test]
+    fn integrating_active_mode_actually_reaches_the_command() {
+        // This PCU's inner rate loop is deliberately stiff (see `new`'s doc
+        // comment: reaches its torque ceiling well inside the rated rate's
+        // error band), which any caller must integrate at a fine enough
+        // step to resolve -- exactly why `surface::ControlSurface` and
+        // `high_lift::HighLiftSystem` sub-step internally. This test does
+        // the same sub-stepping by hand rather than exercising the PCU at
+        // an unrealistically large step no real caller would use.
+        const FINE_DT: f64 = 0.0005;
+        let mut pcu = PowerControlUnit::new(ActuatorGeometry::elevator());
+        let inertia = 50.0; // kg*m^2, arbitrary for this closed-loop check
+        let mut angle = 0.0_f64;
+        let mut rate = 0.0_f64;
+        for _ in 0..200_000 {
+            let out = pcu.step(ActuatorMode::Active, 0.1, angle, rate, 1.0, &ActuatorFaults::default());
+            rate += out.torque_nm / inertia * FINE_DT;
+            angle += rate * FINE_DT;
+        }
+        assert!((angle - 0.1).abs() < 0.01, "settled at {angle}");
+    }
+
+    #[test]
+    fn damping_mode_only_resists_motion_never_drives() {
+        let mut pcu = PowerControlUnit::new(ActuatorGeometry::spoiler());
+        let out = pcu.step(ActuatorMode::Damping, 0.5, 0.0, 2.0, 1.0, &ActuatorFaults::default());
+        assert!(out.torque_nm < 0.0); // opposes the positive rate
+        let out2 = pcu.step(ActuatorMode::Damping, 0.5, 0.0, 0.0, 1.0, &ActuatorFaults::default());
+        assert_eq!(out2.torque_nm, 0.0); // at rest, no drive at all
+    }
+
+    #[test]
+    fn standby_mode_holds_the_angle_it_was_entered_at() {
+        let mut pcu = PowerControlUnit::new(ActuatorGeometry::rudder());
+        // Enters standby at angle 0.3: a later request for 0 should be
+        // ignored, and it should resist displacement away from 0.3.
+        pcu.step(ActuatorMode::Standby, 0.0, 0.3, 0.0, 1.0, &ActuatorFaults::default());
+        let out = pcu.step(ActuatorMode::Standby, 0.0, 0.4, 0.0, 1.0, &ActuatorFaults::default());
+        assert!(out.torque_nm < 0.0); // pulls back toward 0.3, not 0
+    }
+
+    #[test]
+    fn supply_loss_shrinks_both_force_and_rate_limit() {
+        let mut healthy = PowerControlUnit::new(ActuatorGeometry::aileron());
+        let mut starved = PowerControlUnit::new(ActuatorGeometry::aileron());
+        let h = healthy.step(ActuatorMode::Active, 1.0, 0.0, 0.0, 1.0, &ActuatorFaults::default());
+        let s = starved.step(
+            ActuatorMode::Active,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            &ActuatorFaults { supply_loss: 0.9, ..Default::default() },
+        );
+        assert!(s.max_torque_nm < 0.2 * h.max_torque_nm);
+    }
+
+    #[test]
+    fn a_full_jam_freezes_the_mechanism_against_a_moderate_load() {
+        let mut pcu = PowerControlUnit::new(ActuatorGeometry::elevator());
+        let faults = ActuatorFaults { jam: 1.0, ..Default::default() };
+        // Jams at angle 0.1; an aerodynamic-scale external torque tries to
+        // push it further. The jam's own resistance should dominate a
+        // torque well under its jam-spring strength for a small excursion.
+        let out = pcu.step(ActuatorMode::Active, 0.5, 0.1, 0.0, 1.0, &faults);
+        assert_eq!(out.max_torque_nm, 0.0); // no servo authority left
+        let excursion = pcu.step(ActuatorMode::Active, 0.5, 0.11, 0.0, 1.0, &faults);
+        assert!(excursion.torque_nm < 0.0); // resists the excursion
+    }
+
+    #[test]
+    fn runaway_drives_full_rate_in_its_own_direction_regardless_of_command() {
+        let mut pcu = PowerControlUnit::new(ActuatorGeometry::rudder());
+        let faults = ActuatorFaults { runaway: 1.0, runaway_sign: -1.0, ..Default::default() };
+        // Commanded straight to +1 rad, but the hardover should still drive
+        // negative.
+        let out = pcu.step(ActuatorMode::Active, 1.0, 0.0, 0.0, 1.0, &faults);
+        assert!(out.torque_nm < 0.0);
+    }
+
+    #[test]
+    fn a_frozen_transducer_chases_a_stale_reading_even_as_the_true_angle_moves() {
+        let mut pcu = PowerControlUnit::new(ActuatorGeometry::aileron());
+        let faults = ActuatorFaults { transducer_frozen: true, ..Default::default() };
+        // Feedback freezes at the angle seen the first tick (0.0), so a
+        // command of 0.0 with the *true* angle having since drifted to 0.2
+        // should read as "already there" and stop driving back toward 0.2.
+        pcu.step(ActuatorMode::Active, 0.0, 0.0, 0.0, 1.0, &faults);
+        let out = pcu.step(ActuatorMode::Active, 0.0, 0.2, 0.0, 1.0, &faults);
+        assert!((out.torque_nm).abs() < 1e-9, "should see no error: {}", out.torque_nm);
+    }
+
+    #[test]
+    fn electric_pump_ramps_up_and_respects_motor_failure() {
+        let mut pump = ElectricMotorPump::new(0.2);
+        let mut p = 0.0;
+        for _ in 0..1000 {
+            p = pump.step(1.0, &ElectricPumpFaults::default(), DT);
+        }
+        assert!(p > 0.99);
+        let mut dead = ElectricMotorPump::new(0.2);
+        for _ in 0..1000 {
+            p = dead.step(1.0, &ElectricPumpFaults { motor_failure: 1.0 }, DT);
+        }
+        assert!(p < 1e-6);
+    }
+}

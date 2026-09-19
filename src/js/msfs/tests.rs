@@ -520,3 +520,38 @@ fn fws_recovers_after_a_cold_and_dark_power_up() {
     assert_eq!(fws1, 1., "FWS1 never became healthy after ground power connected and stayed on");
     assert_eq!(fws2, 1., "FWS2 never became healthy after ground power connected and stayed on");
 }
+
+/// Debug pass (2026-09-19), cockpit screen clicks doing nothing
+/// (docs/deep/debug_screen_clicks.md): `Cockpit::tick` used to clear a
+/// view's `inbox` (the `__msfsDeliver` batch, which is how a screen click
+/// from `Displays::dispatch_pointer`/`screen_event` reaches the instrument)
+/// *before* knowing whether the delivery call actually completed. When the
+/// engine's own runaway-script watchdog interrupted that one call (a view's
+/// scripts being genuinely slow for a frame, not hung — `mfd_dropdown_click_
+/// and_overlap`'s own finding, `js/mod.rs`'s `a_runaway_script_is_
+/// interrupted`), the click was already gone from the inbox and nothing
+/// ever retried it: from the cockpit, indistinguishable from the click never
+/// having landed at all. `should_retry_delivery` is the fix's decision
+/// function, pulled out so it can be checked without booting an engine.
+#[test]
+fn should_retry_delivery_only_for_an_interrupted_batch_and_only_up_to_the_limit() {
+    // An ordinary script error (a real bug in the delivered batch's handler,
+    // or a missing `__msfsDeliver`) must never be retried: retrying it would
+    // just repeat the same failure forever.
+    assert!(!should_retry_delivery("TypeError: x is not a function", 1));
+    assert!(!should_retry_delivery("__msfsDeliver: is not defined", 1));
+
+    // The watchdog's own interrupt (case-insensitive: `js/mod.rs`'s
+    // `Engine::eval`/`invoke` surface whatever text the underlying engine
+    // gives, and the existing `a_runaway_script_is_interrupted` test only
+    // asserts a lower-cased "interrupt" substring) is retried while under
+    // the limit...
+    for stalls in 1..=INBOX_RETRY_LIMIT {
+        assert!(should_retry_delivery("Error: interrupted", stalls), "stall {stalls} of {INBOX_RETRY_LIMIT} should still retry");
+        assert!(should_retry_delivery("INTERRUPTED", stalls), "case-insensitive, stall {stalls}");
+    }
+    // ...but not forever: a batch that keeps timing out past the limit is a
+    // genuinely hung script, not a one-frame slowdown, and must be dropped
+    // rather than grow every later frame's own events onto it forever.
+    assert!(!should_retry_delivery("Error: interrupted", INBOX_RETRY_LIMIT + 1));
+}

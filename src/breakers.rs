@@ -1517,6 +1517,11 @@ mod tests {
 
     #[test]
     fn pulling_a_plugin_var_breaker_writes_one_and_reset_writes_zero() {
+        // Same reason as the other `pre_systems`-driving tests above: it
+        // touches every catalogued breaker's bridged failure id on the
+        // shared global `failures::STATE`, not just "hyd-epump-ga" (which
+        // has none of its own, but its neighbours in the catalogue do).
+        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let mut vars = TestVars::default();
         let mut circuits = crate::circuits::Circuits::new(&mut vars);
         let mut b = Breakers::new(&mut vars);
@@ -1739,6 +1744,10 @@ mod tests {
     /// re-derived from `bearing_overcurrent_multiplier` under test.
     #[test]
     fn bearing_wear_magnitude_predicts_current_by_the_back_emf_relation() {
+        // Same shared-global-state hazard as the `pre_systems` tests above:
+        // `Failures::new()` clears the process-wide `failures::STATE`
+        // outright, and `set_magnitude` writes into it too. Take the lock.
+        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let _f = crate::failures::Failures::new();
         crate::failures::set_magnitude(29_103, 0.6);
         assert_eq!(bearing_overcurrent_multiplier("hyd-epump-ga"), 4.0);

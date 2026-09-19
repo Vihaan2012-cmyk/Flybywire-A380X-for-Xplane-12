@@ -37,6 +37,7 @@ pub enum Area {
     EngineCore = 16,
     Breakers = 17,
     Integration = 18,
+    Fuel = 19,
 }
 
 pub const fn failure_id(area: Area, ata: u16, n: u16) -> u64 {

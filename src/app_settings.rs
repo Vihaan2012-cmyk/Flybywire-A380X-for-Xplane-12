@@ -79,7 +79,7 @@ impl Default for AppSettings {
             random_failures: false,
             failure_rate: 1.0,
             persistence: true,
-            state_dumps: true,
+            state_dumps: false,
             state_dump_frames: crate::state_dump::DEFAULT_EVERY_TICKS,
             state_dump_keep: crate::state_dump::DEFAULT_KEEP_PER_SESSION,
         }

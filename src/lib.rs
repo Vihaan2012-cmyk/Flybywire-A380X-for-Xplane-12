@@ -1003,6 +1003,14 @@ struct Computed {
     mass: Option<DataRef>,
     paused: Option<DataRef>,
     gear_deploy: Option<DataRef>,
+    /// `msfs_derived`'s own identifiers, resolved once here instead of by
+    /// name every tick (perf: `Vars::get` hashes a freshly allocated
+    /// `String` on every call; `msfs_derived` used to build one with
+    /// `format!`/`to_string()` per variable, every single tick, only to
+    /// look up an identifier that never changes after the first tick).
+    fd_light: VariableIdentifier,
+    ap_fd_active: [VariableIdentifier; 2],
+    gear_pct_extended: VariableIdentifier,
 }
 
 impl Plugin {
@@ -1028,7 +1036,30 @@ impl Plugin {
         let simulation = start_systems(start_state, &mut vars);
         let fadec = fadec::Fadec::new(&mut vars, xplm);
         let throttles = throttle::Throttles::new(xplm);
-        let engine_commands = engine_commands::EngineCommands::new(&mut vars, xplm);
+        let mut engine_commands = engine_commands::EngineCommands::new(&mut vars, xplm);
+        // A spawn state other than Hangar/Apron begins with the engines
+        // already running (start_state.rs's own module docs: "every state
+        // but Hangar and Apron starts with the engines running";
+        // `fadec::Fadec::new`'s own `initialize` turns the masters on for
+        // exactly these states). `EngineCommands::new` always builds each
+        // physical engine stone cold (`Engine::new()`,
+        // physics/engine/mod.rs) regardless of state, and nothing called
+        // the `spawn_at_idle()` this crate already ships for exactly this
+        // case (its own doc comment: "the state a spawn with engines
+        // running starts each engine in, as a simulator's in-flight or
+        // engines-running spawn does") -- it was only ever wired into the
+        // offline harness (offline_chain.rs). Left cold, a non-cold spawn
+        // had `fadec.rs`'s `next_state` promote every engine straight to
+        // `On` (its `Off` arm) while the real physics engine sat at
+        // N1=N2=N3=0 with no starter engaged (state is already `On`, not
+        // `Starting`, so `engine_commands.rs`'s own `starter_engaged` gate
+        // never latches) -- a cold core has no torque source to spin up on
+        // its own, so it stayed at 0% forever while EngineState and the
+        // cockpit's masters said running throughout. See
+        // docs/deep/debug_start_fps.md.
+        if !matches!(start_state, StartState::Hangar | StartState::Apron) {
+            engine_commands.spawn_at_idle();
+        }
         let prims = prim::Prims::new(&mut vars, start_state.into());
         let commands = afs_events::Commands::register(xplm);
         let priority_takeover_commands = afs_events::PriorityTakeoverCommands::register(xplm);
@@ -1171,6 +1202,12 @@ impl Plugin {
             mass: xplm.find("sim/flightmodel/weight/m_total"),
             paused: xplm.find("sim/time/paused"),
             gear_deploy: xplm.find("sim/flightmodel2/gear/deploy_ratio"),
+            fd_light: vars.get("FCU_FD_LIGHT_ON".to_owned()),
+            ap_fd_active: [
+                vars.get("AUTOPILOT FLIGHT DIRECTOR ACTIVE:1".to_owned()),
+                vars.get("AUTOPILOT FLIGHT DIRECTOR ACTIVE:2".to_owned()),
+            ],
+            gear_pct_extended: vars.get("GEAR TOTAL PCT EXTENDED".to_owned()),
         };
         Self {
             simulation,
@@ -1533,10 +1570,13 @@ impl Plugin {
             let h_events = js_bridge::take_hevents();
             let provider_events = js_bridge::take_provider_events();
             let mut events: Vec<(String, f64)> = Vec::new();
-            if let Some(js) = self.js.as_mut() {
-                js.update(&mut self.vars, delta, self.time, &h_events, &provider_events);
-                events.extend(js.take_events());
-            }
+            // XPHFBW first, so this tick's switch between the two display
+            // engines is settled before either consumes this tick's cockpit
+            // events: otherwise, on the tick its views finish loading (or
+            // reload after a script error), the same KCCU keystroke reached
+            // both the plugin's own QuickJS cockpit and XPHFBW's views — a
+            // double press (docs/deep/debug_mcdu.md).
+            let was_active = self.xphfbw.as_ref().is_some_and(|h| h.displays_active());
             if let Some(host) = self.xphfbw.as_mut() {
                 host.post_tick(&mut self.vars, self.time, &h_events, &provider_events);
                 events.extend(host.take_events());
@@ -1554,6 +1594,13 @@ impl Plugin {
                         js.resume();
                     }
                 }
+            }
+            if let Some(js) = self.js.as_mut() {
+                // Cockpit events went to XPHFBW above whenever its views were
+                // the authoritative displays going into this tick.
+                let cockpit_events: &[_] = if was_active { &[] } else { &h_events };
+                js.update(&mut self.vars, delta, self.time, cockpit_events, &provider_events);
+                events.extend(js.take_events());
             }
             crate::perf::lap("tick-after-systems: radios");
             // [slot tick-after-systems: radios] The scripts' key events: the
@@ -1622,7 +1669,14 @@ impl Plugin {
                 ));
             }
         }
-        if self.ticks % state_dump::EVERY_TICKS == 0 {
+        // `state_dump::EVERY_TICKS` is always 1 (the real interval,
+        // `xphfbw.stateDumpFrames`, is checked live inside `StateDump::tick`
+        // itself, see its module docs) so this used to lock the shared
+        // snapshot `Mutex` -- contended with the panel thread -- every
+        // single tick even with dumps off. `enabled()` is checked first
+        // instead: cheap, and false in the common (dumps off) case, so the
+        // snapshot lock is only taken on a tick that could actually dump.
+        if self.ticks % state_dump::EVERY_TICKS == 0 && self.state_dump.enabled() {
             if let Ok(s) = snapshot().lock() {
                 self.state_dump.tick(s.time, s.ticks, &s.names, &s.datarefs, &s.values, &s.sources);
             }
@@ -1650,12 +1704,18 @@ impl Plugin {
     }
 
     /// Simulator variables MSFS derives from several of its own values.
+    ///
+    /// The three identifiers this needs are resolved once, in `Computed`
+    /// (`Plugin::new`), not here: this runs every tick, and
+    /// `Vars::get`/`VariableRegistry::get` takes an owned `String` to hash
+    /// against `Vars::ids`, so building one fresh with `format!`/
+    /// `to_string()` per variable every tick (four allocations a frame,
+    /// times the tick rate) was pure per-frame waste once the identifier
+    /// is known after the first tick -- see `docs/deep/debug_start_fps.md`.
     fn msfs_derived(&mut self, xplm: &Xplm) {
         // The flight director: MSFS's flag follows the FCU's FD pushbutton.
-        let fd = self.vars.get("FCU_FD_LIGHT_ON".to_string());
-        let fd = self.vars.read(&fd);
-        for n in [1, 2] {
-            let id = self.vars.get(format!("AUTOPILOT FLIGHT DIRECTOR ACTIVE:{n}"));
+        let fd = self.vars.read(&self.computed.fd_light);
+        for id in self.computed.ap_fd_active {
             self.vars.write(&id, fd);
         }
         // All gear extended, as a ratio (FlyByWire compares it with 0.95 in
@@ -1665,8 +1725,7 @@ impl Plugin {
             let n = xplm.get_vf(d, &mut ratios).min(5);
             if n > 0 {
                 let mean = ratios[..n].iter().map(|&r| r as f64).sum::<f64>() / n as f64;
-                let id = self.vars.get("GEAR TOTAL PCT EXTENDED".to_string());
-                self.vars.write_from_xplane(&id, mean);
+                self.vars.write_from_xplane(&self.computed.gear_pct_extended, mean);
             }
         }
     }

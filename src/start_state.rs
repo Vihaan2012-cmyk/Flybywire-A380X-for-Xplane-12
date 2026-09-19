@@ -495,6 +495,25 @@ mod tests {
         // 0/0 = NaN this harness would otherwise wrongly blame on this
         // plugin's own glue for.
         vars.set("TOTAL WEIGHT", 600_000.0);
+        // FlyByWire's own `SimulationTestBed::new_with_start_state` (the
+        // harness every one of their own systems tests runs through,
+        // fbw-common systems/src/simulation/test.rs:263-269) always seeds
+        // exactly these two before ticking anything: ambient_pressure
+        // 29.92 inHg, ambient_temperature 0 C. This harness builds
+        // `Simulation` directly instead of going through their `TestBed`
+        // (module docs above), so nothing here ever set them, and
+        // `TestVars` (aspects.rs) defaults every unset variable to a bare
+        // 0 -- AMBIENT PRESSURE reading 0 is a vacuum, a condition the
+        // ported electrical/air-conditioning/pneumatic code was never
+        // written to divide by (see e.g. `air_cycle_machine.rs`'s
+        // `rho_ambient = ambient_pressure / (R * ambient_temperature)`,
+        // and the pressure-ratio terms throughout `pneumatic.rs`), which is
+        // the NaN this test's own name is written to catch. Seeding the
+        // same baseline FlyByWire's own tests always assume is not a
+        // scripted value; it is the "sitting in the open air" condition no
+        // real aircraft, cold or running, is ever without.
+        vars.set("AMBIENT PRESSURE", 29.92);
+        vars.set("AMBIENT TEMPERATURE", 0.0);
         let mut sim = Simulation::new(StartState::Apron, A380::new, &mut vars);
         let mut aspects = crate::aspects::a380(&mut vars);
         let dt_s = 0.05;

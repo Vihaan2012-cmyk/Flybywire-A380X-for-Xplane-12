@@ -1308,8 +1308,11 @@ impl Fadec {
         use thrust_limits::limit_n1;
         let flex_temp = vars.read(&self.flex_temp);
         let limit_type = vars.read(&self.limit_type);
-        let tla_at_flex = self.engines.iter().map(|e| e.tla).collect::<Vec<_>>();
-        let all_at_flex = tla_at_flex.iter().all(|id| vars.read(id) == 35.0);
+        // No `Vec` here: this ran every tick purely to check four levers,
+        // heap-allocating a throwaway `Vec<VariableIdentifier>` each time
+        // (see docs/deep/debug_start_fps.md) for what a plain iterator
+        // check does with no allocation at all.
+        let all_at_flex = self.engines.iter().all(|e| vars.read(&e.tla) == 35.0);
 
         // Only latch the flex temperature when flex is not both selected and
         // set on the levers.
