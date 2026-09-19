@@ -28,6 +28,8 @@ physics, not out of a scripted symptom.
 | MEL | 64 items / 89 sub-items mapped to 120 failures, with per-unit placarding |
 | Tests | **831** unit and integration tests, plus a multi-tier failure battery |
 
+Full reference data, sources and architecture: [docs/SPECIFICATIONS.md](docs/SPECIFICATIONS.md).
+
 ## Lines of code
 
 Counted from the files in this repository (`git ls-files`), excluding FlyByWire's own
