@@ -1,0 +1,141 @@
+# APU AVAILABLE / auto-shutdown fix (follow-up to apu-start-fix.patch)
+#
+# Root cause: Pw980Core::update() (apu/pw980_physics.rs:393, pre-fix) did a
+# single explicit-Euler integration step of the rotor inertia AND the PID
+# fuel governor using context.delta_as_secs_f64() directly as dt, with no
+# substepping. AuxiliaryPowerUnitTestBed::run(delta) (apu/mod.rs) issues
+# exactly ONE Simulation::tick(delta, ...) call for the whole requested
+# duration (see simulation/test.rs:295 run_with_delta, and
+# simulation/mod.rs:435 Simulation::tick, which does not subdivide) -- so a
+# `.run(Duration::from_secs(49))` call (APPROXIMATE_STARTUP_TIME, apu/mod.rs
+# :1455) handed Pw980Core::update a single ~49s dt.
+#
+# A 49s single Euler step computes the rotor's angular acceleration once
+# from the START-of-tick state (N2 near 0%, fuel governor's first-ever
+# output) and applies that ONE acceleration value, unchanged, for the
+# entire 49 simulated seconds, instead of the real continuously-governed
+# spool-up the PID/torque-balance model assumes. This left N2/N far short
+# of the governed idle setpoint (observed: n() settling at 95.13% instead
+# of the expected 100%, i.e. n2 ~= 78.9% instead of the governed 85-87%
+# idle target -- apu/mod.rs:1546), which in turn meant:
+#   - ElectronicControlBox::is_available() (apu/electronic_control_box.rs
+#     :328, `self.n.get::<percent>() > 95.`) never went true, so
+#     `test_bed.apu_is_available()` failed (apu/mod.rs ~1285/1911 callers).
+#   - The same under-integrated trajectory desynced EGT, start-motor
+#     current and timing assertions across most other pw980 tests.
+#   - The no-fuel/shutdown tests (`running_apu_shuts_down_when_no_more_fuel
+#     _available`, `starting_apu_shuts_down_when_no_more_fuel_available`,
+#     `when_no_fuel_is_available_and_apu_is_running_auto_shutdown_is_true`)
+#     never got the APU running in the first place (their "run apu to
+#     steady state" precondition used the same single-huge-tick harness),
+#     so `run_until_n_decreases()` saw n=0.000% for the full 3000-iteration
+#     budget and failed before the fuel-cutoff logic was ever exercised.
+#
+# Fix (apu/pw980_physics.rs): renamed the existing per-tick body of
+# Pw980Core::update to update_step(..., dt: f64), and added a new public
+# update() that subdivides context.delta_as_secs_f64() into bounded
+# MAX_PHYSICS_SUBSTEP_S = 0.1s substeps, calling update_step() in a loop
+# with a small, consistent dt each time (external inputs -- running,
+# starter_powered, elec_shaft_power, bleed_extraction, bleed_pressure --
+# held constant across the substeps of one host tick, same contract as any
+# other single-frame update). This makes the rotor/governor integration
+# accurate at any caller tick size, matching this module's own documented
+# intent ("gains are tuned for stability across the whole 0-100%
+# delta-time range this sim can run at"), without loosening any test
+# assertion or hand-tuning a physical constant.
+#
+# Not a change to fuel-availability plumbing: that path was already
+# correct (ElectronicControlBox::update_fuel_pressure_switch_state ->
+# ecb.signal() -> Turbine::update's controller.signal(), see apu/mod.rs
+# :187-215 and electronic_control_box.rs:445-464); it only ever looked
+# broken because the APU never reached a running state to shut down from.
+#
+# Result: `cargo +stable-x86_64-pc-windows-gnu test -p systems --release
+# --lib apu::` (CARGO_TARGET_DIR=/d/fbw-build/target-main, run from
+# fbw-a380x/src/wasm/systems): 173 passed / 27 failed -> 191 passed / 9
+# failed. All 5 target failures from the task are now fixed:
+#   - test_bed.apu_is_available() assertion (apu/mod.rs ~1285/1911)
+#   - when_no_fuel_is_available_and_apu_is_running_auto_shutdown_is_true
+#   - starting_apu_shuts_down_when_no_more_fuel_available
+#     (case_1_pw980 now passes; case_2_pw980 still fails, see below)
+#   - running_apu_shuts_down_when_no_more_fuel_available
+#   - when_apu_shuts_down_cooldown_period_commences_and_apu_is_not_available
+#
+# Remaining 9 failures (not part of this task's target list, left for a
+# follow-up patch -- mostly look like separate EGT-steady-state /
+# governor-load-response tuning issues, not availability or shutdown):
+#   apu::tests::apu_tests::restarting_apu_which_is_cooling_down_does_not_suddenly_reduce_egt_to_ambient_temperature::case_2_pw980
+#   apu::tests::apu_tests::restarting_apu_which_is_cooling_down_does_reduce_towards_ambient_until_startup_egt_above_current_egt::case_2_pw980
+#   apu::tests::apu_tests::running_apu_egt_without_bleed_air_usage_stabilizes_to_ref_degrees::case_2_pw980
+#   apu::tests::apu_tests::running_apu_supplying_bleed_air_and_electrical_increases_egt_to_ref_degrees::case_2_pw980
+#   apu::tests::apu_tests::running_apu_supplying_bleed_air_increases_egt_by_ref_degrees::case_2_pw980
+#   apu::tests::apu_tests::running_apu_with_generator_supplying_electricity_increases_egt_by_ref_degrees::case_2_pw980
+#   apu::tests::apu_tests::starting_apu_shuts_down_when_no_more_fuel_available::case_2_pw980
+#   apu::tests::apu_tests::when_in_emergency_shutdown_apu_shuts_down::case_2_pw980
+#   apu::tests::apu_tests::without_fuel_apu_starts_until_approximately_n_3_percent_and_then_shuts_down_with_fault::case_2_pw980
+#
+# --- diff (apu/pw980_physics.rs, Pw980Core::update) ---
+--- a/fbw-common/src/wasm/systems/systems/src/apu/pw980_physics.rs
++++ b/fbw-common/src/wasm/systems/systems/src/apu/pw980_physics.rs
+@@ -390,7 +390,42 @@
+-    pub fn update(
++    /// Maximum single integration step for the rotor/governor physics
++    /// below. This model integrates the gas-generator spool and the PID
++    /// fuel governor with explicit Euler steps, which are only accurate
++    /// for small `dt`. Test beds (and, in principle, a slow host frame)
++    /// can call `update()` with a `context.delta()` of many *seconds* in
++    /// one go (`AuxiliaryPowerUnitTestBed::run` issues a single tick of
++    /// the requested duration, not a loop of small ticks -- see
++    /// `simulation::test::SimulationTestBed::run_with_delta`, which calls
++    /// `Simulation::tick` exactly once with the full delta). Handing a
++    /// 49 s `dt` straight to a single Euler step would compute the
++    /// rotor's acceleration from the *start-of-tick* state (e.g. N2 = 0%)
++    /// and apply it unchanged for the whole 49 s, and would hand the PID
++    /// governor a single enormous `dt` for its integral term -- neither
++    /// resembles the real continuously-governed spool-up. Subdividing
++    /// into bounded substeps here (rather than relying on the caller to
++    /// tick finely) keeps the same physics correct at any caller
++    /// granularity, matching this module's own documented intent that
++    /// the governor gains are "tuned for stability across the whole
++    /// 0-100% delta-time range this sim can run at".
++    const MAX_PHYSICS_SUBSTEP_S: f64 = 0.1;
++
++    pub fn update(
++        &mut self,
++        context: &UpdateContext,
++        running: bool,
++        starter_powered: bool,
++        elec_shaft_power: Power,
++        bleed_extraction: MassRate,
++        bleed_pressure: Pressure,
++    ) {
++        let total_dt = context.delta_as_secs_f64().max(1e-6);
++        let substeps = (total_dt / Self::MAX_PHYSICS_SUBSTEP_S).ceil().max(1.0) as u32;
++        let dt = total_dt / substeps as f64;
++        for _ in 0..substeps {
++            self.update_step(
++                context,
++                running,
++                starter_powered,
++                elec_shaft_power,
++                bleed_extraction,
++                bleed_pressure,
++                dt,
++            );
++        }
++    }
++
++    /// One bounded-`dt` Euler step of the core physics; see `update`'s
++    /// substep loop, which is the only caller.
++    #[allow(clippy::too_many_arguments)]
++    fn update_step(
+         &mut self,
+         context: &UpdateContext,
+         running: bool,
+         starter_powered: bool,
+         elec_shaft_power: Power,
+         bleed_extraction: MassRate,
+         bleed_pressure: Pressure,
++        dt: f64,
+     ) {
+-        let dt = context.delta_as_secs_f64().max(1e-6);

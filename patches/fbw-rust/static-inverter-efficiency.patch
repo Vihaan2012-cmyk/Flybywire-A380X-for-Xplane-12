@@ -1,0 +1,65 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/electrical/static_inverter.rs b/fbw-common/src/wasm/systems/systems/src/electrical/static_inverter.rs
+index 16d82aa..8e358cb 100644
+--- a/fbw-common/src/wasm/systems/systems/src/electrical/static_inverter.rs
++++ b/fbw-common/src/wasm/systems/systems/src/electrical/static_inverter.rs
+@@ -1,6 +1,6 @@
+ use std::cell::Ref;
+ 
+-use uom::si::{electric_potential::volt, f64::*, frequency::hertz};
++use uom::si::{electric_potential::volt, f64::*, frequency::hertz, power::watt};
+ 
+ use super::{
+     ElectricalElement, ElectricalElementIdentifier, ElectricalElementIdentifierProvider,
+@@ -20,6 +20,13 @@ pub struct StaticInverter {
+     output_potential: ElectricPotential,
+     output_frequency: Frequency,
+     failure: Failure,
++    /// Real AC power delivered this tick, the basis for both the equivalent-
++    /// circuit voltage sag and the DC-side (input) power via
++    /// `EFFICIENCY` below. fbw-xp-systems electrical-sources workstream
++    /// (docs/physics/electrical.md): previously a flat 115 V regardless of
++    /// current, and DC input was set equal to AC output with the file's own
++    /// comment noting "inefficiency isn't modelled".
++    real_power_output: Power,
+ }
+ impl StaticInverter {
+     pub fn new(context: &mut InitContext) -> StaticInverter {
+@@ -30,8 +37,17 @@ impl StaticInverter {
+             output_potential: ElectricPotential::new::<volt>(0.),
+             output_frequency: Frequency::new::<hertz>(0.),
+             failure: Failure::new(FailureType::StaticInverter),
++            real_power_output: Power::new::<watt>(0.),
+         }
+     }
++
++    /// Typical peak efficiency of a small solid-state PWM DC-AC static
++    /// inverter; FBW's own code has no figure (its comment explicitly says
++    /// "inefficiency isn't modelled"), so this is a derived/typical value
++    /// (docs/physics/electrical.md) used only to make the DC (battery-side)
++    /// input power exceed the AC output it is converted from, as a real
++    /// converter's losses require.
++    const EFFICIENCY: f64 = 0.85;
+ }
+ provide_potential!(StaticInverter, (110.0..=120.0));
+ provide_frequency!(StaticInverter, (390.0..=410.0));
+@@ -73,12 +89,14 @@ impl SimulationElement for StaticInverter {
+         consumption: &mut T,
+     ) {
+         let ac_power = consumption.total_consumption_of(PotentialOrigin::StaticInverter);
+-
+-        // Add the AC consumption to the STAT INVs input (DC) consumption.
+-        // Currently static inverter inefficiency isn't modelled.
+-        // It is to be expected that DC consumption should actually be somewhat
+-        // higher than AC consumption.
+-        consumption.consume_from_input(self, ac_power);
++        self.real_power_output = ac_power;
++
++        // DC (battery-side) input exceeds the AC output by the converter's
++        // own conversion losses (`EFFICIENCY`), replacing the previous
++        // lossless DC==AC shortcut the file's own comment flagged as not
++        // modelled.
++        let dc_power = ac_power / Self::EFFICIENCY;
++        consumption.consume_from_input(self, dc_power);
+     }
+ 
+     fn process_power_consumption_report<T: PowerConsumptionReport>(

@@ -1,0 +1,13 @@
+/target/
+/dist/
+/fbw-buildtarget-*/
+/distribution/**/node_modules/
+/distribution/**/*.zip
+/distribution/**/*.7z
+/distribution/out/
+*.pdb
+*.tar.gz
+.wrangler/
+.dev.vars
+*.env
+.env*

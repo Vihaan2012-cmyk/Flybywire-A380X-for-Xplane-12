@@ -1,0 +1,158 @@
+--- a/fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs
+@@ -2845,13 +2845,6 @@
+         pump_speed: AngularVelocity,
+         controller: &impl PumpController,
+     ) {
+-        self.heat_state.update(
+-            context,
+-            self.overheat_failure.is_active()
+-                && pump_speed.get::<revolution_per_minute>()
+-                    > Self::MIN_SPEED_TO_REPORT_HEATING_RPM,
+-        );
+-
+         self.speed = if !self.is_damaged() && controller.is_input_shaft_connected() {
+             pump_speed
+         } else {
+@@ -2872,6 +2865,47 @@
+             .update(context, section, reservoir, self.speed, controller);
+ 
+         self.is_active = controller.should_pressurise();
++
++        // ATA-29 hydraulics workstream (docs/physics/fluids.md): a
++        // cavitating pump is a real overheat/damage cause on its own, not
++        // only the instructor-triggered `overheat_failure`. Starved of
++        // fluid (low reservoir air pressure, low quantity, or the
++        // reservoir already overheated -- all three already drive
++        // `Pump::cavitation_efficiency` above, via
++        // `PumpCharacteristics::cavitation_efficiency`), the pump's
++        // pistons lose their lubricating film and cavitation bubbles
++        // collapsing against the pump internals both generate real heat:
++        // a standard hydraulic pump failure mode (e.g. Parker Hannifin's
++        // "Cavitation in Hydraulic Pumps" application literature: pump
++        // cavitation "generates heat and can quickly damage a pump").
++        // `CAVITATION_OVERHEAT_EFFICIENCY_RATIO` (0.3) is the severity
++        // threshold below which that starvation counts as a heating
++        // cause -- computed fresh this tick (after `self.pump.update`
++        // above just recomputed it from this tick's reservoir state), not
++        // last tick's stale value.
++        self.heat_state
++            .update(context, self.is_heating_this_tick(pump_speed));
++    }
++
++    /// Whether this tick's conditions should drive `heat_state` toward
++    /// overheat: either the instructor-triggered failure (unchanged, base
++    /// FBW behaviour), or real cavitation (see the comment above the call
++    /// site in `update`) severe enough to cross
++    /// `CAVITATION_OVERHEAT_EFFICIENCY_RATIO`, while the pump is actually
++    /// being asked to pressurise and turning fast enough to matter. Split
++    /// out from `update` so it can be unit tested directly against a
++    /// pump's already-computed cavitation state.
++    fn is_heating_this_tick(&self, pump_speed: AngularVelocity) -> bool {
++        let is_cavitating_badly = self.is_active
++            && self.pump.cavitation_efficiency().get::<ratio>()
++                < Self::CAVITATION_OVERHEAT_EFFICIENCY_RATIO;
++
++        (self.overheat_failure.is_active() || is_cavitating_badly)
++            && pump_speed.get::<revolution_per_minute>() > Self::MIN_SPEED_TO_REPORT_HEATING_RPM
++    }
++
++    pub fn cavitation_efficiency(&self) -> Ratio {
++        self.pump.cavitation_efficiency()
+     }
+ 
+     /// The mechanical shaft power this pump draws from the engine gearbox:
+@@ -2923,6 +2957,10 @@
+         writer.write(&self.active_id, self.is_active);
+         writer.write(&self.shaft_power_id, self.shaft_power().get::<watt>());
+         writer.write(&self.flow_id, self.flow());
++        writer.write(
++            &self.cavitation_id,
++            self.cavitation_efficiency().get::<ratio>(),
++        );
+     }
+ }
+ impl HeatingElement for EngineDrivenPump {
+@@ -3885,5 +3923,82 @@
+             let power = test_bed.query_element(|e| e.shaft_power());
+             assert_eq!(power.get::<watt>(), 0.);
+         }
++
++        // ATA-29 hydraulics workstream (docs/physics/fluids.md): a pump
++        // starved by reservoir cavitation (here forced directly onto the
++        // pump's own already-real `cavitation_efficiency`, rather than
++        // re-deriving a whole reservoir/air-pressure starvation scenario)
++        // must be flagged as a heating cause on its own, independent of
++        // the instructor-triggered `overheat_failure`.
++        #[test]
++        fn severe_cavitation_is_a_heating_cause_without_failure_injected() {
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            test_bed.command_element(|e| {
++                e.is_active = true;
++                e.pump.cavitation_efficiency = Ratio::new::<ratio>(0.1);
++            });
++
++            let is_heating = test_bed.query_element(|e| {
++                e.is_heating_this_tick(AngularVelocity::new::<revolution_per_minute>(1000.))
++            });
++
++            assert!(
++                is_heating,
++                "cavitation_efficiency 0.1 is below CAVITATION_OVERHEAT_EFFICIENCY_RATIO \
++                 (0.3) and should count as a heating cause on its own"
++            );
++        }
++
++        #[test]
++        fn mild_cavitation_is_not_a_heating_cause() {
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            test_bed.command_element(|e| {
++                e.is_active = true;
++                e.pump.cavitation_efficiency = Ratio::new::<ratio>(0.9);
++            });
++
++            let is_heating = test_bed.query_element(|e| {
++                e.is_heating_this_tick(AngularVelocity::new::<revolution_per_minute>(1000.))
++            });
++
++            assert!(
++                !is_heating,
++                "cavitation_efficiency 0.9 is a healthy pump and must not heat the pump"
++            );
++        }
++
++        #[test]
++        fn cavitation_is_not_a_heating_cause_when_pump_not_pressurising() {
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            // Pump has a bad cavitation_efficiency reading but is not
++            // actually being commanded to pressurise (e.g. declutched) --
++            // it should not be treated as a live cavitation heating cause.
++            test_bed.command_element(|e| {
++                e.is_active = false;
++                e.pump.cavitation_efficiency = Ratio::new::<ratio>(0.05);
++            });
++
++            let is_heating = test_bed.query_element(|e| {
++                e.is_heating_this_tick(AngularVelocity::new::<revolution_per_minute>(1000.))
++            });
++
++            assert!(!is_heating);
++        }
++
++        #[test]
++        fn cavitation_efficiency_is_published() {
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            test_bed.command_element(|e| {
++                e.pump.cavitation_efficiency = Ratio::new::<ratio>(0.42);
++            });
++            test_bed.run_without_delta();
++
++            let published: f64 = test_bed.read_by_name("HYD_GREEN_EDPUMP_CAVITATION");
++            assert!((published - 0.42).abs() < 1e-6);
++        }
+     }
+ }

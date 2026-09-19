@@ -1,0 +1,127 @@
+== MFD page (submits: 1)
+BEGIN_PATH
+RECT 0 0 768 1024
+FILL 0.016 0.016 0.02 1 0
+SAVE
+  TRANSFORM 1 0 0 1 0 5
+  BEGIN_PATH
+  RECT 0 40 768 1
+  FILL 0.769 0.776 0.812 1 0
+  SAVE
+    TRANSFORM 1 0 0 1 3 10
+    TEXT "FROM" "FBW-Display-EIS-A380-SlashedZero, monospace" 20 400 0 0 16 0 0 1 1 1 1 0 0 0 0 0
+  RESTORE
+  SAVE
+    TRANSFORM 1 0 0 1 195 0
+    BEGIN_PATH
+    RECT 0 0 72 40
+    FILL 0.153 0.145 0.145 1 0
+    BEGIN_PATH
+    RECT 0 0 72 2
+    FILL 0.769 0.776 0.812 1 0
+    BEGIN_PATH
+    RECT 70 0 2 40
+    FILL 0.769 0.776 0.812 1 0
+    BEGIN_PATH
+    RECT 0 38 72 2
+    FILL 0.769 0.776 0.812 1 0
+    BEGIN_PATH
+    RECT 0 0 2 40
+    FILL 0.769 0.776 0.812 1 0
+    SAVE
+      TRANSFORM 1 0 0 1 14 11
+      TEXT "INIT" "FBW-Display-EIS-A380-SlashedZero, monospace" 22 400 0 0 17.6 0 0 1 1 1 1 0 0 0 0 0
+    RESTORE
+  RESTORE
+RESTORE
+SAVE
+  TRANSFORM 1 0 0 1 0 46
+  SAVE
+    TRANSFORM 1 0 0 1 7 9.5
+    TEXT "CRZ" "FBW-Display-EIS-A380-SlashedZero, monospace" 20 400 0 0 16 0 0 1 1 1 1 0 0 0 0 0
+  RESTORE
+  SAVE
+    TRANSFORM 1 0 0 1 52 7
+    TEXT "FL350" "FBW-Display-EIS-A380-SlashedZero, monospace" 25 400 0 0 20 0 0 0 1 0 1 0 0 0 0 0
+  RESTORE
+RESTORE
+SAVE
+  TRANSFORM 1 0 0 1 0 85
+  TEXT "THR RED/ACC" "FBW-Display-EIS-A380-SlashedZero, monospace" 20 400 0 0 16 0 0 1 1 1 1 0 0 0 0 0
+  SAVE
+    TRANSFORM 1 0 0 1 0 24
+    TEXT "T.O" "FBW-Display-EIS-A380-SlashedZero, monospace" 20 400 0 0 16 0 0 1 1 1 1 0 0 0 0 0
+  RESTORE
+  SAVE
+    TRANSFORM 1 0 0 1 200 24
+    TEXT "1500" "FBW-Display-EIS-A380-SlashedZero, monospace" 25 400 0 0 20 0 0 0 1 0 1 0 0 0 0 0
+  RESTORE
+  SAVE
+    TRANSFORM 1 0 0 1 400 24
+    TEXT "3000" "FBW-Display-EIS-A380-SlashedZero, monospace" 25 400 0 0 20 0 0 0 1 0 1 0 0 0 0 0
+  RESTORE
+RESTORE
+
+== hovered, clicked (INIT), CRZ FL370; button at 195,5 72x40 (submits: 2)
+BEGIN_PATH
+RECT 0 0 768 1024
+FILL 0.016 0.016 0.02 1 0
+SAVE
+  TRANSFORM 1 0 0 1 0 5
+  BEGIN_PATH
+  RECT 0 40 768 1
+  FILL 0.769 0.776 0.812 1 0
+  SAVE
+    TRANSFORM 1 0 0 1 3 10
+    TEXT "FROM" "FBW-Display-EIS-A380-SlashedZero, monospace" 20 400 0 0 16 0 0 1 1 1 1 0 0 0 0 0
+  RESTORE
+  SAVE
+    TRANSFORM 1 0 0 1 195 0
+    BEGIN_PATH
+    RECT 0 0 72 40
+    FILL 0.153 0.145 0.145 1 0
+    BEGIN_PATH
+    RECT 0 0 72 2
+    FILL 0 1 1 1 0
+    BEGIN_PATH
+    RECT 70 0 2 40
+    FILL 0 1 1 1 0
+    BEGIN_PATH
+    RECT 0 38 72 2
+    FILL 0 1 1 1 0
+    BEGIN_PATH
+    RECT 0 0 2 40
+    FILL 0 1 1 1 0
+    SAVE
+      TRANSFORM 1 0 0 1 14 11
+      TEXT "INIT" "FBW-Display-EIS-A380-SlashedZero, monospace" 22 400 0 0 17.6 0 0 1 1 1 1 0 0 0 0 0
+    RESTORE
+  RESTORE
+RESTORE
+SAVE
+  TRANSFORM 1 0 0 1 0 46
+  SAVE
+    TRANSFORM 1 0 0 1 7 9.5
+    TEXT "CRZ" "FBW-Display-EIS-A380-SlashedZero, monospace" 20 400 0 0 16 0 0 1 1 1 1 0 0 0 0 0
+  RESTORE
+  SAVE
+    TRANSFORM 1 0 0 1 52 7
+    TEXT "FL370" "FBW-Display-EIS-A380-SlashedZero, monospace" 25 400 0 0 20 0 0 0 1 0 1 0 0 0 0 0
+  RESTORE
+RESTORE
+SAVE
+  TRANSFORM 1 0 0 1 0 85
+  TEXT "THR RED/ACC" "FBW-Display-EIS-A380-SlashedZero, monospace" 20 400 0 0 16 0 0 1 1 1 1 0 0 0 0 0
+  SAVE
+    TRANSFORM 1 0 0 1 0 24
+    TEXT "T.O" "FBW-Display-EIS-A380-SlashedZero, monospace" 20 400 0 0 16 0 0 1 1 1 1 0 0 0 0 0
+  RESTORE
+  SAVE
+    TRANSFORM 1 0 0 1 200 24
+    TEXT "1500" "FBW-Display-EIS-A380-SlashedZero, monospace" 25 400 0 0 20 0 0 0 1 0 1 0 0 0 0 0
+  RESTORE
+  SAVE
+    TRANSFORM 1 0 0 1 400 24
+    TEXT "3000" "FBW-Display-EIS-A380-SlashedZero, monospace" 25 400 0 0 20 0 0 0 1 0 1 0 0 0 0 0
+  RESTORE
+RESTORE

@@ -1,0 +1,15 @@
+{
+  "description": "Shared by every state: all electrical buses the instruments test are powered (external power at the gate, engine generators in flight). The flt file of a state is applied first, then its parents in order, then its own vars.",
+  "vars": {
+    "L:A32NX_ELEC_AC_1_BUS_IS_POWERED": { "value": 1, "unit": "bool", "src": "fbw-common/src/wasm/systems/systems/src/electrical/mod.rs:124 (ELEC_{bus}_BUS_IS_POWERED), bus names shared/mod.rs:408-423" },
+    "L:A32NX_ELEC_AC_ESS_BUS_IS_POWERED": { "value": 1, "unit": "bool", "src": "electrical/mod.rs:124" },
+    "L:A32NX_ELEC_DC_1_BUS_IS_POWERED": { "value": 1, "unit": "bool", "src": "electrical/mod.rs:124" },
+    "L:A32NX_ELEC_DC_2_BUS_IS_POWERED": { "value": 1, "unit": "bool", "src": "electrical/mod.rs:124" },
+    "L:A32NX_ELEC_DC_ESS_BUS_IS_POWERED": { "value": 1, "unit": "bool", "src": "electrical/mod.rs:124" },
+    "L:A32NX_ELEC_DC_HOT_1_BUS_IS_POWERED": { "value": 1, "unit": "bool", "src": "electrical/mod.rs:124" },
+    "L:A32NX_ELEC_108PH_BUS_IS_POWERED": { "value": 1, "unit": "bool", "src": "electrical/mod.rs:124; 108PH is DcEssInFlight (fbw-a380x/src/systems/shared/src/electrical.ts:5)" },
+    "L:A32NX_ELEC_247XP_BUS_IS_POWERED": { "value": 1, "unit": "bool", "src": "electrical/mod.rs:124" },
+    "CIRCUIT AVIONICS ON": { "value": 1, "unit": "bool", "src": "systems.cfg:540 circuit.142 CIRCUIT_AVIONICS on bus.10" }
+  },
+  "storage": {}
+}

@@ -1,0 +1,290 @@
+--- a/fbw-common/src/wasm/systems/systems/src/air_conditioning/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/air_conditioning/mod.rs
+@@ -481,7 +481,8 @@
+ 
+     fn read(&mut self, reader: &mut SimulatorReader) {
+         if let Some(id) = &self.breaker_id {
+-            self.breaker_closed = reader.read(id);
++            let open: bool = reader.read(id);
++            self.breaker_closed = !open;
+         }
+     }
+ }
+@@ -526,7 +527,7 @@
+ 
+     // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md):
+     // the X-Plane plugin's breaker catalogue registers one
+-    // `ELEC_CABIN_FAN_<id>_BREAKER_CLOSED` variable per fan, default closed.
++    // `ELEC_CABIN_FAN_<id>_BREAKER_OPEN` variable per fan, default closed.
+     // ANDed into `receive_power` below, so an open one really drops this
+     // fan's own power (it stops moving air, same as losing its bus), not a
+     // synthetic failure flag. Unread outside the plugin, so purely
+@@ -555,7 +556,7 @@
+             failure: Failure::new(FailureType::CabinFan(id as usize)),
+ 
+             breaker_id: context
+-                .get_identifier(format!("ELEC_CABIN_FAN_{}_BREAKER_CLOSED", id)),
++                .get_identifier(format!("ELEC_CABIN_FAN_{}_BREAKER_OPEN", id)),
+             breaker_closed: true,
+         }
+     }
+@@ -626,7 +627,8 @@
+     }
+ 
+     fn read(&mut self, reader: &mut SimulatorReader) {
+-        self.breaker_closed = reader.read(&self.breaker_id);
++        let open: bool = reader.read(&self.breaker_id);
++        self.breaker_closed = !open;
+     }
+ 
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+--- a/fbw-common/src/wasm/systems/systems/src/enhanced_gpwc/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/enhanced_gpwc/mod.rs
+@@ -67,7 +67,7 @@
+         EnhancedGroundProximityWarningComputer {
+             powered_by,
+             is_powered: false,
+-            breaker_id: context.get_identifier("ELEC_EGPWC_BREAKER_CLOSED".to_owned()),
++            breaker_id: context.get_identifier("ELEC_EGPWC_BREAKER_OPEN".to_owned()),
+             breaker_closed: true,
+             fm1_destination_longitude_ssm_id: context
+                 .get_identifier("FM1_DEST_LONG_SSM".to_owned()),
+@@ -154,7 +154,8 @@
+     }
+ 
+     fn read(&mut self, reader: &mut SimulatorReader) {
+-        self.breaker_closed = reader.read(&self.breaker_id);
++        let open: bool = reader.read(&self.breaker_id);
++        self.breaker_closed = !open;
+         let destination_long: f64 = reader.read(&self.fm1_destination_longitude_id);
+         let destination_lat: f64 = reader.read(&self.fm1_destination_latitude_id);
+         let destination_long_ssm: u32 = reader.read(&self.fm1_destination_longitude_ssm_id);
+--- a/fbw-common/src/wasm/systems/systems/src/hydraulic/electrical_pump_physics.rs
++++ b/fbw-common/src/wasm/systems/systems/src/hydraulic/electrical_pump_physics.rs
+@@ -41,7 +41,7 @@
+     power_id: VariableIdentifier,
+     // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md):
+     // the X-Plane plugin's own breaker catalogue registers one
+-    // `ELEC_PUMP_<id>_BREAKER_CLOSED` simulation variable per electric
++    // `ELEC_PUMP_<id>_BREAKER_OPEN` simulation variable per electric
+     // pump (rated at this pump's own `max_current`, `ELECTRIC_PUMP_MAX_
+     // CURRENT_AMPERE` in a380_systems' hydraulic/mod.rs) and pulls it to
+     // simulate an open breaker. Defaults closed (`true`) so a build that
+@@ -111,7 +111,7 @@
+             rpm_id: context.get_identifier(format!("HYD_{}_EPUMP_RPM", id)),
+             current_id: context.get_identifier(format!("HYD_{}_EPUMP_CURRENT", id)),
+             power_id: context.get_identifier(format!("HYD_{}_EPUMP_POWER_W", id)),
+-            breaker_id: context.get_identifier(format!("ELEC_PUMP_{}_BREAKER_CLOSED", id)),
++            breaker_id: context.get_identifier(format!("ELEC_PUMP_{}_BREAKER_OPEN", id)),
+             breaker_closed: true,
+             powered_by: bus_type,
+             is_powered: false,
+@@ -304,7 +304,8 @@
+     }
+ 
+     fn read(&mut self, reader: &mut SimulatorReader) {
+-        self.breaker_closed = reader.read(&self.breaker_id);
++        let open: bool = reader.read(&self.breaker_id);
++        self.breaker_closed = !open;
+     }
+ 
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+--- a/fbw-common/src/wasm/systems/systems/src/landing_gear/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/landing_gear/mod.rs
+@@ -891,7 +891,7 @@
+ 
+     // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md,
+     // "LGCIU 1"/"LGCIU 2" ATA32): the X-Plane plugin's breaker catalogue
+-    // registers one `ELEC_LGCIU_<n>_BREAKER_CLOSED` variable per LGCIU,
++    // registers one `ELEC_LGCIU_<n>_BREAKER_OPEN` variable per LGCIU,
+     // default closed. ANDed into `receive_power` below alongside the
+     // existing power_supply_failure bridge, so an open one really drops
+     // this LGCIU's own power (every downstream gear/door sensor/state read
+@@ -967,7 +967,7 @@
+             external_power_available: false,
+ 
+             breaker_id: context.get_identifier(format!(
+-                "ELEC_LGCIU_{}_BREAKER_CLOSED",
++                "ELEC_LGCIU_{}_BREAKER_OPEN",
+                 lgciu_number(lgciu_id)
+             )),
+             breaker_closed: true,
+@@ -1290,7 +1290,8 @@
+     }
+ 
+     fn read(&mut self, reader: &mut SimulatorReader) {
+-        self.breaker_closed = reader.read(&self.breaker_id);
++        let open: bool = reader.read(&self.breaker_id);
++        self.breaker_closed = !open;
+     }
+ 
+     fn write(&self, writer: &mut SimulatorWriter) {
+--- a/fbw-common/src/wasm/systems/systems/src/navigation/ala52b.rs
++++ b/fbw-common/src/wasm/systems/systems/src/navigation/ala52b.rs
+@@ -365,7 +365,7 @@
+ 
+     // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md,
+     // "RA SYS A/B/C" ATA34): the X-Plane plugin's breaker catalogue
+-    // registers one `ELEC_RA_<n>_BREAKER_CLOSED` variable per radio
++    // registers one `ELEC_RA_<n>_BREAKER_OPEN` variable per radio
+     // altimeter, default closed. ANDed into `receive_power` below, so an
+     // open one really drops this transceiver's own power (its runtime is
+     // lost and `radio_altitude()` fails warning, same as a real power
+@@ -408,7 +408,7 @@
+             powered_by,
+             is_powered: false,
+ 
+-            breaker_id: context.get_identifier(format!("ELEC_RA_{}_BREAKER_CLOSED", number)),
++            breaker_id: context.get_identifier(format!("ELEC_RA_{}_BREAKER_OPEN", number)),
+             breaker_closed: true,
+             power_holdover: Duration::from_secs_f64(random_from_range(
+                 Self::MINIMUM_POWER_HOLDOVER as f64 / 1000.,
+@@ -515,7 +515,8 @@
+     }
+ 
+     fn read(&mut self, reader: &mut SimulatorReader) {
+-        self.breaker_closed = reader.read(&self.breaker_id);
++        let open: bool = reader.read(&self.breaker_id);
++        self.breaker_closed = !open;
+     }
+ 
+     fn consume_power<T: ConsumePower>(&mut self, _: &UpdateContext, consumption: &mut T) {
+--- a/fbw-common/src/wasm/systems/systems/src/pneumatic/valve.rs
++++ b/fbw-common/src/wasm/systems/systems/src/pneumatic/valve.rs
+@@ -269,7 +269,7 @@
+             is_powered: false,
+             powered_by,
+             breaker_id: context
+-                .get_identifier(format!("ELEC_{}_BREAKER_CLOSED", breaker_name)),
++                .get_identifier(format!("ELEC_{}_BREAKER_OPEN", breaker_name)),
+             breaker_closed: true,
+         }
+     }
+@@ -365,7 +365,8 @@
+     }
+ 
+     fn read(&mut self, reader: &mut SimulatorReader) {
+-        self.breaker_closed = reader.read(&self.breaker_id);
++        let open: bool = reader.read(&self.breaker_id);
++        self.breaker_closed = !open;
+     }
+ }
+ 
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/full_digital_agu_controller.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/full_digital_agu_controller.rs
+@@ -61,14 +61,14 @@
+             active_channel: OperatingChannel::new_with_breaker(
+                 context,
+                 1,
+-                format!("ELEC_FDAC_{}_1_BREAKER_CLOSED", fdac_id),
++                format!("ELEC_FDAC_{}_1_BREAKER_OPEN", fdac_id),
+                 Some(FailureType::Fdac(fdac_id, Channel::ChannelOne)),
+                 &[powered_by[0]],
+             ),
+             stand_by_channel: OperatingChannel::new_with_breaker(
+                 context,
+                 2,
+-                format!("ELEC_FDAC_{}_2_BREAKER_CLOSED", fdac_id),
++                format!("ELEC_FDAC_{}_2_BREAKER_OPEN", fdac_id),
+                 Some(FailureType::Fdac(fdac_id, Channel::ChannelTwo)),
+                 &[powered_by[1]],
+             ),
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/outflow_valve_control_module.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/outflow_valve_control_module.rs
+@@ -86,14 +86,14 @@
+             active_channel: OperatingChannel::new_with_breaker(
+                 context,
+                 1,
+-                format!("ELEC_OCSM_{}_1_BREAKER_CLOSED", outflow_valve_id),
++                format!("ELEC_OCSM_{}_1_BREAKER_OPEN", outflow_valve_id),
+                 Some(FailureType::Ocsm(outflow_valve_id, Channel::ChannelOne)),
+                 &powered_by[0..1],
+             ),
+             stand_by_channel: OperatingChannel::new_with_breaker(
+                 context,
+                 2,
+-                format!("ELEC_OCSM_{}_2_BREAKER_CLOSED", outflow_valve_id),
++                format!("ELEC_OCSM_{}_2_BREAKER_OPEN", outflow_valve_id),
+                 Some(FailureType::Ocsm(outflow_valve_id, Channel::ChannelTwo)),
+                 &powered_by[1..2],
+             ),
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/trim_air_drive_device.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/trim_air_drive_device.rs
+@@ -58,14 +58,14 @@
+             active_channel: OperatingChannel::new_with_breaker(
+                 context,
+                 1,
+-                "ELEC_TADD_1_BREAKER_CLOSED",
++                "ELEC_TADD_1_BREAKER_OPEN",
+                 Some(FailureType::Tadd(Channel::ChannelOne)),
+                 &[powered_by[0]],
+             ),
+             stand_by_channel: OperatingChannel::new_with_breaker(
+                 context,
+                 2,
+-                "ELEC_TADD_2_BREAKER_CLOSED",
++                "ELEC_TADD_2_BREAKER_OPEN",
+                 Some(FailureType::Tadd(Channel::ChannelTwo)),
+                 &[powered_by[1]],
+             ),
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/ventilation_control_module.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/ventilation_control_module.rs
+@@ -52,14 +52,14 @@
+             active_channel: OperatingChannel::new_with_breaker(
+                 context,
+                 1,
+-                format!("ELEC_VCM_{}_1_BREAKER_CLOSED", id),
++                format!("ELEC_VCM_{}_1_BREAKER_OPEN", id),
+                 Some(FailureType::Vcm(id, Channel::ChannelOne)),
+                 &[powered_by[0]],
+             ),
+             stand_by_channel: OperatingChannel::new_with_breaker(
+                 context,
+                 2,
+-                format!("ELEC_VCM_{}_2_BREAKER_CLOSED", id),
++                format!("ELEC_VCM_{}_2_BREAKER_OPEN", id),
+                 Some(FailureType::Vcm(id, Channel::ChannelTwo)),
+                 &[powered_by[1]],
+             ),
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs
+@@ -399,7 +399,7 @@
+                 .map(|zone| Failure::new(FailureType::FireDetectionLoop(loop_id, zone))),
+             breaker_ids: fire_detection_zones.map(|zone| {
+                 context.get_identifier(format!(
+-                    "ELEC_FIRE_LOOP_{}_{}_BREAKER_CLOSED",
++                    "ELEC_FIRE_LOOP_{}_{}_BREAKER_OPEN",
+                     loop_letter, zone
+                 ))
+             }),
+@@ -477,7 +477,8 @@
+ 
+     fn read(&mut self, reader: &mut SimulatorReader) {
+         for (index, breaker_id) in self.breaker_ids.iter().enumerate() {
+-            self.breaker_closed[index] = reader.read(breaker_id);
++            let open: bool = reader.read(breaker_id);
++            self.breaker_closed[index] = !open;
+         }
+     }
+ }
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/autobrakes.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/autobrakes.rs
+@@ -147,7 +147,7 @@
+             disarm_knob_id: context.get_identifier("AUTOBRAKES_DISARM_KNOB_REQ".to_owned()),
+ 
+             breaker_id: context
+-                .get_identifier("ELEC_AUTOBRAKE_DISARM_SOLENOID_BREAKER_CLOSED".to_owned()),
++                .get_identifier("ELEC_AUTOBRAKE_DISARM_SOLENOID_BREAKER_OPEN".to_owned()),
+             breaker_closed: true,
+             powered_by,
+             is_powered: true,
+@@ -166,7 +166,8 @@
+     }
+ 
+     fn read(&mut self, reader: &mut SimulatorReader) {
+-        self.breaker_closed = reader.read(&self.breaker_id);
++        let open: bool = reader.read(&self.breaker_id);
++        self.breaker_closed = !open;
+     }
+ 
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {

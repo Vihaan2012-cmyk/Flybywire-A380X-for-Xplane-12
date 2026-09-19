@@ -1,0 +1,61 @@
+[package]
+name = "fbw_a380_systems_xp"
+version = "0.1.0"
+edition = "2021"
+description = "FlyByWire's A380X systems simulation as an X-Plane 12 plugin"
+
+[lib]
+# rlib too, for the systems process (src/bin/fbw_a380_systems_server.rs).
+crate-type = ["cdylib", "rlib"]
+name = "fbw_a380_systems"
+
+[dependencies]
+a380_systems = { path = "../fbw-aircraft/fbw-a380x/src/wasm/systems/a380_systems" }
+systems = { path = "../fbw-aircraft/fbw-common/src/wasm/systems/systems" }
+uom = "0.37.0"
+# The failure sets FlyByWire's systems take (src/remote).
+rustc-hash = "2.1.1"
+# The JavaScript and TypeScript engine (feature "js").
+rquickjs = { version = "0.13", features = ["loader"], optional = true }
+oxc = { version = "0.150", features = ["transformer", "codegen", "semantic"], optional = true }
+# The cockpit screens (src/display, feature "js"): fill and stroke
+# tessellation, the instrument fonts, and PNG images.
+lyon_tessellation = { version = "1.0", optional = true }
+ab_glyph = { version = "0.2", optional = true }
+png = { version = "0.17", optional = true }
+# The map data (src/mapdata): X-Plane's 7z-compressed DSF scenery for the
+# terrain map, gzip for its tile cache, and JSON for FlyByWire's SimBridge
+# and AMDB messages.
+sevenz-rust2 = { version = "0.22", default-features = false }
+flate2 = "1"
+serde_json = "1"
+# src/mel.rs's persistence round trip (hyperrealism physics workstream 6)
+# derives Serialize/Deserialize; already in the tree transitively through
+# serde_json, just not as a direct dependency with the derive macros.
+serde = { version = "1", features = ["derive"] }
+# The cockpit sounds (src/sound): Vorbis decoding of Wwise's media.
+lewton = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+# A reference rasteriser and PNG writer for the display snapshot tests only.
+tiny-skia = "0.11"
+
+[features]
+default = []
+# QuickJS with an Oxc TypeScript/JSX loader, for FlyByWire's TypeScript, and
+# the screens FlyByWire's instruments draw on.
+js = ["dep:rquickjs", "dep:oxc", "dep:lyon_tessellation", "dep:ab_glyph", "dep:png"]
+# No new dependencies: only widens some already-crate-private items (Vars,
+# Xplm::dummy) to `pub` and re-exports otherwise-private modules that are
+# already written to run offline (breakers/circuits/failures/wear/
+# invariants/mel/scripted_failures/random_failures/scenarios/physics/
+# aspects), so the out-of-tree `emulator` crate (D:\fbw-xp-systems\emulator)
+# can drive the real plugin code with no live X-Plane process. Does not
+# change the plugin's own behaviour or its default/js build.
+test-support = []
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level = 3

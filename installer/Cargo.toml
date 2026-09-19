@@ -1,0 +1,17 @@
+[package]
+name = "fbw-a380x-installer"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Installs and updates the FlyByWire A380X X-Plane port from its release server."
+
+[dependencies]
+native-windows-gui = { version = "1.0.13", default-features = false, features = ["file-dialog", "progress-bar", "notice", "textbox"] }
+ureq = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+strip = true

@@ -1,0 +1,139 @@
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/electrical/alternating_current.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/electrical/alternating_current.rs
+index dad9d85..6893ae8 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/electrical/alternating_current.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/electrical/alternating_current.rs
+@@ -13,7 +13,10 @@ use systems::{
+     },
+     engine::Engine,
+     shared::{AuxiliaryPowerUnitElectrical, ElectricalBusType, EngineFirePushButtons},
+-    simulation::{InitContext, SimulationElement, SimulationElementVisitor, UpdateContext},
++    simulation::{
++        InitContext, Read, SimulationElement, SimulationElementVisitor, SimulatorReader,
++        UpdateContext, VariableIdentifier,
++    },
+ };
+ use uom::si::{f64::Power, power::kilowatt};
+ 
+@@ -665,12 +668,26 @@ enum ACBusPowerSource {
+ pub(super) struct A380AcEssFeedContactors {
+     ac_ess_feed_contactor_1: Contactor,
+     ac_ess_feed_contactor_2: Contactor,
++    // fbw-xp-systems circuit-breaker workstream (patches/fbw-rust/
++    // bus-feeder-breakers.patch): the X-Plane plugin's breaker catalogue
++    // registers `ELEC_AC_ESS_SHED_BREAKER_OPEN` for its "AC_ESS_SHED BUS
++    // FEED" entry, default closed. ANDed into 3XC1's own close_when below,
++    // so pulling it really opens the AC BUS 1 feed into the AC ESS SHED
++    // bus (400XP) -- FlyByWire's own transfer logic above (3XC2 closing on
++    // `!ac_bus_1_powered || overhead.ac_ess_feed_is_altn()`) still decides
++    // whether AC BUS 4 picks the load up, exactly as it already does for a
++    // genuine loss of AC BUS 1. Not a soft FailureType flag.
++    ac_ess_shed_feed_breaker_open_id: VariableIdentifier,
++    ac_ess_shed_feed_breaker_open: bool,
+ }
+ impl A380AcEssFeedContactors {
+     fn new(context: &mut InitContext) -> Self {
+         A380AcEssFeedContactors {
+             ac_ess_feed_contactor_1: Contactor::new(context, "3XC1"),
+             ac_ess_feed_contactor_2: Contactor::new(context, "3XC2"),
++            ac_ess_shed_feed_breaker_open_id: context
++                .get_identifier("ELEC_AC_ESS_SHED_BREAKER_OPEN".to_owned()),
++            ac_ess_shed_feed_breaker_open: false,
+         }
+     }
+ 
+@@ -684,7 +701,8 @@ impl A380AcEssFeedContactors {
+         let ac_bus_1_powered = electricity.is_powered(ac_bus_1);
+ 
+         self.ac_ess_feed_contactor_1.close_when(
+-            electricity.is_powered(ac_bus_1)
++            !self.ac_ess_shed_feed_breaker_open
++                && electricity.is_powered(ac_bus_1)
+                 && (ac_bus_1_powered && overhead.ac_ess_feed_is_normal()),
+         );
+         self.ac_ess_feed_contactor_2.close_when(
+@@ -702,6 +720,11 @@ impl A380AcEssFeedContactors {
+     }
+ }
+ impl SimulationElement for A380AcEssFeedContactors {
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        let open: bool = reader.read(&self.ac_ess_shed_feed_breaker_open_id);
++        self.ac_ess_shed_feed_breaker_open = open;
++    }
++
+     fn accept<T: SimulationElementVisitor>(&mut self, visitor: &mut T) {
+         self.ac_ess_feed_contactor_1.accept(visitor);
+         self.ac_ess_feed_contactor_2.accept(visitor);
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/electrical/mod.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/electrical/mod.rs
+index 1f2d2dc..f6ebd94 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/electrical/mod.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/electrical/mod.rs
+@@ -2754,6 +2754,52 @@ mod a380_electrical_circuit_tests {
+         assert!(test_bed.both_ac_ess_feed_contactors_open());
+     }
+ 
++    // fbw-xp-systems circuit-breaker workstream: reroute/decouple coverage
++    // for the "AC_ESS_SHED BUS FEED" breaker (patches/fbw-rust/
++    // bus-feeder-breakers.patch), which now ANDs
++    // `ELEC_AC_ESS_SHED_BREAKER_OPEN` into 3XC1's own close_when instead
++    // of bridging `FailureType::ElectricalBus`. AC BUS 1 itself stays
++    // powered in both cases -- only its 3XC1 feed into the AC ESS SHED bus
++    // (400XP, `ElectricalBusType::AlternatingCurrentEssentialShed`) is cut
++    // -- so whether the bus survives is decided entirely by FBW's own
++    // pre-existing 3XC2 transfer logic (`!ac_bus_1_powered ||
++    // overhead.ac_ess_feed_is_altn()`), not by anything authored here.
++    #[test]
++    fn when_ac1_feed_breaker_open_and_altn_selected_gen_4_reroutes_onto_ac_ess_shed_bus() {
++        // Reroute: 3XC1 is forced open by the pulled breaker, but AC BUS 4
++        // is healthy and ALTN is selected, so 3XC2 (its own, unmodified
++        // close_when) picks the AC ESS SHED bus up from engine generator 4
++        // instead of letting it die.
++        let test_bed = test_bed_with()
++            .running_engines()
++            .ac_ess_feed_altn()
++            .and()
++            .ac1_feed_to_ac_ess_shed_breaker_open()
++            .run();
++
++        assert!(test_bed
++            .ac_ess_shed_bus_output()
++            .is_single(PotentialOrigin::EngineGenerator(4)));
++    }
++
++    #[test]
++    fn when_ac1_feed_breaker_open_and_gen_4_also_off_ac_ess_shed_bus_is_unpowered() {
++        // Decouple: same pulled breaker (3XC1 forced open) and ALTN still
++        // selected, but with no engines/APU/external power running at all
++        // (the same cold state `when_ac_bus_1_and_ac_bus_4_are_lost_
++        // neither_ac_ess_feed_contactor_is_closed` above uses), AC BUS 4
++        // has no source of its own either -- so 3XC2's own close_when
++        // condition is never satisfied. The bus genuinely loses power
++        // instead of silently staying alive through some other path.
++        let test_bed = test_bed_with()
++            .ac_ess_feed_altn()
++            .and()
++            .ac1_feed_to_ac_ess_shed_breaker_open()
++            .run();
++
++        assert!(test_bed.ac_ess_shed_bus_output().is_unpowered());
++    }
++
+     #[test]
+     fn when_battery_1_is_empty_and_button_off_it_is_not_powered_by_dc_bus() {
+         let test_bed = test_bed_with()
+@@ -3805,6 +3851,16 @@ mod a380_electrical_circuit_tests {
+             self
+         }
+ 
++        // fbw-xp-systems circuit-breaker workstream (patches/fbw-rust/
++        // bus-feeder-breakers.patch): the plugin's "AC_ESS_SHED BUS FEED"
++        // breaker, ANDed into 3XC1's own close_when in
++        // A380AcEssFeedContactors::update. Default closed (false = not
++        // open), matching the plugin's 0-is-closed convention.
++        fn ac1_feed_to_ac_ess_shed_breaker_open(mut self) -> Self {
++            self.write_by_name("ELEC_AC_ESS_SHED_BREAKER_OPEN", true);
++            self
++        }
++
+         fn all_bats_auto(self) -> Self {
+             self.bat_auto(1).bat_auto(2).bat_auto(3).and().bat_auto(4)
+         }

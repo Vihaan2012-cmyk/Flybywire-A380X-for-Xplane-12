@@ -1,0 +1,155 @@
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs
+@@ -4,9 +4,9 @@
+ use uom::si::{
+     area::square_meter,
+     f64::*,
+-    pressure::psi,
++    pressure::{kilopascal, pascal, psi},
+     ratio::ratio,
+-    thermodynamic_temperature::degree_celsius,
++    thermodynamic_temperature::{degree_celsius, kelvin},
+     volume::{cubic_meter, gallon},
+ };
+ 
+@@ -90,6 +90,60 @@
+     }
+ }
+ 
++/// One customer bleed port as the XP port's engine model computes it
++/// (`ENGINE_IP_PORT_PRESSURE_PA:n`/`ENGINE_IP_PORT_TEMP_K:n` for IP8,
++/// `ENGINE_HP_PORT_*` for HP6): the compressor's own total pressure and
++/// temperature there. Until the engine model publishes it (0), the port
++/// falls back to FlyByWire's own N1/N2 estimate.
++#[derive(Clone)]
++struct EnginePort {
++    pressure_id: VariableIdentifier,
++    temperature_id: VariableIdentifier,
++    published: Option<TargetPressureTemperatureSignal>,
++}
++impl EnginePort {
++    fn new(context: &mut InitContext, port: &str, number: usize) -> Self {
++        Self {
++            pressure_id: context.get_identifier(format!("ENGINE_{}_PORT_PRESSURE_PA:{}", port, number)),
++            temperature_id: context.get_identifier(format!("ENGINE_{}_PORT_TEMP_K:{}", port, number)),
++            published: None,
++        }
++    }
++
++    /// The published port conditions, or `estimate`'s when there are none.
++    fn or<'a>(&'a self, estimate: &'a EngineCompressionChamberController) -> PortSignal<'a> {
++        PortSignal(self.published.as_ref(), estimate)
++    }
++}
++impl SimulationElement for EnginePort {
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        let pressure: f64 = systems::simulation::Read::read(reader, &self.pressure_id);
++        let temperature: f64 = systems::simulation::Read::read(reader, &self.temperature_id);
++        self.published = (pressure > 0. && temperature > 0.).then(|| {
++            TargetPressureTemperatureSignal::new(
++                Pressure::new::<pascal>(pressure),
++                ThermodynamicTemperature::new::<kelvin>(temperature),
++            )
++        });
++    }
++}
++
++struct PortSignal<'a>(
++    Option<&'a TargetPressureTemperatureSignal>,
++    &'a EngineCompressionChamberController,
++);
++impl ControllerSignal<TargetPressureTemperatureSignal> for PortSignal<'_> {
++    fn signal(&self) -> Option<TargetPressureTemperatureSignal> {
++        match self.0 {
++            Some(s) => Some(TargetPressureTemperatureSignal::new(
++                s.target_pressure(),
++                s.target_temperature(),
++            )),
++            None => self.1.signal(),
++        }
++    }
++}
++
+ /// A fixed open amount, to hold a seized valve where its seizure allows.
+ #[derive(Clone)]
+ struct HoldOpenAmount(Ratio);
+@@ -636,6 +690,22 @@
+ }
+ impl CoreProcessingInputOutputModuleAUnit {
+     const PRESSURE_REGULATING_VALVE_TARGET_PSI: f64 = 40.; // FCOM
++    // EASA TCDS E.012 (Trent 900) section 10: bleed comes off IP8 whenever
++    // the IP port pressure is above 206.8 kPa with four bleeds and two packs
++    // running, above 231 kPa with two bleeds and one pack; otherwise off HP6.
++    const IP_SWITCH_OVER_NORMAL_KPA: f64 = 206.8;
++    const IP_SWITCH_OVER_ABNORMAL_KPA: f64 = 231.;
++
++    /// The IP port pressure above which the HP valve stays shut. With a
++    /// bleed pushbutton off the configuration is no longer the data sheet's
++    /// normal one, so its abnormal figure applies.
++    fn ip_switch_over_pressure(&self) -> Pressure {
++        Pressure::new::<kilopascal>(if self.is_any_bleed_pushbutton_off {
++            Self::IP_SWITCH_OVER_ABNORMAL_KPA
++        } else {
++            Self::IP_SWITCH_OVER_NORMAL_KPA
++        })
++    }
+ 
+     fn new(engine_number: usize) -> Self {
+         Self {
+@@ -722,7 +792,7 @@
+         // TODO: Add overtemperature condition here
+         if self.pressure_regulating_valve_is_closed
+             || self.high_pressure_compressor_pressure < Pressure::new::<psi>(15.)
+-            || self.intermediate_pressure_compressor_pressure > Pressure::new::<psi>(33.5)
++            || self.intermediate_pressure_compressor_pressure > self.ip_switch_over_pressure()
+         {
+             Some(HighPressureValveSignal::new_closed())
+         } else {
+@@ -801,6 +871,8 @@
+     fan_compression_chamber_controller: EngineCompressionChamberController, // Controls pressure just behind the main fan
+     intermediate_pressure_compression_chamber_controller: EngineCompressionChamberController,
+     high_pressure_compression_chamber_controller: EngineCompressionChamberController,
++    intermediate_pressure_port: EnginePort,
++    high_pressure_port: EnginePort,
+     fan_compression_chamber: CompressionChamber,
+     intermediate_pressure_compression_chamber: CompressionChamber,
+     high_pressure_compression_chamber: CompressionChamber,
+@@ -891,6 +963,8 @@
+             high_pressure_compression_chamber_controller: EngineCompressionChamberController::new(
+                 2.40411, 1.61386,
+             ),
++            intermediate_pressure_port: EnginePort::new(context, "IP", number),
++            high_pressure_port: EnginePort::new(context, "HP", number),
+             fan_compression_chamber: CompressionChamber::new(Volume::new::<cubic_meter>(1.)),
+             intermediate_pressure_compression_chamber: CompressionChamber::new(Volume::new::<
+                 cubic_meter,
+@@ -968,10 +1042,16 @@
+ 
+         self.fan_compression_chamber
+             .update(&self.fan_compression_chamber_controller);
+-        self.intermediate_pressure_compression_chamber
+-            .update(&self.intermediate_pressure_compression_chamber_controller);
+-        self.high_pressure_compression_chamber
+-            .update(&self.high_pressure_compression_chamber_controller);
++        self.intermediate_pressure_compression_chamber.update(
++            &self
++                .intermediate_pressure_port
++                .or(&self.intermediate_pressure_compression_chamber_controller),
++        );
++        self.high_pressure_compression_chamber.update(
++            &self
++                .high_pressure_port
++                .or(&self.high_pressure_compression_chamber_controller),
++        );
+ 
+         update_seizable(
+             &mut self.high_pressure_valve,
+@@ -1120,6 +1200,8 @@
+         self.fan_air_valve.accept(visitor);
+         self.high_pressure_valve_seizure.accept(visitor);
+         self.pressure_regulating_valve_seizure.accept(visitor);
++        self.intermediate_pressure_port.accept(visitor);
++        self.high_pressure_port.accept(visitor);
+ 
+         self.intermediate_pressure_transducer.accept(visitor);
+         self.transfer_pressure_transducer.accept(visitor);

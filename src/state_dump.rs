@@ -1,0 +1,199 @@
+//! A dump of the aircraft's whole state, every variable, every
+//! `xphfbw.stateDumpFrames` frames (`app_settings.rs`, default
+//! [`DEFAULT_EVERY_TICKS`]), to `D:\fbw-build\state-dumps`, for reading
+//! what the systems did after a flight.
+//!
+//! `xphfbw.stateDumps`/`stateDumpFrames`/`stateDumpKeep` (the Simulation
+//! settings panel) apply live: [`StateDump::tick`] and [`write`] read
+//! `app_settings::current()` on every call, so toggling dumps off, or
+//! changing the interval or the keep count, takes effect on the very next
+//! tick/dump without an aircraft reload.
+//!
+//! The flight loop only copies the values; a thread of its own formats and
+//! writes them, so a dump never costs a frame. Each X-Plane session gets a
+//! folder; a session keeps its latest `xphfbw.stateDumpKeep` dumps
+//! (default [`DEFAULT_KEEP_PER_SESSION`]) and only the latest
+//! [`KEEP_SESSIONS`] sessions are kept, so the dumps stay a few tens of
+//! megabytes however long the simulator runs.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
+use std::sync::Arc;
+
+/// `Plugin::tick` (lib.rs) offers this module every tick (`% 1` is always
+/// `0`): the real, user-configurable interval (`xphfbw.stateDumpFrames`)
+/// is checked live inside [`StateDump::tick`] itself, so a settings change
+/// never needs that call site to change too.
+pub const EVERY_TICKS: u64 = 1;
+/// `xphfbw.stateDumpFrames`'s shipped default (`app_settings.rs`), and the
+/// interval used while the app's settings cannot be read yet.
+pub const DEFAULT_EVERY_TICKS: u64 = 200;
+const ROOT: &str = r"D:\fbw-build\state-dumps";
+/// `xphfbw.stateDumpKeep`'s shipped default.
+pub const DEFAULT_KEEP_PER_SESSION: usize = 60;
+const KEEP_SESSIONS: usize = 3;
+
+struct Dump {
+    time: f64,
+    ticks: u64,
+    names: Arc<Vec<String>>,
+    datarefs: Arc<Vec<String>>,
+    values: Vec<f64>,
+    sources: Vec<u8>,
+}
+
+pub struct StateDump {
+    sender: Option<SyncSender<Dump>>,
+    names: Arc<Vec<String>>,
+    datarefs: Arc<Vec<String>>,
+}
+
+impl StateDump {
+    /// Starts the writer thread; without a folder to write to, dumping is off.
+    pub fn start() -> Self {
+        let off = Self { sender: None, names: Arc::default(), datarefs: Arc::default() };
+        let Ok(session) = session_folder(Path::new(ROOT)) else { return off };
+        // One dump waiting at most: a slow disk skips dumps, never frames.
+        let (sender, receiver) = sync_channel::<Dump>(1);
+        let spawned = std::thread::Builder::new().name("fbw state dump".into()).spawn(move || {
+            for dump in receiver {
+                if let Err(e) = write(&session, &dump) {
+                    crate::log(&format!("state dump: {e}"));
+                }
+            }
+        });
+        if spawned.is_err() {
+            return off;
+        }
+        crate::log(&format!(
+            "state dump: every variable every N frames (xphfbw.stateDumpFrames, default {DEFAULT_EVERY_TICKS}) under {ROOT}"
+        ));
+        Self { sender: Some(sender), ..off }
+    }
+
+    /// Called once a tick with the tick's state; dumps every
+    /// `xphfbw.stateDumpFrames`th tick, or never while `xphfbw.stateDumps`
+    /// is off — both checked live, every call.
+    pub fn tick(&mut self, time: f64, ticks: u64, names: &[String], datarefs: &[String], values: &[f64], sources: &[u8]) {
+        let Some(sender) = &self.sender else { return };
+        let settings = crate::app_settings::current();
+        let every = settings.state_dump_frames.max(1);
+        if !settings.state_dumps || ticks == 0 || ticks % every != 0 {
+            return;
+        }
+        // Names change only when a variable is registered.
+        if self.names.len() != names.len() {
+            self.names = Arc::new(names.to_vec());
+            self.datarefs = Arc::new(datarefs.to_vec());
+        }
+        let dump = Dump {
+            time,
+            ticks,
+            names: self.names.clone(),
+            datarefs: self.datarefs.clone(),
+            values: values.to_vec(),
+            sources: sources.to_vec(),
+        };
+        if let Err(TrySendError::Disconnected(_)) = sender.try_send(dump) {
+            self.sender = None;
+        }
+    }
+}
+
+/// A new folder for this session under `root`, the oldest sessions beyond
+/// [`KEEP_SESSIONS`] removed.
+fn session_folder(root: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(root)?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let session = root.join(format!("session-{secs}"));
+    std::fs::create_dir_all(&session)?;
+    prune(root, "session-", KEEP_SESSIONS);
+    Ok(session)
+}
+
+/// Keep the newest `keep` entries of `dir` whose names start with `prefix`
+/// (names sort by their number, which only grows).
+fn prune(dir: &Path, prefix: &str, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut found: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let number = name.strip_prefix(prefix)?.split('.').next()?.parse::<u64>().ok()?;
+            Some((number, e.path()))
+        })
+        .collect();
+    found.sort_unstable_by_key(|(n, _)| std::cmp::Reverse(*n));
+    for (_, path) in found.into_iter().skip(keep) {
+        let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+    }
+}
+
+fn write(session: &Path, dump: &Dump) -> std::io::Result<()> {
+    let path = session.join(format!("dump-{:010}.tsv", dump.ticks));
+    let partial = path.with_extension("tsv.part");
+    {
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&partial)?);
+        format(&mut out, dump)?;
+        out.flush()?;
+    }
+    std::fs::rename(&partial, &path)?;
+    let keep = crate::app_settings::current().state_dump_keep.max(1);
+    prune(session, "dump-", keep);
+    Ok(())
+}
+
+fn format(out: &mut impl Write, dump: &Dump) -> std::io::Result<()> {
+    writeln!(out, "# sim time {:.3} s, frame {}, {} variables", dump.time, dump.ticks, dump.values.len())?;
+    writeln!(out, "# source: 0 nothing yet, 1 X-Plane, 2 the systems")?;
+    writeln!(out, "name\tvalue\tsource\tdataref")?;
+    for (i, value) in dump.values.iter().enumerate() {
+        let name = dump.names.get(i).map_or("", String::as_str);
+        let dataref = dump.datarefs.get(i).map_or("", String::as_str);
+        let source = dump.sources.get(i).copied().unwrap_or(0);
+        writeln!(out, "{name}\t{value}\t{source}\t{dataref}")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dump_lists_every_variable_with_its_value_and_source() {
+        let dump = Dump {
+            time: 12.5,
+            ticks: 400,
+            names: Arc::new(vec!["A32NX_EXT_PWR_AVAIL:1".into(), "AMBIENT PRESSURE".into()]),
+            datarefs: Arc::new(vec!["fbw/A32NX_EXT_PWR_AVAIL_1".into(), "fbw/AMBIENT_PRESSURE".into()]),
+            values: vec![1., 29.92],
+            sources: vec![2, 1],
+        };
+        let mut text = Vec::new();
+        format(&mut text, &dump).unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.starts_with("# sim time 12.500 s, frame 400, 2 variables\n"), "{text}");
+        assert!(text.contains("A32NX_EXT_PWR_AVAIL:1\t1\t2\tfbw/A32NX_EXT_PWR_AVAIL_1\n"), "{text}");
+        assert!(text.contains("AMBIENT PRESSURE\t29.92\t1\tfbw/AMBIENT_PRESSURE\n"), "{text}");
+    }
+
+    #[test]
+    fn only_the_newest_dumps_are_kept() {
+        let dir = std::env::temp_dir().join(format!("fbw-dump-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in [5, 400, 200, 600, 1000] {
+            std::fs::write(dir.join(format!("dump-{n:010}.tsv")), "x").unwrap();
+        }
+        std::fs::write(dir.join("other.txt"), "x").unwrap();
+        prune(&dir, "dump-", 2);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["dump-0000000600.tsv", "dump-0000001000.tsv", "other.txt"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+

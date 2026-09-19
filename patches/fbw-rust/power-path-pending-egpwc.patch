@@ -1,0 +1,42 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/enhanced_gpwc/mod.rs b/fbw-common/src/wasm/systems/systems/src/enhanced_gpwc/mod.rs
+index 0000000..0000000 100644
+--- a/fbw-common/src/wasm/systems/systems/src/enhanced_gpwc/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/enhanced_gpwc/mod.rs
+@@ -21,6 +21,15 @@
+ pub struct EnhancedGroundProximityWarningComputer {
+     powered_by: ElectricalBusType,
+     is_powered: bool,
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md):
++    // the X-Plane plugin's breaker catalogue registers this variable,
++    // default closed. ANDed into `receive_power` below, so an open one
++    // really drops this EGPWC's own power (terrain/GPWS/TAWS outputs and
++    // navigation display stop updating), not a synthetic failure flag.
++    // Unread outside the plugin (tests in this file, the MSFS build), so
++    // purely additive.
++    breaker_id: VariableIdentifier,
++    breaker_closed: bool,
+     fm1_destination_longitude_ssm_id: VariableIdentifier,
+     fm1_destination_longitude_id: VariableIdentifier,
+     fm1_destination_latitude_ssm_id: VariableIdentifier,
+@@ -58,6 +67,8 @@
+         EnhancedGroundProximityWarningComputer {
+             powered_by,
+             is_powered: false,
++            breaker_id: context.get_identifier("ELEC_EGPWC_BREAKER_CLOSED".to_owned()),
++            breaker_closed: true,
+             fm1_destination_longitude_ssm_id: context
+                 .get_identifier("FM1_DEST_LONG_SSM".to_owned()),
+             fm1_destination_longitude_id: context.get_identifier("FM1_DEST_LONG".to_owned()),
+@@ -139,10 +150,11 @@
+ 
+ impl SimulationElement for EnhancedGroundProximityWarningComputer {
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+-        self.is_powered = buses.is_powered(self.powered_by)
++        self.is_powered = self.breaker_closed && buses.is_powered(self.powered_by)
+     }
+ 
+     fn read(&mut self, reader: &mut SimulatorReader) {
++        self.breaker_closed = reader.read(&self.breaker_id);
+         let destination_long: f64 = reader.read(&self.fm1_destination_longitude_id);
+         let destination_lat: f64 = reader.read(&self.fm1_destination_latitude_id);
+         let destination_long_ssm: u32 = reader.read(&self.fm1_destination_longitude_ssm_id);

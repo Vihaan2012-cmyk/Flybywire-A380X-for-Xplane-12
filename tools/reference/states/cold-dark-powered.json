@@ -1,0 +1,8 @@
+{
+  "name": "cold-dark-powered",
+  "description": "See docs/reference-harness.md, States.",
+  "extends": ["parts/common", "parts/systems-cold-dark-powered", "parts/avionics-cold-dark-powered"],
+  "flt": "apron.FLT",
+  "time": { "utc": "2026-06-21T12:00:00Z", "settleMs": 20000 },
+  "vars": {}
+}

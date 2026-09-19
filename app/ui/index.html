@@ -1,0 +1,2264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>XPHFBW</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #242424;
+    --panel: #242424;
+    --line: #9a9a9a;
+    --line-dim: #5a5a5a;
+    --text: #f2f2f2;
+    --text-dim: #a8a8a8;
+    --heading: #9d9d9d;
+    --field: #1c1c1c;
+    --button: #4c5663;
+    --button-line: #d8dde3;
+    --accent: #3fb0ff;
+    --ok: #3ccf6e;
+    --warn: #f0b429;
+    --bad: #e5484d;
+    --efb-brightness: 1;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    filter: brightness(var(--efb-brightness));
+    background:
+      radial-gradient(ellipse at 45% 20%, rgba(255,255,255,0.05), transparent 55%),
+      repeating-linear-gradient(115deg, rgba(255,255,255,0.018) 0 2px, transparent 2px 60px),
+      var(--bg);
+    color: var(--text);
+    font: 15px/1.35 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  main {
+    flex: 1; min-height: 0;
+    display: flex; flex-direction: column;
+  }
+  .columns { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; padding: 28px 56px 0; overflow: hidden; }
+  .column { min-height: 0; overflow-y: auto; padding-right: 10px; scrollbar-color: #555 transparent; }
+  h2 { font-weight: 300; color: var(--heading); font-size: 28px; margin: 14px 0 12px; letter-spacing: 0.2px; }
+  .box { border: 2px solid var(--line); padding: 14px 16px 18px; margin-bottom: 26px; }
+  .row { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
+  .label { text-transform: uppercase; font-size: 16px; letter-spacing: 0.2px; }
+  .label.dim { color: var(--text-dim); }
+  .help { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #6b6b6b; color: #eee; font-size: 12px; cursor: help; margin-left: 6px; }
+  input[type=checkbox] { appearance: none; width: 22px; height: 22px; border: 2px solid var(--line); background: transparent; margin: 0; cursor: pointer; display: grid; place-items: center; flex: none; }
+  input[type=checkbox]:checked::after { content: ""; width: 11px; height: 6px; border: 2px solid #ccc; border-top: 0; border-right: 0; transform: rotate(-45deg) translate(1px, -1px); }
+  select, input[type=text], input[type=number], input[type=password] {
+    width: 100%; background: var(--field); color: var(--text); border: 2px solid var(--line);
+    padding: 7px 8px; font: inherit; outline: none; border-radius: 0;
+  }
+  select:focus, input:focus { border-color: #d0d0d0; }
+  .field { margin: 12px 0 4px; }
+  .field .label { display: block; margin-bottom: 6px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+  .apply { display: flex; justify-content: center; margin-top: 18px; }
+  button {
+    font: 600 14px "Segoe UI", system-ui, sans-serif; color: var(--text); background: transparent;
+    border: 2px solid var(--line); padding: 12px 20px; min-width: min(250px, 100%); cursor: pointer; text-transform: uppercase;
+  }
+  button:hover { background: rgba(255,255,255,0.06); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.small { min-width: 0; padding: 6px 14px; font-size: 13px; }
+  button.grey { background: #7c7c7c; border-color: #9a9a9a; color: #cfcfcf; }
+  .status { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+  .lights { display: grid; gap: 6px; margin-top: 14px; font-size: 14px; color: var(--text-dim); }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #666; margin-right: 8px; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  .support-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; border-bottom: 1px solid var(--line-dim); padding: 8px 0; font-size: 17px; }
+  .link-button { font: 600 15px "Segoe UI"; background: var(--button); color: #fff; border: 2px solid var(--button-line); padding: 6px 12px; min-width: 0; width: 226px; max-width: 45%; flex: none; text-transform: none; }
+  .link-button::after { content: " \27A4"; }
+  .discord { min-width: 0; width: 226px; max-width: 45%; flex: none; height: 70px; background: #5865f2; border: 0; display: flex; align-items: center; justify-content: center; gap: 10px; text-transform: none; font-size: 20px; font-weight: 800; }
+  .changelog h3 { text-align: center; font-weight: 400; margin: 18px 0 8px; font-size: 16px; }
+  .changelog h4 { color: var(--text-dim); font-weight: 400; font-size: 26px; margin: 8px 0; }
+  .changelog em { display: block; margin-bottom: 12px; }
+  .changelog b { display: block; margin: 12px 0 6px; }
+  .changelog ul { margin: 0; padding-left: 30px; list-style: none; }
+  .changelog li { margin: 7px 0; position: relative; }
+  .changelog li::before { content: ""; position: absolute; left: -24px; top: 5px; width: 9px; height: 9px; border: 2px solid var(--text); border-radius: 50%; }
+  footer { display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; padding: 12px 0 10px; }
+  .brand { display: flex; align-items: center; gap: 12px; padding-left: 8px; }
+  .brand img { height: 44px; width: auto; }
+  .brand span { font-size: 22px; font-weight: 300; letter-spacing: 2px; color: var(--text-dim); border-left: 1px solid var(--line-dim); padding-left: 12px; }
+  .legal { text-align: center; color: var(--text-dim); font-size: 14px; line-height: 1.8; }
+  .legal a { color: var(--text-dim); }
+  .server { text-align: right; color: var(--text-dim); font-size: 14px; padding-right: 10px; align-self: end; }
+  .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); background: #333; border: 1px solid #777; padding: 8px 16px; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .masked { -webkit-text-security: disc; }
+  #tab-status .columns, #tab-support .columns { grid-template-columns: minmax(0, 900px); justify-content: center; }
+  .tabs { display: flex; flex-wrap: nowrap; flex-shrink: 0; gap: 4px; padding: 14px 24px 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+  .tab-btn { font: 600 13px "Segoe UI", system-ui, sans-serif; color: var(--text-dim); background: transparent; border: 2px solid var(--line-dim); border-bottom: 0; padding: 10px 12px; min-width: 0; width: auto; flex: 1 1 auto; text-align: center; white-space: nowrap; cursor: pointer; text-transform: uppercase; }
+  .tab-btn.active { color: var(--text); border-color: var(--line); background: rgba(255,255,255,0.04); }
+  .tab-panel { display: none; flex: 1; min-height: 0; }
+  .tab-panel.active { display: flex; flex-direction: column; }
+  #tab-study.active { display: flex; }
+  .study-offline { margin: 20px 56px; }
+  .study-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 210px 1fr; gap: 0; padding: 0 56px; }
+  .study-nav { overflow-y: auto; border-right: 2px solid var(--line-dim); padding-right: 10px; }
+  .study-nav-group { color: var(--heading); text-transform: uppercase; font-size: 12px; margin: 14px 0 4px; letter-spacing: 0.5px; }
+  .study-nav button { display: block; width: 100%; text-align: left; background: transparent; border: 0; color: var(--text-dim); padding: 6px 8px; font: 13px "Segoe UI"; text-transform: none; cursor: pointer; min-width: 0; }
+  .study-nav button:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+  .study-nav button.active { color: var(--accent); font-weight: 700; }
+  .study-main { min-width: 0; overflow-y: auto; padding: 10px 16px 30px; }
+  .study-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .study-toolbar input[type=text] { width: auto; flex: 1; min-width: 160px; }
+  .study-groups { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+  .study-field-row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 13px; }
+  .study-field-row .fname { color: var(--text-dim); }
+  .study-field-row .fval { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .study-field-row .fval.missing { color: var(--text-dim); font-style: italic; }
+  .study-svg { width: 100%; height: auto; background: #05060a; border: 2px solid var(--line-dim); }
+  .study-svg .node-box { fill: #0b0d12; stroke: #4a4f5a; stroke-width: 1.5; }
+  .study-svg .node.live .node-box { stroke: #cfd3da; }
+  .study-svg .node-title { fill: #cfd3da; font-size: 11px; font-family: "Segoe UI"; }
+  .study-svg .node.live .node-title { fill: #fff; }
+  .study-svg .node-value { fill: #3ccf6e; font-size: 10px; font-family: "Segoe UI"; }
+  .study-svg .node-flag { fill: #666; font-size: 10px; font-family: "Segoe UI"; }
+  .study-svg .node-flag.on { fill: #3ccf6e; } .study-svg .node-flag.off { fill: #666; } .study-svg .node-flag.missing { fill: #444; }
+  .study-svg .link { fill: none; stroke: #444; stroke-width: 1.5; }
+  .ecam-wrap { overflow-x: auto; padding: 4px 0 12px; display: flex; justify-content: center; }
+  .ecam-panel { width: 100%; max-width: 520px; height: auto; display: block; background: #000; border: 2px solid var(--line-dim); border-radius: 10px; }
+  .ecam-panel text { font-family: "Ecam", "Segoe UI", monospace; }
+  .study-svg .link.live { stroke: #3ccf6e; stroke-width: 2.5; }
+  .study-svg .link.pipe.live { stroke: #4db8ff; }
+  .page-main { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 56px 30px; }
+  .section-title { color: var(--heading); text-transform: uppercase; font-size: 13px; letter-spacing: 0.6px; margin: 18px 0 8px; }
+  .diagram-wrap { overflow-x: auto; padding: 4px 0 12px; }
+  .diagram { position: relative; margin: 0 auto; font-size: calc(11.5px * var(--s)); }
+  .diagram-links { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .diagram-links .link { fill: none; stroke: var(--line-dim); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+  .diagram-links .link.wire.live { stroke: var(--ok); stroke-width: 3; }
+  .diagram-links .link.pipe.live { stroke: var(--accent); stroke-width: 3; }
+  .diagram-links .link.air.live { stroke: var(--accent); stroke-width: 3; }
+  .diagram-links .link.gas.live { stroke: #ff9f43; stroke-width: 4; }
+  .diagram-links .link.shaft { stroke-dasharray: 6 4; }
+  .diagram-links .link.shaft.live { stroke: var(--ok); stroke-width: 3; stroke-dasharray: none; }
+  .cutaway-shapes .edge { stroke: #1e1e30; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .cutaway-shapes .leader { stroke: var(--text-dim); stroke-opacity: 0.55; stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .cutaway-shapes .marker { fill: #d6d6e6; stroke: #1e1e30; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .cutaway-shapes .marker-text { fill: #08081a; font: 600 11px "Segoe UI"; }
+  .cutaway-shapes .caption { fill: var(--text-dim); font: 12px "Segoe UI"; }
+  .cutaway-shapes .band { stroke: var(--line-dim); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .dnode.stage { background: rgba(48,52,58,0.95); }
+  .dnode.label { border: 0; background: var(--bg); }
+  .dnode.label .dtitle { border: 0; color: var(--text-dim); font-weight: 400; }
+  .dnode { position: absolute; box-sizing: content-box; line-height: 1.1; border: 2px solid var(--line-dim); background: rgba(36,36,36,0.92); display: flex; flex-direction: column; overflow: hidden; }
+  .dnode.live { border-color: var(--line); }
+  .dnode.bus { border-color: #6a5a2a; }
+  .dnode.bus.live { border-color: var(--ok); }
+  .dnode .dtitle { box-sizing: border-box; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; border-bottom: 1px solid var(--line-dim); }
+  .dnode .drow { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 6px; white-space: nowrap; }
+  .dnode .drow.center { justify-content: center; }
+  .dnode .dlabel { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+  .dnode .dval { font-variant-numeric: tabular-nums; color: var(--text); }
+  .dnode .dval.nodata { color: var(--line-dim); }
+  .dnode .dot { width: calc(7px * var(--s)); height: calc(7px * var(--s)); margin-right: 5px; }
+  .dnode .lamp-off { color: var(--line-dim); }
+  .fail-row { display: grid; grid-template-columns: 70px 1fr auto; align-items: center; gap: 12px; padding: 7px 4px; border-bottom: 1px solid var(--line-dim); }
+  .fail-row .ata { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .fail-row button { min-width: 96px; padding: 5px 10px; font-size: 12px; }
+  .fail-row button.armed { border-color: var(--bad); color: #fff; background: rgba(229,72,77,0.25); }
+  .cb-row { display: grid; grid-template-columns: 40px 1fr 68px 68px 150px 26px; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line-dim); }
+  .cb-row .bus { font-size: 11px; text-transform: none; }
+  .cb { position: relative; width: 32px; height: 32px; min-width: 0; padding: 0; border: 2px solid var(--line-dim); background: #141414; border-radius: 3px; overflow: hidden; flex: none; }
+  .cb-collar { position: absolute; left: 0; right: 0; top: 0; height: 0; background: #fff; transition: height 0.15s; }
+  .cb.pulled .cb-collar { height: 9px; }
+  .cb.pulled.trip-thermal .cb-collar { background: var(--warn); }
+  .cb.pulled.trip-magnetic .cb-collar { background: var(--bad); }
+  .cb-cap { position: absolute; left: 2px; right: 2px; top: 2px; bottom: 2px; background: #3a3f47; border: 1px solid #565b63; transition: transform 0.15s; }
+  .cb.pulled .cb-cap { transform: translateY(9px); }
+  .cb-detail { padding: 2px 4px 12px 50px; color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+  .cb-detail div + div { margin-top: 2px; }
+  .cb-info { cursor: pointer; }
+  .comp-row { display: grid; grid-template-columns: 40px 1fr 60px 140px auto 26px; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line-dim); }
+  .comp-row .bus, .mel-row .bus { font-size: 11px; text-transform: none; }
+  .comp-bar { height: 6px; background: var(--line-dim); }
+  .comp-bar > div { height: 6px; }
+  .comp-quick { display: flex; gap: 6px; }
+  .comp-quick button { min-width: 0; width: auto; padding: 4px 10px; font-size: 12px; }
+  .comp-quick button.armed { border-color: var(--bad); color: #fff; background: rgba(229,72,77,0.25); }
+  .mel-row { display: grid; grid-template-columns: minmax(220px, 1fr) auto 26px; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line-dim); }
+  .mel-units { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+  .mel-units button { min-width: 0; width: auto; padding: 4px 10px; font-size: 12px; }
+  .mel-units button.armed { border-color: var(--bad); color: #fff; background: rgba(229,72,77,0.25); }
+  .cb-detail .box { margin: 6px 0 0; }
+  .study-nav button .count { float: right; color: var(--text-dim); font-weight: 400; }
+  .study-nav button .count.armed { color: var(--bad); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+  .tile { min-width: 0; height: 74px; display: flex; flex-direction: column; align-items: flex-start; justify-content: space-between; text-align: left; padding: 10px 14px; }
+  .tile.loading { border-color: var(--accent); }
+  .preset-bar { flex: 1; height: 10px; border: 2px solid var(--line-dim); }
+  .preset-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.3s; }
+  .tile .tile-state { font-weight: 400; font-size: 12px; color: var(--text-dim); text-transform: none; }
+  .fp-head { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 20px; }
+  .fp-apt .icao { font-size: 38px; font-weight: 300; letter-spacing: 1px; }
+  .fp-apt .name { color: var(--text-dim); }
+  .fp-apt.dest { text-align: right; }
+  .fp-mid { text-align: center; color: var(--text-dim); }
+  .fp-mid .big { color: var(--text); font-size: 18px; }
+  .fp-route { font-family: Consolas, monospace; font-size: 13px; line-height: 1.6; word-spacing: 4px; color: var(--text); }
+  .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px 20px; }
+  .kv div span { display: block; }
+  .kv .k { color: var(--text-dim); font-size: 12px; text-transform: uppercase; }
+  .kv .v { font-size: 17px; font-variant-numeric: tabular-nums; }
+  table.navlog { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  table.navlog th { text-align: left; color: var(--text-dim); font-weight: 600; text-transform: uppercase; font-size: 11px; border-bottom: 2px solid var(--line); padding: 6px; }
+  table.navlog td { padding: 5px 6px; border-bottom: 1px solid var(--line-dim); }
+  table.navlog td.num, table.navlog th.num { text-align: right; }
+  .study-grid-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .study-item-btn { border: 2px solid var(--line-dim); background: transparent; color: var(--text); padding: 8px 10px; text-align: left; text-transform: none; font-size: 13px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+  .study-item-btn.active { border-color: var(--ok); }
+  .study-item-btn .amps { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  @media (max-width: 1100px) {
+    .study-layout { grid-template-columns: 1fr; padding: 0 16px; }
+    .study-nav { border-right: 0; border-bottom: 2px solid var(--line-dim); padding-bottom: 10px; max-height: 160px; }
+    .tabs { padding: 14px 16px 0; flex-wrap: wrap; }
+    .page-main { padding: 12px 16px 24px; }
+    .columns { grid-template-columns: 1fr; gap: 0; padding: 16px 24px; overflow-y: auto; }
+    .column { padding-right: 0; }
+    .column { overflow: visible; }
+    button:not(.tab-btn), .link-button, .discord { min-width: 0; width: 100%; }
+    .support-row { flex-direction: column; align-items: stretch; }
+    footer { grid-template-columns: 1fr; gap: 8px; text-align: center; }
+    .brand { justify-content: center; }
+    .server { text-align: center; }
+  }
+</style>
+</head>
+<body>
+<div class="tabs" id="tabs">
+  <button type="button" class="tab-btn active" data-tab="study">Study</button>
+  <button type="button" class="tab-btn" data-tab="failures">Failures</button>
+  <button type="button" class="tab-btn" data-tab="breakers">Circuit Breakers</button>
+  <button type="button" class="tab-btn" data-tab="maintenance">MEL &amp; Maintenance</button>
+  <button type="button" class="tab-btn" data-tab="components">Components</button>
+  <button type="button" class="tab-btn" data-tab="flightplan">Flight Plan</button>
+  <button type="button" class="tab-btn" data-tab="ground">Ground Services</button>
+  <button type="button" class="tab-btn" data-tab="settings">Settings</button>
+  <button type="button" class="tab-btn" data-tab="status">Status</button>
+  <button type="button" class="tab-btn" data-tab="support">Support</button>
+</div>
+<main>
+<div class="tab-panel active" id="tab-study">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="box study-offline" id="study-offline" hidden><span class="label dim">Not connected to X-Plane / the plugin. Retrying…</span></div>
+  <div class="study-layout" id="study-layout">
+    <nav class="study-nav" id="study-nav"></nav>
+    <div class="study-main">
+      <div class="study-toolbar" id="study-toolbar"></div>
+      <div id="study-content"></div>
+    </div>
+  </div>
+</div>
+<div class="tab-panel" id="tab-failures">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="study-layout">
+    <nav class="study-nav" id="failures-nav"></nav>
+    <div class="study-main">
+      <div class="study-toolbar" id="failures-toolbar">
+        <input type="text" id="failures-search" placeholder="Search by ATA number or name…">
+        <label class="row" style="margin:0"><input type="checkbox" id="failures-armed"><span class="label">Armed only</span></label>
+        <button type="button" class="small grey" id="failures-clear">Disarm all</button>
+      </div>
+      <div id="failures-content"></div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-maintenance">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="study-layout">
+    <nav class="study-nav" id="maint-nav"></nav>
+    <div class="study-main">
+      <div class="study-toolbar">
+        <input type="text" id="maint-filter" placeholder="Filter this list, or search the whole MEL (Enter)…">
+        <button type="button" class="small grey" id="maint-refresh">Refresh</button>
+      </div>
+      <div id="maint-content"></div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-components">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="study-layout">
+    <nav class="study-nav" id="comp-nav"></nav>
+    <div class="study-main">
+      <div class="study-toolbar">
+        <input type="text" id="comp-filter" placeholder="Search by name, system or cause…">
+        <label class="row" style="margin:0"><input type="checkbox" id="comp-degraded"><span class="label">Degraded only</span></label>
+        <button type="button" class="small grey" id="comp-restore-all">Restore all</button>
+        <button type="button" class="small grey" id="comp-refresh">Refresh</button>
+      </div>
+      <div id="comp-content"></div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-breakers">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="study-layout">
+    <nav class="study-nav" id="breakers-nav"></nav>
+    <div class="study-main">
+      <div class="study-toolbar" id="breakers-toolbar">
+        <input type="text" id="breakers-search" placeholder="Search by ATA number, name or bus…">
+        <label class="row" style="margin:0"><input type="checkbox" id="breakers-pulled"><span class="label">Pulled/tripped only</span></label>
+        <button type="button" class="small grey" id="breakers-reset-all">Reset all</button>
+      </div>
+      <div id="breakers-content"></div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-flightplan">
+  <div class="page-main">
+    <div class="study-toolbar">
+      <span class="label">SimBrief user ID</span>
+      <input type="text" id="fp-user" style="width:220px" placeholder="From your SimBrief account">
+      <button type="button" class="small" id="fp-fetch">Fetch latest OFP</button>
+      <span class="label dim" id="fp-state"></span>
+    </div>
+    <div id="fp-content"><div class="box"><span class="label dim">Enter your SimBrief user ID and fetch your latest flight plan.</span></div></div>
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-ground">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="page-main" id="ground-content"></div>
+</div>
+
+<div class="tab-panel" id="tab-settings">
+<div class="columns">
+  <div class="column" id="left">
+    <h2>Product Configuration</h2>
+    <form class="box" data-group="product">
+      <label class="row"><input type="checkbox" data-key="xphfbw.autoCrashReport"><span class="label">Auto crash report</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.streamerMode"><span class="label">Streamer mode</span></label>
+      <div class="field"><span class="label">ACARS service</span>
+        <select data-key="ACARS_PROVIDER">
+          <option value="NONE">None</option>
+          <option value="HOPPIE">Hoppie</option>
+          <option value="SAYINTENTIONS">SayIntentions</option>
+        </select></div>
+      <div class="field" data-show="ACARS_PROVIDER=HOPPIE"><span class="label">Hoppie ACARS code</span>
+        <input type="text" data-key="CONFIG_HOPPIE_USERID" data-secret placeholder="Enter Logon Code"></div>
+      <div class="field" data-show="ACARS_PROVIDER=SAYINTENTIONS"><span class="label">SayIntentions logon key</span>
+        <input type="text" data-key="CONFIG_SAI_LOGON_KEY" data-secret placeholder="Enter Logon Key"></div>
+      <div class="grid2">
+        <div class="field"><span class="label">Online features</span>
+          <select data-key="CONFIG_ONLINE_FEATURES_STATUS"><option value="DISABLED">Disabled</option><option value="ENABLED">Enabled</option></select></div>
+        <div class="field"><span class="label">SimBridge</span>
+          <select data-key="CONFIG_SIMBRIDGE_ENABLED"><option value="AUTO ON">Auto on</option><option value="PERM OFF">Off</option></select></div>
+        <div class="field"><span class="label">SimBridge location</span>
+          <select data-key="CONFIG_SIMBRIDGE_REMOTE"><option value="local">This PC</option><option value="remote">Another PC</option></select></div>
+        <div class="field"><span class="label">SimBridge port</span>
+          <input type="number" min="1" max="65535" data-key="CONFIG_SIMBRIDGE_PORT"></div>
+        <div class="field" data-show="CONFIG_SIMBRIDGE_REMOTE=remote"><span class="label">SimBridge IP</span>
+          <input type="text" data-key="CONFIG_SIMBRIDGE_IP"></div>
+        <div class="field"><span class="label">SimBrief user ID</span>
+          <input type="text" data-key="CONFIG_OVERRIDE_SIMBRIEF_USERID" data-secret placeholder="From your SimBrief account"></div>
+        <div class="field"><span class="label">SimBrief auto import</span>
+          <select data-key="CONFIG_AUTO_SIMBRIEF_IMPORT"><option value="DISABLED">Disabled</option><option value="ENABLED">Enabled</option></select></div>
+      </div>
+      <div class="row"><button type="button" class="small" data-action="navigraph">Link Navigraph account</button><span class="label dim" id="navigraph-user"></span></div>
+      <div class="apply"><button type="submit">Apply</button></div>
+    </form>
+
+    <h2>Flight Deck Displays</h2>
+    <form class="box" data-group="displays">
+      <label class="row"><input type="checkbox" data-key="xphfbw.displaySafeMode"><span class="label">Use display safe mode</span><span class="help" title="Draws the instruments with the most compatible settings (lower frame rate, no hardware paths). Use if screens stay black or flicker.">?</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.forceCpuRendering"><span class="label">Force safe mode CPU rendering</span><span class="help" title="Renders every instrument on the CPU: no extra video memory. On by default.">?</span></label>
+      <div class="grid2">
+        <div class="field"><span class="label">Display frame rate</span>
+          <select data-key="xphfbw.displayFps"><option value="60">60</option><option value="30">30</option><option value="20">20</option></select></div>
+        <div class="field"><span class="label">EFB brightness</span>
+          <input type="range" min="20" max="100" step="5" data-key="xphfbw.efbBrightness"></div>
+        <div class="field"><span class="label">DMC self test (s)</span>
+          <input type="number" min="0" max="60" data-key="CONFIG_SELF_TEST_TIME"></div>
+        <div class="field"><span class="label">Initial baro unit</span>
+          <select data-key="CONFIG_INIT_BARO_UNIT"><option value="AUTO">Auto</option><option value="IN HG">inHg</option><option value="HPA">hPa</option></select></div>
+        <div class="field"><span class="label">MCDU keyboard timeout (s)</span>
+          <input type="number" min="0" max="600" data-key="CONFIG_MCDU_KB_TIMEOUT"></div>
+      </div>
+      <label class="row"><input type="checkbox" data-key="ISIS_BARO_UNIT_INHG" data-bool="1,0"><span class="label">ISIS baro in inHg</span></label>
+      <label class="row"><input type="checkbox" data-key="ISIS_METRIC_ALTITUDE" data-bool="1,0"><span class="label">ISIS metric altitude</span></label>
+      <label class="row"><input type="checkbox" data-key="LATLON_EXT_FMT" data-bool="1,0"><span class="label">Extended lat/lon format</span></label>
+      <label class="row"><input type="checkbox" data-key="CONFIG_A380X_SHOW_ECL_SOFTKEYS" data-bool="1,0"><span class="label">Show ECL softkeys</span></label>
+      <label class="row"><input type="checkbox" data-key="FO_SYNC_EFIS_ENABLED" data-bool="1,0"><span class="label">Sync first officer EFIS</span></label>
+      <div class="apply"><button type="submit">Apply</button></div>
+    </form>
+
+  </div>
+
+  <div class="column" id="right">
+    <h2>Aircraft</h2>
+    <form class="box" data-group="aircraft">
+      <div class="grid2">
+        <div class="field"><span class="label">Weight unit</span>
+          <select data-key="EFB_PREFERRED_WEIGHT_UNIT"><option value="kg">kg</option><option value="lb">lb</option></select></div>
+        <div class="field"><span class="label">ADIRS align time</span>
+          <select data-key="CONFIG_ALIGN_TIME"><option value="REAL">Real</option><option value="FAST">Fast</option><option value="INSTANT">Instant</option></select></div>
+        <div class="field"><span class="label">Boarding rate</span>
+          <select data-key="CONFIG_BOARDING_RATE"><option value="REAL">Real</option><option value="FAST">Fast</option><option value="INSTANT">Instant</option></select></div>
+        <div class="field"><span class="label">Refuel rate</span>
+          <select data-key="REFUEL_RATE_SETTING"><option value="REAL">Real</option><option value="FAST">Fast</option><option value="INSTANT">Instant</option></select></div>
+        <div class="field"><span class="label">Thrust reduction alt (ft)</span>
+          <input type="number" min="400" max="5000" step="10" data-key="CONFIG_THR_RED_ALT"></div>
+        <div class="field"><span class="label">Acceleration alt (ft)</span>
+          <input type="number" min="400" max="5000" step="10" data-key="CONFIG_ACCEL_ALT"></div>
+        <div class="field"><span class="label">Engine-out accel alt (ft)</span>
+          <input type="number" min="400" max="5000" step="10" data-key="CONFIG_ENG_OUT_ACCEL_ALT"></div>
+        <div class="field"><span class="label">Pause at T/D distance (NM)</span>
+          <input type="number" min="1" max="99" data-key="PAUSE_AT_TOD_DISTANCE"></div>
+      </div>
+      <label class="row"><input type="checkbox" data-key="DYNAMIC_REGISTRATION_DECAL" data-bool="1,0"><span class="label">Dynamic registration decal</span></label>
+      <label class="row"><input type="checkbox" data-key="CONFIG_PILOT_AVATAR_VISIBLE" data-bool="1,0"><span class="label">Pilot avatars</span></label>
+      <label class="row"><input type="checkbox" data-key="MODEL_WHEELCHOCKS_ENABLED" data-bool="1,0"><span class="label">Wheel chocks</span></label>
+      <label class="row"><input type="checkbox" data-key="MODEL_CONES_ENABLED" data-bool="1,0"><span class="label">Safety cones</span></label>
+      <label class="row"><input type="checkbox" data-key="MODEL_SATCOM_ENABLED" data-bool="1,0"><span class="label">Satcom antenna</span></label>
+      <label class="row"><input type="checkbox" data-key="REALISTIC_TILLER_ENABLED" data-bool="1,0"><span class="label">Realistic tiller</span></label>
+      <label class="row"><input type="checkbox" data-key="PUSHBACK_USE_CONTROLLER_INPUT" data-bool="1,0"><span class="label">Pushback with controller input</span></label>
+      <label class="row"><input type="checkbox" data-key="RMP_VHF_SPACING_25KHZ" data-bool="1,0"><span class="label">RMP 25 kHz spacing</span></label>
+      <label class="row"><input type="checkbox" data-key="RADIO_RECEIVER_USAGE_ENABLED" data-bool="1,0"><span class="label">Radio receiver usage</span></label>
+      <label class="row"><input type="checkbox" data-key="FDR_ENABLED" data-bool="1,0"><span class="label">Flight data recorder</span></label>
+      <label class="row"><input type="checkbox" data-key="LIGHT_PRESET_AUTOLOAD" data-bool="1,0"><span class="label">Autoload light presets</span></label>
+      <div class="grid2" data-show="LIGHT_PRESET_AUTOLOAD=1">
+        <div class="field"><span class="label">Day preset</span><input type="number" min="0" max="10" data-key="LIGHT_PRESET_AUTOLOAD_DAY"></div>
+        <div class="field"><span class="label">Dawn/dusk preset</span><input type="number" min="0" max="10" data-key="LIGHT_PRESET_AUTOLOAD_DAWNDUSK"></div>
+        <div class="field"><span class="label">Night preset</span><input type="number" min="0" max="10" data-key="LIGHT_PRESET_AUTOLOAD_NIGHT"></div>
+      </div>
+      <h2 style="font-size:18px;margin:18px 0 4px">Sound</h2>
+      <label class="row"><input type="checkbox" data-key="SOUND_ANNOUNCEMENTS_ENABLED" data-bool="1,0"><span class="label">Cabin announcements</span></label>
+      <label class="row"><input type="checkbox" data-key="SOUND_PTU_AUDIBLE_COCKPIT" data-bool="1,0"><span class="label">PTU audible in cockpit</span></label>
+      <div class="grid2">
+        <div class="field"><span class="label">Interior engine (dB)</span><input type="number" min="-30" max="10" data-key="SOUND_INTERIOR_ENGINE"></div>
+        <div class="field"><span class="label">Interior wind (dB)</span><input type="number" min="-30" max="10" data-key="SOUND_INTERIOR_WIND"></div>
+        <div class="field"><span class="label">Exterior master (dB)</span><input type="number" min="-30" max="10" data-key="SOUND_EXTERIOR_MASTER"></div>
+      </div>
+      <div class="apply"><button type="submit">Apply</button></div>
+    </form>
+
+    <h2>Simulation</h2>
+    <form class="box" data-group="simulation">
+      <label class="row"><input type="checkbox" data-key="xphfbw.systemsOutOfProcess"><span class="label">Run systems in XPHFBW</span><span class="help" title="FlyByWire's systems run in this app, in lockstep with X-Plane's frame. A crash in the systems cannot take X-Plane down.">?</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.coldStartGroundPower"><span class="label">Cold &amp; dark start on ground power</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.randomFailures"><span class="label">Random failures</span></label>
+      <div class="field" data-show="xphfbw.randomFailures=true"><span class="label">Failure rate multiplier</span>
+        <input type="number" min="0.1" max="1000" step="0.1" data-key="xphfbw.failureRate"></div>
+      <label class="row"><input type="checkbox" data-key="xphfbw.persistence"><span class="label">Airframe wear &amp; damage persistence</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.stateDumps"><span class="label">State dumps</span><span class="help" title="Every variable written to D:\fbw-build\state-dumps every N frames, for diagnosing problems.">?</span></label>
+      <div class="grid2" data-show="xphfbw.stateDumps=true">
+        <div class="field"><span class="label">Every N frames</span><input type="number" min="10" max="10000" data-key="xphfbw.stateDumpFrames"></div>
+        <div class="field"><span class="label">Keep dumps</span><input type="number" min="1" max="1000" data-key="xphfbw.stateDumpKeep"></div>
+      </div>
+      <div class="apply"><button type="submit">Apply</button></div>
+    </form>
+  </div>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-status">
+<div class="columns">
+  <div class="column">
+    <h2>System Status</h2>
+    <div class="box">
+      <div class="status">
+        <button type="button" class="small grey" data-action="restart-all">Restart all</button>
+        <button type="button" class="small grey" data-action="restart-displays">Restart displays</button>
+        <button type="button" class="small grey" data-action="restart-systems">Restart systems</button>
+        <button type="button" class="small" data-action="reset-airframe">Reset airframe</button>
+      </div>
+      <div class="lights">
+        <div><span class="dot" id="dot-xplane"></span><span id="st-xplane">X-Plane: not connected</span></div>
+        <div><span class="dot" id="dot-systems"></span><span id="st-systems">Systems: stopped</span></div>
+        <div><span class="dot" id="dot-displays"></span><span id="st-displays">Displays: stopped</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="column"></div>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-support">
+<div class="columns">
+  <div class="column">
+    <h2>Help &amp; Support</h2>
+    <div class="box">
+      <div class="support-row"><span>Found a problem or want to report an issue?</span><button type="button" class="link-button" data-action="report">Report an Issue</button></div>
+      <div class="support-row"><span>Been asked for your logs?</span><button type="button" class="link-button" data-action="open-logs">Open Logs</button></div>
+      <div class="support-row"><span>Need the systems' variable dumps?</span><button type="button" class="link-button" data-action="open-dumps">Open State Dumps</button></div>
+      <div class="support-row" style="border:0"><span>Want to give feedback or chat with the team?</span>
+        <button type="button" class="discord" data-action="discord">
+          <svg width="42" height="32" viewBox="0 0 71 55" fill="#fff" aria-hidden="true"><path d="M60.1 4.9A58.5 58.5 0 0 0 45.6.4a40 40 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0A38 38 0 0 0 25.8.4 58.4 58.4 0 0 0 11.3 4.9C2.1 18.6-.4 32 .9 45.2a58.9 58.9 0 0 0 17.9 9 43 43 0 0 0 3.8-6.2 38 38 0 0 1-6-2.9l1.5-1.1a42 42 0 0 0 36 0l1.5 1.1a38 38 0 0 1-6 2.9 43 43 0 0 0 3.8 6.2 58.7 58.7 0 0 0 17.9-9C72.6 29.9 68.8 16.6 60.1 4.9ZM23.7 37.1c-3.5 0-6.4-3.2-6.4-7.2s2.8-7.2 6.4-7.2 6.5 3.3 6.4 7.2c0 4-2.8 7.2-6.4 7.2Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.2s2.8-7.2 6.4-7.2 6.5 3.3 6.4 7.2c0 4-2.8 7.2-6.4 7.2Z"/></svg>
+          <span>JOIN US ON DISCORD</span></button></div>
+      <div class="changelog" id="changelog">
+        <h3>Changelog</h3>
+        <h4>XPHFBW A380X v0.1.0</h4>
+        <em>In development</em>
+        <b>Systems</b>
+        <ul>
+          <li>FlyByWire's systems run in their own process, in lockstep with X-Plane's frame</li>
+          <li>Flight warning system clock fixed: FWS 1+2 FAULT clears after the self test</li>
+          <li>Ground power stays connected on a cold start</li>
+          <li>Every MSFS variable, event and runtime call FlyByWire uses is served or reported</li>
+        </ul>
+        <b>Flight deck</b>
+        <ul>
+          <li>Display brightness follows the knobs in linear light</li>
+          <li>Placard lettering without black boxes or shadows</li>
+          <li>Cold and dark apron start states from FlyByWire's own start steps</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+</main>
+
+<footer>
+  <div class="brand">
+    <img src="/xplane12-logo.png" alt="X-Plane 12" onerror="this.hidden=true">
+    <span>XPHFBW</span>
+  </div>
+  <div class="legal">&copy; 2026 XPHFBW &middot; FlyByWire A380X (GPL-3.0)<br><a href="#" data-action="licenses">LICENSES</a></div>
+  <div class="server">Systems link: <span class="dot" id="dot-link" style="margin:0 0 0 4px"></span></div>
+</footer>
+<div class="toast" id="toast"></div>
+
+<script>
+// The app answers `window.xphfbw` (CEF message router); in a plain browser
+// the page keeps working against localStorage so it can be previewed.
+const httpBridge = location.protocol.startsWith('http') ? {
+  async getSettings() { return (await fetch('/api/settings')).json(); },
+  async setSettings(values) { return (await fetch('/api/settings', { method: 'POST', body: JSON.stringify(values) })).json(); },
+  async action(name) { return (await fetch('/api/action/' + name, { method: 'POST' })).json(); },
+  async status() { return (await fetch('/api/status')).json(); },
+} : null;
+const bridge = window.xphfbw || httpBridge || (() => {
+  const read = () => { try { return JSON.parse(localStorage.getItem('xphfbw-preview') || '{}'); } catch { return {}; } };
+  return {
+    async getSettings() { return read(); },
+    async setSettings(values) { try { localStorage.setItem('xphfbw-preview', JSON.stringify({ ...read(), ...values })); } catch {} },
+    async action(name) { return { ok: false, message: `${name}: only in the XPHFBW app` }; },
+    async status() { return { xplane: false, systems: null, displays: null }; },
+  };
+})();
+
+// FlyByWire's own defaults (their usePersistentProperty calls) and the app's.
+const DEFAULTS = {
+  'xphfbw.autoCrashReport': true, 'xphfbw.streamerMode': false,
+  ACARS_PROVIDER: 'NONE', CONFIG_HOPPIE_USERID: '', CONFIG_SAI_LOGON_KEY: '',
+  CONFIG_ONLINE_FEATURES_STATUS: 'DISABLED', CONFIG_SIMBRIDGE_ENABLED: 'AUTO ON', CONFIG_SIMBRIDGE_REMOTE: 'local',
+  CONFIG_SIMBRIDGE_PORT: '8380', CONFIG_SIMBRIDGE_IP: 'localhost', CONFIG_OVERRIDE_SIMBRIEF_USERID: '', CONFIG_AUTO_SIMBRIEF_IMPORT: 'DISABLED',
+  'xphfbw.displaySafeMode': false, 'xphfbw.forceCpuRendering': true, 'xphfbw.displayFps': '60', 'xphfbw.efbBrightness': '100',
+  CONFIG_SELF_TEST_TIME: '12', CONFIG_INIT_BARO_UNIT: 'AUTO', CONFIG_MCDU_KB_TIMEOUT: '60',
+  ISIS_BARO_UNIT_INHG: '0', ISIS_METRIC_ALTITUDE: '0', LATLON_EXT_FMT: '0', CONFIG_A380X_SHOW_ECL_SOFTKEYS: '0', FO_SYNC_EFIS_ENABLED: '0',
+  EFB_PREFERRED_WEIGHT_UNIT: 'kg', CONFIG_ALIGN_TIME: 'REAL', CONFIG_BOARDING_RATE: 'REAL', REFUEL_RATE_SETTING: 'REAL',
+  CONFIG_THR_RED_ALT: '1500', CONFIG_ACCEL_ALT: '1500', CONFIG_ENG_OUT_ACCEL_ALT: '1500', PAUSE_AT_TOD_DISTANCE: '10',
+  DYNAMIC_REGISTRATION_DECAL: '0', CONFIG_PILOT_AVATAR_VISIBLE: '0', MODEL_WHEELCHOCKS_ENABLED: '1', MODEL_CONES_ENABLED: '1', MODEL_SATCOM_ENABLED: '0',
+  REALISTIC_TILLER_ENABLED: '0', PUSHBACK_USE_CONTROLLER_INPUT: '1', RMP_VHF_SPACING_25KHZ: '0', RADIO_RECEIVER_USAGE_ENABLED: '0', FDR_ENABLED: '1',
+  LIGHT_PRESET_AUTOLOAD: '0', LIGHT_PRESET_AUTOLOAD_DAY: '0', LIGHT_PRESET_AUTOLOAD_DAWNDUSK: '0', LIGHT_PRESET_AUTOLOAD_NIGHT: '0',
+  SOUND_ANNOUNCEMENTS_ENABLED: '1', SOUND_PTU_AUDIBLE_COCKPIT: '0', SOUND_INTERIOR_ENGINE: '0', SOUND_INTERIOR_WIND: '0', SOUND_EXTERIOR_MASTER: '0',
+  'xphfbw.systemsOutOfProcess': true, 'xphfbw.coldStartGroundPower': true, 'xphfbw.randomFailures': false, 'xphfbw.failureRate': '1',
+  'xphfbw.persistence': true, 'xphfbw.stateDumps': true, 'xphfbw.stateDumpFrames': '200', 'xphfbw.stateDumpKeep': '60',
+};
+
+let settings = {};
+const $all = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+function show(text) {
+  const t = document.getElementById('toast');
+  t.textContent = text; t.classList.add('show');
+  clearTimeout(show.timer); show.timer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function valueOf(el) {
+  if (el.type === 'checkbox') {
+    if (el.dataset.bool) { const [on, off] = el.dataset.bool.split(','); return el.checked ? on : off; }
+    return el.checked;
+  }
+  return el.value;
+}
+
+function fill() {
+  for (const el of $all('[data-key]')) {
+    const v = settings[el.dataset.key] ?? DEFAULTS[el.dataset.key] ?? '';
+    if (el.type === 'checkbox') el.checked = el.dataset.bool ? String(v) === el.dataset.bool.split(',')[0] : v === true || v === 'true';
+    else el.value = v;
+  }
+  applyVisibility();
+  applyStreamer();
+  applyEfbBrightness();
+}
+
+function current(key) {
+  const el = document.querySelector(`[data-key="${key}"]`);
+  return el ? String(valueOf(el)) : String(settings[key] ?? DEFAULTS[key] ?? '');
+}
+
+function applyVisibility() {
+  for (const el of $all('[data-show]')) {
+    const [key, want] = el.dataset.show.split('=');
+    el.style.display = current(key) === want ? '' : 'none';
+  }
+}
+
+function applyStreamer() {
+  const on = current('xphfbw.streamerMode') === 'true';
+  for (const el of $all('[data-secret]')) el.classList.toggle('masked', on);
+}
+
+// The EFB's own brightness (independent of any aircraft bus or dimming
+// knob: a real EFB is a portable tablet with its own battery). Dims the
+// whole page via a CSS filter, so it applies equally whether this page is
+// shown in XPHFBW's own window or, unchanged, on the cockpit's EFB screen
+// (app/src/views.rs's spawn_efb_view loads this same page there).
+function applyEfbBrightness() {
+  const pct = Number(current('xphfbw.efbBrightness')) || 100;
+  document.documentElement.style.setProperty('--efb-brightness', String(Math.min(100, Math.max(20, pct)) / 100));
+}
+
+document.addEventListener('change', (e) => {
+  if (e.target.matches('[data-key]')) { applyVisibility(); applyStreamer(); if (e.target.dataset.key === 'xphfbw.efbBrightness') applyEfbBrightness(); }
+});
+
+for (const form of $all('form[data-group]')) {
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const values = {};
+    for (const el of $all('[data-key]', form)) values[el.dataset.key] = valueOf(el);
+    const r = await bridge.setSettings(values);
+    if (r && r.ok === false) { show(r.message || 'Could not apply'); return; }
+    settings = { ...settings, ...values };
+    show('Applied');
+  });
+}
+
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-action]');
+  if (!b) return;
+  e.preventDefault();
+  if (b.dataset.action === 'reset-airframe' && !confirm('Reset the airframe? Wear, damage, deferred MEL items and active failures are cleared.')) return;
+  const r = await bridge.action(b.dataset.action);
+  if (r && r.message) show(r.message);
+});
+
+async function refreshStatus() {
+  const s = await bridge.status();
+  const set = (id, cls, text) => { const d = document.getElementById('dot-' + id); d.className = 'dot ' + cls; if (text) document.getElementById('st-' + id).textContent = text; };
+  set('xplane', s.xplane ? 'ok' : 'bad', s.xplane ? 'X-Plane: connected' : 'X-Plane: not connected');
+  set('systems', s.systems ? (s.systems.late ? 'warn' : 'ok') : 'bad',
+      s.systems ? `Systems: running, ${s.systems.variables} variables, ${s.systems.roundTripMs.toFixed(2)} ms per frame` : 'Systems: stopped');
+  set('displays', s.displays ? 'ok' : 'bad', s.displays ? `Displays: ${s.displays.screens} screens at ${s.displays.fps} fps` : 'Displays: stopped');
+  document.getElementById('dot-link').className = 'dot ' + (s.xplane && s.systems ? 'ok' : 'bad');
+  if (s.navigraphUser !== undefined) document.getElementById('navigraph-user').textContent = s.navigraphUser ? `Linked: ${s.navigraphUser}` : '';
+}
+
+for (const btn of $all('.tab-btn')) {
+  btn.addEventListener('click', () => {
+    for (const b of $all('.tab-btn')) b.classList.toggle('active', b === btn);
+    for (const p of $all('.tab-panel')) p.classList.toggle('active', p.id === 'tab-' + btn.dataset.tab);
+    if (btn.dataset.tab === 'study') studyOnShow();
+    if (btn.dataset.tab === 'failures') failuresOnShow();
+    if (btn.dataset.tab === 'breakers') breakersOnShow();
+    if (btn.dataset.tab === 'maintenance') maintenanceOnShow();
+    if (btn.dataset.tab === 'components') componentsOnShow();
+    if (btn.dataset.tab === 'flightplan') flightPlanOnShow();
+    if (btn.dataset.tab === 'ground') groundOnShow();
+  });
+}
+
+(async () => {
+  settings = (await bridge.getSettings()) || {};
+  fill();
+  refreshStatus();
+  setInterval(refreshStatus, 1000);
+})();
+
+// ---------------------------------------------------------------------
+// Study tab: the aircraft's Study pages (src/study/**), fetched straight
+// from the plugin's own port (docs/briefs/xphfbw-app.md — no app/src
+// involvement needed, the page talks to the plugin directly).
+
+const PLUGIN_ORIGIN = 'http://127.0.0.1:8390';
+const FIXTURE = new URLSearchParams(location.search).get('fixture') === '1';
+let fixtureData = null;
+
+async function studyGet(path) {
+  if (FIXTURE) {
+    if (!fixtureData) fixtureData = await (await fetch('test/study-fixture.json')).json();
+    if (path === '/study/pages') return fixtureData.pages;
+    if (path === '/study/failures') return fixtureData.failures;
+    if (path === '/study/breakers') return fixtureData.breakers;
+    if (path.startsWith('/vars')) return fixtureData.vars;
+    return {};
+  }
+  try {
+    const r = await fetch(PLUGIN_ORIGIN + path);
+    if (!r.ok) throw new Error('plugin replied ' + r.status);
+    const data = await r.json();
+    setStudyPreview(false);
+    return data;
+  } catch (e) {
+    // X-Plane is not running: the page layouts come from XPHFBW itself
+    // (the same Rust), and there are no values to show.
+    setStudyPreview(true);
+    if (path.startsWith('/vars')) return { vars: {} };
+    const r = await fetch(path);
+    if (!r.ok) throw e;
+    return r.json();
+  }
+}
+
+async function studyPost(path, body) {
+  if (FIXTURE) return { ok: true };
+  if (study.preview) { show('Start X-Plane with the A380X to use this'); return { ok: false }; }
+  const r = await fetch(PLUGIN_ORIGIN + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return r.json().catch(() => ({ ok: r.ok }));
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) { if (k === 'class') n.className = v; else if (k === 'text') n.textContent = v; else n.setAttribute(k, v); }
+  for (const k of kids) n.append(k);
+  return n;
+}
+const SVGNS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs = {}) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  return n;
+}
+
+// The same reading rules as src/study/canvas.rs's format_value/looks_packed,
+// so a value the plugin sends as a raw ARINC 429 word (source/mod.rs's
+// `/vars` does not unpack it) reads the same way here as in the XPLM window.
+// FlyByWire stores an ARINC 429 word in a double as ssm * 2^32 plus the
+// float32 value's bit pattern (Arinc429Word.ts), so both are recovered with
+// arithmetic on the number, not from the double's own bits.
+function isPacked(v) { return isFinite(v) && v >= 1.0e9 && v < 17179869184 && v === Math.trunc(v); }
+function unpackArinc(v) {
+  if (!isFinite(v) || v < 0 || v >= 17179869184 || v !== Math.trunc(v)) return [v, 3];
+  const low = v % 4294967296;
+  const ssm = Math.floor(v / 4294967296) & 3;
+  const buf = new ArrayBuffer(4);
+  new Uint32Array(buf)[0] = low;
+  return [new Float32Array(buf)[0], ssm];
+}
+function arincStatus(ssm) { return { 0: 'FW', 1: 'NCD', 2: 'FT' }[ssm]; }
+function withUnit(n, unit) { return unit ? `${n} ${unit}` : n; }
+function formatValue(value, kind, decimals, unit) {
+  if (value === undefined || !isFinite(value)) return 'no reading';
+  if (kind === 'lamp') return value !== 0 ? 'ON' : 'OFF';
+  const asArinc = kind === 'arinc' || (kind === 'num' && isPacked(value));
+  if (asArinc) {
+    const [v, ssm] = unpackArinc(value);
+    const shown = withUnit(v.toFixed(decimals), unit);
+    const status = arincStatus(ssm);
+    return status ? `${shown} ${status}` : shown;
+  }
+  if (Math.abs(value) >= 1e7) return withUnit(value.toFixed(0), unit);
+  return withUnit(value.toFixed(decimals), unit);
+}
+
+const study = { pages: [], selected: 0, physics: false, vars: {}, pollTimer: null, offline: false, preview: false, renderToken: 0 };
+
+function gateNames(gate, out) {
+  if (!gate) return;
+  if (gate.name) out.add(gate.name);
+  if (gate.gates) gate.gates.forEach((g) => gateNames(g, out));
+}
+// Extra variables the ECAM-style FUEL and WHEEL schematics (renderFuelEcam,
+// renderGearEcam, below) read that are not already named by the page's own
+// groups/topology/tanks — ported straight from FuelPage.tsx and
+// Wheel/WheelPage.tsx's own SimVar names.
+function ecamFuelExtraNames() {
+  const names = ['A32NX_EFB_USING_METRIC_UNIT', 'A32NX_OVHD_APU_MASTER_SW_PB_IS_ON'];
+  for (let n = 1; n <= 4; n++) {
+    names.push(`FUELSYSTEM VALVE OPEN:${n}`, `A32NX_FUEL_USED:${n}`, `A32NX_ENGINE_FF:${n}`, `A32NX_ENGINE_N3:${n}`);
+  }
+  for (let n = 1; n <= 11; n++) names.push(`FUELSYSTEM TANK WEIGHT:${n}`);
+  for (let n = 1; n <= 21; n++) names.push(`FUELSYSTEM PUMP ACTIVE:${n}`);
+  // Crossfeed 46-49, APU isolation/LP 50-51, emergency transfer 52-53,
+  // gallery aux refuel 54-55, transfer defuel 56, jettison 57-58, trim inlet
+  // 43/59, trim line isolation 44-45 (FuelPage.tsx's own valve numbers; the
+  // XP port parses the same fbw-a380x flight_model.cfg, so they match).
+  for (const n of [43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59]) names.push(`FUELSYSTEM VALVE OPEN:${n}`);
+  return names;
+}
+function ecamGearExtraNames() {
+  return [
+    'A32NX_HYD_GREEN_SYSTEM_1_SECTION_PRESSURE_SWITCH',
+    'A32NX_HYD_YELLOW_SYSTEM_1_SECTION_PRESSURE_SWITCH',
+    'A32NX_ELEC_AC_2_BUS_IS_POWERED',
+    'A32NX_ELEC_AC_3_BUS_IS_POWERED',
+    'A32NX_ELEC_AC_4_BUS_IS_POWERED',
+    'ANTISKID BRAKES ACTIVE',
+  ];
+}
+function collectNames(page) {
+  const out = new Set();
+  const addFields = (fields) => fields && fields.forEach((f) => out.add(f.name));
+  (page.groups || []).forEach((g) => addFields(g.fields));
+  if (page.topology) {
+    page.topology.nodes.forEach((n) => addFields(n.fields));
+    page.topology.links.forEach((l) => gateNames(l.gate, out));
+  }
+  (page.tanks || []).forEach((t) => out.add(t.name));
+  (page.stations || []).forEach((s) => addFields(s.fields));
+  (page.summaries || []).forEach((s) => addFields(s.fields));
+  if (page.columns) page.columns.flat().forEach((sec) => (sec.gauges || []).forEach((g) => out.add(g.name)));
+  // The Study tab's own ECAM-style FUEL and WHEEL pages (below) need a few
+  // variables the page schema itself does not list.
+  if (page.kind === 'fuel') ecamFuelExtraNames().forEach((n) => out.add(n));
+  if (page.kind === 'topology' && page.title === 'Landing Gear and Brakes') ecamGearExtraNames().forEach((n) => out.add(n));
+  return [...out];
+}
+
+function evalGate(gate, vars) {
+  if (!gate) return false;
+  const v = (n) => vars[n];
+  switch (gate.op) {
+    case 'on': return (v(gate.name) ?? 0) !== 0;
+    case 'off': return (v(gate.name) ?? 0) === 0;
+    case 'gt': return v(gate.name) !== undefined && v(gate.name) > gate.value;
+    case 'absGt': return Math.abs(v(gate.name) ?? 0) > gate.value;
+    case 'all': return gate.gates.every((g) => evalGate(g, vars));
+    case 'any': return gate.gates.some((g) => evalGate(g, vars));
+    default: return false;
+  }
+}
+
+function fieldRow(f, vars) {
+  const has = Object.prototype.hasOwnProperty.call(vars, f.name);
+  const row = el('div', { class: 'study-field-row' });
+  row.append(el('span', { class: 'fname', text: f.label || f.name }));
+  if (!has) { row.append(el('span', { class: 'fval missing', text: study.preview ? '--' : 'not modelled' })); return { row, has }; }
+  if (f.kind === 'lamp' || f.kind === 'flag') {
+    const on = vars[f.name] !== 0;
+    const dot = el('span', { class: 'dot ' + (on ? 'ok' : '') });
+    const val = el('span', { class: 'fval' });
+    val.append(dot, document.createTextNode(f.kind === 'flag' ? (on ? f.flagText : '') : (on ? 'ON' : 'OFF')));
+    row.append(val);
+  } else {
+    row.append(el('span', { class: 'fval', text: formatValue(vars[f.name], f.kind, f.decimals, f.unit) }));
+  }
+  return { row, has };
+}
+
+function renderGroupBox(g, vars) {
+  const rows = [];
+  for (const f of g.fields) {
+    const { row, has } = fieldRow(f, vars);
+    if (!has && g.hideMissing && !study.preview) continue;
+    rows.push(row);
+  }
+  if (g.hideMissing && rows.length === 0) return null;
+  const box = el('div', { class: 'box' }, el('h2', { style: 'font-size:15px;margin:0 0 8px', text: g.title }));
+  rows.forEach((r) => box.append(r));
+  return box;
+}
+
+function renderGroups(container, groups, vars) {
+  const wrap = el('div', { class: 'study-groups' });
+  for (const g of groups) {
+    const box = renderGroupBox(g, vars);
+    if (box) wrap.append(box);
+  }
+  container.append(wrap);
+}
+
+// Readings the aircraft's own ECAM-style boxes carry with no label of their
+// own: named by what their unit measures.
+const UNIT_LABEL = { V: 'Voltage', Hz: 'Frequency', A: 'Current', '%': 'Load', psi: 'Pressure', RPM: 'Speed', gal: 'Quantity', kg: 'Quantity', lb: 'Quantity', '°C': 'Temperature', C: 'Temperature' };
+function fieldLabel(f) {
+  if (f.label) return f.label;
+  if (f.kind === 'flag') return f.flagText;
+  return UNIT_LABEL[f.unit] || f.name.replace(/^(A32NX|A380X)_/, '').replace(/_/g, ' ').toLowerCase();
+}
+
+// A topology page as part of the window: HTML boxes in the app's own style
+// on the page's own background, the links drawn underneath, laid out on the
+// design sheet (elec::box_h: a 22-unit title plus 16 units per field).
+function renderTopology(container, topo, vars) {
+  const avail = container.clientWidth || topo.designW;
+  const sc = Math.max(0.85, Math.min(1.25, avail / topo.designW));
+  const px = (v) => `${v * sc}px`;
+  const wrap = el('div', { class: 'diagram-wrap' });
+  const d = el('div', { class: 'diagram' });
+  d.style.width = px(topo.designW);
+  d.style.height = px(topo.designH);
+  d.style.setProperty('--s', Math.max(0.95, sc));
+  const svg = svgEl('svg', { viewBox: `0 0 ${topo.designW} ${topo.designH}`, preserveAspectRatio: 'none', class: 'diagram-links' });
+  for (const link of topo.links) {
+    const live = evalGate(link.gate, vars);
+    svg.append(svgEl('polyline', { points: link.points.map((p) => p.join(',')).join(' '), class: `link ${link.kind} ${live ? 'live' : ''}` }));
+  }
+  d.append(svg);
+  for (const n of topo.nodes) {
+    const live = n.fields.some((f) => vars[f.name] !== undefined && vars[f.name] !== 0);
+    const box = el('div', { class: `dnode ${n.kind} ${live ? 'live' : ''}` });
+    Object.assign(box.style, { left: px(n.x), top: px(n.y), width: px(n.w), height: px(22 + 16 * n.fields.length) });
+    const title = el('div', { class: 'dtitle', text: n.title, title: n.title });
+    title.style.height = px(22);
+    box.append(title);
+    const narrow = n.w < 130;
+    for (const f of n.fields) {
+      const has = Object.prototype.hasOwnProperty.call(vars, f.name);
+      const row = el('div', { class: 'drow', title: f.name });
+      row.style.height = px(16);
+      if (f.kind === 'flag' || f.kind === 'lamp') {
+        const on = has && vars[f.name] !== 0;
+        if (f.kind === 'flag' || narrow) {
+          row.classList.add('center');
+          const span = el('span', { class: on ? '' : 'lamp-off' });
+          span.append(el('span', { class: 'dot ' + (on ? 'ok' : '') }), document.createTextNode(f.kind === 'flag' ? f.flagText : fieldLabel(f)));
+          row.append(span);
+        } else {
+          row.append(el('span', { class: 'dlabel', text: fieldLabel(f) }));
+          const v = el('span', { class: 'dval' + (has ? '' : ' nodata') });
+          v.append(el('span', { class: 'dot ' + (on ? 'ok' : '') }), document.createTextNode(has ? (on ? 'ON' : 'OFF') : '--'));
+          row.append(v);
+        }
+      } else {
+        if (narrow) row.classList.add('center');
+        else row.append(el('span', { class: 'dlabel', text: fieldLabel(f) }));
+        row.append(el('span', { class: 'dval' + (has ? '' : ' nodata'), text: has ? formatValue(vars[f.name], f.kind, f.decimals, f.unit) : (f.unit ? `-- ${f.unit}` : '--') }));
+      }
+      box.append(row);
+    }
+    d.append(box);
+  }
+  wrap.append(d);
+  container.append(wrap);
+}
+
+// The engine page as the Study window draws it: the Trent 900 cutaway
+// (engine::cutaway), each station's box with a leader line to the part it
+// reads and a numbered marker there, and the summary strip along the foot.
+function renderCutaway(container, page, vars) {
+  const W = 1000, H = 600;
+  const avail = container.clientWidth || W;
+  const sc = Math.max(0.85, Math.min(1.25, avail / W));
+  const px = (v) => `${v * sc}px`;
+  const wrap = el('div', { class: 'diagram-wrap' });
+  const d = el('div', { class: 'diagram' });
+  d.style.width = px(W);
+  d.style.height = px(H);
+  d.style.setProperty('--s', Math.max(0.95, sc));
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', class: 'diagram-links cutaway-shapes' });
+  svg.append(svgEl('line', { x1: 0, y1: 196, x2: W, y2: 196, class: 'band' }), svgEl('line', { x1: 0, y1: 520, x2: W, y2: 520, class: 'band' }));
+  const pts = (list) => list.map((p) => p.join(',')).join(' ');
+  for (const s of page.cutaway) {
+    if (s.type === 'poly') svg.append(svgEl('polygon', { points: pts(s.points), fill: s.fill, class: 'edge' }));
+    else if (s.type === 'rect') svg.append(svgEl('rect', { x: s.x, y: s.y, width: s.w, height: s.h, fill: s.fill, class: 'edge' }));
+    else if (s.type === 'line') svg.append(svgEl('line', { x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2, stroke: s.stroke, 'stroke-width': s.width, 'vector-effect': 'non-scaling-stroke' }));
+    else if (s.type === 'arrow') {
+      const head = s.half * 1.6, x = s.x, y = s.y, l = s.len, hh = s.half;
+      svg.append(svgEl('polygon', { points: pts([[x, y - hh * 0.5], [x + l - head, y - hh * 0.5], [x + l - head, y - hh], [x + l, y], [x + l - head, y + hh], [x + l - head, y + hh * 0.5], [x, y + hh * 0.5]]), fill: s.fill, class: 'edge' }));
+    } else if (s.type === 'text') {
+      const t = svgEl('text', { x: s.x, y: s.y, class: 'caption' });
+      t.textContent = s.text;
+      svg.append(t);
+    }
+  }
+  const box = (title, x, y, w, fields) => {
+    const n = { title, x, y, w, kind: 'source', fields: fields.map((f) => ({ ...f, kind: f.kind === 'lamp' ? 'lamp' : f.kind })) };
+    const node = el('div', { class: 'dnode source' });
+    Object.assign(node.style, { left: px(x), top: px(y), width: px(w), height: px(22 + 16 * fields.length) });
+    const tt = el('div', { class: 'dtitle', text: title });
+    tt.style.height = px(22);
+    node.append(tt);
+    for (const f of n.fields) {
+      const has = Object.prototype.hasOwnProperty.call(vars, f.name);
+      const row = el('div', { class: 'drow', title: f.name });
+      row.style.height = px(16);
+      row.append(el('span', { class: 'dlabel', text: f.label }));
+      if (f.kind === 'lamp') {
+        const on = has && vars[f.name] !== 0;
+        const v = el('span', { class: 'dval' + (has ? '' : ' nodata') });
+        v.append(el('span', { class: 'dot ' + (on ? 'ok' : '') }), document.createTextNode(has ? (on ? 'ON' : 'OFF') : '--'));
+        row.append(v);
+      } else {
+        row.append(el('span', { class: 'dval' + (has ? '' : ' nodata'), text: has ? formatValue(vars[f.name], f.kind, f.decimals, f.unit) : (f.unit ? `-- ${f.unit}` : '--') }));
+      }
+      node.append(row);
+    }
+    if ([...Object.keys(vars)].length && n.fields.some((f) => vars[f.name] !== undefined && vars[f.name] !== 0)) node.classList.add('live');
+    d.append(node);
+  };
+  for (const s of page.stations) {
+    box(s.title, s.x, s.y, s.w, s.fields);
+    if (s.leader) {
+      const [tx, ty, label] = s.leader;
+      const bottom = s.y + 22 + 16 * s.fields.length;
+      svg.append(svgEl('line', { x1: s.x + s.w / 2, y1: bottom, x2: tx, y2: ty, class: 'leader' }));
+      const r = Math.max(9, label.length * 3.5 + 6);
+      svg.append(svgEl('ellipse', { cx: tx, cy: ty, rx: r, ry: r * (W / H) * (H / W), class: 'marker' }));
+      const t = svgEl('text', { x: tx, y: ty + 4, 'text-anchor': 'middle', class: 'marker-text' });
+      t.textContent = label;
+      svg.append(t);
+    }
+  }
+  page.summaries.forEach((s, i) => box(s.title, 6 + i * 124.5, 527, 118, s.fields));
+  d.prepend(svg);
+  wrap.append(d);
+  container.append(wrap);
+}
+
+function renderFuel(container, page, vars) {
+  const list = el('div', { class: 'study-groups' });
+  const box = el('div', { class: 'box' }, el('h2', { style: 'font-size:15px;margin:0 0 8px', text: 'Tanks' }));
+  for (const t of page.tanks) {
+    const has = t.name in vars;
+    const row = el('div', { class: 'study-field-row' });
+    row.append(el('span', { class: 'fname', text: t.label + ' (tank ' + t.number + ')' }));
+    row.append(el('span', { class: 'fval' + (has ? '' : ' missing'), text: has ? `${vars[t.name].toFixed(0)} / ${t.capacityGal.toFixed(0)} gal` : (study.preview ? `-- / ${t.capacityGal.toFixed(0)} gal` : 'not modelled') }));
+    box.append(row);
+  }
+  list.append(box);
+  container.append(list);
+  renderGroups(container, (page.stations || []).map((s) => ({ title: s.title, theme: s.theme, hideMissing: false, fields: s.fields })), vars);
+  renderGroups(container, page.groups || [], vars);
+}
+
+function renderEngine(container, page, vars) {
+  renderGroups(container, (page.stations || []).map((s) => ({ title: s.title, theme: s.theme, hideMissing: false, fields: s.fields })), vars);
+  renderGroups(container, (page.summaries || []).map((s) => ({ title: s.title, theme: s.theme, hideMissing: false, fields: s.fields })), vars);
+  renderGroups(container, page.groups || [], vars);
+}
+
+function renderFlightControls(container, page, vars) {
+  for (const col of page.columns) {
+    for (const section of col) {
+      const box = el('div', { class: 'box' }, el('h2', { style: 'font-size:14px;margin:0 0 8px', text: section.heading }));
+      for (const g of section.gauges) {
+        const { row } = fieldRow({ label: g.label, name: g.name, kind: 'num', decimals: 2, unit: g.unit }, vars);
+        box.append(row);
+      }
+      container.append(box);
+    }
+  }
+}
+
+async function renderFailures(container) {
+  const data = await studyGet('/study/failures');
+  const list = data.failures;
+  const chapters = [...new Set(list.map((f) => f.chapter))].sort();
+  const toolbar = document.getElementById('study-toolbar');
+  toolbar.innerHTML = '';
+  const search = el('input', { type: 'text', placeholder: 'Search failures…' });
+  const ata = el('select', {});
+  ata.append(el('option', { value: '', text: 'All ATA chapters' }));
+  chapters.forEach((c) => ata.append(el('option', { value: c, text: c })));
+  toolbar.append(search, ata);
+  const grid = el('div', { class: 'study-grid-list' });
+  container.append(el('div', { class: 'box', text: `${list.filter((f) => f.active).length} of ${list.length} failures armed` }), grid);
+  const draw = () => {
+    grid.innerHTML = '';
+    const q = search.value.trim().toLowerCase();
+    for (const f of list) {
+      if (ata.value && f.chapter !== ata.value) continue;
+      if (q && !(`${f.id} ${f.name}`.toLowerCase().includes(q))) continue;
+      const btn = el('button', { class: 'study-item-btn' + (f.active ? ' active' : ''), type: 'button', text: `${f.id} ${f.name}` });
+      btn.addEventListener('click', async () => { await studyPost('/study/action', { kind: 'toggleFailure', id: f.id }); f.active = !f.active; btn.classList.toggle('active', f.active); });
+      grid.append(btn);
+    }
+  };
+  search.addEventListener('input', draw);
+  ata.addEventListener('change', draw);
+  draw();
+}
+
+async function renderBreakers(container) {
+  const data = await studyGet('/study/breakers');
+  const list = data.breakers;
+  container.append(el('div', { class: 'box', text: `${list.length} circuits, ${list.filter((c) => !c.closed).length} breakers pulled. Click a breaker to pull or reset it.` }));
+  const grid = el('div', { class: 'study-grid-list' });
+  for (const c of list) {
+    const amps = c.currentA !== null && c.currentA !== undefined ? c.currentA.toFixed(1) + 'A' : '';
+    const btn = el('button', { class: 'study-item-btn' + (c.closed ? ' active' : ''), type: 'button' });
+    btn.append(el('span', { text: `${c.number} ${c.name || c.typeName}${c.trip !== 'none' ? ' ' + c.trip.toUpperCase() : ''}` }), el('span', { class: 'amps', text: amps }));
+    btn.addEventListener('click', async () => { await studyPost('/study/action', { kind: 'toggleBreaker', id: c.number }); c.closed = !c.closed; btn.classList.toggle('active', c.closed); });
+    grid.append(btn);
+  }
+  container.append(grid);
+}
+
+function renderGroundServices(container, page, vars) {
+  const row = el('div', { class: 'status' });
+  for (const b of page.buttons.concat(page.tug)) {
+    const btn = el('button', { class: 'small grey', type: 'button', text: b.label });
+    btn.addEventListener('click', () => studyPost('/study/action', { kind: 'command', command: b.command }));
+    row.append(btn);
+  }
+  const oxy = el('button', { class: 'small', type: 'button', text: 'Service oxygen' });
+  oxy.addEventListener('click', () => studyPost('/study/action', { kind: 'serviceOxygen' }));
+  row.append(oxy);
+  container.append(el('div', { class: 'box' }, row));
+  renderGroups(container, page.groups || [], vars);
+}
+
+// ---------------------------------------------------------------------
+// ECAM-style SD pages: FUEL and WHEEL, ported from FlyByWire's own
+// fbw-a380x/src/systems/instruments/src/SD/Pages/FuelPage.tsx and
+// Wheel/WheelPage.tsx (+ Wheel/elements/*.tsx). Same SimVar names,
+// thresholds and colours as those TSX pages; drawn as SVG on a black
+// ECAM-style panel instead of the generic study boxes, in SCHEMATIC mode
+// only (PHYSICS mode keeps using renderGroups, unchanged). A variable this
+// app's Rust backend does not publish is honestly "not available" (amber
+// XX, or the shape left undrawn), never invented.
+const ECAM_W = 768, ECAM_H = 1024;
+const ECAM = { green: '#00ff00', amber: '#e68000', white: '#ffffff', cyan: '#00ffff', red: '#ff0000', grey: '#7c8291' };
+
+function ecamPanel() {
+  return svgEl('svg', { viewBox: `0 0 ${ECAM_W} ${ECAM_H}`, class: 'ecam-panel' });
+}
+function ecamText(x, y, color, size, str, anchor) {
+  const t = svgEl('text', { x, y, fill: color, 'font-size': size, 'text-anchor': anchor || 'start' });
+  t.textContent = str;
+  return t;
+}
+function ecamLine(x1, y1, x2, y2, color, width) {
+  return svgEl('line', { x1, y1, x2, y2, stroke: color, 'stroke-width': width || 3, 'stroke-linecap': 'round' });
+}
+function ecamRect(x, y, w, h, color, width) {
+  return svgEl('rect', { x, y, width: w, height: h, fill: 'none', stroke: color, 'stroke-width': width || 2.8 });
+}
+function ecamCircle(cx, cy, r, color, width) {
+  return svgEl('circle', { cx, cy, r, fill: 'none', stroke: color, 'stroke-width': width || 2.8 });
+}
+
+// Reads a variable the way the real pages' ARINC helpers do: missing means
+// "not available" (null); a packed ARINC 429 word only counts when its SSM
+// is normal (3, canvas.rs/formatValue's own convention) — anything else
+// (FW/NCD/FT) is invalid data, same as a missing reading.
+function ecamNum(vars, name) {
+  if (!Object.prototype.hasOwnProperty.call(vars, name)) return null;
+  const raw = vars[name];
+  if (!isFinite(raw)) return null;
+  if (isPacked(raw)) {
+    const [v, ssm] = unpackArinc(raw);
+    return ssm === 3 ? v : null;
+  }
+  return raw;
+}
+function ecamBool(vars, name, threshold) {
+  const v = ecamNum(vars, name);
+  return v === null ? null : v >= (threshold === undefined ? 0.5 : threshold);
+}
+// NXDataStore's CONFIG_USING_METRIC_UNIT default is "true" (NXUnits.ts).
+function ecamMetric(vars) {
+  const v = ecamNum(vars, 'A32NX_EFB_USING_METRIC_UNIT');
+  return v === null ? true : v !== 0;
+}
+function ecamUserWeight(kg, metric) { return metric ? kg : kg * 2.204625; }
+function ecamWeightUnit(metric) { return metric ? 'KG' : 'LBS'; }
+// FuelPage.tsx's <TankQuantity>: floor(userWeight/20)*20, or amber 'XX'.
+function ecamQtyText(kg, metric) {
+  return kg === null ? 'XX ' : String(Math.floor(ecamUserWeight(kg, metric) / 20) * 20);
+}
+
+function ecamValve(g, x, y, open, opts) {
+  opts = opts || {};
+  const horizontal = !!opts.horizontal, normallyClosed = !!opts.normallyClosed;
+  const color = open === null ? ECAM.amber : (!open && !normallyClosed) ? ECAM.amber : ECAM.green;
+  const rotate = (open === true) !== !horizontal ? 90 : 0;
+  const wrap = svgEl('g', { transform: `rotate(${rotate} ${x} ${y})` });
+  wrap.append(ecamCircle(x, y, 16, color), ecamLine(x, y - 16, x, y + 16, color));
+  g.append(wrap);
+}
+function ecamPump(g, x, y, running, fault) {
+  const color = fault ? ECAM.amber : running === null ? ECAM.amber : running ? ECAM.green : ECAM.white;
+  const w = 28;
+  g.append(ecamRect(x - w / 2, y - w / 2, w, w, color));
+  g.append(running ? ecamLine(x, y - w / 2, x, y + w / 2, color) : ecamLine(x - 9, y, x + 9, y, color));
+}
+function ecamFuelLine(g, x1, y1, x2, y2, active) {
+  g.append(ecamLine(x1, y1, x2, y2, active ? ECAM.green : ECAM.grey, 3));
+}
+
+// FuelPage.tsx's own tank numbering (1-11), which matches the flight_model
+// .cfg Tank.N this app's fuel.rs parses (fuel.rs:543-545): the aspect
+// quantity/weight vars share that same N.
+const FUEL_TANKS = [
+  { n: 1, x: 102, y: 434, feed: false },
+  { n: 2, x: 154, y: 300, feed: true },
+  { n: 3, x: 202, y: 430, feed: false },
+  { n: 4, x: 302, y: 430, feed: false },
+  { n: 5, x: 322, y: 288, feed: true },
+  { n: 6, x: 528, y: 288, feed: true },
+  { n: 7, x: 548, y: 430, feed: false },
+  { n: 8, x: 648, y: 430, feed: false },
+  { n: 9, x: 696, y: 300, feed: true },
+  { n: 10, x: 748, y: 434, feed: false },
+  { n: 11, x: 418, y: 640, feed: false },
+];
+const FEED_TANK_LOW_LEVEL_THRESHOLD_KG = 1375;
+const FEED_PUMPS = [
+  { idx: 1, x: 95, y: 227 }, { idx: 2, x: 127, y: 227 },
+  { idx: 3, x: 258, y: 208 }, { idx: 4, x: 290, y: 208 },
+  { idx: 5, x: 476, y: 208 }, { idx: 6, x: 508, y: 208 },
+  { idx: 7, x: 639, y: 227 }, { idx: 8, x: 671, y: 227 },
+];
+const FWD_GALLERY_PUMPS = [
+  { idx: 9, x: 84, y: 384 }, { idx: 10, x: 140, y: 384 }, { idx: 12, x: 232, y: 384 },
+  { idx: 13, x: 482, y: 384 }, { idx: 15, x: 584, y: 384 }, { idx: 14, x: 680, y: 384 },
+];
+const AFT_GALLERY_PUMPS = [
+  { idx: 11, x: 182, y: 452 }, { idx: 17, x: 274, y: 452 }, { idx: 18, x: 524, y: 452 }, { idx: 16, x: 626, y: 452 },
+];
+const CROSSFEED_VALVES = [{ idx: 46, x: 154, y: 175 }, { idx: 47, x: 316, y: 148 }, { idx: 48, x: 450, y: 148 }, { idx: 49, x: 612, y: 175 }];
+const ENGINE_LP = [{ x: 111, y: 150, tx: 111, ty: 84 }, { x: 273, y: 123, tx: 273, ty: 68 }, { x: 493, y: 123, tx: 493, ty: 68 }, { x: 655, y: 150, tx: 655, ty: 84 }];
+const ENGINE_BOX = [{ x: 74, y: 105 }, { x: 236, y: 81 }, { x: 456, y: 81 }, { x: 618, y: 105 }];
+
+function renderFuelEcam(container, page, vars) {
+  const metric = ecamMetric(vars);
+  const unit = ecamWeightUnit(metric);
+  const svg = ecamPanel();
+
+  svg.append(ecamText(10, 32, ECAM.white, 24, 'FUEL'));
+
+  // Total fuel used (top centre): FuelPage.tsx:787-807.
+  const engUsed = [1, 2, 3, 4].map((n) => ecamNum(vars, `A32NX_FUEL_USED:${n}`));
+  const apuUsed = ecamNum(vars, 'A32NX_APU_FUEL_USED');
+  const totalKnown = engUsed.every((v) => v !== null);
+  const totalKg = totalKnown ? engUsed.reduce((a, b) => a + b, 0) + (apuUsed !== null ? apuUsed : 0) : null;
+  svg.append(ecamText(384, 56, ECAM.white, 20, 'FU', 'middle'));
+  svg.append(ecamText(384, 79, ECAM.white, 20, apuUsed !== null ? 'TOTAL' : 'ALL ENG', 'middle'));
+  svg.append(ecamText(384, 103, totalKg === null ? ECAM.amber : ECAM.green, 24, totalKg === null ? 'XX' : String(Math.floor(ecamUserWeight(totalKg, metric) / 50) * 50), 'middle'));
+  svg.append(ecamText(384, 126, ECAM.cyan, 18, unit, 'middle'));
+
+  // Engines, LP valves and per-engine fuel used: FuelPage.tsx:809-876.
+  for (let i = 0; i < 4; i++) {
+    const n = i + 1;
+    const box = ENGINE_BOX[i], lp = ENGINE_LP[i];
+    const n3 = ecamNum(vars, `A32NX_ENGINE_N3:${n}`);
+    const running = n3 !== null && n3 > 50;
+    svg.append(ecamRect(box.x, box.y, 75, 96, ECAM.grey, 2));
+    svg.append(ecamText(box.x + 8, box.y + 32, n3 === null ? ECAM.amber : running ? ECAM.white : ECAM.amber, 22, String(n)));
+    const open = ecamBool(vars, `FUELSYSTEM VALVE OPEN:${n}`);
+    ecamValve(svg, lp.x, lp.y, open, {});
+    svg.append(ecamText(lp.tx, lp.ty, ECAM.green, 20, engUsed[i] === null ? 'XX' : String(Math.floor(ecamUserWeight(engUsed[i], metric) / 50) * 50), 'middle'));
+  }
+
+  // ALL ENG FF: FuelPage.tsx:1041-1050.
+  const ff = [1, 2, 3, 4].map((n) => ecamNum(vars, `A32NX_ENGINE_FF:${n}`));
+  const ffKnown = ff.every((v) => v !== null);
+  svg.append(ecamText(10, 615, ECAM.white, 18, 'ALL ENG FF'));
+  svg.append(ecamText(24, 640, ffKnown ? ECAM.green : ECAM.amber, 18, ffKnown ? String(Math.floor(ecamUserWeight(ff.reduce((a, b) => a + b, 0), metric) / 60 / 10) * 10) : 'XX'));
+  svg.append(ecamText(68, 640, ECAM.cyan, 16, `${unit}/MIN`));
+
+  // Feed pumps: FuelPage.tsx:898-1025 (Pump.1-8).
+  for (const p of FEED_PUMPS) ecamPump(svg, p.x, p.y, ecamBool(vars, `FUELSYSTEM PUMP ACTIVE:${p.idx}`));
+
+  // Crossfeed valves and manifold: FuelPage.tsx:914-1039, 1061-1150 (simplified
+  // to a single manifold line rather than every individual segment).
+  let anyCrossfeed = false;
+  for (const v of CROSSFEED_VALVES) {
+    const open = ecamBool(vars, `FUELSYSTEM VALVE OPEN:${v.idx}`);
+    if (open) anyCrossfeed = true;
+    ecamValve(svg, v.x, v.y, open, { horizontal: true, normallyClosed: true });
+  }
+  ecamFuelLine(svg, 171, 175, 595, 175, anyCrossfeed);
+  ecamFuelLine(svg, 316, 148, 316, 175, anyCrossfeed);
+  ecamFuelLine(svg, 450, 148, 450, 175, anyCrossfeed);
+
+  // APU (simplified indication): FuelPage.tsx:1662-1709.
+  {
+    const apuOn = ecamBool(vars, 'A32NX_OVHD_APU_MASTER_SW_PB_IS_ON');
+    const iso = ecamBool(vars, 'FUELSYSTEM VALVE OPEN:50', 0.1);
+    const lp = ecamBool(vars, 'FUELSYSTEM VALVE OPEN:51', 0.1);
+    const normal = apuOn !== null && iso !== null && lp !== null && iso === apuOn && lp === apuOn;
+    svg.append(ecamText(705, 180, normal ? ECAM.white : ECAM.amber, 18, 'APU', 'middle'));
+  }
+
+  // FWD/AFT transfer galleries (simplified to pump icons + one gallery line
+  // each, rather than every individual transfer valve): FuelPage.tsx:275-359,
+  // 1176-1210 (Gallery).
+  for (const grp of [FWD_GALLERY_PUMPS, AFT_GALLERY_PUMPS]) {
+    const states = grp.map((p) => ecamBool(vars, `FUELSYSTEM PUMP ACTIVE:${p.idx}`));
+    const anyOn = states.some((s) => s === true);
+    ecamFuelLine(svg, grp[0].x, grp[0].y, grp[grp.length - 1].x, grp[0].y, anyOn);
+    grp.forEach((p, i) => ecamPump(svg, p.x, p.y, states[i]));
+  }
+
+  // Jettison (only drawn when open, like the source): FuelPage.tsx:1212-1255.
+  for (const j of [{ idx: 57, x: 190 }, { idx: 58, x: 570 }]) {
+    const open = ecamBool(vars, `FUELSYSTEM VALVE OPEN:${j.idx}`, 0.1);
+    if (open) {
+      svg.append(ecamLine(j.x, 500, j.x, 522, ECAM.green, 4));
+      svg.append(ecamText(j.x - 56, 562, ECAM.white, 18, 'JETTISON'));
+    }
+  }
+
+  // Trim tank: FuelPage.tsx:1257-1315.
+  {
+    const open = ecamBool(vars, 'FUELSYSTEM VALVE OPEN:43', 0.1);
+    ecamValve(svg, 386, 540, open, { normallyClosed: true });
+    ecamPump(svg, 298, 610, ecamBool(vars, 'FUELSYSTEM PUMP ACTIVE:19'));
+    ecamPump(svg, 468, 610, ecamBool(vars, 'FUELSYSTEM PUMP ACTIVE:20'));
+  }
+
+  // Tank quantities: FuelPage.tsx's <TankQuantity>, FuelPage.tsx:1634-1653.
+  const labels = { 1: 'OUTER', 2: 'FEED 1', 3: 'MID', 4: 'INNER', 5: 'FEED 2', 6: 'FEED 3', 7: 'INNER', 8: 'MID', 9: 'FEED 4', 10: 'OUTER', 11: 'TRIM' };
+  for (const t of FUEL_TANKS) {
+    const lbs = ecamNum(vars, `FUELSYSTEM TANK WEIGHT:${t.n}`);
+    const kg = lbs === null ? null : lbs * 0.45359237;
+    const low = t.feed && (kg === null || kg < FEED_TANK_LOW_LEVEL_THRESHOLD_KG);
+    svg.append(ecamText(t.x, t.y, low || kg === null ? ECAM.amber : ECAM.green, 22, ecamQtyText(kg, metric), 'end'));
+    svg.append(ecamText(t.x, t.y - 24, ECAM.white, 13, labels[t.n], 'end'));
+  }
+
+  const wrap = el('div', { class: 'ecam-wrap' });
+  wrap.append(svg);
+  container.append(wrap);
+}
+
+// Wheel bogey wheel numbering, WheelBogey.tsx:37-59: WLG has 4 wheels
+// [1,2,5,6] on the left / [3,4,7,8] on the right, BLG has 6
+// [9,10,13,14,17,18] left / [11,12,15,16,19,20] right, in axle pairs.
+// hasBrake = wheelNumber < 17 (Wheel.tsx:33): the BLG's outermost axle
+// (17-20) is unbraked, matching A32NX_BRAKE_TEMPERATURE_1..16 (16 brakes).
+function bogeyWheelNumbers(kind, isLeft) {
+  if (kind === 'nose') return [];
+  const n = kind === 'wlg' ? 4 : 6;
+  const base = kind === 'wlg' ? (isLeft ? 1 : 3) : (isLeft ? 9 : 11);
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(i + Math.floor(i / 2) * 2 + base);
+  return out;
+}
+function renderGearEcam(container, page, vars) {
+  const svg = ecamPanel();
+  svg.append(ecamText(10, 32, ECAM.white, 24, 'WHEEL'));
+
+  // Gear position + door triangles, simplified from Gear.tsx's twin LGCIU
+  // position indicators to one: green when down and locked (>98), red while
+  // in transit/disagreeing (2-98), undrawn when fully retracted (<2) or the
+  // position is not available — never invented. Gear.tsx:66-92, 100-135.
+  const legs = [
+    { key: 'CENTER', x: 351, y: 59, door: 'CENTER' },
+    { key: 'LEFT', x: 48, y: 223, door: 'LEFT', wlg: true },
+    { key: 'LEFT', x: 223, y: 260, door: null, blg: true },
+    { key: 'RIGHT', x: 479, y: 260, door: null, blg: true },
+    { key: 'RIGHT', x: 654, y: 223, door: 'RIGHT', wlg: true },
+  ];
+  for (const leg of legs) {
+    const pos = ecamNum(vars, `A32NX_GEAR_${leg.key}_POSITION`);
+    if (pos !== null && pos >= 2) {
+      const color = pos > 98 ? ECAM.green : ECAM.red;
+      const cx = leg.x + 14, cy = leg.y + 13;
+      svg.append(svgEl('polygon', { points: `${cx - 15},${cy + 13} ${cx + 15},${cy + 13} ${cx},${cy - 13}`, fill: 'none', stroke: color, 'stroke-width': 3 }));
+    }
+    if (leg.door) {
+      const doorPos = ecamNum(vars, `A32NX_GEAR_DOOR_${leg.door}_POSITION`);
+      if (doorPos !== null) {
+        const inTransit = doorPos > 2;
+        svg.append(ecamLine(leg.x - 10, leg.y - 10, leg.x + 38, leg.y - 10, inTransit ? ECAM.amber : ECAM.green, 2));
+      }
+    }
+  }
+  {
+    const doorPos = ecamNum(vars, 'A32NX_GEAR_DOOR_CENTER_POSITION');
+    if (doorPos !== null) svg.append(ecamLine(331, 46, 379, 46, doorPos > 2 ? ECAM.amber : ECAM.green, 2));
+  }
+
+  // Hydraulic/electrical power supply boxes by leg, PowerSupply.tsx:27-60,
+  // Gear.tsx:24-27 (WLG/Nose = Green hyd, BLG = Yellow hyd),
+  // BrakingSupply.tsx:11-26 (WLG braking = AC_4, BLG braking = AC_2).
+  const supply = (x, y, label, available) => {
+    svg.append(svgEl('rect', { x, y, width: 21, height: 21, fill: '#4f5467' }));
+    svg.append(ecamText(x + 5, y + 16, available === null ? ECAM.amber : available ? ECAM.green : ECAM.amber, 16, label));
+  };
+  const green = ecamBool(vars, 'A32NX_HYD_GREEN_SYSTEM_1_SECTION_PRESSURE_SWITCH');
+  const yellow = ecamBool(vars, 'A32NX_HYD_YELLOW_SYSTEM_1_SECTION_PRESSURE_SWITCH');
+  const ac2 = ecamBool(vars, 'A32NX_ELEC_AC_2_BUS_IS_POWERED');
+  const ac4 = ecamBool(vars, 'A32NX_ELEC_AC_4_BUS_IS_POWERED');
+  supply(374, 20, 'G', green);
+  for (const leg of legs.filter((l) => l.wlg)) supply(leg.x + 23, leg.y - 32, 'G', green);
+  for (const leg of legs.filter((l) => l.blg)) supply(leg.x - 30, leg.y - 36, 'Y', yellow);
+
+  // Wheel bogeys with per-wheel brake temperature: Wheel.tsx, WheelBogey.tsx.
+  const bogeys = [
+    { kind: 'nose', x: 384, y: 140 },
+    { kind: 'wlg', isLeft: true, x: 81, y: 403 },
+    { kind: 'blg', isLeft: true, x: 257, y: 417 },
+    { kind: 'blg', isLeft: false, x: 513, y: 417 },
+    { kind: 'wlg', isLeft: false, x: 690, y: 403 },
+  ];
+  for (const b of bogeys) {
+    const nums = bogeyWheelNumbers(b.kind, b.isLeft);
+    if (b.kind === 'nose') {
+      svg.append(ecamCircle(b.x - 18, b.y, 15, ECAM.grey, 2), ecamCircle(b.x + 18, b.y, 15, ECAM.grey, 2));
+      continue;
+    }
+    const spacing = b.kind === 'wlg' ? 92 : 90;
+    for (let row = 0; row < nums.length / 2; row++) {
+      const y = b.y + row * spacing;
+      const wl = nums[row * 2], wr = nums[row * 2 + 1];
+      for (const [num, x] of [[wl, b.x - 22], [wr, b.x + 22]]) {
+        svg.append(ecamCircle(x, y, 15, ECAM.grey, 2));
+        svg.append(ecamText(x, y + 5, ECAM.white, 13, String(num), 'middle'));
+        if (num < 17) {
+          const temp = ecamNum(vars, `A32NX_BRAKE_TEMPERATURE_${num}`);
+          const label = temp === null ? 'XX' : String(Math.round(Math.min(995, Math.max(0, temp)) / 5) * 5);
+          svg.append(ecamText(x, y - 20, temp !== null && temp > 300 ? ECAM.amber : temp === null ? ECAM.amber : ECAM.green, 13, label, 'middle'));
+        }
+      }
+    }
+  }
+  svg.append(ecamText(135, 300, ECAM.cyan, 16, '°C', 'middle'));
+
+  // Braking supply row: BrakingSupply.tsx.
+  svg.append(ecamText(384, 320, ECAM.white, 18, 'BRK', 'middle'));
+  const brk = [{ x: 81, wlg: true }, { x: 258, wlg: false }, { x: 513, wlg: false }, { x: 690, wlg: true }];
+  for (const s of brk) supply(s.x - 23, 328, s.wlg ? 'G' : 'Y', s.wlg ? green : yellow);
+  for (const s of brk) supply(s.x + 1, 328, s.wlg ? '4' : '2', s.wlg ? ac4 : ac2);
+
+  // Antiskid: sensors.rs's ANTISKID BRAKES ACTIVE.
+  const antiskid = ecamBool(vars, 'ANTISKID BRAKES ACTIVE');
+  svg.append(ecamText(10, 660, antiskid === false ? ECAM.amber : ECAM.white, 16, antiskid === false ? 'ANTI SKID OFF' : ''));
+
+  const wrap = el('div', { class: 'ecam-wrap' });
+  wrap.append(svg);
+  container.append(wrap);
+}
+
+function renderAllVars(container, vars) {
+  const names = Object.keys(vars).sort();
+  const box = el('div', { class: 'box' });
+  for (const n of names) box.append(el('div', { class: 'study-field-row' }, el('span', { class: 'fname', text: n }), el('span', { class: 'fval', text: String(vars[n]) })));
+  container.append(box);
+}
+
+function renderStudyNav() {
+  const nav = document.getElementById('study-nav');
+  nav.innerHTML = '';
+  const groups = {};
+  for (const p of study.pages.filter((p) => p.kind !== 'failures' && p.kind !== 'breakers' && p.kind !== 'groundServices')) (groups[p.menuGroup || ''] = groups[p.menuGroup || ''] || []).push(p);
+  const order = ['', 'Engines', 'Environmental', 'Hydraulics', 'Landing Gear', 'Fire'];
+  for (const key of order) {
+    if (!groups[key]) continue;
+    if (key) nav.append(el('div', { class: 'study-nav-group', text: key }));
+    for (const p of groups[key]) {
+      const btn = el('button', { type: 'button', text: p.title, class: p.index === study.selected ? 'active' : '' });
+      btn.addEventListener('click', () => selectStudyPage(p.index));
+      nav.append(btn);
+    }
+  }
+}
+
+async function selectStudyPage(index) {
+  study.selected = index;
+  study.physics = false;
+  renderStudyNav();
+  await renderStudyContent();
+}
+
+async function renderStudyContent() {
+  const page = study.pages[study.selected];
+  const content = document.getElementById('study-content');
+  const toolbar = document.getElementById('study-toolbar');
+  content.innerHTML = '';
+  toolbar.innerHTML = '';
+  if (page.hasPhysics) {
+    const btn = el('button', { class: 'small' + (study.physics ? '' : ' grey'), type: 'button', text: study.physics ? 'SCHEMATIC' : 'PHYSICS' });
+    btn.addEventListener('click', () => { study.physics = !study.physics; renderStudyContent(); });
+    toolbar.append(btn);
+  }
+  if (study.pollTimer) { clearInterval(study.pollTimer); study.pollTimer = null; }
+  study.renderToken++;
+
+  if (page.kind === 'failures') return renderFailures(content);
+  if (page.kind === 'breakers') return renderBreakers(content);
+
+  const names = collectNames(page);
+  // Each page shown gets its own token: a poll that was still waiting on
+  // the plugin when another page was picked must not draw its old page over
+  // the new one, and polls never overlap when the plugin answers slowly.
+  const token = ++study.renderToken;
+  let busy = false;
+  const poll = async () => {
+    if (busy || token !== study.renderToken) return;
+    busy = true;
+    try {
+      const q = names.length ? '?names=' + names.map(encodeURIComponent).join(',') : '';
+      const data = await studyGet('/vars' + q);
+      if (token !== study.renderToken) return;
+      study.vars = data.vars || {};
+      setStudyOffline(false);
+    } catch {
+      if (token === study.renderToken) setStudyOffline(true);
+      return;
+    } finally {
+      busy = false;
+    }
+    content.innerHTML = '';
+    const vars = study.vars;
+    if (page.kind === 'groups') renderGroups(content, page.groups, vars);
+    else if (page.kind === 'topology') {
+      if (study.physics) renderGroups(content, page.groups, vars);
+      else if (page.title === 'Landing Gear and Brakes') renderGearEcam(content, page, vars);
+      else renderTopology(content, page.topology, vars);
+    } else if (page.kind === 'fuel') {
+      if (study.physics) renderGroups(content, page.groups, vars);
+      else renderFuelEcam(content, page, vars);
+    } else if (page.kind === 'engine') {
+      if (study.physics) renderGroups(content, page.groups, vars);
+      else if (page.cutaway) renderCutaway(content, page, vars);
+      else renderEngine(content, page, vars);
+    } else if (page.kind === 'flightControls') renderFlightControls(content, page, vars);
+    else if (page.kind === 'groundServices') renderGroundServices(content, page, vars);
+    else if (page.kind === 'all') renderAllVars(content, vars);
+  };
+  await poll();
+  study.pollTimer = setInterval(poll, page.kind === 'all' || study.preview ? 2000 : 200);
+}
+
+function setStudyPreview(preview) {
+  if (study.preview === preview) return;
+  study.preview = preview;
+  for (const b of $all('.preview-banner')) b.hidden = !preview;
+}
+
+function setStudyOffline(offline) {
+  study.offline = offline;
+  document.getElementById('study-offline').hidden = !offline;
+  document.getElementById('study-layout').style.display = offline ? 'none' : '';
+}
+
+let studyStarted = false;
+async function studyOnShow() {
+  if (studyStarted) return;
+  studyStarted = true;
+  try {
+    const data = await studyGet('/study/pages');
+    study.pages = data.pages;
+    setStudyOffline(false);
+    renderStudyNav();
+    await selectStudyPage(0);
+  } catch {
+    setStudyOffline(true);
+    studyStarted = false;
+    setTimeout(() => { if (document.getElementById('tab-study').classList.contains('active')) studyOnShow(); }, 3000);
+  }
+}
+studyOnShow();
+
+// ---------------------------------------------------------------------
+// Failures tab: every failure the systems and computers know, by ATA
+// chapter, armed through the plugin's own failure queue.
+
+const fail = { list: null, chapter: '' };
+// MEL & Maintenance: the plugin's /study/maintenance (study/web.rs
+// maintenance_json). Defects with their MEL deferral or the MEL items that
+// may cover them, dispatch status, component wear and the tech log. Actions
+// are queued and applied on the plugin's next tick, so the page reloads a
+// moment after each.
+const maint = { data: null, search: {}, section: 'status', melItems: {}, filter: '' };
+
+// Components: every damageable component's physical parameters (the
+// plugin's components.rs, GET /study/components): the engines' own parts and
+// every catalogued failure as the part it breaks, each a physical loss the
+// systems run on. Laid out like the Circuit Breakers tab: systems on the
+// left, one row per parameter with quick settings; "i" opens exact value and
+// wear rate (a change per flight hour).
+const comp = { list: null, system: '', degradedOnly: false };
+
+function compSystem(c) {
+  const [head, ...rest] = c.component.split('.');
+  if (head === 'engine') return `Engine ${rest[0]}`;
+  const m = head.match(/^(\d+)_(.*)$/);
+  if (!m) return head;
+  const name = m[2].replace(/_/g, ' ');
+  return `${m[1]} ${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+}
+
+function compLabel(c) {
+  const parts = c.component.split('.');
+  const tail = parts[0] === 'engine' ? parts.slice(2).join(' ') + ' · ' + c.param : parts.slice(1).join(' ');
+  const t = tail.replace(/_/g, ' ');
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+// How far a value sits from healthy towards the end of its range it can
+// move to: 0 healthy, 1 at the limit.
+function compLimit(c) { return Math.abs(c.max - c.healthy) >= Math.abs(c.min - c.healthy) ? c.max : c.min; }
+function compDegradation(c) {
+  const span = compLimit(c) - c.healthy;
+  return span === 0 ? 0 : Math.max(0, Math.min(1, (c.value - c.healthy) / span));
+}
+
+function fmtNum(v) {
+  if (v == null || !isFinite(v)) return '–';
+  const a = Math.abs(v);
+  return a !== 0 && (a < 0.01 || a >= 1e5) ? v.toExponential(2) : (+v.toFixed(3)).toString();
+}
+
+async function componentsOnShow() {
+  try {
+    comp.list = (await studyGet('/study/components')).components || [];
+  } catch {
+    comp.list = null;
+  }
+  if (!comp.list || !comp.list.length) {
+    document.getElementById('comp-nav').replaceChildren();
+    document.getElementById('comp-content').replaceChildren(el('div', { class: 'box', text: 'Could not load the component list.' }));
+    return;
+  }
+  drawComponents();
+}
+
+async function compSet(c, value, rate) {
+  const r = await studyPost('/study/action', { kind: 'setComponentParam', component: c.component, param: c.param, value, ratePerHour: rate });
+  if (r && r.ok === false) { if (r.message) show(r.message); return; }
+  c.direct = value === c.healthy && !rate ? null : value;
+  c.ratePerHour = rate;
+  c.value = value;
+  drawComponents();
+  setTimeout(componentsOnShow, 500);
+}
+
+function compRow(c) {
+  const wrap = el('div', {});
+  const row = el('div', { class: 'comp-row' });
+  const deg = compDegradation(c);
+  const at = (f) => c.healthy + f * (compLimit(c) - c.healthy);
+  // The status button: a healthy part fails outright, a degraded one is
+  // restored, like pulling and resetting a breaker.
+  const status = el('button', { type: 'button', class: 'cb' + (deg > 1e-6 ? ' pulled' + (deg >= 0.999 ? ' trip-magnetic' : ' trip-thermal') : ''), title: deg > 1e-6 ? 'Restore to healthy' : 'Fail completely' }, el('span', { class: 'cb-collar' }), el('span', { class: 'cb-cap' }));
+  status.addEventListener('click', () => compSet(c, deg > 1e-6 ? c.healthy : at(1), 0));
+  const name = el('div', {}, el('div', { class: 'label', text: compLabel(c) }), el('div', { class: 'label dim bus', text: compSystem(c) + (c.ratePerHour ? ` · worsening ${fmtNum(c.ratePerHour)} ${c.unit}/h` : '') }));
+  const value = el('span', { class: 'fval', text: c.unit === 'fraction lost' ? `${(deg * 100).toFixed(deg > 0 && deg < 0.1 ? 1 : 0)}%` : `${fmtNum(c.value)}` });
+  const bar = el('div', { class: 'comp-bar' });
+  bar.append(el('div', { style: `width:${(deg * 100).toFixed(1)}%;background:${deg > 0.5 ? 'var(--bad)' : deg > 0.1 ? 'var(--warn)' : 'var(--ok)'}` }));
+  const quick = el('span', { class: 'comp-quick' });
+  for (const [label, f] of [['25%', 0.25], ['50%', 0.5], ['Fail', 1]]) {
+    const b = el('button', { type: 'button', class: 'small grey' + (Math.abs(deg - f) < 1e-6 ? ' armed' : ''), text: label });
+    b.addEventListener('click', () => compSet(c, at(f), 0));
+    quick.append(b);
+  }
+  const info = el('span', { class: 'help cb-info', title: 'Exact value and wear rate', text: 'i' });
+  row.append(status, name, value, bar, quick, info);
+  wrap.append(row);
+  const detail = el('div', { class: 'cb-detail', hidden: '' });
+  if (c.description) detail.append(el('div', { text: c.description }));
+  detail.append(el('div', { text: `Healthy ${fmtNum(c.healthy)} · range ${fmtNum(c.min)} to ${fmtNum(c.max)} ${c.unit} · now ${fmtNum(c.value)}` + (c.direct != null ? ` · set ${fmtNum(c.direct)}` : '') }));
+  const v = el('input', { type: 'number', step: 'any', min: String(c.min), max: String(c.max), style: 'width:110px' });
+  v.value = String(c.direct ?? c.healthy);
+  const rate = el('input', { type: 'number', step: 'any', style: 'width:90px', title: 'Change per flight hour, in the parameter’s unit' });
+  rate.value = String(c.ratePerHour || 0);
+  const apply = el('button', { type: 'button', class: 'small', text: 'Apply' });
+  apply.addEventListener('click', () => compSet(c, parseFloat(v.value), parseFloat(rate.value) || 0));
+  detail.append(el('div', { class: 'row', style: 'gap:8px;margin-top:6px' }, el('span', { text: 'Value' }), v, el('span', { text: 'per hour' }), rate, apply));
+  info.addEventListener('click', () => { detail.hidden = !detail.hidden; });
+  wrap.append(detail);
+  return wrap;
+}
+
+function drawComponents() {
+  if (!comp.list) return;
+  const nav = document.getElementById('comp-nav');
+  nav.innerHTML = '';
+  const systems = [...new Set(comp.list.map(compSystem))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const navBtn = (key, text, items) => {
+    const bad = items.filter((c) => compDegradation(c) > 1e-6).length;
+    const b = el('button', { type: 'button', class: comp.system === key ? 'active' : '' }, text, el('span', { class: 'count' + (bad ? ' armed' : ''), text: bad ? `${bad}/${items.length}` : String(items.length) }));
+    b.addEventListener('click', () => { comp.system = key; drawComponents(); });
+    nav.append(b);
+  };
+  navBtn('', 'All components', comp.list);
+  nav.append(el('div', { class: 'study-nav-group', text: 'Systems' }));
+  for (const s of systems) navBtn(s, s, comp.list.filter((c) => compSystem(c) === s));
+
+  const q = document.getElementById('comp-filter').value.trim().toLowerCase();
+  const onlyBad = document.getElementById('comp-degraded').checked;
+  const shown = comp.list.filter((c) => (!comp.system || compSystem(c) === comp.system) && (!onlyBad || compDegradation(c) > 1e-6) && (!q || `${c.component} ${c.param} ${compLabel(c)} ${c.description || ''}`.toLowerCase().includes(q)));
+  const content = document.getElementById('comp-content');
+  content.innerHTML = '';
+  const bad = comp.list.filter((c) => compDegradation(c) > 1e-6).length;
+  content.append(el('div', { class: 'section-title', text: `${comp.system || 'All components'} · ${shown.length} shown · ${bad} degraded` }));
+  const box = el('div', { class: 'box' });
+  if (!shown.length) box.append(el('span', { class: 'label dim', text: 'No components match.' }));
+  for (const c of shown) box.append(compRow(c));
+  content.append(box);
+}
+document.getElementById('comp-filter').addEventListener('input', drawComponents);
+document.getElementById('comp-degraded').addEventListener('change', drawComponents);
+document.getElementById('comp-refresh').addEventListener('click', componentsOnShow);
+document.getElementById('comp-restore-all').addEventListener('click', async () => {
+  if (!comp.list) return;
+  for (const c of comp.list.filter((c) => c.direct != null || c.ratePerHour)) {
+    await studyPost('/study/action', { kind: 'setComponentParam', component: c.component, param: c.param, value: c.healthy, ratePerHour: 0 });
+  }
+  setTimeout(componentsOnShow, 400);
+});
+
+// MEL & Maintenance: the plugin's /study/maintenance (study/web.rs
+// maintenance_json), laid out like the Circuit Breakers tab: sections and
+// the operator MEL's ATA chapters on the left. Each MEL item is a row with
+// an INOP button, pressed like pulling a breaker: the equipment is
+// placarded INOP (its catalogued failure armed and deferred under the item,
+// or, with none, recorded with its interval). Actions are queued and applied
+// on the plugin's next tick, so the page reloads a moment after each.
+async function maintenanceOnShow() {
+  try {
+    maint.data = await studyGet('/study/maintenance');
+  } catch {
+    document.getElementById('maint-content').replaceChildren(el('div', { class: 'box', text: 'Could not load maintenance data.' }));
+    return;
+  }
+  drawMaintenance();
+}
+document.getElementById('maint-refresh').addEventListener('click', () => { maint.melItems = {}; maintenanceOnShow(); });
+document.getElementById('maint-filter').addEventListener('input', (e) => { maint.filter = e.target.value; drawMaintenance(); });
+document.getElementById('maint-filter').addEventListener('keydown', async (e) => {
+  if (e.key !== 'Enter' || maint.section.startsWith('mel:')) return;
+  maint.searchResults = (await studyGet('/study/mel?q=' + encodeURIComponent(e.target.value))).items || [];
+  maint.section = 'mel-search';
+  drawMaintenance();
+});
+
+async function maintAction(body) {
+  const r = await studyPost('/study/action', body);
+  if (r && r.ok === false && r.message) show(r.message);
+  setTimeout(maintenanceOnShow, 400);
+}
+
+function fmtHours(h) { return h == null ? '' : `${h.toFixed(1)} h`; }
+
+function melItemBox(item) {
+  const box = el('div', { class: 'box' });
+  box.append(el('div', { class: 'label', text: `${item.id} · ${item.title}` }));
+  const cat = item.category ? `Category ${item.category}` + (item.intervalDays ? ` (${item.intervalDays} days)` : ' (interval as stated)') : 'Category unreadable in source';
+  box.append(el('div', { class: 'label dim', text: `${cat} · installed ${item.installed ?? '–'} · required ${item.required ?? '–'} · placard ${item.placard ?? '–'}` }));
+  if (item.conditions) box.append(el('div', { class: 'label', text: item.conditions }));
+  if (item.opsProcedure) {
+    const d = el('details');
+    d.append(el('summary', { text: 'Operational procedure (o)' }), el('pre', { style: 'white-space:pre-wrap', text: item.opsProcedure }));
+    box.append(d);
+  }
+  if (item.amm && item.amm.length) box.append(el('div', { class: 'label dim', text: `Maintenance procedure (m): AMM ${item.amm.join(', ')}` }));
+  return box;
+}
+
+function melChapterName(c) { return c.name && c.name !== 'Other' ? c.name : `${c.ata} ATA ${c.ata}`; }
+
+function melRow(item) {
+  const d = maint.data || {};
+  const wrap = el('div', {});
+  const row = el('div', { class: 'mel-row' });
+  const name = el('div', {}, el('div', { class: 'label', text: `${item.id} · ${item.title}` }), el('div', { class: 'label dim bus', text: `${item.category ? 'Category ' + item.category : 'Category —'} · ${item.intervalDays ? item.intervalDays + ' days' : item.category === 'A' ? 'interval as stated' : 'no interval'}` }));
+  // One INOP button per unit the item covers: pressed like pulling a
+  // breaker, it arms that unit's failure and defers it under this item.
+  const units = el('span', { class: 'mel-units' });
+  for (const u of item.units || []) {
+    const deferral = (d.deferrals || []).find((x) => x.id === u.failureId);
+    const here = deferral && deferral.melRef === item.id;
+    const b = el('button', { type: 'button', class: 'small grey' + (deferral ? ' armed' : ''), text: u.name, title: here ? 'INOP under this item: press when repaired' : deferral ? `Deferred under ${deferral.melRef}` : 'Placard INOP' });
+    b.addEventListener('click', () => {
+      if (here) return maintAction({ kind: 'repairFailure', id: u.failureId });
+      if (deferral) return show(`${u.name} is already deferred under ${deferral.melRef}`);
+      maintAction({ kind: 'placardMelItem', melRef: item.id, failureId: u.failureId });
+    });
+    units.append(b);
+  }
+  const info = el('span', { class: 'help cb-info', title: 'Conditions and procedures', text: 'i' });
+  row.append(name, units, info);
+  wrap.append(row);
+  const detail = el('div', { class: 'cb-detail', hidden: '' });
+  detail.append(melItemBox(item));
+  info.addEventListener('click', () => { detail.hidden = !detail.hidden; });
+  wrap.append(detail);
+  return wrap;
+}
+
+async function melChapterItems(ata) {
+  if (!maint.melItems[ata]) maint.melItems[ata] = (await studyGet('/study/mel?ata=' + encodeURIComponent(ata))).items || [];
+  return maint.melItems[ata];
+}
+
+function drawDefects(content, d) {
+  const dispatch = d.dispatch || { legal: true, blocking: [] };
+  const status = el('div', { class: 'box' });
+  status.append(el('div', { class: 'section-title', text: dispatch.legal ? 'Dispatch: allowed' : 'Dispatch: NOT allowed' }));
+  for (const b of dispatch.blocking || []) status.append(el('div', { class: 'label', text: b }));
+  status.append(el('div', { class: 'label dim', text: `Airframe hours ${fmtHours(d.airframeHours || 0)}` }));
+  status.append(el('div', {
+    class: 'label dim',
+    text: d.melLoaded ? 'Operator MEL loaded.' : `No operator MEL found. Run tools/parse_mel.py on your MEL and place the result at ${d.melPath || 'Output/preferences/fbw_a380x_mel.json'}; deferrals meanwhile use a generic category.`,
+  }));
+  content.append(status);
+
+  content.append(el('div', { class: 'section-title', text: `Defects · ${(d.defects || []).length}` }));
+  if (!(d.defects || []).length) content.append(el('div', { class: 'box label dim', text: 'No active defects.' }));
+  for (const f of d.defects || []) {
+    const box = el('div', { class: 'box' });
+    box.append(el('div', { class: 'label', text: `${f.name} · ATA ${f.ata} · ${Math.round((f.magnitude || 0) * 100)}%` }));
+    if (f.cause) box.append(el('div', { class: 'label dim', text: f.cause }));
+    const buttons = el('div', { class: 'row' });
+    if (f.deferral) {
+      const rem = f.deferral.hoursRemaining;
+      box.append(el('div', { class: 'label', text: rem > 0 ? `Deferred${f.deferral.melRef ? ' under MEL ' + f.deferral.melRef : ''} · ${fmtHours(rem)} remaining` : `Deferral EXPIRED${f.deferral.melRef ? ' (MEL ' + f.deferral.melRef + ')' : ''}` }));
+      if (f.deferral.melItem) box.append(melItemBox(f.deferral.melItem));
+    } else {
+      const chosen = maint.search[f.id] || {};
+      const options = [...(chosen.results || []), ...(f.candidates || [])];
+      const select = el('select');
+      if (!options.length) select.append(el('option', { value: '', text: f.genericCategory ? `Generic category ${f.genericCategory}` : 'No MEL item available' }));
+      for (const o of options) select.append(el('option', { value: o.id, text: `${o.id} · ${o.title} · ${o.category || '?'}` }));
+      if (chosen.selected) select.value = chosen.selected;
+      const preview = el('div');
+      const showPreview = () => {
+        const item = options.find((o) => o.id === select.value);
+        preview.replaceChildren(item ? melItemBox(item) : el('span'));
+        maint.search[f.id] = { ...chosen, selected: select.value };
+      };
+      select.addEventListener('change', showPreview);
+      const query = el('input', { type: 'text', placeholder: 'Search the MEL (ATA, title, condition)…' });
+      query.addEventListener('keydown', async (e) => {
+        if (e.key !== 'Enter') return;
+        const r = await studyGet('/study/mel?q=' + encodeURIComponent(query.value));
+        maint.search[f.id] = { results: r.items || [], selected: (r.items || [])[0]?.id };
+        drawMaintenance();
+      });
+      box.append(query, select, preview);
+      showPreview();
+      const defer = el('button', { type: 'button', class: 'small', text: 'Defer' });
+      defer.disabled = !options.length && !f.genericCategory;
+      defer.addEventListener('click', () => maintAction({ kind: 'deferFailure', id: f.id, ...(select.value ? { melRef: select.value } : {}) }));
+      buttons.append(defer);
+    }
+    const repair = el('button', { type: 'button', class: 'small grey', text: 'Repair' });
+    repair.addEventListener('click', () => maintAction({ kind: 'repairFailure', id: f.id }));
+    buttons.append(repair);
+    box.append(buttons);
+    content.append(box);
+  }
+}
+
+async function drawMaintenance() {
+  const d = maint.data || {};
+  const nav = document.getElementById('maint-nav');
+  nav.innerHTML = '';
+  const navBtn = (key, text, count, warn) => {
+    const b = el('button', { type: 'button', class: maint.section === key ? 'active' : '' }, text, el('span', { class: 'count' + (warn ? ' armed' : ''), text: String(count) }));
+    b.addEventListener('click', () => { maint.section = key; drawMaintenance(); });
+    nav.append(b);
+  };
+  const legal = (d.dispatch || { legal: true }).legal;
+  navBtn('status', legal ? 'Dispatch & defects' : 'Dispatch & defects (NO GO)', (d.defects || []).length, !legal);
+  navBtn('wear', 'Component wear', (d.components || []).length, false);
+  navBtn('log', 'Technical log', (d.techLog || []).length, false);
+  if ((d.melChapters || []).length) {
+    nav.append(el('div', { class: 'study-nav-group', text: 'Operator MEL' }));
+    for (const c of d.melChapters) navBtn('mel:' + c.ata, melChapterName(c), c.count, false);
+  }
+
+  const content = document.getElementById('maint-content');
+  const q = maint.filter.trim().toLowerCase();
+  content.innerHTML = '';
+  if (maint.section === 'status') {
+    drawDefects(content, d);
+  } else if (maint.section === 'wear') {
+    content.append(el('div', { class: 'section-title', text: `Component wear · ${(d.components || []).length}` }));
+    if (!(d.components || []).length) content.append(el('div', { class: 'box label dim', text: 'No component wear recorded yet.' }));
+    for (const c of d.components || []) {
+      const row = el('div', { class: 'box row' });
+      row.append(el('span', { class: 'label', text: `${c.id} · ${Math.round((c.degradation || 0) * 100)}% degraded · ${fmtHours(c.hotHours)} hot · ${c.cycles} cycles` }));
+      const replace = el('button', { type: 'button', class: 'small grey', text: 'Replace' });
+      replace.addEventListener('click', () => maintAction({ kind: 'replaceComponent', component: c.id }));
+      row.append(replace);
+      content.append(row);
+    }
+  } else if (maint.section === 'log') {
+    content.append(el('div', { class: 'section-title', text: 'Technical log' }));
+    const log = el('div', { class: 'box' });
+    if (!(d.techLog || []).length) log.append(el('div', { class: 'label dim', text: 'No entries.' }));
+    for (const e of d.techLog || []) {
+      const when = e.unixTime ? new Date(e.unixTime * 1000).toLocaleString() : '';
+      log.append(el('div', { class: 'label', text: `${when} · ${fmtHours(e.airframeHours)} · ${e.text}` }));
+    }
+    content.append(log);
+  } else {
+    let items;
+    let title;
+    if (maint.section === 'mel-search') {
+      items = maint.searchResults || [];
+      title = `MEL search · ${items.length} found`;
+    } else {
+      const ata = maint.section.slice(4);
+      const chapter = (d.melChapters || []).find((c) => c.ata === ata);
+      title = chapter ? melChapterName(chapter) : `ATA ${ata}`;
+      content.append(el('div', { class: 'section-title', text: title + ' · loading…' }));
+      items = await melChapterItems(ata);
+      if (maint.section !== 'mel:' + ata) return;
+      content.innerHTML = '';
+    }
+    const shown = items.filter((it) => !q || `${it.id} ${it.title} ${it.conditions || ''} ${(it.units || []).map((u) => u.name).join(' ')}`.toLowerCase().includes(q));
+    const inop = shown.filter((it) => (d.deferrals || []).some((x) => x.melRef === it.id)).length;
+    content.append(el('div', { class: 'section-title', text: `${title} · ${shown.length} items · ${inop} INOP` }));
+    const box = el('div', { class: 'box' });
+    if (!shown.length) box.append(el('span', { class: 'label dim', text: 'No MEL items match.' }));
+    for (const it of shown) box.append(melRow(it));
+    content.append(box);
+  }
+}
+
+async function failuresOnShow() {
+  try {
+    fail.list = (await studyGet('/study/failures')).failures;
+  } catch {
+    document.getElementById('failures-content').replaceChildren(el('div', { class: 'box', text: 'Could not load the failure list.' }));
+    return;
+  }
+  drawFailures();
+}
+function drawFailures() {
+  if (!fail.list) return;
+  const nav = document.getElementById('failures-nav');
+  nav.innerHTML = '';
+  const chapters = [...new Set(fail.list.map((f) => f.chapter))].sort();
+  const navBtn = (key, text, items) => {
+    const armed = items.filter((f) => f.active).length;
+    const b = el('button', { type: 'button', class: fail.chapter === key ? 'active' : '' }, text, el('span', { class: 'count' + (armed ? ' armed' : ''), text: armed ? `${armed}/${items.length}` : String(items.length) }));
+    b.addEventListener('click', () => { fail.chapter = key; drawFailures(); });
+    nav.append(b);
+  };
+  navBtn('', 'All failures', fail.list);
+  nav.append(el('div', { class: 'study-nav-group', text: 'ATA chapters' }));
+  for (const c of chapters) navBtn(c, c, fail.list.filter((f) => f.chapter === c));
+
+  const q = document.getElementById('failures-search').value.trim().toLowerCase();
+  const armedOnly = document.getElementById('failures-armed').checked;
+  const shown = fail.list.filter((f) => (!fail.chapter || f.chapter === fail.chapter) && (!armedOnly || f.active) && (!q || `${f.id} ${f.name}`.toLowerCase().includes(q)));
+  const content = document.getElementById('failures-content');
+  content.innerHTML = '';
+  const armed = fail.list.filter((f) => f.active).length;
+  content.append(el('div', { class: 'section-title', text: `${fail.chapter || 'All failures'} · ${shown.length} shown · ${armed} armed` }));
+  const box = el('div', { class: 'box' });
+  if (!shown.length) box.append(el('span', { class: 'label dim', text: 'No failures match.' }));
+  for (const f of shown) {
+    const btn = el('button', { type: 'button', class: 'small' + (f.active ? ' armed' : ''), text: f.active ? 'Armed' : 'Arm' });
+    btn.addEventListener('click', async () => {
+      const r = await studyPost('/study/action', { kind: 'toggleFailure', id: f.id });
+      if (r.ok === false) return;
+      f.active = !f.active;
+      drawFailures();
+    });
+    box.append(el('div', { class: 'fail-row' }, el('span', { class: 'ata', text: String(f.id) }), el('span', { text: f.name }), btn));
+  }
+  content.append(box);
+}
+document.getElementById('failures-search').addEventListener('input', drawFailures);
+document.getElementById('failures-armed').addEventListener('change', drawFailures);
+document.getElementById('failures-clear').addEventListener('click', async () => {
+  if (!fail.list) return;
+  for (const f of fail.list.filter((f) => f.active)) {
+    const r = await studyPost('/study/action', { kind: 'toggleFailure', id: f.id });
+    if (r.ok === false) return;
+    f.active = false;
+  }
+  drawFailures();
+});
+
+// ---------------------------------------------------------------------
+// Circuit Breakers tab: every systems.cfg circuit plus breakers.rs's wider
+// catalogue (docs/physics/breakers.md — `GET /study/breakers`), by ATA
+// chapter; systems.cfg circuits carry chapter "systems.cfg" straight from
+// the JSON so they land in their own nav group with no extra code here.
+// Unlike Failures (a plain armed flag), current amperage moves every tick,
+// so this tab polls while visible the same busy-flag/self-clearing-timer
+// way the Ground Services tab does (studyGet already carries the
+// preview/offline handling every tab shares).
+
+const breakers = { list: null, chapter: '', timer: null, busy: false };
+
+function cbStateLabel(c) {
+  if (c.closed) return 'Closed';
+  if (c.trip === 'thermal') return 'Tripped (thermal)';
+  if (c.trip === 'magnetic') return 'Tripped (magnetic)';
+  return 'Pulled';
+}
+function cbStateDot(c) { return c.closed ? 'ok' : (c.trip !== 'none' ? 'bad' : 'warn'); }
+
+// Only the backend action `apply_action` (src/study/web.rs) actually
+// supports for this row's source: `pullBreaker`/`resetBreaker` by the
+// catalogue's own string id, or the plain `toggleBreaker` open/close used
+// for a `systems.cfg` circuit (there is no separate pull/reset pair for
+// those — see docs/physics/breakers.md "Study panel wiring").
+function cbAction(c) {
+  if (c.source === 'catalogue') return studyPost('/study/action', c.closed ? { kind: 'pullBreaker', id: c.id } : { kind: 'resetBreaker', id: c.id });
+  return studyPost('/study/action', { kind: 'toggleBreaker', id: c.number });
+}
+
+function cbRow(c) {
+  const wrap = el('div', {});
+  const row = el('div', { class: 'cb-row' });
+  const cbClass = 'cb' + (!c.closed ? ' pulled' : '') + (c.trip === 'thermal' ? ' trip-thermal' : c.trip === 'magnetic' ? ' trip-magnetic' : '');
+  const cb = el('button', { type: 'button', class: cbClass, title: c.closed ? 'Pull' : 'Reset' }, el('span', { class: 'cb-collar' }), el('span', { class: 'cb-cap' }));
+  cb.addEventListener('click', async () => {
+    if (cb.disabled) return;
+    cb.disabled = true;
+    try {
+      const r = await cbAction(c);
+      if (r.ok === false) return;
+      c.closed = !c.closed;
+      if (c.closed) c.trip = 'none';
+      drawBreakers();
+    } finally { cb.disabled = false; }
+  });
+  const name = el('div', {}, el('div', { class: 'label', text: c.name }), el('div', { class: 'label dim bus', text: c.bus ? `Bus: ${c.bus}` : 'Bus: —' }));
+  const rating = el('span', { class: 'fval', text: c.ratingA !== null && c.ratingA !== undefined ? c.ratingA.toFixed(0) + ' A' : '—' });
+  const current = el('span', { class: 'fval', text: c.currentA !== null && c.currentA !== undefined ? c.currentA.toFixed(1) + ' A' : '—' });
+  const state = el('span', { class: 'row', style: 'margin:0;gap:6px' }, el('span', { class: 'dot ' + cbStateDot(c) }), el('span', { class: 'label dim', style: 'text-transform:none', text: cbStateLabel(c) }));
+  // Consumers/basis only exist on a catalogue entry (breakers_json's own
+  // doc comment: "the last two only on catalogue entries" — a systems.cfg
+  // circuit carries neither, so it gets no expand affordance at all rather
+  // than a fake empty one.
+  const hasDetail = (c.consumers && c.consumers.length) || c.basis;
+  const info = hasDetail ? el('span', { class: 'help cb-info', title: 'Consumers and rating basis', text: 'i' }) : el('span', {});
+  row.append(cb, name, rating, current, state, info);
+  wrap.append(row);
+  if (hasDetail) {
+    const detail = el('div', { class: 'cb-detail', hidden: '' });
+    if (c.consumers && c.consumers.length) detail.append(el('div', { text: `Consumers: ${c.consumers.join(', ')}` }));
+    if (c.basis) detail.append(el('div', { text: `Basis: ${c.basis}` }));
+    info.addEventListener('click', () => { detail.hidden = !detail.hidden; });
+    wrap.append(detail);
+  }
+  return wrap;
+}
+
+async function breakersOnShow() {
+  if (!breakers.list) {
+    try {
+      breakers.list = (await studyGet('/study/breakers')).breakers.filter((c) => c.source !== 'systemsCfg');
+    } catch {
+      document.getElementById('breakers-content').replaceChildren(el('div', { class: 'box', text: 'Could not load the circuit breaker list.' }));
+      return;
+    }
+  }
+  drawBreakers();
+  if (!breakers.timer) breakers.timer = setInterval(pollBreakers, 1000);
+}
+
+async function pollBreakers() {
+  if (!document.getElementById('tab-breakers').classList.contains('active')) { clearInterval(breakers.timer); breakers.timer = null; return; }
+  if (breakers.busy) return;
+  breakers.busy = true;
+  try {
+    const fresh = (await studyGet('/study/breakers')).breakers.filter((c) => c.source !== 'systemsCfg');
+    const byKey = new Map(fresh.map((c) => [c.source + ':' + c.id, c]));
+    for (const c of breakers.list) {
+      const f = byKey.get(c.source + ':' + c.id);
+      if (f) { c.currentA = f.currentA; c.closed = f.closed; c.trip = f.trip; }
+    }
+  } catch { /* keep the last known list showing; the plugin will reconnect */ }
+  finally { breakers.busy = false; }
+  if (document.getElementById('tab-breakers').classList.contains('active')) drawBreakers();
+}
+
+function drawBreakers() {
+  if (!breakers.list) return;
+  const nav = document.getElementById('breakers-nav');
+  nav.innerHTML = '';
+  const chapters = [...new Set(breakers.list.map((c) => c.chapter))].sort();
+  const navBtn = (key, text, items) => {
+    const open = items.filter((c) => !c.closed).length;
+    const b = el('button', { type: 'button', class: breakers.chapter === key ? 'active' : '' }, text, el('span', { class: 'count' + (open ? ' armed' : ''), text: open ? `${open}/${items.length}` : String(items.length) }));
+    b.addEventListener('click', () => { breakers.chapter = key; drawBreakers(); });
+    nav.append(b);
+  };
+  navBtn('', 'All breakers', breakers.list);
+  nav.append(el('div', { class: 'study-nav-group', text: 'Chapters' }));
+  for (const c of chapters) navBtn(c, c, breakers.list.filter((x) => x.chapter === c));
+
+  const q = document.getElementById('breakers-search').value.trim().toLowerCase();
+  const pulledOnly = document.getElementById('breakers-pulled').checked;
+  const shown = breakers.list.filter((c) => (!breakers.chapter || c.chapter === breakers.chapter) && (!pulledOnly || !c.closed) && (!q || `${c.id} ${c.name} ${c.bus || ''}`.toLowerCase().includes(q)));
+  const content = document.getElementById('breakers-content');
+  content.innerHTML = '';
+  const open = breakers.list.filter((c) => !c.closed).length;
+  content.append(el('div', { class: 'section-title', text: `${breakers.chapter || 'All breakers'} · ${shown.length} shown · ${open} pulled or tripped` }));
+  const box = el('div', { class: 'box' });
+  if (!shown.length) box.append(el('span', { class: 'label dim', text: 'No breakers match.' }));
+  for (const c of shown) box.append(cbRow(c));
+  content.append(box);
+}
+document.getElementById('breakers-search').addEventListener('input', drawBreakers);
+document.getElementById('breakers-pulled').addEventListener('change', drawBreakers);
+document.getElementById('breakers-reset-all').addEventListener('click', async () => {
+  if (!breakers.list) return;
+  const r = await studyPost('/study/action', { kind: 'resetAllBreakers' });
+  if (r.ok === false) return;
+  for (const c of breakers.list) {
+    if (c.source === 'catalogue') { c.closed = true; c.trip = 'none'; }
+  }
+  // `resetAllBreakers` only drains breakers.rs's own catalogue queue
+  // (docs/physics/breakers.md "Study panel wiring"); a systems.cfg circuit
+  // has no batch reset in apply_action at all, so each open one is closed
+  // the same one-at-a-time way "Disarm all" clears failures above.
+  for (const c of breakers.list.filter((c) => c.source === 'systemsCfg' && !c.closed)) {
+    const rr = await studyPost('/study/action', { kind: 'toggleBreaker', id: c.number });
+    if (rr.ok === false) continue;
+    c.closed = true;
+    c.trip = 'none';
+  }
+  drawBreakers();
+});
+
+// ---------------------------------------------------------------------
+// Ground services tab: the flyPad's ground commands and the services'
+// live state.
+
+const ground = { page: null, timer: null, busy: false };
+const AIRCRAFT_PRESETS = [
+  [1, 'Cold & Dark', 'FlyByWire preset 1'],
+  [2, 'Powered', 'FlyByWire preset 2'],
+  [3, 'Ready for Pushback', 'FlyByWire preset 3'],
+  [4, 'Ready for Taxi', 'FlyByWire preset 4'],
+  [5, 'Ready for Takeoff', 'FlyByWire preset 5'],
+];
+async function groundOnShow() {
+  const content = document.getElementById('ground-content');
+  if (!ground.page) {
+    try {
+      const pages = (await studyGet('/study/pages')).pages;
+      ground.page = pages.find((p) => p.kind === 'groundServices');
+    } catch {
+      content.replaceChildren(el('div', { class: 'box', text: 'Could not load ground services.' }));
+      return;
+    }
+  }
+  const page = ground.page;
+  const PRESET = { load: 'A32NX_AIRCRAFT_PRESET_LOAD', progress: 'A32NX_AIRCRAFT_PRESET_LOAD_PROGRESS', expedite: 'A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE' };
+  const names = collectNames(page).concat(Object.values(PRESET));
+  const tile = (b) => {
+    const t = el('button', { type: 'button', class: 'tile' }, el('span', { text: b.label }), el('span', { class: 'tile-state', text: b.command.split('/').pop().replace(/_/g, ' ') }));
+    t.addEventListener('click', async () => { const r = await studyPost('/study/action', { kind: 'command', command: b.command }); if (r.ok !== false) show(b.label); });
+    return t;
+  };
+  const draw = (vars) => {
+    content.innerHTML = '';
+    // FlyByWire's aircraft presets, as the flyPad's Presets page lists them
+    // (extras-host AircraftPresetsList.ts), run by its own procedures.
+    content.append(el('div', { class: 'section-title', text: 'Aircraft state' }));
+    const loading = Number(vars[PRESET.load] || 0);
+    const presets = el('div', { class: 'tiles' });
+    AIRCRAFT_PRESETS.forEach(([id, label, what]) => {
+      const t = el('button', { type: 'button', class: 'tile' + (loading === id ? ' loading' : '') }, el('span', { text: label }), el('span', { class: 'tile-state', text: loading === id ? 'loading…' : what }));
+      t.addEventListener('click', async () => { const r = await studyPost('/study/action', { kind: 'loadAircraftPreset', id }); if (r.ok !== false) show(`Loading ${label}`); });
+      presets.append(t);
+    });
+    content.append(presets);
+    const bar = el('div', { class: 'preset-bar' }, el('div', { class: 'preset-fill' }));
+    bar.firstChild.style.width = `${Math.round(Math.max(0, Math.min(1, Number(vars[PRESET.progress] || 0))) * 100)}%`;
+    const expedite = el('input', { type: 'checkbox' });
+    expedite.checked = Number(vars[PRESET.expedite] || 0) !== 0;
+    expedite.addEventListener('change', () => studyPost('/study/action', { kind: 'setPresetExpedite', on: expedite.checked }));
+    const cancel = el('button', { type: 'button', class: 'small grey', text: 'Cancel' });
+    cancel.disabled = loading === 0;
+    cancel.addEventListener('click', () => studyPost('/study/action', { kind: 'loadAircraftPreset', id: 0 }));
+    content.append(el('div', { class: 'row' }, bar, el('label', { class: 'row', style: 'margin:0' }, expedite, el('span', { class: 'label', text: 'Expedite' })), cancel));
+    content.append(el('div', { class: 'label dim', text: 'On the ground only, as in the flyPad.' }));
+    content.append(el('div', { class: 'section-title', text: 'Services' }));
+    const services = el('div', { class: 'tiles' });
+    page.buttons.forEach((b) => services.append(tile(b)));
+    const oxy = el('button', { type: 'button', class: 'tile' }, el('span', { text: 'Service oxygen' }), el('span', { class: 'tile-state', text: 'refill crew bottles' }));
+    oxy.addEventListener('click', async () => { const r = await studyPost('/study/action', { kind: 'serviceOxygen' }); if (r.ok !== false) show('Oxygen serviced'); });
+    services.append(oxy);
+    content.append(services);
+    content.append(el('div', { class: 'section-title', text: 'Pushback' }));
+    const tug = el('div', { class: 'tiles' });
+    page.tug.forEach((b) => tug.append(tile(b)));
+    content.append(tug);
+    content.append(el('div', { class: 'section-title', text: 'State' }));
+    renderGroups(content, page.groups || [], vars);
+  };
+  const poll = async () => {
+    if (!document.getElementById('tab-ground').classList.contains('active')) { clearInterval(ground.timer); ground.timer = null; return; }
+    if (ground.busy) return;
+    ground.busy = true;
+    let vars = {};
+    try { vars = (await studyGet('/vars?names=' + names.map(encodeURIComponent).join(','))).vars || {}; } catch {} finally { ground.busy = false; }
+    if (document.getElementById('tab-ground').classList.contains('active')) draw(vars);
+  };
+  await poll();
+  if (!ground.timer) ground.timer = setInterval(poll, 1000);
+}
+
+// ---------------------------------------------------------------------
+// Flight plan tab: the pilot's latest SimBrief OFP, straight from SimBrief.
+
+function flightPlanOnShow() {
+  const user = document.getElementById('fp-user');
+  if (!user.value) user.value = settings.CONFIG_OVERRIDE_SIMBRIEF_USERID || '';
+}
+const arr = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+const num = (v, d = 0) => (v === undefined || v === '' || isNaN(Number(v)) ? '--' : Number(v).toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d }));
+function hhmm(sec) { const m = Math.round(Number(sec) / 60); return isNaN(m) ? '--' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`; }
+async function fetchFlightPlan() {
+  const id = document.getElementById('fp-user').value.trim();
+  const state = document.getElementById('fp-state');
+  if (!id) { state.textContent = 'Enter a SimBrief user ID first'; return; }
+  state.textContent = 'Fetching…';
+  let ofp;
+  try {
+    const r = await fetch(`https://www.simbrief.com/api/xml.fetcher.php?userid=${encodeURIComponent(id)}&json=v2`);
+    ofp = await r.json();
+    if (ofp.fetch && ofp.fetch.status && ofp.fetch.status !== 'Success') throw new Error(ofp.fetch.status);
+  } catch (e) {
+    state.textContent = 'SimBrief: ' + (e.message || 'could not fetch');
+    return;
+  }
+  state.textContent = `Generated ${new Date(Number(ofp.params.time_generated) * 1000).toLocaleString()}`;
+  renderFlightPlan(ofp);
+}
+function kv(pairs) {
+  const g = el('div', { class: 'kv' });
+  for (const [k, v] of pairs) g.append(el('div', {}, el('span', { class: 'k', text: k }), el('span', { class: 'v', text: v })));
+  return g;
+}
+function renderFlightPlan(ofp) {
+  const c = document.getElementById('fp-content');
+  c.innerHTML = '';
+  const g = ofp.general || {}, o = ofp.origin || {}, dst = ofp.destination || {}, alt = arr(ofp.alternate)[0] || {}, f = ofp.fuel || {}, w = ofp.weights || {}, t = ofp.times || {};
+  const unit = (ofp.params && ofp.params.units) || 'kgs';
+  const head = el('div', { class: 'box fp-head' },
+    el('div', { class: 'fp-apt' }, el('div', { class: 'icao', text: o.icao_code || '----' }), el('div', { class: 'name', text: `${o.name || ''} · RWY ${o.plan_rwy || '--'}` })),
+    el('div', { class: 'fp-mid' }, el('div', { class: 'big', text: `${g.icao_airline || ''}${g.flight_number || ''}` }), el('div', { text: `${num(g.route_distance)} NM · ${hhmm(t.est_block)} block` }), el('div', { text: `FL${Math.round(Number(g.initial_altitude) / 100) || '--'} · CI ${g.costindex ?? '--'}` })),
+    el('div', { class: 'fp-apt dest' }, el('div', { class: 'icao', text: dst.icao_code || '----' }), el('div', { class: 'name', text: `${dst.name || ''} · RWY ${dst.plan_rwy || '--'}` })));
+  c.append(head);
+  c.append(el('div', { class: 'section-title', text: 'Route' }));
+  c.append(el('div', { class: 'box fp-route', text: `${o.icao_code || ''}/${o.plan_rwy || ''} ${g.route || ''} ${dst.icao_code || ''}/${dst.plan_rwy || ''}` }));
+  c.append(el('div', { class: 'section-title', text: `Fuel (${unit})` }));
+  c.append(el('div', { class: 'box' }, kv([['Block', num(f.plan_ramp)], ['Taxi', num(f.taxi)], ['Trip', num(f.enroute_burn)], ['Contingency', num(f.contingency)], ['Alternate', num(f.alternate_burn)], ['Final reserve', num(f.reserve)], ['Extra', num(f.extra)], ['Landing', num(f.plan_landing)]])));
+  c.append(el('div', { class: 'section-title', text: `Weights (${unit})` }));
+  c.append(el('div', { class: 'box' }, kv([['Passengers', num(w.pax_count_actual ?? w.pax_count)], ['Cargo', num(w.cargo)], ['Payload', num(w.payload)], ['Est ZFW', num(w.est_zfw)], ['Est TOW', num(w.est_tow)], ['Est LW', num(w.est_ldw)], ['Max TOW', num(w.max_tow)], ['Alternate', alt.icao_code || '--']])));
+  const fixes = arr(ofp.navlog && ofp.navlog.fix);
+  c.append(el('div', { class: 'section-title', text: `Navigation log · ${fixes.length} fixes` }));
+  const table = el('table', { class: 'navlog' });
+  const hr = el('tr');
+  [['Fix', ''], ['Via', ''], ['Alt ft', 'num'], ['Leg NM', 'num'], ['Dist NM', 'num'], ['ETE', 'num'], ['Fuel on board', 'num']].forEach(([h, cl]) => hr.append(el('th', { class: cl, text: h })));
+  table.append(hr);
+  let dist = 0;
+  for (const x of fixes) {
+    dist += Number(x.distance) || 0;
+    const tr = el('tr');
+    [[x.ident, ''], [x.via_airway, ''], [num(x.altitude_feet), 'num'], [num(x.distance), 'num'], [num(dist), 'num'], [hhmm(x.time_total), 'num'], [num(x.fuel_plan_onboard), 'num']].forEach(([v, cl]) => tr.append(el('td', { class: cl, text: v ?? '' })));
+    table.append(tr);
+  }
+  c.append(el('div', { class: 'box' }, table));
+  c.append(el('div', { class: 'label dim', style: 'margin-top:4px', text: 'Load it into the FMS from the flyPad (Dashboard, Import SimBrief data).' }));
+}
+document.getElementById('fp-fetch').addEventListener('click', fetchFlightPlan);
+</script>
+</body>
+</html>

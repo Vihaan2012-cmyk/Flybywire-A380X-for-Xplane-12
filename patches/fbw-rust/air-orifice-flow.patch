@@ -1,0 +1,358 @@
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs
+index 3a14d05..049302b 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs
+@@ -2,6 +2,7 @@ use core::panic;
+ use std::{f64::consts::PI, time::Duration};
+ 
+ use uom::si::{
++    area::square_meter,
+     f64::*,
+     pressure::psi,
+     ratio::ratio,
+@@ -395,6 +396,13 @@ impl PackFlowValveState for A380Pneumatic {
+             self.packs[id].left_pack_flow_valve_inlet_pressure()
+         }
+     }
++    // pack_id: 1 or 2 (one shared inlet plenum per pack, downstream of both its flow valves)
++    fn pack_inlet_pressure(&self, pack_id: usize) -> Pressure {
++        self.packs[pack_id - 1].pack_inlet_pressure()
++    }
++    fn pack_inlet_temperature(&self, pack_id: usize) -> ThermodynamicTemperature {
++        self.packs[pack_id - 1].pack_inlet_temperature()
++    }
+ }
+ impl SimulationElement for A380Pneumatic {
+     fn accept<T: SimulationElementVisitor>(&mut self, visitor: &mut T) {
+@@ -698,6 +706,7 @@ struct EngineBleedAirSystem {
+     transfer_pressure_transducer_pressure_id: VariableIdentifier,
+     regulated_pressure_transducer_pressure_id: VariableIdentifier,
+     differential_pressure_transducer_pressure_id: VariableIdentifier,
++    bleed_extraction_flow_id: VariableIdentifier,
+ 
+     fan_compression_chamber_controller: EngineCompressionChamberController, // Controls pressure just behind the main fan
+     intermediate_pressure_compression_chamber_controller: EngineCompressionChamberController,
+@@ -724,6 +733,19 @@ struct EngineBleedAirSystem {
+     differential_pressure_transducer: DifferentialPressureTransducer,
+ }
+ impl EngineBleedAirSystem {
++    // Effective flow areas (Cd * geometric throat area) for the compressible-orifice flow law
++    // (`compressible_orifice_mass_flow_rate`) now used by the HP valve and PRV. GENERIC: no
++    // published A380-specific bleed duct diameter or valve Cv was found by this workstream.
++    // Sized from typical large-transport engine bleed duct diameters (main HP/PR bleed ducts on
++    // wide-body engines commonly run 3.5-4 in) and a typical butterfly/globe bleed valve
++    // discharge coefficient (0.6-0.8 range); first-principles area from that cited diameter, per
++    // docs/briefs/hyperrealism.md's "first-principles derivation from cited geometry" allowance.
++    // See docs/physics/air.md for the full derivation and what remains GENERIC.
++    const HP_VALVE_ORIFICE_AREA_M2: f64 = 0.006207; // pi/4 * (3.5 in)^2
++    const HP_VALVE_DISCHARGE_COEFFICIENT: f64 = 0.65;
++    const PR_VALVE_ORIFICE_AREA_M2: f64 = 0.008107; // pi/4 * (4 in)^2
++    const PR_VALVE_DISCHARGE_COEFFICIENT: f64 = 0.65;
++
+     fn new(context: &mut InitContext, number: usize, powered_by: ElectricalBusType) -> Self {
+         Self {
+             high_pressure_id: context.get_identifier(format!("PNEU_ENG_{}_HP_PRESSURE", number)),
+@@ -761,6 +783,13 @@ impl EngineBleedAirSystem {
+                 "PNEU_ENG_{}_DIFFERENTIAL_TRANSDUCER_PRESSURE",
+                 number
+             )),
++            // The mass flow this engine's compressor actually loses to the bleed system (the
++            // pressure regulating valve's own flow, which is the single path bleed air leaves
++            // the engine through in normal operation). Published under the plugin's
++            // `ENGINE_BLEED_EXTRACTION_KG_S:n` shared-contract name by the XP plugin's own
++            // glue, not by this crate directly (docs/briefs/hyperrealism.md).
++            bleed_extraction_flow_id: context
++                .get_identifier(format!("PNEU_ENG_{}_BLEED_EXTRACTION_FLOW", number)),
+             // TODO: These constants are copied from the A320
+             fan_compression_chamber_controller: EngineCompressionChamberController::new(2., 0.),
+             intermediate_pressure_compression_chamber_controller:
+@@ -852,20 +881,24 @@ impl EngineBleedAirSystem {
+             &mut self.intermediate_pressure_compression_chamber,
+             &mut self.transfer_pressure_pipe,
+         );
+-        self.high_pressure_valve.update_move_fluid(
++        self.high_pressure_valve.update_move_fluid_with_orifice(
+             context,
+             &mut self.high_pressure_compression_chamber,
+             &mut self.transfer_pressure_pipe,
++            Area::new::<square_meter>(Self::HP_VALVE_ORIFICE_AREA_M2),
++            Self::HP_VALVE_DISCHARGE_COEFFICIENT,
+         );
+         self.fan_air_valve.update_move_fluid(
+             context,
+             &mut self.fan_compression_chamber,
+             &mut self.precooler_supply_pipe,
+         );
+-        self.pressure_regulating_valve.update_move_fluid(
++        self.pressure_regulating_valve.update_move_fluid_with_orifice(
+             context,
+             &mut self.transfer_pressure_pipe,
+             &mut self.precooler_inlet_pipe,
++            Area::new::<square_meter>(Self::PR_VALVE_ORIFICE_AREA_M2),
++            Self::PR_VALVE_DISCHARGE_COEFFICIENT,
+         );
+         self.precooler.update(
+             context,
+@@ -941,6 +974,15 @@ impl EngineBleedAirSystem {
+         self.pressure_regulating_valve.is_open()
+     }
+ 
++    /// Total mass flow leaving this engine's compressor for the bleed system: the PRV's own
++    /// flow, plus the HP valve's when it is the PRV's own upstream source is the HP stage
++    /// (`high_pressure_valve` feeds the same `transfer_pressure_pipe` the PRV draws from, so
++    /// double counting is avoided by reading the one flow that actually crosses into the bleed
++    /// duct, the PRV).
++    fn bleed_extraction_flow(&self) -> MassRate {
++        self.pressure_regulating_valve.fluid_flow()
++    }
++
+     fn intermediate_pressure_transducer_pressure(&self) -> Option<Pressure> {
+         self.intermediate_pressure_transducer.signal()
+     }
+@@ -1027,6 +1069,7 @@ impl SimulationElement for EngineBleedAirSystem {
+             &self.pressure_regulating_valve_open_id,
+             self.pressure_regulating_valve.is_open(),
+         );
++        writer.write(&self.bleed_extraction_flow_id, self.bleed_extraction_flow());
+         writer.write(
+             &self.starter_valve_open_id,
+             self.engine_starter_valve.is_open(),
+@@ -1307,6 +1350,18 @@ impl PackComplex {
+     fn right_pack_flow_valve_inlet_pressure(&self) -> Option<Pressure> {
+         self.right_inlet_pressure_sensor.signal()
+     }
++
++    /// Pressure of the air actually sitting in the pack's own inlet plenum, mixed from both flow
++    /// control valves by `pack_container`'s own mass/energy balance. This is the real bleed
++    /// condition the air cycle machine sees, as opposed to `*_inlet_pressure`'s upstream sensor
++    /// reading ahead of the valve.
++    fn pack_inlet_pressure(&self) -> Pressure {
++        self.pack_container.pressure()
++    }
++
++    fn pack_inlet_temperature(&self) -> ThermodynamicTemperature {
++        self.pack_container.temperature()
++    }
+ }
+ impl PneumaticContainer for PackComplex {
+     fn pressure(&self) -> Pressure {
+diff --git a/fbw-common/src/wasm/systems/systems/src/pneumatic/valve.rs b/fbw-common/src/wasm/systems/systems/src/pneumatic/valve.rs
+index 8d2851d..ac67154 100644
+--- a/fbw-common/src/wasm/systems/systems/src/pneumatic/valve.rs
++++ b/fbw-common/src/wasm/systems/systems/src/pneumatic/valve.rs
+@@ -7,8 +7,9 @@ use crate::{
+ };
+ 
+ use uom::si::{
++    area::square_meter,
+     f64::*,
+-    pressure::psi,
++    pressure::{pascal, psi},
+     ratio::{percent, ratio},
+     temperature_interval,
+     thermodynamic_temperature::kelvin,
+@@ -16,6 +17,64 @@ use uom::si::{
+ 
+ use super::{ControllablePneumaticValve, PneumaticContainer, PneumaticValveSignal};
+ 
++/// Standard compressible (isentropic) flow of an ideal gas through a converging orifice/valve
++/// throat: choked above the critical pressure ratio, subsonic (but still compressible, i.e. not
++/// the incompressible sqrt(dP) form) below it. This is the flow law a real HP/PR/crossbleed/pack
++/// bleed valve obeys; it replaces the crate's `PneumaticContainerConnector` "relax exponentially
++/// toward the equilibrium mass" approximation for the valves this pass converts.
++///
++/// Source: Anderson, *Modern Compressible Flow*, 3rd ed., section 3.6 (isentropic flow through a
++/// converging nozzle); the identical functional form (mass flow ~ discharge coefficient * throat
++/// area * upstream stagnation pressure * f(pressure ratio), choked below the critical ratio) is
++/// the basis of the IEC 60534-2-3 valve gas-sizing standard used for real pneumatic valve Cv/Kv
++/// ratings.
++///
++/// `orifice_area` is the valve's fully-open effective flow area (discharge coefficient is passed
++/// separately so callers can size the two independently, matching how real valve data sheets
++/// separate geometric area from Cd). Returns the (always non-negative) mass flow rate from the
++/// upstream side to the downstream side; the caller is responsible for picking which container is
++/// upstream (this function does not look at which container is "container_one"/"container_two").
++pub fn compressible_orifice_mass_flow_rate(
++    upstream_pressure: Pressure,
++    upstream_temperature: ThermodynamicTemperature,
++    downstream_pressure: Pressure,
++    orifice_area: Area,
++    discharge_coefficient: f64,
++) -> MassRate {
++    use uom::si::mass_rate::kilogram_per_second;
++
++    // Matches PneumaticContainer::HEAT_CAPACITY_RATIO / GAS_CONSTANT_DRY_AIR (private to that
++    // trait, so duplicated here, same as air_cycle_machine.rs already does for CP_AIR/GAMMA/R_AIR).
++    const GAMMA: f64 = 1.4;
++    const R: f64 = 287.057005;
++    // Critical pressure ratio for choked flow: (2/(gamma+1))^(gamma/(gamma-1)), gamma = 1.4.
++    const CRITICAL_PRESSURE_RATIO: f64 = 0.528_281_787_717_685_7;
++
++    let p1 = upstream_pressure.get::<pascal>();
++    let p2 = downstream_pressure.get::<pascal>();
++    let t1 = upstream_temperature.get::<kelvin>().max(1.);
++    let a = orifice_area.get::<square_meter>().max(0.);
++
++    if p1 <= 0. || a <= 0. || p2 >= p1 {
++        return MassRate::default();
++    }
++
++    let pressure_ratio = (p2 / p1).max(0.);
++
++    let flow_function = if pressure_ratio <= CRITICAL_PRESSURE_RATIO {
++        (GAMMA * (2. / (GAMMA + 1.)).powf((GAMMA + 1.) / (GAMMA - 1.))).sqrt()
++    } else {
++        (2. * GAMMA / (GAMMA - 1.)
++            * (pressure_ratio.powf(2. / GAMMA) - pressure_ratio.powf((GAMMA + 1.) / GAMMA)))
++        .max(0.)
++        .sqrt()
++    };
++
++    MassRate::new::<kilogram_per_second>(
++        discharge_coefficient * a * p1 / (R * t1).sqrt() * flow_function,
++    )
++}
++
+ /// A valve only controlled by the physical forces due to the pressure gradient. This does not accept any signals.
+ pub struct PurelyPneumaticValve {
+     open_amount: Ratio,
+@@ -219,6 +278,32 @@ impl ElectroPneumaticValve {
+             .update_move_fluid(context, container_one, container_two);
+     }
+ 
++    /// Same as `update_move_fluid` but using real compressible orifice flow
++    /// (`PneumaticContainerConnector::update_move_fluid_with_orifice`) instead of the
++    /// exponential relaxation approximation.
++    pub fn update_move_fluid_with_orifice(
++        &mut self,
++        context: &UpdateContext,
++        container_one: &mut impl PneumaticContainer,
++        container_two: &mut impl PneumaticContainer,
++        orifice_area: Area,
++        discharge_coefficient: f64,
++    ) {
++        if !self.is_powered {
++            self.set_open_amount_from_pressure_difference(
++                container_one.pressure() - container_two.pressure(),
++            )
++        }
++
++        self.connector.with_transfer_speed_factor(self.open_amount).update_move_fluid_with_orifice(
++            context,
++            container_one,
++            container_two,
++            orifice_area,
++            discharge_coefficient,
++        );
++    }
++
+     fn set_open_amount_from_pressure_difference(&mut self, pressure_difference: Pressure) {
+         self.open_amount = Ratio::new::<ratio>(
+             2. / PI
+@@ -399,6 +484,26 @@ impl DefaultValve {
+             );
+     }
+ 
++    /// Same as `update_move_fluid` but using real compressible orifice flow instead of the
++    /// exponential relaxation approximation. See `PneumaticContainerConnector::
++    /// update_move_fluid_with_orifice`.
++    pub fn update_move_fluid_with_orifice(
++        &mut self,
++        context: &UpdateContext,
++        container_one: &mut impl PneumaticContainer,
++        container_two: &mut impl PneumaticContainer,
++        orifice_area: Area,
++        discharge_coefficient: f64,
++    ) {
++        self.connector.with_transfer_speed_factor(self.open_amount).update_move_fluid_with_orifice(
++            context,
++            container_one,
++            container_two,
++            orifice_area,
++            discharge_coefficient,
++        );
++    }
++
+     pub fn fluid_flow(&self) -> MassRate {
+         self.connector.fluid_flow()
+     }
+@@ -460,6 +565,79 @@ impl PneumaticContainerConnector {
+         self.update_move_fluid_internal(context, container_one, container_two, transfer_speed);
+     }
+ 
++    /// Real compressible-orifice flow law (see `compressible_orifice_mass_flow_rate`) instead of
++    /// the exponential-relaxation-to-equilibrium approximation `update_move_fluid` above uses.
++    /// `orifice_area` is the valve's fully-open effective area; the connector's own
++    /// `transfer_speed_factor` (set via `with_transfer_speed_factor`, the valve's open_amount
++    /// ratio) scales it down the same way every other valve already scales its flow by open
++    /// amount.
++    ///
++    /// An explicit, single-evaluation-per-step orifice equation is only the *instantaneous* rate;
++    /// integrated over a finite step it can overshoot pressure equalisation between two small
++    /// volumes (unlike the old relaxation model, which could not overshoot by construction). The
++    /// same non-negotiable stability bound the old model enforced structurally is kept explicitly
++    /// here: the mass moved this step is clamped to the equilibrium-limited mass
++    /// (`get_mass_flow_for_equilibrium`, already used elsewhere in this crate and unconditionally
++    /// stable/NaN-free). This does not change the flow *law* (still real compressible orifice
++    /// flow away from equilibrium, which is where the choked/unchoked distinction actually
++    /// matters); it only prevents a single large step from reversing the pressure gradient.
++    pub fn update_move_fluid_with_orifice(
++        &mut self,
++        context: &UpdateContext,
++        container_one: &mut impl PneumaticContainer,
++        container_two: &mut impl PneumaticContainer,
++        orifice_area: Area,
++        discharge_coefficient: f64,
++    ) {
++        self.heat_conduction(context, container_one, container_two);
++
++        let dt = context.delta_as_secs_f64();
++        if dt <= 0. {
++            self.fluid_flow = MassRate::default();
++            return;
++        }
++
++        let open_amount = self.transfer_speed_factor.get::<ratio>().clamp(0., 1.);
++        let effective_area = orifice_area * open_amount;
++
++        // `move_mass(container_one, container_two, air_mass)` below ADDS `air_mass` to
++        // container_one (same convention `get_mass_flow_for_equilibrium` already uses) -- so
++        // when container_one is the higher-pressure/upstream side, mass must be REMOVED from it
++        // (negative), not added. (Previous version of this method had this backwards: it added
++        // flow to the upstream/higher-pressure container, which the equilibrium clamp below then
++        // crushed to near nothing -- the actual cause of the PRV-regulation regression this was
++        // reverted for, not the assumed orifice area.)
++        let mut air_mass = if container_one.pressure() >= container_two.pressure() {
++            let rate = compressible_orifice_mass_flow_rate(
++                container_one.pressure(),
++                container_one.temperature(),
++                container_two.pressure(),
++                effective_area,
++                discharge_coefficient,
++            );
++            -Mass::new::<uom::si::mass::kilogram>(rate.get::<uom::si::mass_rate::kilogram_per_second>() * dt)
++        } else {
++            let rate = compressible_orifice_mass_flow_rate(
++                container_two.pressure(),
++                container_two.temperature(),
++                container_one.pressure(),
++                effective_area,
++                discharge_coefficient,
++            );
++            Mass::new::<uom::si::mass::kilogram>(rate.get::<uom::si::mass_rate::kilogram_per_second>() * dt)
++        };
++
++        let equilibrium_mass = container_one.get_mass_flow_for_equilibrium(container_two);
++        air_mass = if equilibrium_mass >= Mass::default() {
++            air_mass.max(Mass::default()).min(equilibrium_mass)
++        } else {
++            air_mass.min(Mass::default()).max(equilibrium_mass)
++        };
++
++        self.move_mass(container_one, container_two, air_mass);
++        self.fluid_flow = -air_mass / context.delta_as_time();
++    }
++
+     fn update_move_fluid_internal(
+         &mut self,
+         context: &UpdateContext,

@@ -1,0 +1,64 @@
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs
+index 0000000..0000000 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs
+@@ -748,7 +748,21 @@
+             });
+     }
+ 
+-    /// We check any "new" bottle discharges and then add a random factor on whether it should extinguish a fire
++    /// A zone extinguishes when one of its bottles newly discharges: the
++    /// squib can only arm once the engine (or APU) fire pushbutton is
++    /// released (`ExtinguishingAgentBottle::update`, squib_is_armed requires
++    /// it), which is the same input that cuts the LP fuel valve (xp plugin's
++    /// aspects.rs, engine_commands.rs's `master`/fuel_valve_open) and the
++    /// hydraulic/bleed fire shutoff valves and trips the generator
++    /// (electrical/mod.rs, hydraulic/mod.rs, pneumatic.rs) -- so by the time
++    /// a bottle can discharge, the zone's fuel source is already isolated,
++    /// and a full Halon 1301 bottle discharged into that now fuel-starved,
++    /// sealed nacelle/APU bay reliably smothers the fire. There is no
++    /// physical reason for a properly discharged bottle to sometimes fail,
++    /// so this is deterministic rather than a coin flip; two bottles per
++    /// engine exist for redundancy against a squib or bottle that failed to
++    /// discharge at all (bottle_discharge false), not against agent that
++    /// discharged but somehow wasn't "enough".
+     /// We also use this function to "extinguish" a fire if the user deselects the failure
+     fn zone_extinguishing_determination(&self, bottle_discharge: [bool; 9]) -> [bool; 6] {
+         [
+@@ -756,31 +770,27 @@
+                 bottle_discharge[..2].iter(),
+                 self.bottle_already_discharged[..2].iter(),
+             )
+-            .any(|(discharge, already_discharged)| *discharge && !already_discharged)
+-                && rand::random())
++            .any(|(discharge, already_discharged)| *discharge && !already_discharged))
+                 || (self.was_on_fire[0] && !self.fire[0].is_active()),
+             (zip(
+                 bottle_discharge[2..4].iter(),
+                 self.bottle_already_discharged[2..4].iter(),
+             )
+-            .any(|(discharge, already_discharged)| *discharge && !already_discharged)
+-                && rand::random())
++            .any(|(discharge, already_discharged)| *discharge && !already_discharged))
+                 || (self.was_on_fire[1] && !self.fire[1].is_active()),
+             (zip(
+                 bottle_discharge[4..6].iter(),
+                 self.bottle_already_discharged[4..6].iter(),
+             )
+-            .any(|(discharge, already_discharged)| *discharge && !already_discharged)
+-                && rand::random())
++            .any(|(discharge, already_discharged)| *discharge && !already_discharged))
+                 || (self.was_on_fire[2] && !self.fire[2].is_active()),
+             (zip(
+                 bottle_discharge[6..8].iter(),
+                 self.bottle_already_discharged[6..8].iter(),
+             )
+-            .any(|(discharge, already_discharged)| *discharge && !already_discharged)
+-                && rand::random())
++            .any(|(discharge, already_discharged)| *discharge && !already_discharged))
+                 || (self.was_on_fire[3] && !self.fire[3].is_active()),
+-            (bottle_discharge[8] && !self.bottle_already_discharged[8] && rand::random())
++            (bottle_discharge[8] && !self.bottle_already_discharged[8])
+                 || (self.was_on_fire[4] && !self.fire[4].is_active()),
+             // MLG does not have a fire extinguishing system
+             false,

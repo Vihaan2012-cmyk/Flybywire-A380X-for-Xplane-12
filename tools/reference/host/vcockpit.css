@@ -1,0 +1,21 @@
+/* The VCockpit view: a fixed-size surface at panel.cfg pixel_size. MSFS's
+   own common.css is not shipped with the aircraft; only the properties that
+   affect a glass cockpit texture are reproduced here. The texture behind
+   transparent pixels is black (emissive screen, unlit). */
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+}
+vcockpit-panel {
+  display: block;
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+}
+script[type="text/html"] { display: none; }

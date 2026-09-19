@@ -1,0 +1,37 @@
+[package]
+name = "xphfbw"
+version = "0.1.0"
+edition = "2021"
+description = "XPHFBW: FlyByWire A380X's systems and instruments host for X-Plane 12"
+publish = false
+
+[[bin]]
+name = "XPHFBW"
+path = "src/main.rs"
+
+[dependencies]
+# Chromium Embedded Framework. The runtime (CEF 152) is exported once to
+# D:\fbw-build\cef; builds find it through CEF_PATH.
+cef = { version = "=152.3.0", default-features = false }
+# FlyByWire's systems and the plugin's shared-memory bridge (src/remote).
+fbw_a380_systems_xp = { path = ".." }
+serde_json = "1"
+# tray.rs (notification-area icon and its menu) and crash.rs (unhandled
+# exception filter): pure Win32, no CEF.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# build.rs: generates and embeds the app's .ico as a Windows resource.
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3

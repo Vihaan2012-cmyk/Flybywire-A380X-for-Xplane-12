@@ -1,0 +1,73 @@
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/mod.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/mod.rs
+@@ -2214,7 +2214,9 @@
+             A380ElectricPumpId::GreenA => self.green_electric_pump_a_controller.has_any_fault(),
+             A380ElectricPumpId::GreenB => self.green_electric_pump_b_controller.has_any_fault(),
+ 
+-            A380ElectricPumpId::GreenAuxiliary => false, // TODO check the fault behaviour
++            A380ElectricPumpId::GreenAuxiliary => {
++                self.green_electric_aux_pump_controller.has_any_fault()
++            }
+         }
+     }
+ 
+@@ -3045,7 +3047,7 @@
+         );
+ 
+         self.green_electric_aux_pump_controller
+-            .update(&self.epump_auto_logic);
++            .update(&self.epump_auto_logic, self.green_circuit.reservoir());
+         self.green_auxiliary_pump.update(
+             context,
+             self.green_circuit.auxiliary_section(),
+@@ -4062,17 +4064,48 @@
+     pump_id: A380ElectricPumpId,
+ 
+     should_pressurise: bool,
++
++    // ATA-29 hydraulics workstream: `epump_has_fault(GreenAuxiliary)` used
++    // to hard-code `false` regardless of this pump's real state (a
++    // flag-instead-of-real-input shortcut). This controller previously
++    // tracked nothing at all -- unlike `A380ElectricPumpController`
++    // (`has_low_level_fault`/`has_air_pressure_low_fault`/
++    // `has_pressure_low_fault`/`has_overheat_fault`, all driven by the
++    // real `Reservoir`/pump state), it had no fault fields to report.
++    // Reservoir-quantity and reservoir-air-pressure starvation are real,
++    // already-modelled causes (`Reservoir::is_low_level`/
++    // `is_low_air_pressure`) that apply to this pump exactly as they do
++    // to the other green/yellow electric pumps sharing the same
++    // reservoir, so they are wired in here the same way. Left out:
++    // pressure-low (no dedicated pump-section pressure switch index is
++    // wired to this auxiliary section the same way) and overheat (the
++    // underlying `ManualPump` type, `hydraulic/mod.rs`, has no heat model
++    // at all -- `impl HeatingElement for ManualPump {}` uses the trait's
++    // `false` defaults; giving the green auxiliary pump a real overheat
++    // fault needs a heat model added to `ManualPump` itself first, out of
++    // scope for this pass and left as a documented follow-up).
++    has_low_level_fault: bool,
++    has_air_pressure_low_fault: bool,
+ }
+ impl A380AuxiliaryPumpController {
+     fn new(pump_id: A380ElectricPumpId) -> Self {
+         Self {
+             pump_id,
+             should_pressurise: false,
++            has_low_level_fault: false,
++            has_air_pressure_low_fault: false,
+         }
+     }
+ 
+-    fn update(&mut self, auto_logic: &A380ElectricPumpAutoLogic) {
+-        self.should_pressurise = auto_logic.should_auto_run_pump(self.pump_id)
++    fn update(&mut self, auto_logic: &A380ElectricPumpAutoLogic, reservoir: &Reservoir) {
++        self.should_pressurise = auto_logic.should_auto_run_pump(self.pump_id);
++
++        self.has_low_level_fault = reservoir.is_low_level();
++        self.has_air_pressure_low_fault = reservoir.is_low_air_pressure();
++    }
++
++    fn has_any_fault(&self) -> bool {
++        self.has_low_level_fault || self.has_air_pressure_low_fault
+     }
+ }
+ impl PumpController for A380AuxiliaryPumpController {

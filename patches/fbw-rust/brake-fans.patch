@@ -1,0 +1,40 @@
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/mod.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/mod.rs
+@@ -2074,28 +2074,33 @@
+             left_wing_brake_assembly: BrakeAssembly::new(
+                 context,
+                 "WHEEL RPM:1".to_owned(), // Should be "WHEEL RPM:3" but MSFS has weird definitions...
+                 [1, 2, 5, 6],
+                 [ElectricalBusType::DirectCurrent(1); 4], // TODO
+-                None,
++                // fbw-xp-systems landing gear/brakes workstream: Brake.rs's
++                // BrakeFan (589 W motor) was fully modelled but never
++                // instantiated on the A380 (every assembly passed `None`
++                // here). Racked on the same bus as the brake sensors above
++                // until a dedicated fan-circuit bus is assigned.
++                Some(ElectricalBusType::DirectCurrent(1)),
+             ),
+             right_wing_brake_assembly: BrakeAssembly::new(
+                 context,
+                 "WHEEL RPM:2".to_owned(), // Should be "WHEEL RPM:4" but MSFS has weird definitions...
+                 [3, 4, 7, 8],
+                 [ElectricalBusType::DirectCurrent(1); 4], // TODO
+-                None,
++                Some(ElectricalBusType::DirectCurrent(1)),
+             ),
+             left_body_brake_assembly: BrakeAssembly::new(
+                 context,
+                 "WHEEL RPM:1".to_owned(),
+                 [9, 10, 13, 14],
+                 [ElectricalBusType::DirectCurrent(1); 4], // TODO
+-                None,
++                Some(ElectricalBusType::DirectCurrent(1)),
+             ),
+             right_body_brake_assembly: BrakeAssembly::new(
+                 context,
+                 "WHEEL RPM:2".to_owned(),
+                 [11, 12, 15, 16],
+                 [ElectricalBusType::DirectCurrent(1); 4], // TODO
+-                None,
++                Some(ElectricalBusType::DirectCurrent(1)),
+             ),

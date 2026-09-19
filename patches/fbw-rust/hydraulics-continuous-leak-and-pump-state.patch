@@ -1,0 +1,471 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs b/fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs
+index 7df3533..c8c0956 100644
+--- a/fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs
+@@ -25,6 +25,7 @@ use uom::si::{
+     angular_velocity::{radian_per_second, revolution_per_minute},
+     f64::*,
+     length::meter,
++    power::watt,
+     pressure::{pascal, psi},
+     ratio::ratio,
+     torque::{newton_meter, pound_force_inch},
+@@ -2236,6 +2237,21 @@ pub struct Reservoir {
+     leak_failure: Failure,
+     return_failure: Failure,
+ 
++    // ATA-29 hydraulics workstream (docs/physics/fluids.md): a continuous,
++    // externally driven leak rate, orthogonal to `leak_failure` above.
++    // `leak_failure` is FBW's original instructor failure: binary (on/off)
++    // at a fixed `LEAK_FAILURE_FLOW_GAL_PER_S`. The plugin's continuous
++    // degradation model (`failures::magnitude`, fbw-xp-systems) instead
++    // needs a leak whose *rate* varies continuously with wear/damage
++    // severity -- e.g. a seal that is 30% degraded should leak at 30% of
++    // its fully-failed rate, not not-at-all-or-fully. `external_leak_flow`
++    // is that rate, set once per tick by `set_external_leak_flow` (plugin
++    // glue not yet wired -- see the module doc on that function), applied
++    // in `update_leak_failure` in addition to (not instead of) the
++    // existing binary failure so existing FBW behaviour and tests are
++    // unchanged when it is left at its default (zero).
++    external_leak_flow: VolumeRate,
++
+     fluid_physics: FluidPhysics,
+ 
+     heat_state: HeatingProperties,
+@@ -2282,6 +2298,7 @@ impl Reservoir {
+             return_failure: Failure::new(FailureType::ReservoirReturnLeak(hyd_loop_id)),
+             air_pressure_switches,
+             level_switch: LevelSwitch::new(low_level_threshold),
++            external_leak_flow: VolumeRate::new::<gallon_per_second>(0.),
+             fluid_physics: FluidPhysics::new(),
+ 
+             heat_state: HeatingProperties::new(
+@@ -2334,6 +2351,16 @@ impl Reservoir {
+             .update(context, has_fluid_return && fluid.is_overheating())
+     }
+ 
++    /// Sets this tick's continuous, externally driven leak rate (see the
++    /// `external_leak_flow` field doc). `flow` is a physical volume rate,
++    /// not a 0..=1 magnitude -- the caller (plugin glue, once wired) is
++    /// expected to derive it from `failures::magnitude(id) *
++    /// <this reservoir's fully-failed leak rate>`, matching the physical
++    /// quantity a real degraded seal would actually lose.
++    pub fn set_external_leak_flow(&mut self, flow: VolumeRate) {
++        self.external_leak_flow = flow.max(VolumeRate::new::<gallon_per_second>(0.));
++    }
++
+     fn update_leak_failure(&mut self, context: &UpdateContext) {
+         if self.leak_failure.is_active() {
+             self.current_level -=
+@@ -2342,6 +2369,12 @@ impl Reservoir {
+ 
+             self.current_level = self.current_level.max(Volume::new::<gallon>(0.));
+         }
++
++        if self.external_leak_flow.get::<gallon_per_second>() > 0. {
++            self.current_level -= self.external_leak_flow * context.delta_as_time();
++
++            self.current_level = self.current_level.max(Volume::new::<gallon>(0.));
++        }
+     }
+ 
+     fn update_pressure_switches(&mut self, context: &UpdateContext) {
+@@ -2640,6 +2673,10 @@ impl PressureSource for Pump {
+ pub struct ElectricPump {
+     cavitation_id: VariableIdentifier,
+     overheat_id: VariableIdentifier,
++    // hyperrealism.md physics workstream 5: the Study panel's pump flow
++    // quantity, previously unpublished (see the matching `EngineDrivenPump`
++    // comment).
++    flow_id: VariableIdentifier,
+     pump: Pump,
+     pump_physics: ElectricalPumpPhysics,
+ }
+@@ -2655,6 +2692,7 @@ impl ElectricPump {
+         Self {
+             cavitation_id: context.get_identifier(format!("HYD_{}_EPUMP_CAVITATION", id)),
+             overheat_id: context.get_identifier(format!("HYD_{}_EPUMP_OVHT", id)),
++            flow_id: context.get_identifier(format!("HYD_{}_EPUMP_FLOW", id)),
+             pump: Pump::new(pump_characteristics),
+             pump_physics: ElectricalPumpPhysics::new(
+                 context,
+@@ -2739,6 +2777,7 @@ impl SimulationElement for ElectricPump {
+             self.cavitation_efficiency().get::<ratio>(),
+         );
+         writer.write(&self.overheat_id, self.is_overheating());
++        writer.write(&self.flow_id, self.flow());
+     }
+ }
+ impl HeatingElement for ElectricPump {
+@@ -2754,10 +2793,22 @@ impl HeatingPressureSource for ElectricPump {}
+ 
+ pub struct EngineDrivenPump {
+     active_id: VariableIdentifier,
++    shaft_power_id: VariableIdentifier,
++    // hyperrealism.md physics workstream 5: the Study panel's pump flow
++    // quantity; no var previously published a pump's own flow (only the
++    // section/system pressures did, e.g. `HYD_GREEN_PUMP_1_SECTION_PRESSURE`
++    // above the `edp_tests` module).
++    flow_id: VariableIdentifier,
++    // ATA-29 hydraulics workstream (docs/physics/fluids.md): publish the
++    // same cavitation ratio `ElectricPump` already exposes
++    // (`HYD_<id>_EPUMP_CAVITATION`), so a cavitating EDP is observable, and
++    // so its causal link to `is_overheating()` below can be checked live.
++    cavitation_id: VariableIdentifier,
+ 
+     is_active: bool,
+     speed: AngularVelocity,
+     pump: Pump,
++    last_pressure: Pressure,
+ 
+     overheat_failure: Failure,
+     heat_state: HeatingProperties,
+@@ -2773,6 +2824,22 @@ impl EngineDrivenPump {
+ 
+     const SPEED_SPOOLDOWN_WHEN_DECLUTCHED_RPM_PER_S: f64 = 800.;
+ 
++    const CAVITATION_OVERHEAT_EFFICIENCY_RATIO: f64 = 0.3;
++
++    // hyperrealism.md physics workstream 5 (fluids): overall (volumetric x
++    // mechanical) efficiency of an aviation engine-driven axial piston
++    // hydraulic pump. Power & Motion Technology's efficiency survey of
++    // aviation-grade axial piston pumps gives ~92% for a pump "in good
++    // condition" and up to 94% for modern designs
++    // (https://www.powermotiontech.com/hydraulics/hydraulic-pumps-motors/article/21886525/how-efficient-are-your-hydraulic-machines).
++    // No A380 EDP-specific test-stand figure is publicly available, so 0.90
++    // is used: the same order of magnitude, slightly derated to cover the
++    // pump's full pressure/speed envelope rather than only its best point.
++    // This is the divisor the shared engine-load contract
++    // (docs/briefs/hyperrealism.md, "ENGINE_GEARBOX_HYD_LOAD_W:n") calls for:
++    // "pressure x flow / efficiency".
++    const SHAFT_EFFICIENCY: f64 = 0.90;
++
+     pub fn new(
+         context: &mut InitContext,
+         id: AirbusEngineDrivenPumpId,
+@@ -2780,9 +2847,13 @@ impl EngineDrivenPump {
+     ) -> Self {
+         Self {
+             active_id: context.get_identifier(format!("HYD_{}_EDPUMP_ACTIVE", id)),
++            shaft_power_id: context.get_identifier(format!("HYD_{}_EDPUMP_SHAFT_POWER_W", id)),
++            flow_id: context.get_identifier(format!("HYD_{}_EDPUMP_FLOW", id)),
++            cavitation_id: context.get_identifier(format!("HYD_{}_EDPUMP_CAVITATION", id)),
+             is_active: false,
+             speed: AngularVelocity::new::<revolution_per_minute>(0.),
+             pump: Pump::new(pump_characteristics),
++            last_pressure: Pressure::new::<psi>(0.),
+             overheat_failure: Failure::new(FailureType::EnginePumpOverheat(id)),
+             heat_state: HeatingProperties::new(
+                 Duration::from_secs_f64(
+@@ -2806,13 +2877,6 @@ impl EngineDrivenPump {
+         pump_speed: AngularVelocity,
+         controller: &impl PumpController,
+     ) {
+-        self.heat_state.update(
+-            context,
+-            self.overheat_failure.is_active()
+-                && pump_speed.get::<revolution_per_minute>()
+-                    > Self::MIN_SPEED_TO_REPORT_HEATING_RPM,
+-        );
+-
+         self.speed = if !self.is_damaged() && controller.is_input_shaft_connected() {
+             pump_speed
+         } else {
+@@ -2823,10 +2887,68 @@ impl EngineDrivenPump {
+         };
+         self.speed = self.speed.max(AngularVelocity::default());
+ 
++        // hyperrealism.md physics workstream 5: cache the section pressure
++        // this pump is working against so `shaft_power` can turn it into a
++        // real mechanical load on the engine (pressure x flow / efficiency)
++        // once `flow()` below reflects the same tick's demand.
++        self.last_pressure = section.pressure();
++
+         self.pump
+             .update(context, section, reservoir, self.speed, controller);
+ 
+         self.is_active = controller.should_pressurise();
++
++        // ATA-29 hydraulics workstream (docs/physics/fluids.md): a
++        // cavitating pump is a real overheat/damage cause on its own, not
++        // only the instructor-triggered `overheat_failure`. Starved of
++        // fluid (low reservoir air pressure, low quantity, or the
++        // reservoir already overheated -- all three already drive
++        // `Pump::cavitation_efficiency` above, via
++        // `PumpCharacteristics::cavitation_efficiency`), the pump's
++        // pistons lose their lubricating film and cavitation bubbles
++        // collapsing against the pump internals both generate real heat:
++        // a standard hydraulic pump failure mode (e.g. Parker Hannifin's
++        // "Cavitation in Hydraulic Pumps" application literature: pump
++        // cavitation "generates heat and can quickly damage a pump").
++        // `CAVITATION_OVERHEAT_EFFICIENCY_RATIO` (0.3) is the severity
++        // threshold below which that starvation counts as a heating
++        // cause -- computed fresh this tick (after `self.pump.update`
++        // above just recomputed it from this tick's reservoir state), not
++        // last tick's stale value.
++        self.heat_state
++            .update(context, self.is_heating_this_tick(pump_speed));
++    }
++
++    /// Whether this tick's conditions should drive `heat_state` toward
++    /// overheat: either the instructor-triggered failure (unchanged, base
++    /// FBW behaviour), or real cavitation (see the comment above the call
++    /// site in `update`) severe enough to cross
++    /// `CAVITATION_OVERHEAT_EFFICIENCY_RATIO`, while the pump is actually
++    /// being asked to pressurise and turning fast enough to matter. Split
++    /// out from `update` so it can be unit tested directly against a
++    /// pump's already-computed cavitation state.
++    fn is_heating_this_tick(&self, pump_speed: AngularVelocity) -> bool {
++        let is_cavitating_badly = self.is_active
++            && self.pump.cavitation_efficiency().get::<ratio>()
++                < Self::CAVITATION_OVERHEAT_EFFICIENCY_RATIO;
++
++        (self.overheat_failure.is_active() || is_cavitating_badly)
++            && pump_speed.get::<revolution_per_minute>() > Self::MIN_SPEED_TO_REPORT_HEATING_RPM
++    }
++
++    pub fn cavitation_efficiency(&self) -> Ratio {
++        self.pump.cavitation_efficiency()
++    }
++
++    /// The mechanical shaft power this pump draws from the engine gearbox:
++    /// hydraulic output power (pressure x flow) divided by the pump's
++    /// overall efficiency (`SHAFT_EFFICIENCY`), i.e. hydraulic power plus
++    /// the pump's own internal losses (dissipated as heat into the fluid).
++    /// This is the number the plugin's `ENGINE_GEARBOX_HYD_LOAD_W:n`
++    /// contract (docs/briefs/hyperrealism.md) expects; previously nothing
++    /// fed the engine-driven pumps' load back to the engine model at all.
++    pub fn shaft_power(&self) -> Power {
++        (self.last_pressure * self.pump.flow()) / Self::SHAFT_EFFICIENCY
+     }
+ }
+ impl PressureSource for EngineDrivenPump {
+@@ -2865,6 +2987,12 @@ impl SimulationElement for EngineDrivenPump {
+ 
+     fn write(&self, writer: &mut SimulatorWriter) {
+         writer.write(&self.active_id, self.is_active);
++        writer.write(&self.shaft_power_id, self.shaft_power().get::<watt>());
++        writer.write(&self.flow_id, self.flow());
++        writer.write(
++            &self.cavitation_id,
++            self.cavitation_efficiency().get::<ratio>(),
++        );
+     }
+ }
+ impl HeatingElement for EngineDrivenPump {
+@@ -3237,7 +3365,7 @@ mod tests {
+     use ntest::assert_about_eq;
+ 
+     use crate::simulation::test::{
+-        ElementCtorFn, ReadByName, SimulationTestBed, TestBed, WriteByName,
++        ElementCtorFn, ReadByName, SimulationTestBed, TestAircraft, TestBed, WriteByName,
+     };
+     use crate::simulation::InitContext;
+ 
+@@ -3731,6 +3859,84 @@ mod tests {
+         )
+     }
+ 
++    // ATA-29 hydraulics workstream (docs/physics/fluids.md): fixed-size
++    // reservoir for `external_leak_flow` tests below, independent of the
++    // `hydraulic_circuit` test fixture's own reservoir sizing.
++    fn test_reservoir(context: &mut InitContext) -> Reservoir {
++        reservoir(
++            context,
++            HydraulicColor::Green,
++            Volume::new::<gallon>(5.),
++            Volume::new::<gallon>(4.),
++            Volume::new::<gallon>(3.),
++        )
++    }
++
++    // Drives only `update_leak_failure` every tick (not the full
++    // `Reservoir::update`, which also needs an `air_pressure`/`fluid`
++    // context irrelevant to this coupling) so the emergent path under test
++    // -- `set_external_leak_flow` -> `current_level` draining over real
++    // simulated time -- is exercised through the normal physics loop
++    // rather than by hand-stepping the field.
++    fn tick_leak_only(test_bed: &mut SimulationTestBed<TestAircraft<Reservoir>>) {
++        test_bed.set_update_after_power_distribution(|e, context| e.update_leak_failure(context));
++    }
++
++    // COUPLED case, and the emergence proof's baseline: a reservoir
++    // starting at 3.0 gal, with the external-leak coupling wired
++    // (`set_external_leak_flow(0.02 gal/s)`), run for 10s of simulated
++    // time through the real per-tick update loop (`tick_leak_only`, not a
++    // single hand-computed step). Hand-derived prediction, independent of
++    // the sim's own output: 0.02 gal/s * 10s = 0.2 gal lost -> 2.8 gal
++    // remaining. Paired with
++    // `decoupled_reservoir_with_no_leak_flow_command_does_not_drain` below,
++    // which is the identical scenario with only the coupling cut -- the
++    // draining effect must vanish there and only there.
++    #[test]
++    fn coupled_external_leak_flow_drains_reservoir_over_time() {
++        let mut test_bed = SimulationTestBed::from(ElementCtorFn(test_reservoir));
++        tick_leak_only(&mut test_bed);
++
++        let leak_flow = VolumeRate::new::<gallon_per_second>(0.02);
++        test_bed.command_element(|e| e.set_external_leak_flow(leak_flow));
++
++        test_bed.run_multiple_frames(Duration::from_secs(10));
++
++        let level = test_bed.query_element(|e| e.fluid_level_real());
++        let expected = Volume::new::<gallon>(3.0 - 0.02 * 10.0);
++        assert!(
++            (level.get::<gallon>() - expected.get::<gallon>()).abs() < 0.005,
++            "expected {} gal after a 0.02 gal/s leak for 10s (3.0 - 0.2), got {} gal",
++            expected.get::<gallon>(),
++            level.get::<gallon>()
++        );
++    }
++
++    // DECOUPLED case: the exact same fixture, tick loop and duration as
++    // `coupled_external_leak_flow_drains_reservoir_over_time` above, with
++    // only the one link cut -- `set_external_leak_flow` is never called,
++    // so `external_leak_flow` stays at its constructed default (zero).
++    // Hand-derived prediction: with the coupling cut, level must be
++    // exactly unchanged (3.0 gal) after the same 10s that drained 0.2 gal
++    // in the coupled case above -- proving the drain in that test came
++    // from the coupling, not from `run_multiple_frames` itself or from
++    // some other reservoir mechanism (e.g. `leak_failure`, which this test
++    // also never activates).
++    #[test]
++    fn decoupled_reservoir_with_no_leak_flow_command_does_not_drain() {
++        let mut test_bed = SimulationTestBed::from(ElementCtorFn(test_reservoir));
++        tick_leak_only(&mut test_bed);
++
++        test_bed.run_multiple_frames(Duration::from_secs(10));
++
++        let level = test_bed.query_element(|e| e.fluid_level_real());
++        assert!(
++            (level.get::<gallon>() - 3.0).abs() < 1e-9,
++            "expected level unchanged at 3.0 gal with no leak commanded, got {} gal",
++            level.get::<gallon>()
++        );
++    }
++
+     fn hydraulic_circuit(
+         context: &mut InitContext,
+         loop_color: HydraulicColor,
+@@ -3788,5 +3994,121 @@ mod tests {
+ 
+             assert!(test_bed.query_element(|e| !e.is_active));
+         }
++
++        // hyperrealism.md physics workstream 5 (fluids): the engine gearbox
++        // load contract (`ENGINE_GEARBOX_HYD_LOAD_W:n`) is "pressure x flow
++        // / efficiency" -- exercise the pump's own private state directly
++        // (this test module is a descendant of `hydraulic`, so it may) to
++        // check the arithmetic without needing a full hydraulic circuit.
++        #[test]
++        fn shaft_power_is_pressure_times_flow_over_efficiency() {
++            use uom::si::volume_rate::cubic_meter_per_second;
++
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            let pressure = Pressure::new::<psi>(3000.);
++            let flow = VolumeRate::new::<gallon_per_second>(0.05);
++            test_bed.command_element(|e| {
++                e.last_pressure = pressure;
++                e.pump.current_flow = flow;
++            });
++
++            let power = test_bed.query_element(|e| e.shaft_power());
++
++            let expected_w = pressure.get::<pascal>() * flow.get::<cubic_meter_per_second>()
++                / EngineDrivenPump::SHAFT_EFFICIENCY;
++            assert!(
++                (power.get::<watt>() - expected_w).abs() < expected_w * 1e-9 + 1e-6,
++                "expected {expected_w} W, got {} W",
++                power.get::<watt>()
++            );
++        }
++
++        #[test]
++        fn shaft_power_is_zero_with_no_flow() {
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            test_bed.command_element(|e| e.last_pressure = Pressure::new::<psi>(3000.));
++
++            let power = test_bed.query_element(|e| e.shaft_power());
++            assert_eq!(power.get::<watt>(), 0.);
++        }
++
++        // ATA-29 hydraulics workstream (docs/physics/fluids.md): a pump
++        // starved by reservoir cavitation (here forced directly onto the
++        // pump's own already-real `cavitation_efficiency`, rather than
++        // re-deriving a whole reservoir/air-pressure starvation scenario)
++        // must be flagged as a heating cause on its own, independent of
++        // the instructor-triggered `overheat_failure`.
++        #[test]
++        fn severe_cavitation_is_a_heating_cause_without_failure_injected() {
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            test_bed.command_element(|e| {
++                e.is_active = true;
++                e.pump.cavitation_efficiency = Ratio::new::<ratio>(0.1);
++            });
++
++            let is_heating = test_bed.query_element(|e| {
++                e.is_heating_this_tick(AngularVelocity::new::<revolution_per_minute>(1000.))
++            });
++
++            assert!(
++                is_heating,
++                "cavitation_efficiency 0.1 is below CAVITATION_OVERHEAT_EFFICIENCY_RATIO \
++                 (0.3) and should count as a heating cause on its own"
++            );
++        }
++
++        #[test]
++        fn mild_cavitation_is_not_a_heating_cause() {
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            test_bed.command_element(|e| {
++                e.is_active = true;
++                e.pump.cavitation_efficiency = Ratio::new::<ratio>(0.9);
++            });
++
++            let is_heating = test_bed.query_element(|e| {
++                e.is_heating_this_tick(AngularVelocity::new::<revolution_per_minute>(1000.))
++            });
++
++            assert!(
++                !is_heating,
++                "cavitation_efficiency 0.9 is a healthy pump and must not heat the pump"
++            );
++        }
++
++        #[test]
++        fn cavitation_is_not_a_heating_cause_when_pump_not_pressurising() {
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            // Pump has a bad cavitation_efficiency reading but is not
++            // actually being commanded to pressurise (e.g. declutched) --
++            // it should not be treated as a live cavitation heating cause.
++            test_bed.command_element(|e| {
++                e.is_active = false;
++                e.pump.cavitation_efficiency = Ratio::new::<ratio>(0.05);
++            });
++
++            let is_heating = test_bed.query_element(|e| {
++                e.is_heating_this_tick(AngularVelocity::new::<revolution_per_minute>(1000.))
++            });
++
++            assert!(!is_heating);
++        }
++
++        #[test]
++        fn cavitation_efficiency_is_published() {
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            test_bed.command_element(|e| {
++                e.pump.cavitation_efficiency = Ratio::new::<ratio>(0.42);
++            });
++            test_bed.run_without_delta();
++
++            let published: f64 = test_bed.read_by_name("HYD_GREEN_EDPUMP_CAVITATION");
++            assert!((published - 0.42).abs() < 1e-6);
++        }
+     }
+ }

@@ -1,0 +1,8 @@
+{
+  "name": "approach",
+  "description": "See docs/reference-harness.md, States.",
+  "extends": ["parts/common", "parts/systems-approach", "parts/avionics-approach"],
+  "flt": "approach.FLT",
+  "time": { "utc": "2026-06-21T12:00:00Z", "settleMs": 20000 },
+  "vars": {}
+}

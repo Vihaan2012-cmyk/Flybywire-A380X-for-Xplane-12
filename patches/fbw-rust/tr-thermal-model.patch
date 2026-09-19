@@ -1,0 +1,104 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs b/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs
+index 55db420..cef984c 100644
+--- a/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs
++++ b/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs
+@@ -1,6 +1,9 @@
+ use std::cell::Ref;
+ 
+-use uom::si::{electric_current::ampere, electric_potential::volt, f64::*, power::watt};
++use uom::si::{
++    electric_current::ampere, electric_potential::volt, f64::*, power::watt,
++    thermodynamic_temperature::degree_celsius,
++};
+ 
+ use super::{
+     ElectricalElement, ElectricalElementIdentifier, ElectricalElementIdentifierProvider,
+@@ -12,6 +15,7 @@ use crate::{
+     shared::{ConsumePower, PowerConsumptionReport},
+     simulation::{
+         InitContext, SimulationElement, SimulationElementVisitor, SimulatorWriter, UpdateContext,
++        VariableIdentifier, Write,
+     },
+ };
+ 
+@@ -23,12 +27,28 @@ pub struct TransformerRectifier {
+     failure: Failure,
+     output_potential: ElectricPotential,
+     output_current: ElectricCurrent,
++    /// Case temperature (fbw-xp-systems electrical-sources workstream,
++    /// docs/physics/electrical.md): first-order I^2R-in/convective-cooling-
++    /// out energy balance, the same technique `battery.rs`'s own thermal
++    /// model uses, driven by `resistor_power` (the loss already computed
++    /// every tick in `consume_power_in_converters` below but previously
++    /// discarded after being folded into the AC-side input power -- this TR
++    /// already modelled the *loss*, it just never turned that loss into a
++    /// temperature).
++    temperature: ThermodynamicTemperature,
++    temperature_id: VariableIdentifier,
+ }
+ impl TransformerRectifier {
+     // Value determined by output voltage at specific loads
+     const INTERNAL_RESISTANCE_OHM: f64 = 0.0135;
+     // Potential output without any load
+     const IDLE_OUTPUT_VOLTAGE: f64 = 30.2;
++    /// Thermal mass and natural-convection cooling coefficient for a TR's
++    /// finned aluminium case; derived/typical estimates (no FBW/A380
++    /// figure), the same order of magnitude reasoning as `battery.rs`'s own
++    /// thermal constants (docs/physics/electrical.md).
++    const THERMAL_MASS_J_PER_KELVIN: f64 = 1500.;
++    const COOLING_W_PER_KELVIN: f64 = 3.5;
+ 
+     pub fn new(context: &mut InitContext, number: usize) -> TransformerRectifier {
+         TransformerRectifier {
+@@ -39,9 +59,25 @@ impl TransformerRectifier {
+             failure: Failure::new(FailureType::TransformerRectifier(number)),
+             output_potential: ElectricPotential::new::<volt>(0.),
+             output_current: ElectricCurrent::new::<ampere>(0.),
++            temperature: ThermodynamicTemperature::new::<degree_celsius>(20.),
++            temperature_id: context.get_identifier(format!("ELEC_TR_{}_TEMPERATURE", number)),
+         }
+     }
+ 
++    /// First-order energy balance from this tick's real I^2R conversion
++    /// loss (`resistor_power`, already computed in
++    /// `consume_power_in_converters`) to ambient, exactly like
++    /// `battery.rs::update_temperature`.
++    fn update_temperature(&mut self, context: &UpdateContext, resistor_power_watt: f64) {
++        let cooling = Self::COOLING_W_PER_KELVIN
++            * (self.temperature.get::<degree_celsius>()
++                - context.ambient_temperature().get::<degree_celsius>());
++        let d_temp_dt = (resistor_power_watt - cooling) / Self::THERMAL_MASS_J_PER_KELVIN;
++        self.temperature = ThermodynamicTemperature::new::<degree_celsius>(
++            self.temperature.get::<degree_celsius>() + d_temp_dt * context.delta_as_secs_f64(),
++        );
++    }
++
+     pub fn has_failed(&self) -> bool {
+         self.failure.is_active()
+     }
+@@ -98,11 +134,12 @@ impl SimulationElement for TransformerRectifier {
+ 
+     fn write(&self, writer: &mut SimulatorWriter) {
+         self.writer.write_direct(self, writer);
++        writer.write(&self.temperature_id, self.temperature);
+     }
+ 
+     fn consume_power_in_converters<T: ConsumePower>(
+         &mut self,
+-        _: &UpdateContext,
++        context: &UpdateContext,
+         consumption: &mut T,
+     ) {
+         let dc_power =
+@@ -115,6 +152,11 @@ impl SimulationElement for TransformerRectifier {
+ 
+         // Add the DC consumption to the TRs input (AC) consumption.
+         consumption.consume_from_input(self, ac_power);
++
++        // The same I^2R conversion loss just computed above (`resistor_power`)
++        // is real waste heat, not just an AC-side accounting adjustment: feed
++        // it into the case thermal balance.
++        self.update_temperature(context, resistor_power.get::<watt>().abs());
+     }
+ 
+     fn process_power_consumption_report<T: PowerConsumptionReport>(

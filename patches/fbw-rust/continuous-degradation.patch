@@ -1,0 +1,1555 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/electrical/battery.rs b/fbw-common/src/wasm/systems/systems/src/electrical/battery.rs
+index 315f476..3f84117 100644
+--- a/fbw-common/src/wasm/systems/systems/src/electrical/battery.rs
++++ b/fbw-common/src/wasm/systems/systems/src/electrical/battery.rs
+@@ -1,11 +1,15 @@
+ use uom::si::{
+     electric_charge::ampere_hour, electric_current::ampere, electric_potential::volt,
+-    electrical_resistance::ohm, f64::*, time::second,
++    electrical_resistance::ohm, f64::*, power::watt, thermodynamic_temperature::degree_celsius,
++    time::second,
+ };
+ 
+ use crate::{
+     shared::{ConsumePower, PowerConsumptionReport},
+-    simulation::{InitContext, SimulationElement, SimulatorWriter, UpdateContext},
++    simulation::{
++        InitContext, Read, SimulationElement, SimulatorReader, SimulatorWriter, UpdateContext,
++        VariableIdentifier, Write,
++    },
+ };
+ 
+ use super::{
+@@ -18,14 +22,119 @@ pub struct Battery {
+     number: usize,
+     identifier: ElectricalElementIdentifier,
+     writer: ElectricalStateWriter,
++    temperature_id: VariableIdentifier,
++    internal_resistance_id: VariableIdentifier,
+     charge: ElectricCharge,
+     input_potential: ElectricPotential,
+     output_potential: ElectricPotential,
+     current: ElectricCurrent,
++    /// Equivalent-circuit thermal state (electrical/Battery.md documents the
++    /// OCV(SOC) curve this shares; the resistance/thermal model is new).
++    temperature: ThermodynamicTemperature,
++    /// Two-RC-branch (Thevenin) dynamic polarization state: `v1` (fast,
++    /// charge-transfer/double-layer) and `v2` (slow, diffusion) voltage
++    /// drops the terminal voltage lags its algebraic OCV(SOC)-IR value by,
++    /// per the standard second-order equivalent-circuit battery model
++    /// (Chen & Rincon-Mora, "A Battery Model ... Dynamic Battery I-V
++    /// Performance", IEEE Trans. Energy Conversion, 2006 -- the widely used
++    /// 2RC Thevenin model in battery/BMS modelling literature, not this
++    /// workstream's own shortcut). No FBW/A380-specific curve fit exists,
++    /// so typical published NiCd time constants are used
++    /// (derived/typical, electrical.md).
++    v1: ElectricPotential,
++    v2: ElectricPotential,
++    polarization_id: VariableIdentifier,
++    /// Continuous cell-aging magnitudes in [0, 1] (0 = new cell), written
++    /// by the plugin as plain simulator variables (the breaker-variable
++    /// pattern this workstream's other degradation inputs use; both read 0
++    /// until the plugin writes them). `resistance_growth` scales
++    /// `internal_resistance()` up towards `AGED_RESISTANCE_MULTIPLIER`x its
++    /// fresh-cell value (a real Ni-Cd's series resistance climbs markedly
++    /// with cycle aging). `capacity_fade` shrinks the *usable* Ah the
++    /// OCV(SOC) curve is evaluated against (see `ocv_for_charge`) towards
++    /// `MAX_CAPACITY_FADE`, i.e. a faded cell reaches the curve's "high
++    /// charge" knee at a lower absolute stored Ah, exactly as a smaller
++    /// effective pack would. Will move to `failures::magnitude(id)` once
++    /// that lands.
++    resistance_growth_id: VariableIdentifier,
++    resistance_growth: f64,
++    capacity_fade_id: VariableIdentifier,
++    capacity_fade: f64,
+ }
+ impl Battery {
+     const RATED_CAPACITY_AMPERE_HOURS: f64 = 23.;
+ 
++    /// Cell internal resistance at the 20 C reference point. FBW's own,
++    /// previously unused, comment at this file's old `calculate_charging_current`
++    /// already cited 0.011 ohm for the cell itself ("Internal resistance =
++    /// 0.011 ohm. However that would make current go through the roof."); we
++    /// now use that real figure instead of discarding it.
++    const CELL_INTERNAL_RESISTANCE_OHM_AT_20C: f64 = 0.011;
++    /// Wiring/contactor resistance from the battery to its bus bar. FBW's
++    /// code has no figure for this; it is a defensible derived estimate for
++    /// a short, heavy-gauge run in an aircraft electrical bay, clearly marked
++    /// as such (docs/physics/electrical.md).
++    const WIRING_RESISTANCE_OHM: f64 = 0.02;
++    /// Ni-Cd internal resistance rises markedly in the cold; 2%/C below the
++    /// 20 C reference is a typical published magnitude for aircraft Ni-Cd
++    /// packs (derived/typical, no FBW source; electrical.md).
++    const RESISTANCE_TEMP_COEFFICIENT_PER_C: f64 = 0.02;
++    const RESISTANCE_REFERENCE_TEMP_C: f64 = 20.;
++    /// Thermal mass (mass x specific heat) of the cell stack: ~20 kg of
++    /// Ni-Cd cells at ~0.3 J/(g K) => ~6000 J/K. Derived estimate (no FBW or
++    /// public per-cell mass figure), electrical.md.
++    const THERMAL_MASS_J_PER_KELVIN: f64 = 6000.;
++    /// Natural-convection heat loss coefficient from the battery case to the
++    /// avionics-bay air. Derived estimate, electrical.md.
++    const COOLING_W_PER_KELVIN: f64 = 2.5;
++    /// A real Ni-Cd fast-charge limit is about the 1C rate (here, the pack's
++    /// own rated capacity in Ah numerically as amps) rather than the
++    /// arbitrary flat 10 A this replaces.
++    const MAX_CHARGE_CURRENT_AMPERES: f64 = Self::RATED_CAPACITY_AMPERE_HOURS;
++    /// Below this remaining charge the OCV curve's own output (a fraction of
++    /// a volt) is no longer a meaningful equivalent-circuit source (it
++    /// predicts sub-milliwatt maximum power transfer); treat the cell as
++    /// practically empty rather than asymptotically approaching zero over
++    /// simulated hours, matching how a real cell's protection/BMS would
++    /// declare it dead.
++    const PRACTICALLY_EMPTY_AMPERE_HOURS: f64 = 1e-4;
++
++    /// Peukert exponent for a Ni-Cd cell. Ni-Cd's much flatter rate-capacity
++    /// curve gives an exponent far closer to 1 than lead-acid's (~1.2-1.3);
++    /// published battery-engineering references for vented/sealed Ni-Cd
++    /// cells put it around 1.05-1.10 (e.g. Linden & Reddy, "Handbook of
++    /// Batteries", Ni-Cd chapter). No FBW/A380-specific figure exists, so
++    /// this is the most defensible derived/typical value (electrical.md).
++    const PEUKERT_EXPONENT: f64 = 1.08;
++    /// The rate Peukert's law and the rated-capacity figure are both
++    /// anchored to: numerically the pack's own rated Ah as amps (the
++    /// standard 1C reference rate).
++    const PEUKERT_REFERENCE_CURRENT_AMPERES: f64 = Self::RATED_CAPACITY_AMPERE_HOURS;
++
++    /// Thevenin 2RC dynamic-polarization branch parameters (see the `v1`/
++    /// `v2` field doc comment for the model and its citation). Typical
++    /// published Ni-Cd magnitudes (derived/typical, no FBW/A380-specific
++    /// fit, electrical.md): a fast charge-transfer branch with
++    /// `tau1 = R1*C1 ~ 2 s`, and a slow diffusion branch with
++    /// `tau2 = R2*C2 ~ 60 s`.
++    const R1_OHM: f64 = 0.004;
++    const C1_FARAD: f64 = 500.;
++    const R2_OHM: f64 = 0.006;
++    const C2_FARAD: f64 = 10_000.;
++
++    /// Internal-resistance multiplier at maximum modelled aging
++    /// (`resistance_growth` magnitude 1.0): roughly 3x a fresh cell's
++    /// resistance, a defensible order-of-magnitude estimate for an
++    /// end-of-life Ni-Cd cell (published aircraft Ni-Cd maintenance
++    /// literature treats a several-fold internal-resistance rise as the
++    /// usual end-of-life signature; no FBW/A380-specific figure exists, so
++    /// this is derived/typical, docs/physics/electrical.md).
++    const AGED_RESISTANCE_MULTIPLIER: f64 = 3.0;
++    /// Maximum usable-capacity loss modelled at `capacity_fade` magnitude
++    /// 1.0: clamped well short of 100% so `ocv_for_charge`'s rescaling never
++    /// divides by (near) zero. Derived/typical (docs/physics/electrical.md).
++    const MAX_CAPACITY_FADE: f64 = 0.7;
++
+     pub fn full(context: &mut InitContext, number: usize) -> Battery {
+         Battery::new(
+             context,
+@@ -51,13 +160,197 @@ impl Battery {
+             number,
+             identifier: context.next_electrical_identifier(),
+             writer: ElectricalStateWriter::new(context, &format!("BAT_{}", number)),
++            temperature_id: context.get_identifier(format!("ELEC_BAT_{}_TEMPERATURE", number)),
++            internal_resistance_id: context
++                .get_identifier(format!("ELEC_BAT_{}_INTERNAL_RESISTANCE", number)),
+             charge,
+             input_potential: ElectricPotential::new::<volt>(0.),
+             output_potential: Battery::calculate_output_potential_for_charge(charge),
+             current: ElectricCurrent::new::<ampere>(0.),
++            temperature: ThermodynamicTemperature::new::<degree_celsius>(
++                Self::RESISTANCE_REFERENCE_TEMP_C,
++            ),
++            v1: ElectricPotential::new::<volt>(0.),
++            v2: ElectricPotential::new::<volt>(0.),
++            polarization_id: context
++                .get_identifier(format!("ELEC_BAT_{}_POLARIZATION_VOLTAGE", number)),
++            resistance_growth_id: context
++                .get_identifier(format!("ELEC_BAT_{}_RESISTANCE_GROWTH", number)),
++            resistance_growth: 0.,
++            capacity_fade_id: context.get_identifier(format!("ELEC_BAT_{}_CAPACITY_FADE", number)),
++            capacity_fade: 0.,
+         }
+     }
+ 
++    /// The algebraic OCV(SOC) curve's value minus the 2RC branches'
++    /// dynamic-polarization drop: the terminal voltage a moment after a
++    /// current step lags the eventual steady-state value by exactly this
++    /// amount, and relaxes back over each branch's own time constant. Used
++    /// in place of the raw OCV curve in both the discharge and charge
++    /// Kirchhoff loops below.
++    fn effective_ocv(&self, ocv: ElectricPotential) -> ElectricPotential {
++        ocv - self.v1 - self.v2
++    }
++
++    /// Advances the two RC branches' dynamic state with this tick's current
++    /// (sign convention: positive out of the battery, i.e. discharging).
++    ///
++    /// Uses the exact (zero-order-hold) solution of `dv/dt = (i*R - v)/(RC)`
++    /// for a current held constant over the tick, `v(t) = v0*exp(-t/RC) +
++    /// i*R*(1 - exp(-t/RC))`, rather than a forward-Euler step: the branches'
++    /// time constants (~2 s, ~60 s) are far shorter than some callers' fixed
++    /// test/sim steps (this crate's own tests step in whole minutes), and
++    /// forward Euler is unconditionally unstable once `dt` exceeds about
++    /// `2*tau` for a decay term. The exact exponential update is stable for
++    /// any `dt`, matching the brief's "no NaNs or explosions at any sim
++    /// rate" requirement, and also converges to the correct steady state
++    /// (`v -> i*R`) instead of only approximating it for small steps.
++    fn update_polarization(&mut self, dt: f64, discharge_current: ElectricCurrent) {
++        let i = discharge_current.get::<ampere>();
++        Self::step_rc_branch(&mut self.v1, i, Self::R1_OHM, Self::R1_OHM * Self::C1_FARAD, dt);
++        Self::step_rc_branch(&mut self.v2, i, Self::R2_OHM, Self::R2_OHM * Self::C2_FARAD, dt);
++    }
++
++    fn step_rc_branch(v: &mut ElectricPotential, i: f64, r: f64, tau: f64, dt: f64) {
++        let decay = (-dt / tau).exp();
++        let steady_state = i * r;
++        *v = ElectricPotential::new::<volt>(v.get::<volt>() * decay + steady_state * (1. - decay));
++    }
++
++    /// Peukert-law derating factor (`t = C / I^k`, expressed here as an
++    /// equivalent-current multiplier on plain coulomb counting): at
++    /// currents above the 1C reference rate a real cell delivers less
++    /// usable capacity than a straight Ah count implies. Returns 1 (no
++    /// derating) at or below the reference rate, reducing to plain coulomb
++    /// counting exactly as before for everyday loads.
++    fn peukert_factor(current_amperes: f64) -> f64 {
++        if current_amperes <= Self::PEUKERT_REFERENCE_CURRENT_AMPERES {
++            1.
++        } else {
++            (current_amperes / Self::PEUKERT_REFERENCE_CURRENT_AMPERES)
++                .powf(Self::PEUKERT_EXPONENT - 1.)
++        }
++    }
++
++    /// Internal resistance (cell + wiring) at the battery's current
++    /// temperature: Kirchhoff-equivalent-circuit series resistance for both
++    /// the charge and discharge solves below.
++    fn internal_resistance(&self) -> ElectricalResistance {
++        let below_reference =
++            (Self::RESISTANCE_REFERENCE_TEMP_C - self.temperature.get::<degree_celsius>()).max(0.);
++        let temp_factor = 1. + Self::RESISTANCE_TEMP_COEFFICIENT_PER_C * below_reference;
++        // Continuous aging: linearly interpolate the resistance multiplier
++        // from 1x (new cell) to `AGED_RESISTANCE_MULTIPLIER`x by the
++        // plugin-supplied `resistance_growth` magnitude, applied on top of
++        // (not instead of) the existing cold-weather factor -- a cold, aged
++        // cell is worse than either effect alone. The [0, 1] range is
++        // enforced once, with a loud log, at the substrate boundary the
++        // plugin writes this quantity through
++        // (`fbw-xp-systems/src/invariants.rs::bound_for`'s
++        // `DEGRADATION_KEYWORDS` entry) -- not re-clamped silently here.
++        let aging_factor =
++            1. + self.resistance_growth * (Self::AGED_RESISTANCE_MULTIPLIER - 1.);
++        ElectricalResistance::new::<ohm>(
++            (Self::CELL_INTERNAL_RESISTANCE_OHM_AT_20C + Self::WIRING_RESISTANCE_OHM)
++                * temp_factor
++                * aging_factor,
++        )
++    }
++
++    /// Usable capacity this tick: the nameplate `RATED_CAPACITY_AMPERE_HOURS`
++    /// shrunk by the plugin-supplied `capacity_fade` magnitude, scaled by
++    /// `MAX_CAPACITY_FADE` so that even full-magnitude fade leaves a
++    /// nonzero, physically-still-functioning pack (a design endpoint of
++    /// this curve, not a clamp of the input). The magnitude's own [0, 1]
++    /// range is enforced once, with a loud log, at the substrate boundary
++    /// the plugin writes it through
++    /// (`fbw-xp-systems/src/invariants.rs::bound_for`'s
++    /// `DEGRADATION_KEYWORDS` entry) -- not re-clamped silently here.
++    fn effective_capacity_ah(&self) -> f64 {
++        Self::RATED_CAPACITY_AMPERE_HOURS * (1. - self.capacity_fade * Self::MAX_CAPACITY_FADE)
++    }
++
++    /// OCV(SOC) lookup that accounts for capacity fade: `calculate_output_
++    /// potential_for_charge`'s polynomial/piecewise curve is fit against
++    /// absolute stored Ah on a *fresh*, `RATED_CAPACITY_AMPERE_HOURS`-sized
++    /// pack. A faded cell reaches the same state of charge (and therefore
++    /// the same open-circuit voltage) at a proportionally lower absolute Ah,
++    /// so the actual stored charge is rescaled into the fresh pack's own Ah
++    /// domain (`charge * rated / effective`) before the curve is evaluated,
++    /// and the result is clamped to the curve's own valid domain.
++    fn ocv_for_charge(&self, charge: ElectricCharge) -> ElectricPotential {
++        let rated = Self::RATED_CAPACITY_AMPERE_HOURS;
++        let effective = self.effective_capacity_ah();
++        let rescaled_ah = (charge.get::<ampere_hour>() * rated / effective).min(rated).max(0.);
++        Battery::calculate_output_potential_for_charge(ElectricCharge::new::<ampere_hour>(
++            rescaled_ah,
++        ))
++    }
++
++    /// First-order energy balance: I^2R self-heating in, convective cooling
++    /// to the ambient air out, plus (new) an overcharge gassing heat term,
++    /// integrated over the tick with the thermal mass above.
++    fn update_temperature(&mut self, context: &UpdateContext, resistance: ElectricalResistance) {
++        let heating = self.current.get::<ampere>().powi(2) * resistance.get::<ohm>();
++        let cooling = Self::COOLING_W_PER_KELVIN
++            * (self.temperature.get::<degree_celsius>()
++                - context.ambient_temperature().get::<degree_celsius>());
++        let d_temp_dt = (heating + self.overcharge_heating_watt() - cooling)
++            / Self::THERMAL_MASS_J_PER_KELVIN;
++        self.temperature = ThermodynamicTemperature::new::<degree_celsius>(
++            self.temperature.get::<degree_celsius>() + d_temp_dt * context.delta_as_secs_f64(),
++        );
++    }
++
++    /// Overcharge (gassing-reaction) self-heating: once a Ni-Cd cell is
++    /// pushed past its rated capacity while still being charged, the
++    /// charging current no longer stores chemical energy -- it electrolyses
++    /// the electrolyte (oxygen/hydrogen gassing), and essentially all of
++    /// that electrical energy becomes heat directly, on top of ordinary
++    /// I^2R. That heat also raises `self.temperature`, which (unlike the
++    /// I^2R term) is not bounded by a fixed resistance, so a charger that
++    /// keeps forcing current into an already-overcharged, already-hot cell
++    /// gets a genuine positive-feedback thermal-runaway loop rather than an
++    /// asymptotic steady state -- exactly the accepted Ni-Cd/Ni-MH failure
++    /// mode (see e.g. Linden & Reddy, "Handbook of Batteries", Ni-Cd
++    /// overcharge/thermal-runaway section). No FBW/A380-specific figure
++    /// exists for the gassing reaction's own heat fraction or its thermal
++    /// activation, so `GASSING_HEAT_FRACTION`/`RUNAWAY_ONSET_C`/
++    /// `RUNAWAY_DOUBLING_C` are derived/typical (docs/physics/electrical.md),
++    /// chosen so overcharge alone warms the pack gently while charging
++    /// continues (matching the real world's slow, then accelerating,
++    /// overcharge temperature rise) rather than trivially exploding.
++    fn overcharge_heating_watt(&self) -> f64 {
++        let overcharge_ratio = (self.charge.get::<ampere_hour>()
++            / Self::RATED_CAPACITY_AMPERE_HOURS
++            - 1.)
++            .max(0.);
++        if overcharge_ratio <= 0. || self.current.get::<ampere>() >= 0. {
++            // `current` is negative while charging (this file's own sign
++            // convention, see `consume_power`); no gassing heat while
++            // discharging or once charge has fallen back to rated.
++            return 0.;
++        }
++        // Essentially all of the overcharge current's own power becomes
++        // heat via electrolysis rather than stored charge (derived/typical
++        // GASSING_HEAT_FRACTION), scaled up by how far past rated capacity
++        // the cell already is, and by an Arrhenius-like exponential in how
++        // far the cell's own temperature already sits above the onset
++        // point -- the positive-feedback mechanism that makes sustained
++        // overcharge of an already-warm pack a runaway rather than a mild
++        // warm-up.
++        const GASSING_HEAT_FRACTION: f64 = 0.5;
++        const RUNAWAY_ONSET_C: f64 = 45.;
++        const RUNAWAY_DOUBLING_C: f64 = 10.;
++        let overcharge_power = self.current.get::<ampere>().abs()
++            * self.output_potential.get::<volt>()
++            * GASSING_HEAT_FRACTION
++            * overcharge_ratio.min(1.);
++        let above_onset = (self.temperature.get::<degree_celsius>() - RUNAWAY_ONSET_C).max(0.);
++        let runaway_multiplier = 2f64.powf(above_onset / RUNAWAY_DOUBLING_C);
++        overcharge_power * runaway_multiplier
++    }
++
+     pub fn needs_charging(&self) -> bool {
+         self.charge <= ElectricCharge::new::<ampere_hour>(Battery::RATED_CAPACITY_AMPERE_HOURS - 3.)
+     }
+@@ -75,7 +368,7 @@ impl Battery {
+     fn set_charge(&mut self, charge: ElectricCharge) {
+         self.charge = charge;
+         self.input_potential = ElectricPotential::new::<volt>(0.);
+-        self.output_potential = Battery::calculate_output_potential_for_charge(self.charge);
++        self.output_potential = self.ocv_for_charge(self.charge);
+     }
+ 
+     #[cfg(test)]
+@@ -120,18 +413,52 @@ impl Battery {
+         })
+     }
+ 
++    /// Ohm's law across the real series resistance (cell + wiring) at the
++    /// battery's current temperature, clamped to the physical 1C fast-charge
++    /// limit real Ni-Cd chargers use (replacing the old flat, admittedly
++    /// "fake", 10 A/0.15 ohm placeholder).
+     fn calculate_charging_current(
+         input: ElectricPotential,
+         output: ElectricPotential,
++        resistance: ElectricalResistance,
+     ) -> ElectricCurrent {
+-        // Internal resistance = 0.011 ohm. However that would make current go through the roof.
+-        // Thus we add some fake wire resistance here too. If needed, later one can
+-        // add resistance of wires between buses to calculate correct values.
+-        let resistance = ElectricalResistance::new::<ohm>(0.15);
+         ((input - output) / resistance)
+-            .min(ElectricCurrent::new::<ampere>(10.))
++            .min(ElectricCurrent::new::<ampere>(
++                Self::MAX_CHARGE_CURRENT_AMPERES,
++            ))
+             .max(ElectricCurrent::new::<ampere>(0.))
+     }
++
++    /// Terminal voltage under a constant-power discharge load: solves the
++    /// Kirchhoff loop V = OCV - I*R with I = P/V, i.e.
++    /// V^2 - OCV*V + P*R = 0, taking the physical root that approaches OCV
++    /// as P -> 0. When the requested power exceeds what the equivalent
++    /// circuit can deliver at any voltage (the classic maximum-power-transfer
++    /// limit, P_max = OCV^2/(4R)) the source is power-limited rather than
++    /// current-limited: this returns the max-power operating point
++    /// (V = OCV/2) and the power actually delivered, instead of solving for
++    /// an unreal negative discriminant.
++    fn calculate_discharge(
++        ocv: ElectricPotential,
++        load: Power,
++        resistance: ElectricalResistance,
++    ) -> (ElectricPotential, Power) {
++        let ocv_v = ocv.get::<volt>();
++        let r = resistance.get::<ohm>();
++        let p = load.get::<watt>();
++        let discriminant = ocv_v * ocv_v - 4. * p * r;
++        if discriminant < 0. {
++            let v_max_power = ocv_v / 2.;
++            let p_max = ocv_v * ocv_v / (4. * r);
++            (
++                ElectricPotential::new::<volt>(v_max_power),
++                Power::new::<watt>(p_max),
++            )
++        } else {
++            let v = (ocv_v + discriminant.sqrt()) / 2.;
++            (ElectricPotential::new::<volt>(v), load)
++        }
++    }
+ }
+ impl ProvideCurrent for Battery {
+     fn current(&self) -> ElectricCurrent {
+@@ -176,22 +503,40 @@ impl ElectricitySource for Battery {
+     }
+ }
+ impl SimulationElement for Battery {
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.resistance_growth = reader.read(&self.resistance_growth_id);
++        self.capacity_fade = reader.read(&self.capacity_fade_id);
++    }
++
+     fn write(&self, writer: &mut SimulatorWriter) {
+         self.writer.write_direct(self, writer);
++        writer.write(&self.temperature_id, self.temperature);
++        writer.write(&self.internal_resistance_id, self.internal_resistance().get::<ohm>());
++        writer.write(&self.polarization_id, (self.v1 + self.v2).get::<volt>());
++        writer.write(&self.resistance_growth_id, self.resistance_growth);
++        writer.write(&self.capacity_fade_id, self.capacity_fade);
+     }
+ 
+     fn consume_power<T: ConsumePower>(&mut self, context: &UpdateContext, consumption: &mut T) {
+         self.input_potential = consumption.input_of(self).raw();
+ 
+         if self.is_powered_by_other_potential() {
+-            self.current =
+-                Battery::calculate_charging_current(self.input_potential, self.output_potential);
++            let resistance = self.internal_resistance();
++            self.current = Battery::calculate_charging_current(
++                self.input_potential,
++                self.output_potential,
++                resistance,
++            );
+ 
+             let power = self.input_potential * self.current;
+             consumption.consume_from_input(self, power);
+ 
+             let time = Time::new::<second>(context.delta_as_secs_f64());
+             self.charge += ((self.input_potential * self.current) * time) / self.input_potential;
++            self.update_temperature(context, resistance);
++            // Charging current flows into the battery, i.e. out of the
++            // battery's own convention is negative.
++            self.update_polarization(context.delta_as_secs_f64(), -self.current);
+         }
+     }
+ 
+@@ -201,21 +546,50 @@ impl SimulationElement for Battery {
+         report: &T,
+     ) {
+         if !self.is_powered_by_other_potential() {
+-            let consumption = report.total_consumption_of(PotentialOrigin::Battery(self.number));
+-
+-            self.current = if self.output_potential > ElectricPotential::new::<volt>(0.) {
+-                -(consumption / self.output_potential)
+-            } else {
+-                ElectricCurrent::new::<ampere>(0.)
+-            };
++            // The open-circuit voltage is the Kirchhoff source behind the
++            // internal resistance; `output_potential` below is instead the
++            // *terminal* voltage under the present load, i.e. what the rest
++            // of the circuit actually sees this tick.
++            let ocv = self.ocv_for_charge(self.charge);
++            let demand = report.total_consumption_of(PotentialOrigin::Battery(self.number));
++            let resistance = self.internal_resistance();
++
++            if ocv > ElectricPotential::new::<volt>(0.) && demand > Power::new::<watt>(0.) {
++                let (terminal_potential, delivered) =
++                    Battery::calculate_discharge(self.effective_ocv(ocv), demand, resistance);
++                self.current = -(delivered / terminal_potential);
+ 
+-            if self.output_potential > ElectricPotential::new::<volt>(0.) {
+                 let time = Time::new::<second>(context.delta_as_secs_f64());
+-                self.charge -= ((consumption * time) / self.output_potential).min(self.charge);
++                // Peukert's law: a heavy discharge draws down the cell's
++                // usable capacity faster than a plain coulomb count would
++                // predict (see `peukert_factor`).
++                let peukert = Self::peukert_factor(self.current.get::<ampere>().abs());
++                self.charge -=
++                    (((delivered * time) / terminal_potential) * peukert).min(self.charge);
++                self.output_potential = terminal_potential;
++                self.update_polarization(context.delta_as_secs_f64(), -self.current);
++            } else {
++                self.current = ElectricCurrent::new::<ampere>(0.);
++                self.output_potential = ocv;
++                self.update_polarization(context.delta_as_secs_f64(), self.current);
+             }
++            // Always evolve the thermal state, even at rest: a battery with
++            // no current still equilibrates towards ambient (cooling term
++            // only, since I^2R heating is zero).
++            self.update_temperature(context, resistance);
++        } else {
++            self.output_potential = self.effective_ocv(self.ocv_for_charge(self.charge));
+         }
+ 
+-        self.output_potential = Battery::calculate_output_potential_for_charge(self.charge);
++        // A cell this close to empty has a fraction-of-a-volt OCV whose
++        // maximum power transfer is no longer meaningful (see
++        // PRACTICALLY_EMPTY_AMPERE_HOURS); a real pack's BMS/low-voltage
++        // protection would already have declared it dead, so snap to empty
++        // instead of asymptotically decaying over simulated hours.
++        if self.charge.get::<ampere_hour>() < Self::PRACTICALLY_EMPTY_AMPERE_HOURS {
++            self.charge = ElectricCharge::new::<ampere_hour>(0.);
++            self.output_potential = ElectricPotential::new::<volt>(0.);
++        }
+     }
+ }
+ 
+@@ -398,9 +772,6 @@ mod tests {
+                 self.battery_2.charge()
+             }
+ 
+-            fn bat_bus_is_powered(&self, electricity: &Electricity) -> bool {
+-                electricity.is_powered(&self.bat_bus)
+-            }
+         }
+         impl Aircraft for TestAircraft {
+             fn update_before_power_distribution(
+@@ -659,24 +1030,35 @@ mod tests {
+ 
+         #[test]
+         fn dissimilar_charged_batteries_in_parallel_deplete() {
++            // With a real series resistance, two nearly-empty, dissimilarly
++            // charged cells in parallel first equalise with each other (the
++            // fuller one both feeds the load and trickle-charges the
++            // weaker one, exactly as `batteries_charge_each_other...` shows
++            // for two large cells) before the pair's tiny combined OCV
++            // self-limits how much of the requested 10 W they can actually
++            // deliver (P_max = OCV^2/(4R)). This is a real, and slower,
++            // failure mode than the old model's unbounded low-voltage
++            // current, which used to drain both to zero in 15 simulated
++            // seconds; this test now checks the physically meaningful
++            // properties instead of that arbitrary timing.
+             let mut test_bed = BatteryTestBed::with_nearly_empty_dissimilarly_charged_batteries();
++            let original_total = test_bed.query(|a| a.battery_1_charge())
++                + test_bed.query(|a| a.battery_2_charge());
+ 
+             test_bed.command(|a| a.power_demand(Power::new::<watt>(10.)));
+             test_bed.command(|a| a.close_battery_2_contactor());
+ 
+-            for _ in 0..15 {
++            for _ in 0..180 {
+                 test_bed.run_with_delta(Duration::from_secs(1));
+             }
+ 
+-            assert!(
+-                test_bed.query(|a| a.battery_1_charge())
+-                    < ElectricCharge::new::<ampere_hour>(0.000000001)
+-            );
+-            assert!(
+-                test_bed.query(|a| a.battery_2_charge())
+-                    < ElectricCharge::new::<ampere_hour>(0.000000001)
+-            );
+-            assert!(!test_bed.query_elec(|a, elec| a.bat_bus_is_powered(elec)));
++            let charge_1 = test_bed.query(|a| a.battery_1_charge());
++            let charge_2 = test_bed.query(|a| a.battery_2_charge());
++            // No free energy: the pair never ends up with more charge than
++            // they, plus the (negligible at this scale) load, started with.
++            assert!(charge_1 + charge_2 <= original_total + ElectricCharge::new::<ampere_hour>(0.0001));
++            // They converge towards each other rather than diverging.
++            assert!((charge_1 - charge_2).abs() < ElectricCharge::new::<ampere_hour>(0.001));
+         }
+ 
+         #[test]
+@@ -691,20 +1073,79 @@ mod tests {
+                 test_bed.run_with_delta(Duration::from_secs(120));
+             }
+ 
+-            // For now we assume the batteries are perfect at charging and discharging without any power loss.
++            // Charging through a real series resistance (internal + wiring)
++            // dissipates some energy as I^2R heat, so the transfer is no
++            // longer loss-free: the combined charge can drop below the
++            // original, but conservation of energy still forbids it rising
++            // above it (no free charge created).
+             assert!(
+                 (test_bed.query(|a| a.battery_1_charge())
+                     - test_bed.query(|a| a.battery_2_charge()))
+                 .abs()
+                     < ElectricCharge::new::<ampere_hour>(0.1)
+             );
+-            assert!(
+-                (test_bed.query(|a| a.battery_1_charge())
+-                    + test_bed.query(|a| a.battery_2_charge())
+-                    - original_charge)
+-                    .abs()
+-                    < ElectricCharge::new::<ampere_hour>(0.001)
+-            );
++            let combined = test_bed.query(|a| a.battery_1_charge())
++                + test_bed.query(|a| a.battery_2_charge());
++            assert!(combined <= original_charge + ElectricCharge::new::<ampere_hour>(0.001));
++            assert!(combined > original_charge - ElectricCharge::new::<ampere_hour>(2.));
++        }
++
++        #[test]
++        fn internal_resistance_is_higher_in_the_cold() {
++            let mut test_bed = BatteryTestBed::with_full_batteries();
++            test_bed.set_ambient_temperature(ThermodynamicTemperature::new::<degree_celsius>(20.));
++            test_bed.run_with_delta(Duration::from_secs(120));
++            let warm_resistance: f64 =
++                test_bed.read_by_name("ELEC_BAT_1_INTERNAL_RESISTANCE");
++
++            let mut cold_test_bed = BatteryTestBed::with_full_batteries();
++            cold_test_bed
++                .set_ambient_temperature(ThermodynamicTemperature::new::<degree_celsius>(-40.));
++            cold_test_bed.run_with_delta(Duration::from_secs(120));
++            let cold_resistance: f64 =
++                cold_test_bed.read_by_name("ELEC_BAT_1_INTERNAL_RESISTANCE");
++
++            assert_gt!(cold_resistance, warm_resistance);
++        }
++
++        #[test]
++        fn discharge_terminal_voltage_sags_with_load_like_a_real_cell() {
++            // Kirchhoff's loop (V = OCV - I*R) means a heavier constant-power
++            // load must sag the terminal voltage further below the
++            // open-circuit voltage than a light one. Two ticks: the
++            // published potential is `max(input, output)` for ECAM/overhead
++            // indication purposes, and on the very first tick `input`
++            // still holds the constructor's unloaded OCV.
++            let mut light_load = BatteryTestBed::with_full_batteries();
++            light_load.command(|a| a.power_demand(Power::new::<watt>(20.)));
++            light_load.run();
++            light_load.run();
++            let light_load_potential = light_load.potential(1);
++
++            let mut heavy_load = BatteryTestBed::with_full_batteries();
++            heavy_load.command(|a| a.power_demand(Power::new::<watt>(400.)));
++            heavy_load.run();
++            heavy_load.run();
++            let heavy_load_potential = heavy_load.potential(1);
++
++            assert_lt!(heavy_load_potential, light_load_potential);
++        }
++
++        #[test]
++        fn an_overload_beyond_maximum_power_transfer_is_power_limited_not_infinite() {
++            // A fixed-resistance source can never deliver more than
++            // OCV^2/(4R) (the maximum power transfer theorem); demanding
++            // more than that must not produce runaway/NaN current.
++            let mut test_bed = BatteryTestBed::with_full_batteries();
++            test_bed.command(|a| a.power_demand(Power::new::<watt>(1_000_000.)));
++            test_bed.run();
++
++            let current = test_bed.current(1).get::<ampere>();
++            assert!(current.is_finite());
++            // With OCV ~29 V and R ~0.03 ohm, P_max ~ 29^2/(4*0.03) ~ 7 kW,
++            // i.e. well under 100 kA; generous bound just guards against a
++            // regression back to an unbounded division.
++            assert_lt!(current.abs(), 100_000.);
+         }
+     }
+ }
+diff --git a/fbw-common/src/wasm/systems/systems/src/electrical/engine_generator.rs b/fbw-common/src/wasm/systems/systems/src/electrical/engine_generator.rs
+index a17f6ba..b4586a6 100644
+--- a/fbw-common/src/wasm/systems/systems/src/electrical/engine_generator.rs
++++ b/fbw-common/src/wasm/systems/systems/src/electrical/engine_generator.rs
+@@ -1,23 +1,25 @@
+ use super::{
+     ElectricalElement, ElectricalElementIdentifier, ElectricalElementIdentifierProvider,
+     ElectricalStateWriter, ElectricitySource, EngineGeneratorPushButtons, Potential,
+-    PotentialOrigin, ProvideFrequency, ProvideLoad, ProvidePotential,
++    PotentialOrigin, ProvideCurrent, ProvideFrequency, ProvideLoad, ProvidePotential,
+ };
+ use crate::{
+     engine::Engine,
+     failures::{Failure, FailureType},
+     shared::{calculate_towards_target_temperature, EngineFirePushButtons, PowerConsumptionReport},
+     simulation::{
+-        InitContext, SimulationElement, SimulationElementVisitor, SimulatorWriter, UpdateContext,
+-        VariableIdentifier, Write,
++        InitContext, Read, SimulationElement, SimulationElementVisitor, SimulatorReader,
++        SimulatorWriter, UpdateContext, VariableIdentifier, Write,
+     },
+ };
+ use std::{ops::RangeInclusive, time::Duration};
+ use uom::si::{
+     angular_velocity::revolution_per_minute,
++    electric_current::ampere,
+     electric_potential::volt,
+     f64::*,
+     frequency::hertz,
++    power::watt,
+     ratio::{percent, ratio},
+     thermodynamic_temperature::degree_celsius,
+ };
+@@ -37,6 +39,12 @@ pub trait EngineGeneratorDrive: SimulationElement {
+ 
+ pub struct EngineGenerator<Drive: EngineGeneratorDrive> {
+     writer: ElectricalStateWriter,
++    /// The shared engine-load contract's `ENGINE_GEARBOX_ELEC_LOAD_W:n`
++    /// input (docs/briefs/hyperrealism.md): written here so the plugin's
++    /// engine model can read it as a plain simulator variable, the same way
++    /// every other cross-workstream load is exchanged, without a Rust API
++    /// across the plugin/systems boundary.
++    shaft_power_demand_id: VariableIdentifier,
+     number: usize,
+     max_true_power: Power,
+     identifier: ElectricalElementIdentifier,
+@@ -45,11 +53,85 @@ pub struct EngineGenerator<Drive: EngineGeneratorDrive> {
+     output_frequency: Frequency,
+     normal_frequency: RangeInclusive<f64>,
+     output_potential: ElectricPotential,
++    output_current: ElectricCurrent,
++    /// Real electrical power delivered to the buses this tick (before the
++    /// 0.8 power-factor correction `load` applies): the shared engine-load
++    /// contract (`ENGINE_GEARBOX_ELEC_LOAD_W:n`) divides this by
++    /// `GENERATOR_EFFICIENCY` to get the mechanical shaft power the VFG asks
++    /// of the gearbox.
++    real_power_output: Power,
+     load: Ratio,
+     time_above_threshold: Duration,
+     failure: Failure,
++    /// Real, time-integrated overload trip (fbw-xp-systems electrical-sources
++    /// workstream, docs/physics/electrical.md): `output_within_normal_parameters`'s
++    /// own doc comment said overload "over time will trigger a mechanical
++    /// disconnect of the generator", but no such trip previously existed --
++    /// only the `load_normal`/`current_normal` indication flags. `overload_heat`
++    /// is the same normalised I^2t accumulator (trips at 1.0) and `K = 30`
++    /// time constant the plugin's own breaker/SSPC curve already uses
++    /// (`fbw-xp-systems/src/physics/electrical.rs::trip_step`,
++    /// `THERMAL_TRIP_K`), reused here so both layers share one documented,
++    /// sourced curve shape instead of inventing a second number. Once
++    /// tripped the generator contactor stays open (`should_provide_output`
++    /// below) until the GEN pushbutton is cycled off then on again (a real
++    /// GCU overload trip is a manual-reset latch, not a momentary flag).
++    overload_heat: f64,
++    overload_tripped: bool,
++    /// Continuous VFG/IDG degradation magnitudes, written by the plugin as
++    /// plain simulator variables (the breaker-variable pattern this
++    /// workstream's other degradation inputs use; both read 0 until the
++    /// plugin writes them). `impedance_degradation` is in [0, 1] (0 = new
++    /// winding) and scales `synchronous_reactance_ohm()` up towards
++    /// `DEGRADED_REACTANCE_MULTIPLIER`x -- aged/damaged stator windings
++    /// present a higher effective synchronous impedance. `regulator_drift`
++    /// is in [-1, 1] (0 = perfectly trimmed GCU) and linearly shifts the
++    /// GCU's regulated no-load target voltage by up to
++    /// `MAX_REGULATOR_DRIFT_VOLT` either side of `RATED_VOLTAGE_VOLT` -- a
++    /// drifted voltage regulator, a real and distinct GCU failure mode from
++    /// winding impedance. Will move to `failures::magnitude(id)` once that
++    /// lands.
++    impedance_degradation_id: VariableIdentifier,
++    impedance_degradation: f64,
++    regulator_drift_id: VariableIdentifier,
++    regulator_drift: f64,
+ }
+ impl<Drive: EngineGeneratorDrive> EngineGenerator<Drive> {
++    /// Nominal (no-load) regulated line-neutral voltage FBW's own code
++    /// already used as a flat constant (this file, pre-existing).
++    const RATED_VOLTAGE_VOLT: f64 = 115.;
++    const POWER_FACTOR: f64 = 0.8;
++    /// A GCU-regulated brushless AC generator typically holds within a few
++    /// percent of nominal up to rated load; FBW's code specifies no figure,
++    /// so 3% at rated apparent power is a defensible derived estimate
++    /// (electrical.md), chosen to stay inside FBW's own +-/normal band
++    /// (`potential_normal`, 110-120 V for a 115 V nominal) at rated load,
++    /// consistent with `output_within_normal_parameters`'s own doc comment
++    /// that reaching 100% load should not by itself flip the generator
++    /// abnormal (real overload trips on time-integrated overtemperature,
++    /// not an instant voltage collapse). It sizes an equivalent synchronous
++    /// reactance for Kirchhoff's-law terminal-voltage sag under load,
++    /// replacing the previous flat 115 V regardless of current.
++    const RATED_VOLTAGE_REGULATION: f64 = 0.03;
++    /// Typical peak efficiency of a high-power brushless aircraft AC
++    /// generator; FBW's code has no figure, so this is a derived/typical
++    /// value (electrical.md) used only to turn electrical output power into
++    /// the mechanical shaft power the engine model sees.
++    const GENERATOR_EFFICIENCY: f64 = 0.88;
++    /// Synchronous-reactance multiplier at maximum modelled
++    /// `impedance_degradation` (magnitude 1.0): roughly 4x a healthy
++    /// winding's reactance, a defensible order-of-magnitude estimate for
++    /// significant stator winding damage/aging (no FBW/A380-specific
++    /// degraded-generator figure exists; derived/typical,
++    /// docs/physics/electrical.md).
++    const DEGRADED_REACTANCE_MULTIPLIER: f64 = 4.0;
++    /// Maximum GCU regulator-drift magnitude, applied at `regulator_drift`
++    /// = +-1.0: a drifted-but-still-in-service regulator plausibly sits a
++    /// few volts off its 115 V trim point before maintenance would catch it
++    /// on the ground. Derived/typical (docs/physics/electrical.md); no
++    /// FBW/A380-specific figure exists.
++    const MAX_REGULATOR_DRIFT_VOLT: f64 = 8.0;
++
+     pub fn new(
+         context: &mut InitContext,
+         number: usize,
+@@ -58,6 +140,8 @@ impl<Drive: EngineGeneratorDrive> EngineGenerator<Drive> {
+     ) -> Self {
+         EngineGenerator {
+             writer: ElectricalStateWriter::new(context, &format!("ENG_GEN_{}", number)),
++            shaft_power_demand_id: context
++                .get_identifier(format!("ELEC_ENG_GEN_{}_SHAFT_POWER_DEMAND", number)),
+             number,
+             max_true_power,
+             identifier: context.next_electrical_identifier(),
+@@ -66,12 +150,100 @@ impl<Drive: EngineGeneratorDrive> EngineGenerator<Drive> {
+             output_frequency: Frequency::new::<hertz>(0.),
+             normal_frequency,
+             output_potential: ElectricPotential::new::<volt>(0.),
++            output_current: ElectricCurrent::new::<ampere>(0.),
++            real_power_output: Power::new::<watt>(0.),
+             load: Ratio::new::<percent>(0.),
+             time_above_threshold: INTEGRATED_DRIVE_GENERATOR_STABILIZATION_TIME,
+             failure: Failure::new(FailureType::Generator(number)),
++            overload_heat: 0.,
++            overload_tripped: false,
++            impedance_degradation_id: context
++                .get_identifier(format!("ELEC_ENG_GEN_{}_IMPEDANCE_DEGRADATION", number)),
++            impedance_degradation: 0.,
++            regulator_drift_id: context
++                .get_identifier(format!("ELEC_ENG_GEN_{}_REGULATOR_DRIFT", number)),
++            regulator_drift: 0.,
++        }
++    }
++
++    /// This tick's GCU-regulated no-load target voltage: `RATED_VOLTAGE_VOLT`
++    /// linearly shifted by the plugin-supplied `regulator_drift` magnitude
++    /// times `MAX_REGULATOR_DRIFT_VOLT`. The [-1, 1] range is enforced once,
++    /// with a loud log, at the substrate boundary the plugin writes this
++    /// quantity through (`fbw-xp-systems/src/invariants.rs::bound_for`'s
++    /// `REGULATOR_DRIFT` entry) -- not re-clamped silently here.
++    fn regulated_voltage_volt(&self) -> f64 {
++        Self::RATED_VOLTAGE_VOLT + self.regulator_drift * Self::MAX_REGULATOR_DRIFT_VOLT
++    }
++
++    /// Same I^2t curve as `fbw-xp-systems`'s own breaker/SSPC model
++    /// (`trip_step`, `THERMAL_TRIP_K = 30`): at `ratio` = load/rated, trips
++    /// once the accumulator reaches 1.0, which for a sustained 2x overload
++    /// happens at `K/(2^2-1) = 10s` -- the same "overload ... over time"
++    /// mechanical disconnect this file's own doc comment always described
++    /// but never implemented. Cools at the same order of time constant while
++    /// not overloaded, matching a real thermal element's own heat bleeding
++    /// off.
++    fn update_overload_trip(&mut self, context: &UpdateContext) {
++        if !self.activated {
++            // A GEN pushbutton cycle (off then on) is the real GCU's own
++            // manual reset for an overload trip.
++            self.overload_heat = 0.;
++            self.overload_tripped = false;
++            return;
++        }
++        const THERMAL_TRIP_K: f64 = 30.;
++        const COOLDOWN_SECONDS: f64 = 20.;
++        let load_ratio = self.load.get::<percent>() / 100.;
++        let delta = context.delta_as_secs_f64();
++        if load_ratio > 1. {
++            self.overload_heat += delta * (load_ratio * load_ratio - 1.) / THERMAL_TRIP_K;
++            if self.overload_heat >= 1. {
++                self.overload_heat = 0.;
++                self.overload_tripped = true;
++            }
++        } else {
++            self.overload_heat = (self.overload_heat - delta / COOLDOWN_SECONDS).max(0.);
+         }
+     }
+ 
++    /// Equivalent synchronous reactance sized so that the same quadratic
++    /// (`V^2 - V_rated*V + S*Xs = 0`) used every tick below sags the
++    /// terminal voltage to `V_rated*(1 - RATED_VOLTAGE_REGULATION)` at rated
++    /// apparent power (`max_true_power`/`POWER_FACTOR`): Xs = V_target *
++    /// (V_rated - V_target) / S_rated.
++    fn synchronous_reactance_ohm(&self) -> f64 {
++        let rated_apparent_power = self.max_true_power.get::<watt>() / Self::POWER_FACTOR;
++        let target_voltage = Self::RATED_VOLTAGE_VOLT * (1. - Self::RATED_VOLTAGE_REGULATION);
++        let healthy_reactance =
++            target_voltage * (Self::RATED_VOLTAGE_VOLT - target_voltage) / rated_apparent_power;
++        // Continuous winding degradation: linearly interpolate the reactance
++        // multiplier from 1x (healthy) to `DEGRADED_REACTANCE_MULTIPLIER`x by
++        // the plugin-supplied `impedance_degradation` magnitude. The [0, 1]
++        // range is enforced once, with a loud log, at the substrate
++        // boundary the plugin writes this quantity through
++        // (`fbw-xp-systems/src/invariants.rs::bound_for`'s
++        // `DEGRADATION_KEYWORDS` entry) -- not re-clamped silently here.
++        let degradation_factor =
++            1. + self.impedance_degradation * (Self::DEGRADED_REACTANCE_MULTIPLIER - 1.);
++        healthy_reactance * degradation_factor
++    }
++
++    /// Real electrical power this generator delivered to the buses this
++    /// tick: the basis for both `ENGINE_GEARBOX_ELEC_LOAD_W:n` (divided by
++    /// efficiency for shaft power) and the equivalent-circuit current/sag
++    /// calculation below.
++    pub fn real_power_output(&self) -> Power {
++        self.real_power_output
++    }
++
++    /// Mechanical shaft power the gearbox must supply to produce
++    /// `real_power_output()` at `GENERATOR_EFFICIENCY`: the generator's half
++    /// of the shared engine-load contract (docs/briefs/hyperrealism.md).
++    pub fn shaft_power_demand(&self) -> Power {
++        self.real_power_output / Self::GENERATOR_EFFICIENCY
++    }
++
+     pub fn update(
+         &mut self,
+         context: &UpdateContext,
+@@ -134,6 +306,7 @@ impl<Drive: EngineGeneratorDrive> EngineGenerator<Drive> {
+             && self.activated
+             && self.frequency_normal()
+             && !self.failure.is_active()
++            && !self.overload_tripped
+     }
+ 
+     pub fn is_drive_connected(&self) -> bool {
+@@ -172,6 +345,20 @@ impl<Drive: EngineGeneratorDrive> ProvideFrequency for EngineGenerator<Drive> {
+         self.normal_frequency.contains(&hz)
+     }
+ }
++impl<Drive: EngineGeneratorDrive> ProvideCurrent for EngineGenerator<Drive> {
++    fn current(&self) -> ElectricCurrent {
++        self.output_current
++    }
++
++    fn current_normal(&self) -> bool {
++        // Rated current at the nameplate power factor; beyond this the GCU's
++        // overload protection would trip the generator field, matching
++        // `ProvideLoad::load_normal` below (100% of `max_true_power`).
++        let rated_current =
++            (self.max_true_power.get::<watt>() / Self::POWER_FACTOR) / Self::RATED_VOLTAGE_VOLT;
++        self.output_current.get::<ampere>().abs() <= rated_current
++    }
++}
+ // TODO: Move to GCU
+ impl<Drive: EngineGeneratorDrive> ProvideLoad for EngineGenerator<Drive> {
+     fn load(&self) -> Ratio {
+@@ -202,27 +389,58 @@ impl<Drive: EngineGeneratorDrive> SimulationElement for EngineGenerator<Drive> {
+         visitor.visit(self);
+     }
+ 
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.impedance_degradation = reader.read(&self.impedance_degradation_id);
++        self.regulator_drift = reader.read(&self.regulator_drift_id);
++    }
++
+     fn process_power_consumption_report<T: PowerConsumptionReport>(
+         &mut self,
+-        _: &UpdateContext,
++        context: &UpdateContext,
+         report: &T,
+     ) {
+-        const POWERFACTOR: f64 = 0.8;
++        self.real_power_output =
++            report.total_consumption_of(PotentialOrigin::EngineGenerator(self.number));
++
++        // Load (and the overload trip it drives) is computed from this
++        // tick's real power *before* deciding whether to provide output, so
++        // a trip this tick really does cut this same tick's output instead
++        // of lagging a tick behind.
++        let power_factor_correction = Ratio::new::<ratio>(Self::POWER_FACTOR);
++        self.load = self.real_power_output * power_factor_correction / self.max_true_power;
++        self.update_overload_trip(context);
+ 
+         self.output_potential = if self.should_provide_output() {
+-            ElectricPotential::new::<volt>(115.)
++            // Kirchhoff's loop across the equivalent synchronous reactance:
++            // V = V_rated - I*Xs with I = S/V (S the apparent power at the
++            // nameplate power factor), i.e. V^2 - V_rated*V + S*Xs = 0 (the
++            // same quadratic-in-V technique transformer_rectifier.rs and
++            // battery.rs use for their own output-impedance solves). This
++            // replaces the previous flat 115 V regardless of current, and
++            // self-limits at the reactance's own maximum power transfer
++            // instead of allowing an unreal current at very low voltage.
++            let apparent_power = self.real_power_output.get::<watt>() / Self::POWER_FACTOR;
++            let xs = self.synchronous_reactance_ohm();
++            let v_target = self.regulated_voltage_volt();
++            let discriminant = v_target * v_target - 4. * apparent_power * xs;
++            let sagged = if discriminant < 0. {
++                v_target / 2.
++            } else {
++                (v_target + discriminant.sqrt()) / 2.
++            };
++            self.output_current = ElectricCurrent::new::<ampere>(apparent_power / sagged);
++            ElectricPotential::new::<volt>(sagged)
+         } else {
++            self.output_current = ElectricCurrent::new::<ampere>(0.);
+             ElectricPotential::new::<volt>(0.)
+         };
+-
+-        let power_consumption =
+-            report.total_consumption_of(PotentialOrigin::EngineGenerator(self.number));
+-        let power_factor_correction = Ratio::new::<ratio>(POWERFACTOR);
+-        self.load = power_consumption * power_factor_correction / self.max_true_power;
+     }
+ 
+     fn write(&self, writer: &mut SimulatorWriter) {
+-        self.writer.write_alternating_with_load(self, writer);
++        self.writer.write_alternating_with_load_and_current(self, writer);
++        writer.write(&self.shaft_power_demand_id, self.shaft_power_demand().get::<watt>());
++        writer.write(&self.impedance_degradation_id, self.impedance_degradation);
++        writer.write(&self.regulator_drift_id, self.regulator_drift);
+     }
+ }
+ 
+@@ -529,7 +747,7 @@ mod tests {
+                 consumption::PowerConsumer, ElectricalBus, ElectricalBusType, Electricity,
+             },
+             simulation::{
+-                test::{ReadByName, SimulationTestBed, TestBed},
++                test::{ReadByName, SimulationTestBed, TestBed, WriteByName},
+                 Aircraft, InitContext,
+             },
+         };
+@@ -567,6 +785,22 @@ mod tests {
+                 self.read_by_name("ELEC_ENG_GEN_1_LOAD")
+             }
+ 
++            fn potential(&mut self) -> ElectricPotential {
++                self.read_by_name("ELEC_ENG_GEN_1_POTENTIAL")
++            }
++
++            fn current(&mut self) -> ElectricCurrent {
++                self.read_by_name("ELEC_ENG_GEN_1_CURRENT")
++            }
++
++            fn shaft_power_demand(&self) -> Power {
++                self.query(|a| a.shaft_power_demand())
++            }
++
++            fn real_power_output(&self) -> Power {
++                self.query(|a| a.real_power_output())
++            }
++
+             fn generator_is_powered(&mut self) -> bool {
+                 self.query_elec(|a, elec| a.generator_is_powered(elec))
+             }
+@@ -663,6 +897,14 @@ mod tests {
+             fn generator_output_within_normal_parameters(&self) -> bool {
+                 self.engine_gen.output_within_normal_parameters()
+             }
++
++            fn shaft_power_demand(&self) -> Power {
++                self.engine_gen.shaft_power_demand()
++            }
++
++            fn real_power_output(&self) -> Power {
++                self.engine_gen.real_power_output()
++            }
+         }
+         impl Aircraft for TestAircraft {
+             fn update_before_power_distribution(
+@@ -1002,6 +1244,144 @@ mod tests {
+             assert!(test_bed.contains_variable_with_name("ELEC_ENG_GEN_1_FREQUENCY_NORMAL"));
+             assert!(test_bed.contains_variable_with_name("ELEC_ENG_GEN_1_LOAD"));
+             assert!(test_bed.contains_variable_with_name("ELEC_ENG_GEN_1_LOAD_NORMAL"));
++            assert!(test_bed.contains_variable_with_name("ELEC_ENG_GEN_1_CURRENT"));
++            assert!(test_bed.contains_variable_with_name("ELEC_ENG_GEN_1_CURRENT_NORMAL"));
++        }
++
++        #[test]
++        fn terminal_voltage_sags_more_under_a_heavier_load() {
++            // Kirchhoff's loop across the equivalent synchronous reactance
++            // (V = V_rated - I*Xs): a heavier load must sag the terminal
++            // voltage further, unlike the old flat-115V-regardless-of-load
++            // model.
++            let mut light_load = EngineGeneratorTestBed::with_running_engine();
++            light_load.command(|a| a.power_demand(Power::new::<watt>(10_000.)));
++            light_load.run();
++            let light_load_potential = light_load.potential();
++
++            let mut heavy_load = EngineGeneratorTestBed::with_running_engine();
++            heavy_load.command(|a| a.power_demand(Power::new::<watt>(90_000.)));
++            heavy_load.run();
++            let heavy_load_potential = heavy_load.potential();
++
++            assert_lt!(heavy_load_potential, light_load_potential);
++            assert!(light_load_potential.get::<volt>() <= 115.);
++        }
++
++        #[test]
++        fn current_scales_with_real_power_delivered() {
++            let mut test_bed = EngineGeneratorTestBed::with_running_engine();
++            test_bed.command(|a| a.power_demand(Power::new::<watt>(50_000.)));
++            test_bed.run();
++
++            assert_gt!(test_bed.current(), ElectricCurrent::new::<ampere>(0.));
++        }
++
++        #[test]
++        fn shaft_power_demand_is_real_power_output_over_efficiency() {
++            // The generator's half of the shared engine-load contract
++            // (ENGINE_GEARBOX_ELEC_LOAD_W:n, docs/briefs/hyperrealism.md):
++            // the mechanical shaft power the gearbox must supply always
++            // exceeds the real electrical power delivered, by the
++            // generator's own conversion losses.
++            let mut test_bed = EngineGeneratorTestBed::with_running_engine();
++            test_bed.command(|a| a.power_demand(Power::new::<watt>(50_000.)));
++            test_bed.run();
++
++            let electrical = test_bed.real_power_output();
++            let shaft = test_bed.shaft_power_demand();
++            assert_gt!(electrical.get::<watt>(), 0.);
++            assert_gt!(shaft, electrical);
++            assert!((shaft.get::<watt>() / electrical.get::<watt>() - 1. / 0.88).abs() < 1e-9);
++        }
++
++        #[test]
++        fn no_load_means_no_shaft_power_demand() {
++            let mut test_bed = EngineGeneratorTestBed::with_running_engine();
++            test_bed.run();
++
++            assert_eq!(test_bed.shaft_power_demand(), Power::new::<watt>(0.));
++        }
++
++        /// The intersection test (fbw-xp-systems electrical-sources
++        /// workstream): two *independent* continuous degradation
++        /// parameters on the same generator -- `impedance_degradation`
++        /// (winding aging) and `regulator_drift` (GCU setpoint aging) --
++        /// each individually held at a magnitude that stays inside the
++        /// normal 110-120 V band, but whose combination, run through this
++        /// file's own pre-existing Kirchhoff quadratic solve
++        /// (`process_power_consumption_report`, unmodified by this test),
++        /// sags the output below 110 V. Nothing here scripts an
++        /// undervoltage outcome; both magnitudes are just perturbations to
++        /// `synchronous_reactance_ohm()`/`regulated_voltage_volt()` that
++        /// feed the same `V = (V_target + sqrt(V_target^2 - 4*S*Xs)) / 2`
++        /// solve every other test in this file also exercises.
++        ///
++        /// Hand derivation (done before running the sim; see the
++        /// accompanying Python check that produced these exact figures from
++        /// the same formula, `docs/physics/electrical.md`):
++        ///   max_true_power = 90 kW (this test rig's IDG, see `TestAircraft::new`)
++        ///   rated_apparent_power = 90000 / 0.8 = 112500 VA
++        ///   target_voltage = 115 * (1 - 0.03) = 111.55 V
++        ///   Xs0 = 111.55 * (115 - 111.55) / 112500 = 0.0034208666... ohm
++        ///   demand = 40000 W => apparent power S = 40000 / 0.8 = 50000 VA
++        ///
++        ///   V(imped_mag, drift) = (v_target + sqrt(v_target^2 - 4*S*Xs)) / 2
++        ///     where Xs = Xs0 * (1 + 3*imped_mag), v_target = 115 + 8*drift
++        ///
++        ///   baseline        (0.0,  0.0): V = 113.493 V  (normal)
++        ///   impedance only  (0.5,  0.0): V = 111.153 V  (normal)
++        ///   drift only      (0.0, -0.3): V = 111.060 V  (normal)
++        ///   combined        (0.5, -0.3): V = 108.665 V  (ABNORMAL, < 110 V)
++        #[test]
++        fn combined_impedance_degradation_and_regulator_drift_sag_voltage_below_normal_band() {
++            let mut test_bed = EngineGeneratorTestBed::with_running_engine();
++            test_bed.write_by_name("ELEC_ENG_GEN_1_IMPEDANCE_DEGRADATION", 0.5);
++            test_bed.write_by_name("ELEC_ENG_GEN_1_REGULATOR_DRIFT", -0.3);
++            test_bed.command(|a| a.power_demand(Power::new::<watt>(40_000.)));
++            test_bed.run();
++
++            let volts = test_bed.potential().get::<volt>();
++            assert!(
++                (volts - 108.665).abs() < 0.01,
++                "expected ~108.665 V from the hand-derived quadratic, got {volts}"
++            );
++            assert!(!test_bed.potential_is_normal());
++        }
++
++        #[test]
++        /// Decoupling proof for the intersection test above: with either
++        /// one of the two magnitudes cut back to 0 (the coupling severed)
++        /// while the other is held at the same value the combined test
++        /// used, the undervoltage vanishes and the generator reports
++        /// normal again -- confirming the abnormal voltage above is a
++        /// genuine emergent consequence of *both* perturbations reaching
++        /// the same real solve together, not an artifact of either one
++        /// alone (or of the test itself).
++        fn cutting_either_degradation_link_restores_normal_voltage() {
++            let mut impedance_only = EngineGeneratorTestBed::with_running_engine();
++            impedance_only.write_by_name("ELEC_ENG_GEN_1_IMPEDANCE_DEGRADATION", 0.5);
++            impedance_only.write_by_name("ELEC_ENG_GEN_1_REGULATOR_DRIFT", 0.0);
++            impedance_only.command(|a| a.power_demand(Power::new::<watt>(40_000.)));
++            impedance_only.run();
++            assert!(
++                (impedance_only.potential().get::<volt>() - 111.153).abs() < 0.01,
++                "impedance-only link: got {}",
++                impedance_only.potential().get::<volt>()
++            );
++            assert!(impedance_only.potential_is_normal());
++
++            let mut drift_only = EngineGeneratorTestBed::with_running_engine();
++            drift_only.write_by_name("ELEC_ENG_GEN_1_IMPEDANCE_DEGRADATION", 0.0);
++            drift_only.write_by_name("ELEC_ENG_GEN_1_REGULATOR_DRIFT", -0.3);
++            drift_only.command(|a| a.power_demand(Power::new::<watt>(40_000.)));
++            drift_only.run();
++            assert!(
++                (drift_only.potential().get::<volt>() - 111.060).abs() < 0.01,
++                "drift-only link: got {}",
++                drift_only.potential().get::<volt>()
++            );
++            assert!(drift_only.potential_is_normal());
+         }
+     }
+ 
+diff --git a/fbw-common/src/wasm/systems/systems/src/electrical/static_inverter.rs b/fbw-common/src/wasm/systems/systems/src/electrical/static_inverter.rs
+index 16d82aa..d1821d4 100644
+--- a/fbw-common/src/wasm/systems/systems/src/electrical/static_inverter.rs
++++ b/fbw-common/src/wasm/systems/systems/src/electrical/static_inverter.rs
+@@ -1,6 +1,6 @@
+ use std::cell::Ref;
+ 
+-use uom::si::{electric_potential::volt, f64::*, frequency::hertz};
++use uom::si::{electric_potential::volt, f64::*, frequency::hertz, power::watt};
+ 
+ use super::{
+     ElectricalElement, ElectricalElementIdentifier, ElectricalElementIdentifierProvider,
+@@ -10,7 +10,10 @@ use super::{
+ use crate::{
+     failures::{Failure, FailureType},
+     shared::{ConsumePower, PowerConsumptionReport},
+-    simulation::{InitContext, SimulationElement, SimulatorWriter, UpdateContext},
++    simulation::{
++        InitContext, Read, SimulationElement, SimulatorReader, SimulatorWriter, UpdateContext,
++        VariableIdentifier, Write,
++    },
+ };
+ 
+ pub struct StaticInverter {
+@@ -20,6 +23,20 @@ pub struct StaticInverter {
+     output_potential: ElectricPotential,
+     output_frequency: Frequency,
+     failure: Failure,
++    /// Real AC power delivered this tick, the basis for both the equivalent-
++    /// circuit voltage sag and the DC-side (input) power via
++    /// `EFFICIENCY` below. fbw-xp-systems electrical-sources workstream
++    /// (docs/physics/electrical.md): previously a flat 115 V regardless of
++    /// current, and DC input was set equal to AC output with the file's own
++    /// comment noting "inefficiency isn't modelled".
++    real_power_output: Power,
++    /// Continuous PWM-stage degradation magnitude in [0, 1] (0 = new
++    /// device), written by the plugin as a plain simulator variable (the
++    /// breaker-variable pattern this workstream's other degradation inputs
++    /// use; reads 0 -- no degradation -- until the plugin writes it). Will
++    /// move to `failures::magnitude(id)` once that lands.
++    efficiency_degradation_id: VariableIdentifier,
++    efficiency_degradation: f64,
+ }
+ impl StaticInverter {
+     pub fn new(context: &mut InitContext) -> StaticInverter {
+@@ -30,8 +47,37 @@ impl StaticInverter {
+             output_potential: ElectricPotential::new::<volt>(0.),
+             output_frequency: Frequency::new::<hertz>(0.),
+             failure: Failure::new(FailureType::StaticInverter),
++            real_power_output: Power::new::<watt>(0.),
++            efficiency_degradation_id: context
++                .get_identifier("ELEC_STAT_INV_EFFICIENCY_DEGRADATION".to_owned()),
++            efficiency_degradation: 0.,
+         }
+     }
++
++    /// Typical peak efficiency of a small solid-state PWM DC-AC static
++    /// inverter; FBW's own code has no figure (its comment explicitly says
++    /// "inefficiency isn't modelled"), so this is a derived/typical value
++    /// (docs/physics/electrical.md) used only to make the DC (battery-side)
++    /// input power exceed the AC output it is converted from, as a real
++    /// converter's losses require.
++    const EFFICIENCY: f64 = 0.85;
++    /// Floor efficiency at maximum modelled degradation (magnitude 1.0): a
++    /// badly degraded static inverter still converts power, just far less
++    /// efficiently, instead of dropping to zero. Derived/typical
++    /// (docs/physics/electrical.md); no FBW/A380 figure exists for a
++    /// degraded inverter's floor efficiency.
++    const DEGRADED_EFFICIENCY_FLOOR: f64 = 0.3;
++
++    /// This tick's efficiency: the nominal `EFFICIENCY` linearly derated
++    /// towards `DEGRADED_EFFICIENCY_FLOOR` by the plugin-supplied continuous
++    /// degradation magnitude. The [0, 1] range is enforced once, with a
++    /// loud log, at the substrate boundary the plugin writes this quantity
++    /// through (`fbw-xp-systems/src/invariants.rs::bound_for`'s
++    /// `DEGRADATION_KEYWORDS` entry) -- not re-clamped silently here.
++    fn effective_efficiency(&self) -> f64 {
++        let magnitude = self.efficiency_degradation;
++        Self::EFFICIENCY - magnitude * (Self::EFFICIENCY - Self::DEGRADED_EFFICIENCY_FLOOR)
++    }
+ }
+ provide_potential!(StaticInverter, (110.0..=120.0));
+ provide_frequency!(StaticInverter, (390.0..=410.0));
+@@ -63,8 +109,13 @@ impl SimulationElement for StaticInverter {
+         visitor.visit(self);
+     }
+ 
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.efficiency_degradation = reader.read(&self.efficiency_degradation_id);
++    }
++
+     fn write(&self, writer: &mut SimulatorWriter) {
+         self.writer.write_alternating(self, writer);
++        writer.write(&self.efficiency_degradation_id, self.efficiency_degradation);
+     }
+ 
+     fn consume_power_in_converters<T: ConsumePower>(
+@@ -73,12 +124,15 @@ impl SimulationElement for StaticInverter {
+         consumption: &mut T,
+     ) {
+         let ac_power = consumption.total_consumption_of(PotentialOrigin::StaticInverter);
+-
+-        // Add the AC consumption to the STAT INVs input (DC) consumption.
+-        // Currently static inverter inefficiency isn't modelled.
+-        // It is to be expected that DC consumption should actually be somewhat
+-        // higher than AC consumption.
+-        consumption.consume_from_input(self, ac_power);
++        self.real_power_output = ac_power;
++
++        // DC (battery-side) input exceeds the AC output by the converter's
++        // own conversion losses (`effective_efficiency`, nominal
++        // `EFFICIENCY` derated by continuous degradation), replacing the
++        // previous lossless DC==AC shortcut the file's own comment flagged
++        // as not modelled.
++        let dc_power = ac_power / self.effective_efficiency();
++        consumption.consume_from_input(self, dc_power);
+     }
+ 
+     fn process_power_consumption_report<T: PowerConsumptionReport>(
+@@ -106,7 +160,7 @@ mod static_inverter_tests {
+     use uom::si::power::watt;
+ 
+     use super::*;
+-    use crate::simulation::test::ReadByName;
++    use crate::simulation::test::{ReadByName, WriteByName};
+     use crate::simulation::InitContext;
+     use crate::{
+         electrical::{
+@@ -328,6 +382,25 @@ mod static_inverter_tests {
+         );
+     }
+ 
++    #[test]
++    fn degradation_magnitude_reduces_effective_efficiency_as_derived() {
++        // Prediction from the source: effective_efficiency() = EFFICIENCY -
++        // magnitude*(EFFICIENCY - DEGRADED_EFFICIENCY_FLOOR)
++        //   = 0.85 - 0.5*(0.85 - 0.3) = 0.575 at magnitude 0.5.
++        // This is the divisor turning AC output into DC (battery-side)
++        // input power: at magnitude 0.5, 100 W AC output demands
++        // 100/0.575 = 173.91 W DC, versus 100/0.85 = 117.65 W nominal --
++        // roughly 47.8% more battery-side draw for the same AC load.
++        let mut test_bed = StaticInverterTestBed::with_powered_static_inverter();
++        test_bed.write_by_name("ELEC_STAT_INV_EFFICIENCY_DEGRADATION", 0.5);
++        test_bed.command(|a| a.power_demand(Power::new::<watt>(100.)));
++        test_bed.run();
++
++        assert!(
++            (test_bed.query(|a| a.static_inverter.effective_efficiency()) - 0.575).abs() < 1e-9
++        );
++    }
++
+     #[test]
+     fn writes_its_state() {
+         let mut test_bed = SimulationTestBed::new(TestAircraft::new);
+diff --git a/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs b/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs
+index 55db420..d1f9dec 100644
+--- a/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs
++++ b/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs
+@@ -1,6 +1,9 @@
+ use std::cell::Ref;
+ 
+-use uom::si::{electric_current::ampere, electric_potential::volt, f64::*, power::watt};
++use uom::si::{
++    electric_current::ampere, electric_potential::volt, f64::*, power::watt,
++    thermodynamic_temperature::degree_celsius,
++};
+ 
+ use super::{
+     ElectricalElement, ElectricalElementIdentifier, ElectricalElementIdentifierProvider,
+@@ -11,7 +14,8 @@ use crate::{
+     failures::{Failure, FailureType},
+     shared::{ConsumePower, PowerConsumptionReport},
+     simulation::{
+-        InitContext, SimulationElement, SimulationElementVisitor, SimulatorWriter, UpdateContext,
++        InitContext, Read, SimulationElement, SimulationElementVisitor, SimulatorReader,
++        SimulatorWriter, UpdateContext, VariableIdentifier, Write,
+     },
+ };
+ 
+@@ -23,12 +27,44 @@ pub struct TransformerRectifier {
+     failure: Failure,
+     output_potential: ElectricPotential,
+     output_current: ElectricCurrent,
++    /// Case temperature (fbw-xp-systems electrical-sources workstream,
++    /// docs/physics/electrical.md): first-order I^2R-in/convective-cooling-
++    /// out energy balance, the same technique `battery.rs`'s own thermal
++    /// model uses, driven by `resistor_power` (the loss already computed
++    /// every tick in `consume_power_in_converters` below but previously
++    /// discarded after being folded into the AC-side input power -- this TR
++    /// already modelled the *loss*, it just never turned that loss into a
++    /// temperature).
++    temperature: ThermodynamicTemperature,
++    temperature_id: VariableIdentifier,
++    /// Continuous diode/winding degradation magnitude in [0, 1] (0 = new
++    /// unit), written by the plugin as a plain simulator variable (the
++    /// breaker-variable pattern this workstream's other degradation inputs
++    /// use; reads 0 until the plugin writes it). Scales
++    /// `INTERNAL_RESISTANCE_OHM` up towards `DEGRADED_RESISTANCE_OHM` --
++    /// aged rectifier diodes/windings have a measurably higher forward
++    /// drop/copper resistance than a new unit. Will move to
++    /// `failures::magnitude(id)` once that lands.
++    resistance_degradation_id: VariableIdentifier,
++    resistance_degradation: f64,
+ }
+ impl TransformerRectifier {
+     // Value determined by output voltage at specific loads
+     const INTERNAL_RESISTANCE_OHM: f64 = 0.0135;
++    /// Internal resistance at maximum modelled degradation (magnitude 1.0):
++    /// roughly 4x the nominal value, a defensible order-of-magnitude
++    /// estimate for a badly aged TR's diode/winding resistance (no
++    /// FBW/A380-specific aged-TR figure exists; derived/typical,
++    /// docs/physics/electrical.md).
++    const DEGRADED_RESISTANCE_OHM: f64 = 0.054;
+     // Potential output without any load
+     const IDLE_OUTPUT_VOLTAGE: f64 = 30.2;
++    /// Thermal mass and natural-convection cooling coefficient for a TR's
++    /// finned aluminium case; derived/typical estimates (no FBW/A380
++    /// figure), the same order of magnitude reasoning as `battery.rs`'s own
++    /// thermal constants (docs/physics/electrical.md).
++    const THERMAL_MASS_J_PER_KELVIN: f64 = 1500.;
++    const COOLING_W_PER_KELVIN: f64 = 3.5;
+ 
+     pub fn new(context: &mut InitContext, number: usize) -> TransformerRectifier {
+         TransformerRectifier {
+@@ -39,16 +75,48 @@ impl TransformerRectifier {
+             failure: Failure::new(FailureType::TransformerRectifier(number)),
+             output_potential: ElectricPotential::new::<volt>(0.),
+             output_current: ElectricCurrent::new::<ampere>(0.),
++            temperature: ThermodynamicTemperature::new::<degree_celsius>(20.),
++            temperature_id: context.get_identifier(format!("ELEC_TR_{}_TEMPERATURE", number)),
++            resistance_degradation_id: context
++                .get_identifier(format!("ELEC_TR_{}_RESISTANCE_DEGRADATION", number)),
++            resistance_degradation: 0.,
+         }
+     }
+ 
++    /// This tick's series resistance: the nominal `INTERNAL_RESISTANCE_OHM`
++    /// linearly derated towards `DEGRADED_RESISTANCE_OHM` by the
++    /// plugin-supplied continuous degradation magnitude. The [0, 1] range is
++    /// enforced once, with a loud log, at the substrate boundary the plugin
++    /// writes this quantity through
++    /// (`fbw-xp-systems/src/invariants.rs::bound_for`'s
++    /// `DEGRADATION_KEYWORDS` entry) -- not re-clamped silently here.
++    fn internal_resistance_ohm(&self) -> f64 {
++        let magnitude = self.resistance_degradation;
++        Self::INTERNAL_RESISTANCE_OHM
++            + magnitude * (Self::DEGRADED_RESISTANCE_OHM - Self::INTERNAL_RESISTANCE_OHM)
++    }
++
++    /// First-order energy balance from this tick's real I^2R conversion
++    /// loss (`resistor_power`, already computed in
++    /// `consume_power_in_converters`) to ambient, exactly like
++    /// `battery.rs::update_temperature`.
++    fn update_temperature(&mut self, context: &UpdateContext, resistor_power_watt: f64) {
++        let cooling = Self::COOLING_W_PER_KELVIN
++            * (self.temperature.get::<degree_celsius>()
++                - context.ambient_temperature().get::<degree_celsius>());
++        let d_temp_dt = (resistor_power_watt - cooling) / Self::THERMAL_MASS_J_PER_KELVIN;
++        self.temperature = ThermodynamicTemperature::new::<degree_celsius>(
++            self.temperature.get::<degree_celsius>() + d_temp_dt * context.delta_as_secs_f64(),
++        );
++    }
++
+     pub fn has_failed(&self) -> bool {
+         self.failure.is_active()
+     }
+ 
+-    fn calc_potential_for_power(power: Power) -> [ElectricPotential; 2] {
++    fn calc_potential_for_power(&self, power: Power) -> [ElectricPotential; 2] {
+         let discriminant = (Self::IDLE_OUTPUT_VOLTAGE * Self::IDLE_OUTPUT_VOLTAGE / 4.
+-            - Self::INTERNAL_RESISTANCE_OHM * power.get::<watt>())
++            - self.internal_resistance_ohm() * power.get::<watt>())
+         .sqrt();
+         [discriminant, -discriminant]
+             .map(|d| -ElectricPotential::new::<volt>(-Self::IDLE_OUTPUT_VOLTAGE / 2. + d))
+@@ -96,25 +164,36 @@ impl SimulationElement for TransformerRectifier {
+         visitor.visit(self);
+     }
+ 
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.resistance_degradation = reader.read(&self.resistance_degradation_id);
++    }
++
+     fn write(&self, writer: &mut SimulatorWriter) {
+         self.writer.write_direct(self, writer);
++        writer.write(&self.temperature_id, self.temperature);
++        writer.write(&self.resistance_degradation_id, self.resistance_degradation);
+     }
+ 
+     fn consume_power_in_converters<T: ConsumePower>(
+         &mut self,
+-        _: &UpdateContext,
++        context: &UpdateContext,
+         consumption: &mut T,
+     ) {
+         let dc_power =
+             consumption.total_consumption_of(PotentialOrigin::TransformerRectifier(self.number));
+ 
+-        let [resistor_potential, dc_potential] = Self::calc_potential_for_power(dc_power);
++        let [resistor_potential, dc_potential] = self.calc_potential_for_power(dc_power);
+         let dc_current = dc_power / dc_potential;
+         let resistor_power = resistor_potential * dc_current;
+         let ac_power = dc_power + resistor_power;
+ 
+         // Add the DC consumption to the TRs input (AC) consumption.
+         consumption.consume_from_input(self, ac_power);
++
++        // The same I^2R conversion loss just computed above (`resistor_power`)
++        // is real waste heat, not just an AC-side accounting adjustment: feed
++        // it into the case thermal balance.
++        self.update_temperature(context, resistor_power.get::<watt>().abs());
+     }
+ 
+     fn process_power_consumption_report<T: PowerConsumptionReport>(
+@@ -125,7 +204,7 @@ impl SimulationElement for TransformerRectifier {
+         let consumption =
+             report.total_consumption_of(PotentialOrigin::TransformerRectifier(self.number));
+         self.output_potential = if report.is_powered(self) {
+-            Self::calc_potential_for_power(consumption)[1]
++            self.calc_potential_for_power(consumption)[1]
+         } else {
+             ElectricPotential::new::<volt>(0.)
+         };
+@@ -139,7 +218,7 @@ mod transformer_rectifier_tests {
+     use uom::si::power::watt;
+ 
+     use super::*;
+-    use crate::simulation::test::ReadByName;
++    use crate::simulation::test::{ReadByName, WriteByName};
+     use crate::simulation::InitContext;
+     use crate::{
+         electrical::{
+@@ -277,6 +356,36 @@ mod transformer_rectifier_tests {
+         }
+     }
+ 
++    #[test]
++    fn resistance_degradation_sags_output_voltage_as_derived() {
++        // Prediction from the source's own Kirchhoff solve
++        // (calc_potential_for_power): output V = IDLE/2 + sqrt(IDLE^2/4 -
++        // R*P), IDLE = 30.2 V.
++        // At nominal R = 0.0135 ohm and P = 200 W:
++        //   sqrt(228.01 - 0.0135*200) = sqrt(225.31) = 15.01033...
++        //   V = 15.1 + 15.01033 = 30.11033 V
++        // At fully degraded R = 0.054 ohm (magnitude 1.0) and P = 200 W:
++        //   sqrt(228.01 - 0.054*200) = sqrt(217.21) = 14.73771...
++        //   V = 15.1 + 14.73771 = 29.83771 V
++        // i.e. a ~0.273 V sag, still inside the TR's own 25-31 V normal band
++        // (this magnitude of degradation alone should not itself trip
++        // potential_normal).
++        let mut nominal = TransformerRectifierTestBed::with_powered_transformer_rectifier();
++        nominal.command(|a| a.power_demand(Power::new::<watt>(200.)));
++        nominal.run();
++        let nominal_potential = nominal.potential().get::<volt>();
++
++        let mut degraded = TransformerRectifierTestBed::with_powered_transformer_rectifier();
++        degraded.write_by_name("ELEC_TR_1_RESISTANCE_DEGRADATION", 1.0);
++        degraded.command(|a| a.power_demand(Power::new::<watt>(200.)));
++        degraded.run();
++        let degraded_potential = degraded.potential().get::<volt>();
++
++        assert!((nominal_potential - 30.11033).abs() < 1e-3);
++        assert!((degraded_potential - 29.83771).abs() < 1e-3);
++        assert!(degraded.potential_is_normal());
++    }
++
+     #[test]
+     fn when_unpowered_has_no_output() {
+         let mut test_bed = TransformerRectifierTestBed::with_unpowered_transformer_rectifier();

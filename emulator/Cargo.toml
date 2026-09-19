@@ -1,0 +1,18 @@
+[package]
+name = "fbw_a380_emulator"
+version = "0.1.0"
+edition = "2021"
+description = "X-Plane-free, deterministic test bench for the FBW A380X X-Plane port: ticks the real plugin/FBW code with no live X-Plane process."
+
+[dependencies]
+# The FBW systems this ports (their actual Rust simulation, unmodified).
+a380_systems = { path = "../../fbw-aircraft/fbw-a380x/src/wasm/systems/a380_systems" }
+systems = { path = "../../fbw-aircraft/fbw-common/src/wasm/systems/systems" }
+# The plugin crate itself, built with `test-support` (widens a handful of
+# crate-private items to `pub`; see its Cargo.toml). No `js` feature: the
+# emulator never needs the QuickJS/instrument-screen stack, and pulling it
+# in would cost a lot of build time for nothing this crate uses.
+fbw_a380_systems = { path = "..", package = "fbw_a380_systems_xp", features = ["test-support"] }
+uom = "0.37.0"
+
+[dev-dependencies]

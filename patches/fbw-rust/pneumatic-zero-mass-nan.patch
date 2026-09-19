@@ -1,0 +1,42 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/pneumatic/mod.rs b/fbw-common/src/wasm/systems/systems/src/pneumatic/mod.rs
+index 9974910..a85c841 100644
+--- a/fbw-common/src/wasm/systems/systems/src/pneumatic/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/pneumatic/mod.rs
+@@ -75,6 +75,12 @@ pub trait PneumaticContainer {
+         if self.pressure() <= target_pressure {
+             let pressure_diff = target_pressure - self.pressure();
+             let mut mass_aproximation = self.mass() / 2.;
++            if mass_aproximation.get::<kilogram>() <= 0. {
++                // An empty container has no mass to base the Newton
++                // iteration on: dividing by this zero mass produces NaN,
++                // so return zero flow instead of iterating.
++                return Mass::new::<kilogram>(0.);
++            }
+             for _ in 0..3 {
+                 let (self_aprox_pressure, _) = self
+                     .calc_new_pressure_and_temperature_for_mass_flow(
+@@ -110,6 +116,12 @@ pub trait PneumaticContainer {
+         } else {
+             let pressure_diff = other.pressure() - self.pressure();
+             let mut mass_aproximation = other.mass() / 2.;
++            if mass_aproximation.get::<kilogram>() <= 0. {
++                // The donor container is empty, so there is no mass to
++                // base the Newton iteration on: dividing by this zero
++                // mass produces NaN, so return zero flow instead.
++                return Mass::new::<kilogram>(0.);
++            }
+             for _ in 0..3 {
+                 let (self_aprox_pressure, _) = self
+                     .calc_new_pressure_and_temperature_for_mass_flow(
+@@ -162,6 +174,11 @@ pub trait PneumaticContainer {
+                     * volume_quotient.powf(Self::HEAT_CAPACITY_RATIO),
+             );
+             (pressure, temperature)
++        } else if mass.get::<kilogram>() <= 0. {
++            // An empty container has nothing to expand: pressure stays at
++            // zero and temperature is unchanged, instead of the 0/0
++            // division that (new_mass / mass) would otherwise produce.
++            (Pressure::new::<pascal>(0.), self.temperature())
+         } else {
+             let pressure = self.pressure()
+                 * (new_mass.get::<kilogram>() / mass.get::<kilogram>())

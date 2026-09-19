@@ -1,0 +1,319 @@
+# APU start hang release-blocker fix
+#
+# Root cause: shared::pid::PidController::next_control_output divided by
+# dt unconditionally in its derivative term. AuxiliaryPowerUnitTestBed::run
+# (apu/mod.rs) issues a documented Duration::ZERO warm-up tick before every
+# timed tick ("As the APU update executes before power is distributed..."),
+# and pw980_physics.rs's new PW980 fuel governor passed that raw, possibly-
+# zero context.delta() straight to the PID. Once two real ticks had
+# populated the error history, the next zero-dt tick computed the
+# derivative term's numerator as exactly 0.0 (finite * kd=0.0) and then
+# divided by dt=0.0 -- IEEE 754 0.0/0.0 is NaN, not 0.0. The PID is a
+# recursive/incremental controller (self.output = self.output + delta), so
+# that NaN poisoned self.output forever after; .max(0.) on the governor's
+# output (pw980_physics.rs) then laundered the NaN into a silent, permanent
+# 0.0 fuel command. With no fuel, the PW980 gas-generator spool stalled at
+# the pure starter-vs-absorption-torque equilibrium (~14.5% N2, matching
+# the starter's own DC-motor torque curve against compressor/windage drag
+# with zero turbine assist) well below the 83% N2 needed for the ECB to
+# report AVAILABLE, so every test-builder loop waiting on that condition
+# (running_apu et al., apu/mod.rs) looped forever. Not a deadlock or
+# unbounded recursion -- a single poisoned float in otherwise-terminating
+# control logic, confirmed via a bounded, instrumented reproduction (see
+# patch report) before any fix was written.
+#
+# Fix:
+#  - shared/pid.rs: only compute the derivative term when dt > 0 (with no
+#    elapsed time there is no rate to measure -- zero contribution is the
+#    physically correct result, not NaN). Also adds a regression test at
+#    the root-cause site.
+#  - apu/pw980_physics.rs: defense in depth -- pass the governor the
+#    function's own already-guarded, never-truly-zero dt instead of the
+#    raw context.delta(), matching every other use of time in that
+#    function.
+#  - apu/mod.rs: test-harness guard, not a physics change -- bound the six
+#    shared test-builder loops (running_apu, cooling_down_apu,
+#    apu_ready_to_start, unpower_start_motor_between,
+#    unpower_dc_bat_bus_between, run_until_n_decreases) so a future
+#    regression FAILS with a message instead of hanging the suite.
+
+diff --git a/fbw-common/src/wasm/systems/systems/src/shared/pid.rs b/fbw-common/src/wasm/systems/systems/src/shared/pid.rs
+index 0294c5c..a6f39a6 100644
+--- a/fbw-common/src/wasm/systems/systems/src/shared/pid.rs
++++ b/fbw-common/src/wasm/systems/systems/src/shared/pid.rs
+@@ -83,11 +83,33 @@ impl PidController {
+         let p_term = (error - self.error_k_1.unwrap_or(0.)) * self.kp;
+         let i_term = error * self.ki * dt;
+ 
+-        let d_term = self
+-            .error_k_1
+-            .zip(self.error_k_2)
+-            .map(|(error_k_1, error_k_2)| (error - 2. * error_k_1 + error_k_2) * self.kd / dt)
+-            .unwrap_or(0.);
++        // With no elapsed time there is no rate to measure, so the
++        // derivative contribution is zero -- not `0.0 / 0.0`. Without this
++        // guard, a caller invoked with `Some(Duration::ZERO)` (a real,
++        // documented pattern: `AuxiliaryPowerUnitTestBed::run` -- and any
++        // other caller -- issues one zero-duration tick "as power is
++        // distributed throughout the aircraft" before the timed tick, see
++        // `apu/mod.rs`) hits `(finite) * kd / 0.0`. Once `error_k_1` and
++        // `error_k_2` are both populated (kd's numerator is finite, even
++        // when kd itself is 0.0: `x * 0.0` is `0.0`, not skipped), that is
++        // an IEEE 754 `0.0 / 0.0`, which is NaN by definition (unlike
++        // `nonzero / 0.0`, which is +-Infinity) -- and this controller's
++        // recursive form (`self.output = self.output + delta`, see below)
++        // then carries that NaN forward forever, since `NaN + x == NaN`
++        // and `f64::clamp` passes a NaN receiver through unchanged. A
++        // caller that then does `.max(0.)` on the output (as
++        // `pw980_physics.rs`'s fuel governor call does) launders that NaN
++        // into a silent, permanent 0.0 -- the fuel valve reads as
++        // "commanded shut" forever, with no panic and no error, which is
++        // what made this hang rather than crash.
++        let d_term = if dt > 0.0 {
++            self.error_k_1
++                .zip(self.error_k_2)
++                .map(|(error_k_1, error_k_2)| (error - 2. * error_k_1 + error_k_2) * self.kd / dt)
++                .unwrap_or(0.)
++        } else {
++            0.
++        };
+ 
+         let unbound_output = self.output + (p_term + i_term + d_term) * self.output_gain;
+ 
+@@ -131,6 +153,39 @@ mod tests {
+ 
+     use super::*;
+ 
++    /// Regression test for the APU start hang release blocker: a
++    /// zero-duration tick (a real, documented pattern -- see
++    /// `AuxiliaryPowerUnitTestBed::run` in `apu/mod.rs`, which always
++    /// issues one `Duration::ZERO` tick before the timed one) used to turn
++    /// the derivative term's `.../dt` into `0.0 / 0.0` (NaN) once two real
++    /// ticks had already populated `error_k_1`/`error_k_2`, and that NaN
++    /// then poisoned every output forever after (the recursive/incremental
++    /// form feeds `self.output` into the next call). This must never
++    /// happen again, for any gain configuration, including a nonzero `kd`.
++    #[test]
++    fn zero_duration_tick_does_not_poison_output_with_nan() {
++        let mut pid = PidController::new(1.0, 1.0, 1.0, 0.0, 100.0, 10.0, 1.0);
++
++        // Two real ticks populate both error_k_1 and error_k_2.
++        pid.next_control_output(0.0, Some(Duration::from_secs(1)));
++        pid.next_control_output(1.0, Some(Duration::from_secs(1)));
++
++        // A zero-duration tick (the documented "before power distribution"
++        // warm-up tick) must not produce NaN/Infinity.
++        let output = pid.next_control_output(2.0, Some(Duration::ZERO));
++        assert!(
++            output.is_finite(),
++            "a zero-duration tick must not poison the output; got {output}"
++        );
++
++        // And the controller must keep working normally afterwards.
++        let next = pid.next_control_output(2.0, Some(Duration::from_secs(1)));
++        assert!(
++            next.is_finite(),
++            "output must stay finite on subsequent real ticks too; got {next}"
++        );
++    }
++
+     #[test]
+     fn pid_init() {
+         let pid = PidController::new(1., 1., 1., 0., 1., 1., 1.);
+diff --git a/fbw-common/src/wasm/systems/systems/src/apu/mod.rs b/fbw-common/src/wasm/systems/systems/src/apu/mod.rs
+index cd2c0d2..49bcecf 100644
+--- a/fbw-common/src/wasm/systems/systems/src/apu/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/apu/mod.rs
+@@ -1051,12 +1051,30 @@ mod tests {
+ 
+         pub fn running_apu(mut self) -> Self {
+             self = self.starting_apu();
++            // Test-harness guard, not a physics change: a real PW980 start
++            // reaches N2 = 85% by t = 41-45s (this crate's own
++            // `PW980.md`, "Start: time to N2"), so 120 simulated seconds
++            // is generous headroom for both APU types. Without this cap a
++            // regression that stalls the start (as the governor NaN bug
++            // that originally motivated this guard did) hangs the test
++            // suite indefinitely instead of failing with a message -- see
++            // `apu-start-fix.patch`.
++            const MAX_ITERATIONS: u32 = 120;
++            let mut iterations: u32 = 0;
+             loop {
+                 self = self.run(Duration::from_secs(1));
++                iterations += 1;
+                 if self.apu_is_available() {
+                     self = self.run(Duration::from_secs(10));
+                     break;
+                 }
++                assert!(
++                    iterations < MAX_ITERATIONS,
++                    "running_apu() did not reach AVAILABLE within {MAX_ITERATIONS} simulated \
++                     seconds (last n={:.3}%, egt={:.2}C)",
++                    self.n().value().get::<percent>(),
++                    self.egt().value().get::<degree_celsius>()
++                );
+             }
+ 
+             self
+@@ -1075,12 +1093,25 @@ mod tests {
+         fn cooling_down_apu(mut self) -> Self {
+             self = self.running_apu();
+             self = self.master_off();
++            // Test-harness guard, not a physics change (see
++            // `running_apu`'s guard for why): the longest configured
++            // cooldown (`ApuConstants::COOLDOWN_DURATION`) is 60s, plus
++            // spin-down time from N2/N -- 600s is generous headroom.
++            const MAX_ITERATIONS: u32 = 600;
++            let mut iterations: u32 = 0;
+             loop {
+                 self = self.run(Duration::from_secs(1));
++                iterations += 1;
+ 
+                 if self.turbine_is_shutdown() {
+                     break;
+                 }
++                assert!(
++                    iterations < MAX_ITERATIONS,
++                    "cooling_down_apu() did not reach turbine-shutdown within \
++                     {MAX_ITERATIONS} simulated seconds (last n={:.3}%)",
++                    self.n().value().get::<percent>()
++                );
+             }
+ 
+             self
+@@ -1089,12 +1120,25 @@ mod tests {
+         fn apu_ready_to_start(mut self) -> Self {
+             self = self.master_on();
+ 
++            // Test-harness guard, not a physics change (see
++            // `running_apu`'s guard for why): the air intake flap's own
++            // configured travel time never exceeds
++            // `AirIntakeFlap::MAXIMUM_TRAVEL_TIME_SECS` (12s), so 60
++            // simulated seconds is generous headroom.
++            const MAX_ITERATIONS: u32 = 60;
++            let mut iterations: u32 = 0;
+             loop {
+                 self = self.run(Duration::from_secs(1));
++                iterations += 1;
+ 
+                 if self.is_air_intake_flap_fully_open().normal_value().unwrap() {
+                     break;
+                 }
++                assert!(
++                    iterations < MAX_ITERATIONS,
++                    "apu_ready_to_start() did not see the air intake flap fully open within \
++                     {MAX_ITERATIONS} simulated seconds"
++                );
+             }
+ 
+             self
+@@ -1171,37 +1215,66 @@ mod tests {
+         }
+ 
+         fn unpower_start_motor_between(mut self, start: Ratio, end: Ratio) -> Self {
++            // Test-harness guard, not a physics change (see
++            // `running_apu`'s guard for why): 50ms steps to 150 simulated
++            // seconds is generous headroom past a real full start (see
++            // `running_apu`'s own 120s bound).
++            const MAX_ITERATIONS: u32 = 3_000;
++            let mut iterations: u32 = 0;
+             loop {
+                 self = self.run(Duration::from_millis(50));
++                iterations += 1;
+                 let n = self.n().normal_value().unwrap();
+ 
+                 if start < n && n < end {
+                     self = self.then_continue_with().unpowered_start_motor();
+                     break;
+                 }
++                assert!(
++                    iterations < MAX_ITERATIONS,
++                    "unpower_start_motor_between({start:?}, {end:?}) never saw n in that range \
++                     within {MAX_ITERATIONS} 50ms steps (last n={:?})",
++                    self.n().normal_value()
++                );
+             }
+ 
+             self
+         }
+ 
+         fn unpower_dc_bat_bus_between(mut self, start: Ratio, end: Ratio) -> Self {
++            // Test-harness guard, not a physics change (see
++            // `running_apu`'s guard for why).
++            const MAX_ITERATIONS: u32 = 3_000;
++            let mut iterations: u32 = 0;
+             loop {
+                 self = self.run(Duration::from_millis(50));
++                iterations += 1;
+                 let n = self.n().normal_value().unwrap();
+ 
+                 if start < n && n < end {
+                     self = self.then_continue_with().unpowered_dc_bat_bus();
+                     break;
+                 }
++                assert!(
++                    iterations < MAX_ITERATIONS,
++                    "unpower_dc_bat_bus_between({start:?}, {end:?}) never saw n in that range \
++                     within {MAX_ITERATIONS} 50ms steps (last n={:?})",
++                    self.n().normal_value()
++                );
+             }
+ 
+             self
+         }
+ 
+         fn run_until_n_decreases(mut self, delta_per_run: Duration) -> Self {
++            // Test-harness guard, not a physics change (see
++            // `running_apu`'s guard for why).
++            const MAX_ITERATIONS: u32 = 3_000;
++            let mut iterations: u32 = 0;
+             let mut previous_n = 0.;
+             loop {
+                 self = self.run(delta_per_run);
++                iterations += 1;
+ 
+                 let n = self.n().normal_value().unwrap().get::<percent>();
+                 if n < previous_n {
+@@ -1209,6 +1282,11 @@ mod tests {
+                 }
+ 
+                 previous_n = n;
++                assert!(
++                    iterations < MAX_ITERATIONS,
++                    "run_until_n_decreases() never saw n decrease within {MAX_ITERATIONS} \
++                     iterations (last n={previous_n:.3}%)"
++                );
+             }
+ 
+             self
+diff --git a/fbw-common/src/wasm/systems/systems/src/apu/pw980_physics.rs b/fbw-common/src/wasm/systems/systems/src/apu/pw980_physics.rs
+index 7f42d0c..51328d2 100644
+--- a/fbw-common/src/wasm/systems/systems/src/apu/pw980_physics.rs
++++ b/fbw-common/src/wasm/systems/systems/src/apu/pw980_physics.rs
+@@ -507,10 +507,25 @@ impl Pw980Core {
+         // has motored the core up to light-off speed (a real APU start
+         // sequence: crank, then fuel+ignition once airflow/compression
+         // support stable combustion), not from a standstill.
++        //
++        // The governor is given this function's own already-guarded `dt`
++        // (clamped to a 1 microsecond floor above) rather than the raw
++        // `context.delta()`, matching every other use of time in this
++        // function. `context.delta()` legitimately is `Duration::ZERO` on
++        // the "before power distribution" warm-up tick that
++        // `AuxiliaryPowerUnitTestBed::run` (and, in principle, any other
++        // zero-elapsed-time tick) issues -- `PidController` now itself
++        // guards its derivative term against exactly that (see
++        // `shared::pid`'s `zero_duration_tick_does_not_poison_output_with_nan`),
++        // but a governor call is not the place to be relying solely on the
++        // callee's defense: this file already established its own
++        // never-truly-zero `dt` for every other calculation two lines
++        // above `check_protective_trips`, so the governor gets that same
++        // guarantee too.
+         self.fuel_flow = if running && n2_percent >= LIGHT_OFF_N2_PERCENT {
+             MassRate::new::<kilogram_per_second>(
+                 self.governor
+-                    .next_control_output(n2_percent, Some(context.delta()))
++                    .next_control_output(n2_percent, Some(Duration::from_secs_f64(dt)))
+                     .max(0.),
+             )
+         } else if running {
