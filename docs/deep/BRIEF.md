@@ -39,6 +39,29 @@ scripted symptom. You are one of 20 agents working in parallel for a fixed time 
   `ATA | proposed name | model element it acts on | magnitude meaning (0..1) | effect`.
   One line per genuinely distinct physical fault; do not pad with renamings.
 
+## Registering failures, components and ECAM alerts (every system agent, mandatory)
+
+Register everything in CODE through the API in `D:bw-xp-systems\src\deeppi.rs` (read it
+fully: `Registry`, `FailureDef`, `ComponentDef`, `ParamDef`, `EcamAlert`, `line(...)`, `var(...)`,
+`Cond`, `Level`, `Phase`, `failure_id`, `Area`). In your directory create `registry.rs` with
+
+    use crate::deep::api::*;
+    pub fn register(r: &mut Registry) { ... }
+
+and declare it in your `mod.rs`. For every item you build:
+- `r.component(ComponentDef { .. })` for each physical part with health parameters (0..1, with
+  their physical meaning and healthy value), expanded per instance (×4 engines, L/R, green/yellow);
+- `r.failure(FailureDef { id: failure_id(Area::<YourArea>, ata, n), .. })` for each single failure,
+  naming its component and the exact model field it drives;
+- `r.alert(EcamAlert::new(key, ata, "TITLE AS SHOWN", Level::.., trigger).confirm(s).inhibit(&[..])
+  .step(line("ENG 2 MASTER", "OFF").done(var("ENGINE_MASTER:2").off())) ... .raised_by(&[ids]))`
+  for each ECAM alert your failures raise on the real A380 — procedure lines complete from the
+  variable the real cockpit control writes; use the plugin's existing Var names where they exist
+  (grep src\ for them) and document any new Var your model must publish in PROGRESS.md.
+Ids are yours alone (your area code); number `n` sequentially per ATA chapter. The lead calls
+every area's `register` and runs `Registry::validate()`. This replaces CATALOGUE.md and ECAM.md
+(delete those files if you made them, after moving their content into registry.rs).
+
 ## Conventions
 
 - SI units internally (Pa, K, kg, kg/s, m^3, W, V, A, s). Convert only at edges, named

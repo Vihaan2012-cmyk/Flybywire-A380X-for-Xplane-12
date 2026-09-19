@@ -43,6 +43,7 @@ mod engine_commands;
 // across workstreams; each adds its own `physics::<area>` submodule.
 pub mod invariants;
 pub mod physics;
+pub mod deep;
 mod fbw_computers;
 mod fbw_types;
 mod prim;
