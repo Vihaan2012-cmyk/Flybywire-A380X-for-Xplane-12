@@ -110,6 +110,17 @@ pub struct Compression {
     /// Lowest stage flow coefficient over its stall value (<1: a stage is
     /// stalled).
     pub stall_margin: f64,
+    /// Flow out through an interstage handling bleed valve, kg/s.
+    pub bleed_kg_s: f64,
+}
+
+/// An interstage handling bleed valve: air let out after `after_stage`
+/// through an orifice of `area_m2` into `sink_pa` (the bypass duct).
+#[derive(Clone, Copy, Debug)]
+pub struct HandlingBleed {
+    pub after_stage: usize,
+    pub area_m2: f64,
+    pub sink_pa: f64,
 }
 
 impl Compressor {
@@ -154,10 +165,25 @@ impl Compressor {
     /// `tt`, `pt`. `flow_capacity` and `efficiency` scale every stage's
     /// annulus and efficiency (1 healthy): damage.
     pub fn compress(&self, mdot: f64, omega: f64, tt: f64, pt: f64, flow_capacity: f64, efficiency: f64) -> Compression {
+        self.compress_bled(mdot, omega, tt, pt, flow_capacity, efficiency, None)
+    }
+
+    /// As `compress`, with a handling bleed valve letting air out between
+    /// stages: the stages ahead of it pass the full inlet flow, those
+    /// behind it only what is left.
+    pub fn compress_bled(&self, mdot: f64, omega: f64, tt: f64, pt: f64, flow_capacity: f64, efficiency: f64, bleed: Option<HandlingBleed>) -> Compression {
         let k = (GAMMA_AIR - 1.0) / GAMMA_AIR;
         let (mut t, mut p, mut power) = (tt, pt, 0.0);
         let mut margin = f64::INFINITY;
-        for s in &self.stages {
+        let mut mdot = mdot;
+        let mut bled = 0.0;
+        for (index, s) in self.stages.iter().enumerate() {
+            if let Some(b) = bleed {
+                if index == b.after_stage && b.area_m2 > 0.0 && mdot > 0.0 {
+                    bled = nozzle::mass_flow_capacity(t, p, b.sink_pa, b.area_m2, GAMMA_AIR, R_AIR).min(mdot);
+                    mdot -= bled;
+                }
+            }
             let (dh_s, dh0) = s.work(mdot, omega, t, p, flow_capacity, efficiency);
             let u = omega * s.radius_m;
             if u > 1.0 && mdot > 0.0 {
@@ -169,7 +195,7 @@ impl Compressor {
             p *= (1.0 + dh_s / (CP_AIR * t.max(1.0))).max(1e-3).powf(1.0 / k);
             t = (t + dh0 / CP_AIR).max(1.0);
         }
-        Compression { tt_out_k: t, pt_out_pa: p, power_w: power, stall_margin: if margin.is_finite() { margin } else { 0.0 } }
+        Compression { tt_out_k: t, pt_out_pa: p, power_w: power, stall_margin: if margin.is_finite() { margin } else { 0.0 }, bleed_kg_s: bled }
     }
 }
 
@@ -254,6 +280,23 @@ const LPT_RADIUS_M: f64 = 0.72;
 /// How much of the fan's pressure rise the core stream behind the fan hub
 /// gets (the hub does less work than the tip).
 const FAN_HUB_FRACTION: f64 = 0.6;
+/// Handling bleed valves (the Trent's IP and HP3 handling bleeds, dumping
+/// to the bypass duct): the EEC opens them at low corrected speed so the
+/// front stages, which see too little flow there, stay out of stall. Valve
+/// areas and schedules are GENERIC, sized so a start and ground idle keep
+/// both compressors unstalled.
+const HP3_BLEED_AFTER_STAGE: usize = 3;
+const HP3_BLEED_AREA_M2: f64 = 0.03;
+/// Fully open below the first corrected HP speed, shut above the second.
+const HP3_BLEED_SCHEDULE_PCT: (f64, f64) = (70.0, 85.0);
+const IP_BLEED_AFTER_STAGE: usize = 8;
+const IP_BLEED_AREA_M2: f64 = 0.05;
+const IP_BLEED_SCHEDULE_PCT: (f64, f64) = (65.0, 80.0);
+
+fn bleed_open(corrected_pct: f64, (open_below, shut_above): (f64, f64)) -> f64 {
+    ((shut_above - corrected_pct) / (shut_above - open_below)).clamp(0.0, 1.0)
+}
+
 /// Plenum volumes, m^3: bypass duct, IP-HP duct, combustor, HP-IP
 /// interstage, IP-LP interstage, LP turbine exit.
 const V13: f64 = 8.0;
@@ -379,6 +422,11 @@ fn design_at(tt4_k: f64) -> Option<Design> {
 /// The design point: the turbine entry temperature that makes the
 /// certificated take-off thrust at sea level static.
 pub fn design() -> Design {
+    static DESIGN: std::sync::OnceLock<Design> = std::sync::OnceLock::new();
+    DESIGN.get_or_init(solve_design).clone()
+}
+
+fn solve_design() -> Design {
     let (mut lo, mut hi) = (900.0, 2600.0);
     for _ in 0..80 {
         let mid = 0.5 * (lo + hi);
@@ -451,10 +499,16 @@ pub struct GasPath {
 }
 
 impl GasPath {
+    /// At the design point, running.
     pub fn new() -> Self {
         let design = design();
         let state = design.state;
         Self { design, state }
+    }
+
+    /// Stopped: no flow, every plenum at ambient pressure.
+    pub fn rest(&mut self, ambient_pa: f64) {
+        self.state = State { m_fan: 0.0, m_ipc: 0.0, m_hpc: 0.0, p13: ambient_pa, p25: ambient_pa, p3: ambient_pa, p44: ambient_pa, p45: ambient_pa, p5: ambient_pa };
     }
 
     /// Advances the gas path by `dt` with the spool speeds held (they change
@@ -470,14 +524,19 @@ impl GasPath {
         let mut sum = Outputs::default();
         let mut last = Outputs::default();
         let floor = 0.2 * amb;
+        let theta = (s2.tt_k / T_REF_K).sqrt();
+        let ip_open = bleed_open(i.ip_rpm / N2_DESIGN_RPM * 100.0 / theta, IP_BLEED_SCHEDULE_PCT);
+        let hp_open = bleed_open(i.hp_rpm / N3_DESIGN_RPM * 100.0 / theta, HP3_BLEED_SCHEDULE_PCT);
         for _ in 0..n {
             let st = &mut self.state;
             let f = d.fan.compress(st.m_fan, w_lp, s2.tt_k, s2.pt_pa, 1.0, 1.0);
             let p21 = s2.pt_pa + FAN_HUB_FRACTION * (st.p13 - s2.pt_pa);
             let t21 = s2.tt_k + FAN_HUB_FRACTION * (f.tt_out_k - s2.tt_k);
-            let ip = d.ipc.compress(st.m_ipc, w_ip, t21, p21, 1.0, 1.0);
-            let hp = d.hpc.compress(st.m_hpc, w_hp, ip.tt_out_k, st.p25, i.hpc_flow_capacity, i.hpc_efficiency);
-            let air = (st.m_hpc - i.hp_bleed_kg_s).max(0.0);
+            let ip_bleed = Some(HandlingBleed { after_stage: IP_BLEED_AFTER_STAGE, area_m2: IP_BLEED_AREA_M2 * ip_open, sink_pa: st.p13 });
+            let hp_bleed = Some(HandlingBleed { after_stage: HP3_BLEED_AFTER_STAGE, area_m2: HP3_BLEED_AREA_M2 * hp_open, sink_pa: st.p13 });
+            let ip = d.ipc.compress_bled(st.m_ipc, w_ip, t21, p21, 1.0, 1.0, ip_bleed);
+            let hp = d.hpc.compress_bled(st.m_hpc, w_hp, ip.tt_out_k, st.p25, i.hpc_flow_capacity, i.hpc_efficiency, hp_bleed);
+            let air = (st.m_hpc - hp.bleed_kg_s - i.hp_bleed_kg_s).max(0.0);
             let c = combustor::burn(air, i.wf_kg_s, hp.tt_out_k, st.p3);
             let hpt = d.hpt.expand(c.pt4_pa, c.tt4_k, st.p44, w_hp, i.turbine_efficiency);
             let ipt = d.ipt.expand(st.p44, hpt.tt_out_k, st.p45, w_ip, i.turbine_efficiency);
@@ -500,18 +559,43 @@ impl GasPath {
             };
             let (m_fan, m_ipc, m_hpc) = (st.m_fan, st.m_ipc, st.m_hpc);
             st.m_fan = implicit(m_fan, A_OVER_L_FAN, f.pt_out_pa, st.p13, &|m| d.fan.compress(m, w_lp, s2.tt_k, s2.pt_pa, 1.0, 1.0).pt_out_pa);
-            st.m_ipc = implicit(m_ipc, A_OVER_L_IPC, ip.pt_out_pa, st.p25, &|m| d.ipc.compress(m, w_ip, t21, p21, 1.0, 1.0).pt_out_pa);
+            st.m_ipc = implicit(m_ipc, A_OVER_L_IPC, ip.pt_out_pa, st.p25, &|m| d.ipc.compress_bled(m, w_ip, t21, p21, 1.0, 1.0, ip_bleed).pt_out_pa);
             let p25 = st.p25;
             st.m_hpc = implicit(m_hpc, A_OVER_L_HPC, hp.pt_out_pa, st.p3, &|m| {
-                d.hpc.compress(m, w_hp, ip.tt_out_k, p25, i.hpc_flow_capacity, i.hpc_efficiency).pt_out_pa
+                d.hpc.compress_bled(m, w_hp, ip.tt_out_k, p25, i.hpc_flow_capacity, i.hpc_efficiency, hp_bleed).pt_out_pa
             });
+            // Plenums: each pressure advanced implicitly in its own
+            // outflow's slope. Nozzle and turbine flows are very steep in
+            // pressure close to ambient (flow ~ sqrt(dp)), which an explicit
+            // step turns into chatter at low power; linearised about their
+            // own slope, each plenum settles instead. Temperatures are held
+            // over the sub-step.
+            let loss = 1.0 - COMBUSTOR_PRESSURE_LOSS_FRAC;
+            let hpt_flow = |p3: f64, p44: f64| d.hpt.expand(p3 * loss, c.tt4_k, p44, w_hp, i.turbine_efficiency).mdot_kg_s;
+            let ipt_flow = |p44: f64, p45: f64| d.ipt.expand(p44, hpt.tt_out_k, p45, w_ip, i.turbine_efficiency).mdot_kg_s;
+            let lpt_flow = |p45: f64, p5: f64| d.lpt.expand(p45, ipt.tt_out_k, p5, w_lp, 1.0).mdot_kg_s;
+            let core_flow = |p5: f64| nozzle::mass_flow_capacity(lpt.tt_out_k, p5, amb, d.core_nozzle_area_m2, GAMMA_GAS, R_GAS);
+            let byp_flow = |p13: f64| {
+                nozzle::mass_flow_capacity(f.tt_out_k, p13 * (1.0 - BYPASS_DUCT_LOSS_FRAC), amb, d.bypass_nozzle_area_m2, GAMMA_AIR, R_AIR)
+            };
+            let step_p = |p: f64, capacitance: f64, net: &dyn Fn(f64) -> f64| {
+                let dp = (1e-4 * p).max(1.0);
+                let n0 = net(p);
+                let slope = (net(p + dp) - n0) / dp;
+                p + h * capacitance * n0 / (1.0 - h * capacitance * slope).max(1.0)
+            };
+            let (m_fan_new, m_ipc_new, m_hpc_new) = (st.m_fan, st.m_ipc, st.m_hpc);
+            let (p13, p3, p44, p45, p5) = (st.p13, st.p3, st.p44, st.p45, st.p5);
             let t3_mix = 0.5 * (hp.tt_out_k + c.tt4_k);
-            st.p13 += h * R_AIR * f.tt_out_k / V13 * (st.m_fan - st.m_ipc - m_byp);
-            st.p25 += h * R_AIR * ip.tt_out_k / V25 * (st.m_ipc - i.ip_bleed_kg_s - st.m_hpc);
-            st.p3 += h * R_AIR * t3_mix / V3 * (st.m_hpc - i.hp_bleed_kg_s + i.wf_kg_s - hpt.mdot_kg_s);
-            st.p44 += h * R_GAS * hpt.tt_out_k / V44 * (hpt.mdot_kg_s - ipt.mdot_kg_s);
-            st.p45 += h * R_GAS * ipt.tt_out_k / V45 * (ipt.mdot_kg_s - lpt.mdot_kg_s);
-            st.p5 += h * R_GAS * lpt.tt_out_k / V5 * (lpt.mdot_kg_s - m_core_out);
+            // The handling bleeds dump into the bypass duct.
+            let dumped = ip.bleed_kg_s + hp.bleed_kg_s;
+            st.p13 = step_p(p13, R_AIR * f.tt_out_k / V13, &|p| m_fan_new - m_ipc_new + dumped - byp_flow(p));
+            st.p25 += h * R_AIR * ip.tt_out_k / V25 * (m_ipc_new - ip.bleed_kg_s - i.ip_bleed_kg_s - m_hpc_new);
+            st.p3 = step_p(p3, R_AIR * t3_mix / V3, &|p| m_hpc_new - hp.bleed_kg_s - i.hp_bleed_kg_s + i.wf_kg_s - hpt_flow(p, p44));
+            st.p44 = step_p(p44, R_GAS * hpt.tt_out_k / V44, &|p| hpt_flow(p3, p) - ipt_flow(p, p45));
+            st.p45 = step_p(p45, R_GAS * ipt.tt_out_k / V45, &|p| ipt_flow(p44, p) - lpt_flow(p, p5));
+            st.p5 = step_p(p5, R_GAS * lpt.tt_out_k / V5, &|p| lpt_flow(p45, p) - core_flow(p));
+            let _ = (m_core_out, m_byp);
             for p in [&mut st.p13, &mut st.p25, &mut st.p3, &mut st.p44, &mut st.p45, &mut st.p5] {
                 *p = p.max(floor);
             }
