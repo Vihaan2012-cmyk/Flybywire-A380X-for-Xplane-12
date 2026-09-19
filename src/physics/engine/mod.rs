@@ -68,6 +68,7 @@ mod combustor;
 mod compressor;
 mod gas;
 mod governor;
+pub mod gas_path;
 pub mod hot_section;
 pub mod oil;
 mod inlet;
