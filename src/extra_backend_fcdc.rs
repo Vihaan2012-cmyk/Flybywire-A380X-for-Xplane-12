@@ -1196,6 +1196,15 @@ mod tests {
         vars.set("A32NX_AFDX_SWITCH_13_AVAIL", 1.);
         vars.set("A32NX_AFDX_SWITCH_4_AVAIL", 1.);
         vars.set("A32NX_AFDX_SWITCH_14_AVAIL", 1.);
+        // `update_fcdc` gates `Fcdc::update`'s `is_powered` on this
+        // (cpp:2299, FlyByWireInterface.cpp:781 `A32NX_CPIOM_C{1,2}_AVAIL`),
+        // the real CPIOM C1/C2 `is_available()` (powered && no failure
+        // indication) that the linked `a380_systems` simulation writes every
+        // tick in production. This narrower harness doesn't run that
+        // simulation, so it stands in for it here exactly as it already does
+        // for the AFDX switch AVAIL/REACHABLE vars above.
+        vars.set("A32NX_CPIOM_C1_AVAIL", 1.);
+        vars.set("A32NX_CPIOM_C2_AVAIL", 1.);
         for (a, b) in [(1, 3), (2, 3), (9, 3), (11, 13), (12, 13), (19, 13), (1, 4), (2, 4), (9, 4), (11, 14), (12, 14), (19, 14)] {
             vars.set(&format!("A32NX_AFDX_{a}_{b}_REACHABLE"), 1.);
         }
@@ -1255,14 +1264,15 @@ mod tests {
     fn no_cpiom_no_healthy_fcdc() {
         let mut rig = Rig::new(true, 0., 0.);
         network_up(&mut rig.vars);
-        // The real ADCN takes switch 3 (channel A) down with its DC ESS
-        // supply; switch 13 (channel B) is wired from AC ESS instead
-        // (avionics_data_communication_network.rs), so losing just this one
-        // bus is how FCDC 1's `afdx_comm_available` check
-        // (`A32NX_AFDX_SWITCH_3_AVAIL || A32NX_AFDX_SWITCH_13_AVAIL`) still
-        // needs switch 13 killed too to go unhealthy.
-        rig.vars.set("A32NX_AFDX_SWITCH_3_AVAIL", 0.);
-        rig.vars.set("A32NX_AFDX_SWITCH_13_AVAIL", 0.);
+        // FCDC health follows `A32NX_CPIOM_C{n}_AVAIL` alone: cpp:2299 calls
+        // `fcdcs[fcdcIndex].update(sampleTime, failuresConsumer.isActive(...),
+        // idCpiomCxAvailable[fcdcIndex]->get())`, i.e. `isPowered` is the
+        // CPIOM's own availability (power_supply_fault/self-test, Fcdc.cpp
+        // :381-408), never `afdxCommAvailable` (cpp:2229-2230): that one only
+        // gates whether the FCDC's bus/discrete inputs get refreshed
+        // (cpp:2233-2266), not the computer's health. Killing CPIOM C1
+        // alone must drop FCDC 1 healthy/valid and leave FCDC 2 untouched.
+        rig.vars.set("A32NX_CPIOM_C1_AVAIL", 0.);
         let mut fcdc = ExtraBackendFcdc::without_xplane();
         step(&mut rig, &mut fcdc, &FcdcSimData::default(), &SimReadings::default(), 40);
         assert_eq!(rig.vars.value("A32NX_FCDC_1_HEALTHY"), 0.);

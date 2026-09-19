@@ -394,6 +394,17 @@ pub struct TrueState {
     pub mach: f64,
     pub alpha_deg: f64,
     pub on_ground: bool,
+    /// Whether X-Plane has actually placed the aircraft yet (mirrors
+    /// [`agl_looks_placed`]'s own check, computed once in
+    /// `TrueStateSource::read` and shared here so [`Adiru::advance`] can
+    /// gate on it too -- see the debug brief `docs/deep/debug_vs.md` for the
+    /// bug this closes: without it, `should_run` could turn true (FBW's own
+    /// ADIRS reports "Aligned" from the very first tick, see `advance`'s own
+    /// doc comment) before X-Plane has ever handed this module a real
+    /// position, so the free-inertial mechanization would start from -- and
+    /// the baro-inertial loop would then have to null out -- a completely
+    /// synthetic altitude/position error.
+    pub placed: bool,
     /// m/s, true velocity over the Earth (north, east), for the nav frame's
     /// transport rate the gyros sense.
     pub v_north_ms: f64,
@@ -798,7 +809,20 @@ impl Adiru {
         gps_valid: bool,
     ) -> bool {
         self.last_fbw_state = fbw_state;
-        let should_run = fbw_state >= 1.999 && powered;
+        // `&& t.placed`: see [`TrueState::placed`]'s doc comment and
+        // `docs/deep/debug_vs.md`. FBW's own ADIRS (fbw-common's
+        // `navigation/adirs.rs`, `InertialReference::new`) starts every unit
+        // already `AlignState::Aligned` -- `remaining_align_duration:
+        // Some(Duration::from_secs(0))` unconditionally, "to support
+        // starting on the runway or in the air" -- so `fbw_state >= 1.999`
+        // can be true on literally the first tick this module ever sees,
+        // before X-Plane has placed the aircraft (its position/altitude
+        // still reads pre-placement garbage, which `TrueStateSource::read`
+        // freezes at 0 via `agl_looks_placed`). Requiring `t.placed` here
+        // keeps this unit in the "not running" branch below -- which
+        // continuously copies `t.lat_deg`/`lon_deg`/`alt_m` truth into this
+        // struct -- until a real position exists to start mechanizing from.
+        let should_run = fbw_state >= 1.999 && powered && t.placed;
 
         if !should_run {
             // Not aligned, or unpowered: no free-inertial solution. Re-seed
@@ -838,7 +862,40 @@ impl Adiru {
             if !self.running {
                 // Just finished aligning: freeze whatever gyrocompass error
                 // remains and start free-inertial dead reckoning from here.
+                //
+                // Bug fix (docs/deep/debug_vs.md, the reported "-8800 ft/min
+                // on the ground" PFD symptom): re-sync position, heading and
+                // velocity to *this tick's truth* right now, rather than
+                // trusting whatever this struct's fields already held. The
+                // only other place that keeps `lat_rad`/`lon_rad`/`alt_m` in
+                // sync with X-Plane truth is the `!should_run` branch above
+                // -- but with `t.placed` now required for `should_run`
+                // (see it and [`TrueState::placed`]), the first tick this
+                // branch ever runs is guaranteed to have a genuine,
+                // just-placed truth reading, so copying it here zeroes the
+                // baro-inertial loop's initial altitude error outright
+                // instead of leaving it to null out a large, spurious
+                // one-tick jump through several minutes of synthetic
+                // vertical speed (`baro_inertial_correct`'s ~100s time
+                // constant). The same jump existed for ground speed/track
+                // (from `v_north`/`v_east`), true position (from
+                // `lat_rad`/`lon_rad`, previously stuck at 0N/0E "Null
+                // Island" until GPIRS slowly dragged it to truth over
+                // `GPIRS_TIME_CONSTANT_S`) and pitch/roll/heading (stuck
+                // level/0 until the first `!should_run` tick, which may
+                // never come) -- all are "other ADIRUS outputs wrong at
+                // spawn" instances of the identical root cause, fixed the
+                // same way here.
                 self.running = true;
+                self.pitch_deg = t.theta_xp;
+                self.roll_deg = t.phi_xp;
+                self.heading_deg = wrap_360(t.psi_xp + self.heading_error_deg);
+                self.lat_rad = t.lat_deg.to_radians();
+                self.lon_rad = t.lon_deg.to_radians();
+                self.alt_m = t.alt_m;
+                self.v_north = t.v_north_ms;
+                self.v_east = t.v_east_ms;
+                self.v_down = 0.0;
             }
             self.mechanize(dt, t);
             // The vertical channel is always baro-aided: free-inertial
@@ -1514,6 +1571,7 @@ impl TrueStateSource {
             alpha_deg: f(self.alpha),
             // Not placed yet is parked, same call `start_state.rs` makes.
             on_ground: !placed || f(self.on_ground) != 0.,
+            placed,
             v_north_ms,
             v_east_ms,
             any_engine_running: self.engine_running.is_some_and(|dr| {
@@ -1618,6 +1676,7 @@ mod tests {
             mach: 0.,
             alpha_deg: 3.0, // the ADR position-error model's zero-error reference
             on_ground: true,
+            placed: true,
             v_north_ms: 0.,
             v_east_ms: 0.,
             any_engine_running: false,
@@ -1991,6 +2050,103 @@ mod tests {
             (a.alt_m - 50.0).abs() < 1.0,
             "alt_m should converge to the true altitude, got {:.2}",
             a.alt_m
+        );
+    }
+
+    #[test]
+    fn adiru_starting_already_aligned_does_not_spike_vertical_speed_on_the_ground() {
+        // Regression test for the reported bug (docs/deep/debug_vs.md): a
+        // real X-Plane 12 session showed about -8800 ft/min on the PFD with
+        // the aircraft on the ground and not descending. FBW's own ADIRS
+        // (fbw-common's `navigation/adirs.rs`, `InertialReference::new`)
+        // starts every unit already `AlignState::Aligned` ("to support
+        // starting on the runway or in the air"), so a freshly constructed
+        // `Adiru` -- whose `alt_m`/`lat_rad`/`lon_rad` all default to 0 --
+        // could be asked to start its free-inertial mechanization
+        // immediately, on its very first tick, against a real, non-zero
+        // truth altitude it had never synced to.
+        let mut a = Adiru::new_for_test(1);
+        let mut t = stationary_level_state(45.0);
+        t.alt_m = 300.0; // a representative field elevation, metres
+        t.on_ground = true;
+        // Already "Aligned" (2) and powered on this very first call, exactly
+        // as FBW's own ADIRS reports at spawn -- `a` has never run before.
+        a.update_for_test(1.0 / 30.0, &t, 2.0, true);
+        let vs_fpm = -a.v_down * M_TO_FT * 60.0;
+        assert!(
+            vs_fpm.abs() < 100.0,
+            "a stationary aircraft that starts already 'Aligned' must not show a \
+             spurious vertical speed from the baro-inertial loop nulling out an \
+             unsynced altitude, got {vs_fpm:.0} fpm"
+        );
+        assert!(
+            (a.alt_m - t.alt_m).abs() < 1e-3,
+            "altitude should be synced to truth on the running transition, got {}",
+            a.alt_m
+        );
+    }
+
+    #[test]
+    fn adiru_starting_already_aligned_also_syncs_position_heading_and_ground_speed() {
+        // Same root cause as the vertical-speed spike above, for the other
+        // "ADIRUS output wrong at spawn" symptoms it also caused: without
+        // the sync, `lat_rad`/`lon_rad` would start at 0N/0E ("Null Island")
+        // and only crawl to truth over `GPIRS_TIME_CONSTANT_S` (120s), and
+        // `v_north`/`v_east` (hence ground speed and true track) and
+        // pitch/roll/heading would all read a stale/zero default instead of
+        // this tick's truth, for a unit that starts already aligned and
+        // moving (e.g. an "in the air" start FBW's own comment names).
+        let mut a = Adiru::new_for_test(1);
+        let mut t = stationary_level_state(12.0);
+        t.lat_deg = 12.0;
+        t.lon_deg = 34.0;
+        t.alt_m = 3000.0;
+        t.theta_xp = 2.5;
+        t.phi_xp = -1.0;
+        t.psi_xp = 270.0;
+        t.on_ground = false;
+        t.v_north_ms = 120.0;
+        t.v_east_ms = 30.0;
+        a.update_for_test(1.0 / 30.0, &t, 2.0, true);
+        // Loose tolerances: one 1/30s mechanization tick still runs after
+        // the sync (sensor noise/bias and the Earth/transport-rate terms
+        // perturb these by a tiny amount) -- what matters is that these are
+        // near truth, not stuck at the constructor's 0 default (which would
+        // fail by many degrees/m-s^-1, not a rounding error).
+        assert!((a.lat_rad.to_degrees() - 12.0).abs() < 1e-3, "latitude should sync to truth");
+        assert!((a.lon_rad.to_degrees() - 34.0).abs() < 1e-3, "longitude should sync to truth");
+        assert!((a.v_north - 120.0).abs() < 0.1, "north velocity should sync to truth, not start at 0");
+        assert!((a.v_east - 30.0).abs() < 0.1, "east velocity should sync to truth, not start at 0");
+        assert!((a.pitch_deg - 2.5).abs() < 0.01, "pitch should sync to truth, not start level");
+        assert!((a.roll_deg - (-1.0)).abs() < 0.01, "roll should sync to truth, not start level");
+        // Within the residual gyrocompass error a fresh unit starts with
+        // (`GYROCOMPASS_INITIAL_ERROR_DEG`), not stuck at the constructor's
+        // 0 default.
+        assert!(
+            (a.heading_deg - 270.0).abs() < GYROCOMPASS_INITIAL_ERROR_DEG + 1.0,
+            "heading should sync to truth (plus residual gyrocompass error), not start at 0, got {}",
+            a.heading_deg
+        );
+    }
+
+    #[test]
+    fn should_run_waits_for_x_plane_to_place_the_aircraft_even_when_fbw_reports_aligned() {
+        // The other half of the same fix: `should_run` must not go true off
+        // FBW's own immediate "Aligned" state alone -- it must also wait for
+        // a real X-Plane placement, or the running-transition sync above
+        // would itself run once against pre-placement data (which
+        // `TrueStateSource::read` otherwise freezes at 0/parked) and then
+        // never run again (`self.running` latches `true`), missing the real
+        // truth that arrives a few ticks later when X-Plane actually places
+        // the aircraft.
+        let mut a = Adiru::new_for_test(1);
+        let mut t = stationary_level_state(45.0);
+        t.placed = false; // X-Plane has not placed the aircraft yet
+        let should_run = a.update_for_test(1.0 / 30.0, &t, 2.0, true);
+        assert!(
+            !should_run,
+            "must not start mechanizing before a real position exists, even if FBW's \
+             own ADIRS already reports Aligned"
         );
     }
 }

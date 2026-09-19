@@ -52,8 +52,13 @@
 //! volume is its own Volume and Make-Up Gain properties plus its containers'
 //! and its Wwise-hierarchy parents' Volume, summed in dB and converted to
 //! linear gain for `XPLMSetAudioVolume`; loop is the sound.xml Continuous
-//! state for a triggered sound, else the Wwise Loop property (0 = forever,
-//! else once — a specific finite repeat count is not reproduced). Everything
+//! state for a `SimVarSounds` trigger (`true` starts a loop, `false` forces
+//! non-looping even if the media's own Wwise Loop property says otherwise —
+//! a `Continuous="false"` entry is a one-shot by the sound.xml contract, so
+//! nothing may leave it looping forever with no trigger index to ever stop
+//! it by), else, for an `AvionicSounds` name with no sound.xml Continuous of
+//! its own, the Wwise Loop property (0 = forever, else once — a specific
+//! finite repeat count is not reproduced). Everything
 //! plays on the interior bus, flat (X-Plane's `XPLMPlayPCMOnBus` has no 3D
 //! position parameter to place a positional sound at, so [`wwise`]'s
 //! `positional` flag is read but not used here).
@@ -500,14 +505,28 @@ impl Sound {
         let mut actions = Vec::new();
         for i in 0..state.sound_xml.triggers.len() {
             let value = read_named(vars, &state.sound_xml.triggers[i].variable);
-            let action = state.trigger_states[i].step(&state.sound_xml.triggers[i], value);
+            // Every <Requires> gate on this entry (sound.xml, 30 entries in
+            // the package use one) must also hold for MSFS to consider it
+            // inside; with none, this is vacuously true.
+            let requires_hold = state.sound_xml.triggers[i].requires.iter().all(|r| r.holds(read_named(vars, &r.variable)));
+            let action = state.trigger_states[i].step(&state.sound_xml.triggers[i], value, requires_hold);
             if action != Action::None {
                 actions.push((i, action, state.sound_xml.triggers[i].event.clone()));
             }
         }
         for (i, action, event) in actions {
             match action {
-                Action::PlayOnce => self.fire_event(&event, None, None),
+                // Continuous="false": MSFS plays this to completion exactly
+                // once per entry, never looping, regardless of the Wwise
+                // media's own Loop property. Real bug (X-Plane 12 session):
+                // deferring to the bank's Loop property here (as
+                // AvionicSounds legitimately do below, having no sound.xml
+                // Continuous of their own) let a one-shot cabin PA authored
+                // with an infinite Loop property play nonstop, and since
+                // PlayOnce sounds pass no trigger index, `stop_trigger` could
+                // never reach it either — forcing non-looping is the only
+                // fix, not just tracking it to stop later.
+                Action::PlayOnce => self.fire_event(&event, Some(false), None),
                 Action::StartLoop => self.fire_event(&event, Some(true), Some(i)),
                 Action::StopLoop => self.stop_trigger(i),
                 Action::None => {}
@@ -678,6 +697,45 @@ mod tests {
         let mut sound = Sound { load_rx: None, state: None, pending: Vec::new(), rng_state: 0xDEAD_BEEF_1234_5678, logged_no_audio: false };
         sound.install(loaded);
         Some(sound)
+    }
+
+    /// Real bug (X-Plane 12 session, 2026): the cabin "prepare for landing"
+    /// PA played nonstop, looping, on the ground at spawn. Root cause part
+    /// 2: `Action::PlayOnce` (a sound.xml `Continuous="false"` entry) called
+    /// `fire_event` with `force_loop: None`, deferring to the Wwise media's
+    /// own Loop property (`SoundPlay::loop_count == 0` means "loop
+    /// forever"). A one-shot announcement authored that way — or any bank
+    /// content relying on a Stop action this reader does not apply (see the
+    /// module doc) — would then loop forever, and since `PlayOnce` passes no
+    /// trigger index, `stop_trigger` has nothing to reach: nothing could
+    /// ever silence it, not even `Sound::release`. `flatten` must force
+    /// `looped = false` whenever the caller passes `Some(false)`, regardless
+    /// of the leaf's own `loop_count`.
+    #[test]
+    fn a_forced_non_loop_overrides_the_banks_own_infinite_loop_property() {
+        let node = PlayNode::Sound(wwise::SoundPlay {
+            id: 1,
+            media_id: 42,
+            media_bank_id: None,
+            stream_type: 0,
+            codec_plugin_id: 0,
+            loop_count: 0, // authored as "loop forever"
+            volume_db: 0.0,
+            make_up_gain_db: 0.0,
+            positional: false,
+        });
+        let mut rng = 1u64;
+        let mut leaves = Vec::new();
+        flatten(&node, 0.0, &mut rng, Some(false), &mut leaves);
+        assert_eq!(leaves.len(), 1);
+        assert!(!leaves[0].looped, "PlayOnce must force non-looping playback even when the bank's own Loop property says to loop forever");
+
+        // Unforced (the AvionicSounds/instrument-sound path, which has no
+        // sound.xml Continuous of its own): the bank's own property still
+        // decides, as intended.
+        let mut leaves2 = Vec::new();
+        flatten(&node, 0.0, &mut rng, None, &mut leaves2);
+        assert!(leaves2[0].looped, "with no sound.xml trigger, the bank's own Loop property should still apply");
     }
 
     #[test]

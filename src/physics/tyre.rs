@@ -354,17 +354,31 @@ mod tests {
     /// `0.0005*0.8*900 = 0.36` of the nitrogen (`pressure_ratio = 0.64`).
     ///
     /// Phase B -- short turnaround taxi-out, `t = 250 s`: brake has
-    /// dropped to taxi-idle `T_brake = 90 C`; groundspeed `15 m/s`.
-    /// Leaking wheel's flex heat: `0.02*(1/0.64)*15 = 0.46875 C/s`;
-    /// `T_eq_B = (90/900 + 0.46875 + 20/1200)/(7/3600)
+    /// dropped to taxi-idle `T_brake = 90 C`; groundspeed `15 m/s`. The
+    /// leak (`magnitude = 0.8`) is still running through this phase too
+    /// (same as Phase A), so `pressure_ratio` keeps falling and
+    /// `flex_heat = ROLL_HEAT_COEFF*(1/pressure_ratio)*groundspeed` keeps
+    /// rising through the 250 s window -- no longer the constant-coefficient
+    /// linear ODE Phase A is (there is no elementary closed form for
+    /// `1/(p0 - r*t)` convolved against `exp(-k*(t-s))`). The numbers below
+    /// freeze `pressure_ratio` at its Phase-A-end value (`0.64`) as a
+    /// *lower-bound* estimate -- real flex heat only grows from there -- which
+    /// is enough for the ">"/"<" melt-point sanity checks the code below
+    /// runs before trusting the sim, but not tight enough to assert an exact
+    /// final temperature against (see the decoupled wheel below, where the
+    /// test does exactly that and so integrates the real, non-frozen
+    /// pressure ratio instead).
+    /// Leaking wheel's flex heat at Phase B's start: `0.02*(1/0.64)*15 =
+    /// 0.46875 C/s`; `T_eq_B = (90/900 + 0.46875 + 20/1200)/(7/3600)
     /// = 0.585417/0.0019444 = 301.07 C`. `T(250) = 301.07 +
     /// (141.90-301.07)*exp(-0.0019444*250) = 301.07 - 159.17*0.61510
-    /// = 203.2 C` -- past the 177 C melt point.
-    /// Control wheel (no leak, `pressure_ratio = 1.0`): flex heat
-    /// `0.02*1*15 = 0.3 C/s`; `T_eq_B = (0.1+0.3+0.016667)/0.0019444
-    /// = 214.29 C`. `T(250) = 214.29 - 72.39*0.61510 = 169.8 C` -- stays
-    /// under 177 C on the identical brake/taxi profile: the leak is
-    /// necessary.
+    /// = 203.2 C` (lower bound) -- past the 177 C melt point already, so the
+    /// real (hotter) trajectory crosses it too, and sooner.
+    /// Control wheel (no leak, `pressure_ratio = 1.0` throughout, so this one
+    /// *is* exact): flex heat `0.02*1*15 = 0.3 C/s`; `T_eq_B =
+    /// (0.1+0.3+0.016667)/0.0019444 = 214.29 C`. `T(250) = 214.29 -
+    /// 72.39*0.61510 = 169.8 C` -- stays under 177 C on the identical
+    /// brake/taxi profile: the leak is necessary.
     ///
     /// Decoupling proof (the brake-heat-soak link cut, per the brief):
     /// the *same* leaking wheel, but every `step()` call is fed its own
@@ -373,11 +387,23 @@ mod tests {
     /// simply never given anything to couple to. Phase A (no flex, no
     /// soak): `dT/dt = -k_cool*(T-20)`, `T(900) = 20 + (15-20)*
     /// exp(-900/1200) = 20 - 5*0.47237 = 17.64 C`. Phase B (soak still
-    /// severed, flex unchanged at `0.46875 C/s`): rate is `k_cool` alone
-    /// (`1/1200`), target `20 + 0.46875*1200 = 582.5 C`,
-    /// `T(250) = 582.5 + (17.64-582.5)*exp(-250/1200) = 582.5 -
-    /// 564.86*0.81213 = 123.7 C` -- stays under 177 C: the brake-soak
-    /// coupling is necessary too, not just the leak.
+    /// severed) is where the still-running leak's effect on flex heat
+    /// actually matters for an exact number: with `pressure_ratio` frozen
+    /// at Phase A's `0.64` the naive target is `20 + 0.46875*1200 =
+    /// 582.5 C`, `T(250) = 582.5 + (17.64-582.5)*exp(-250/1200) = 582.5 -
+    /// 564.86*0.81213 = 123.7 C`, but the leak keeps draining
+    /// `pressure_ratio` by another `0.0005*0.8*250 = 0.1` over the same
+    /// window (`0.64` -> `0.54`), so `flex_heat` keeps climbing (`0.46875`
+    /// -> `0.3/0.54 = 0.5556 C/s`) instead of holding flat; folded through
+    /// the same `exp(-k*(t-s))` weighting the closed form uses, that raises
+    /// the true `T(250)` by roughly ten degrees over the frozen-ratio
+    /// estimate above -- large next to the `1 C` integration tolerance this
+    /// test holds `TyreWheel::step` to, so `predicted_decoupled_final`
+    /// below is instead integrated one second at a time with the same
+    /// falling `pressure_ratio`, independently of `TyreWheel::step` (same
+    /// equations, no call into the module under test), to get a number
+    /// accurate enough to assert against. It still stays under 177 C: the
+    /// brake-soak coupling is necessary too, not just the leak.
     #[test]
     fn slow_leak_plus_short_turnaround_together_melt_a_fuse_plug_that_neither_does_alone() {
         const T_BRAKE_LANDING: f64 = 280.0;
@@ -393,6 +419,29 @@ mod tests {
 
         fn relax(t0: f64, t_eq: f64, rate: f64, t: f64) -> f64 {
             t_eq + (t0 - t_eq) * (-rate * t).exp()
+        }
+
+        // Phase B, `1 s` Euler-integrated with the leak still running (see
+        // the doc comment above): independent of `TyreWheel::step` (same
+        // governing equations, no call into the module under test), but
+        // tracking the same falling `pressure_ratio` that function does
+        // rather than freezing it at its Phase-A-end value. `soak_coupled
+        // = false` reproduces the decoupled wheel's severed brake-soak term
+        // (fed its own temperature every tick, so `k_soak*(T_brake-T) = 0`
+        // identically) without needing a `brake_temp` argument at all.
+        fn integrate_phase_b(t0: f64, brake_temp: f64, initial_pressure_ratio: f64, soak_coupled: bool) -> f64 {
+            let mut temp = t0;
+            let mut pressure_ratio = initial_pressure_ratio;
+            for _ in 0..(PHASE_B_S as u64) {
+                // Leak first, same order as `TyreWheel::step`: this tick's
+                // flex heat uses the fraction *after* this tick's leak.
+                pressure_ratio -= LEAK_RATE_FRACTION_PER_S_AT_FULL_MAGNITUDE * MAGNITUDE; // dt = 1 s
+                let flex = ROLL_HEAT_COEFF_C_PER_MS_PER_S * (1.0 / pressure_ratio) * GROUNDSPEED_MS;
+                let soak = if soak_coupled { K_SOAK * (brake_temp - temp) } else { 0.0 };
+                let d_temp = soak + flex - K_COOL * (temp - T_AMB);
+                temp += d_temp; // dt = 1 s
+            }
+            temp
         }
 
         // --- Phase A: parked, brake soaking, leak accumulating. ---
@@ -427,6 +476,9 @@ mod tests {
         assert!((decoupled.temp_c - predicted_decoupled_after_a).abs() < 0.5, "{} vs {}", decoupled.temp_c, predicted_decoupled_after_a);
 
         // --- Phase B: short turnaround taxi-out. ---
+        // Frozen-ratio lower bound, only used for the ">" sanity check
+        // below (real leaking+coupled runs hotter than this, see doc
+        // comment above); not asserted against the sim's exact value.
         let leaking_pressure_ratio = 1.0 - leaked_after_a;
         let leaking_flex = ROLL_HEAT_COEFF_C_PER_MS_PER_S * (1.0 / leaking_pressure_ratio) * GROUNDSPEED_MS;
         let t_eq_b_leaking = (K_SOAK * T_BRAKE_TAXI + leaking_flex + K_COOL * T_AMB) / K_TOTAL;
@@ -436,8 +488,11 @@ mod tests {
         let t_eq_b_control = (K_SOAK * T_BRAKE_TAXI + control_flex + K_COOL * T_AMB) / K_TOTAL;
         let predicted_control_final = relax(predicted_after_a, t_eq_b_control, K_TOTAL, PHASE_B_S);
 
-        let t_eq_b_decoupled = T_AMB + leaking_flex / K_COOL; // rate is k_cool alone with soak severed
-        let predicted_decoupled_final = relax(predicted_decoupled_after_a, t_eq_b_decoupled, K_COOL, PHASE_B_S);
+        // Exact (not frozen-ratio) prediction: this one IS asserted against
+        // the sim's final temperature below, so it has to track the leak's
+        // continued effect on pressure_ratio through Phase B.
+        let predicted_decoupled_final =
+            integrate_phase_b(predicted_decoupled_after_a, 0.0, leaking_pressure_ratio, false);
 
         // Sanity on the hand derivation itself before trusting the sim.
         assert!(predicted_leaking_final > damage::FUSE_PLUG_MELT_C, "derivation error: leaking+coupled must cross melt: {predicted_leaking_final}");

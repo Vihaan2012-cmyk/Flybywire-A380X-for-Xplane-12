@@ -1453,6 +1453,20 @@ mod tests {
 
     #[test]
     fn pulling_a_breaker_activates_its_bridged_failure_and_reset_clears_it() {
+        // `crate::failures`' active/magnitude state is one process-wide
+        // `static STATE` (failures.rs), and `Failures::new()` below clears
+        // it outright (`s.active.clear(); s.magnitudes.clear();`) as part of
+        // its own reset. Run unlocked, this test races every other test in
+        // the crate that also touches that global (e.g.
+        // extra_backend_fcdc.rs's failure-id tests, which already take this
+        // same lock) under `cargo test`'s default parallel threads: whichever
+        // one's `Failures::new()`/`set_active`/`replace` lands between this
+        // test's pull and its `active_ids()` assert wipes or changes the set
+        // out from under it. `failures::tests::SERIAL` is exactly the lock
+        // failures.rs's own doc comment describes for this ("tests touching
+        // it take turns"); take it for the whole test, matching the
+        // established pattern.
+        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let mut vars = TestVars::default();
         let mut circuits = crate::circuits::Circuits::new(&mut vars);
         let _f = crate::failures::Failures::new();

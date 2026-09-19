@@ -17,8 +17,42 @@
 //! `<AvionicSounds>` have no trigger of their own: FlyByWire's scripts play
 //! them by name (`Coherent.call('PLAY_INSTRUMENT_SOUND', event)`,
 //! LegacySoundManager.ts, FwsSoundManager.ts:374-376).
+//!
+//! A `<Sound>` may carry one or more `<Requires>` children: a second
+//! variable/range that gates the whole entry, independent of its own
+//! `LocalVar`/`SimVar` range (MSFS SDK, SimVarSounds/Requires). The package's
+//! `sound.xml` uses this on 30 entries, e.g. `cabin_crew_seats_landing`
+//! (`A32NX_CABIN_READY`) additionally `Requires` `AIRLINER_FLIGHT_PHASE` in
+//! `[6, 6]` (descent), so the "cabin crew, seats for landing" PA only plays
+//! during that phase even though `A32NX_CABIN_READY` alone can already be 1
+//! on the ground (the package's `runway.FLT` sets it there at spawn).
 
 use crate::extra_backend::procedures::xml;
+
+/// A `<Requires>` gate: a second variable that must also be inside its range
+/// for the trigger to be considered inside its own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Require {
+    pub variable: String,
+    pub is_local: bool,
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+}
+
+impl Require {
+    /// At or above the lower bound and at or below the upper one. With no
+    /// range, any non-zero value (same rule as [`Trigger::inside`]).
+    pub fn holds(&self, value: f64) -> bool {
+        inside_range(self.lower, self.upper, value)
+    }
+}
+
+fn inside_range(lower: Option<f64>, upper: Option<f64>, value: f64) -> bool {
+    match (lower, upper) {
+        (None, None) => value != 0.,
+        (lower, upper) => lower.map_or(true, |l| value >= l) && upper.map_or(true, |u| value <= u),
+    }
+}
 
 /// One triggered sound.
 #[derive(Clone, Debug, PartialEq)]
@@ -31,16 +65,18 @@ pub struct Trigger {
     pub lower: Option<f64>,
     pub upper: Option<f64>,
     pub continuous: bool,
+    /// Every `<Requires>` gate on this entry; all must hold, alongside this
+    /// trigger's own range, for it to count as inside (empty: no gate).
+    pub requires: Vec<Require>,
 }
 
 impl Trigger {
     /// Inside the range: at or above the lower bound and at or below the
-    /// upper one. With no range, any non-zero value.
+    /// upper one. With no range, any non-zero value. This is the entry's own
+    /// variable only; combine with [`Require::holds`] for every entry in
+    /// [`Trigger::requires`] to get what MSFS actually plays on.
     pub fn inside(&self, value: f64) -> bool {
-        match (self.lower, self.upper) {
-            (None, None) => value != 0.,
-            (lower, upper) => lower.map_or(true, |l| value >= l) && upper.map_or(true, |u| value <= u),
-        }
+        inside_range(self.lower, self.upper, value)
     }
 }
 
@@ -76,7 +112,25 @@ pub fn parse(text: &str) -> Result<SoundXml, String> {
                     let range = sound.children.iter().find(|c| c.name == "Range");
                     let bound = |k: &str| range.and_then(|r| r.attr(k)).and_then(|v| v.trim().parse::<f64>().ok());
                     let continuous = sound.attr("Continuous").map_or(true, |c| c.trim().eq_ignore_ascii_case("true"));
-                    out.triggers.push(Trigger { event, variable, is_local, lower: bound("LowerBound"), upper: bound("UpperBound"), continuous });
+                    let requires = sound
+                        .children
+                        .iter()
+                        .filter(|c| c.name == "Requires")
+                        .filter_map(|r| {
+                            let (variable, is_local) = match (r.attr("LocalVar"), r.attr("SimVar")) {
+                                (Some(l), _) => (l, true),
+                                (None, Some(s)) => {
+                                    let index = r.attr("Index").and_then(|i| i.trim().parse::<u32>().ok()).unwrap_or(0);
+                                    (if index > 0 { format!("{s}:{index}") } else { s }, false)
+                                }
+                                _ => return None,
+                            };
+                            let range = r.children.iter().find(|c| c.name == "Range");
+                            let bound = |k: &str| range.and_then(|rg| rg.attr(k)).and_then(|v| v.trim().parse::<f64>().ok());
+                            Some(Require { variable, is_local, lower: bound("LowerBound"), upper: bound("UpperBound") })
+                        })
+                        .collect();
+                    out.triggers.push(Trigger { event, variable, is_local, lower: bound("LowerBound"), upper: bound("UpperBound"), continuous, requires });
                 }
             }
             "AvionicSounds" => {
@@ -104,12 +158,16 @@ pub struct TriggerState {
 }
 
 impl TriggerState {
-    /// The action for this tick's value. The first reading only records
+    /// The action for this tick's value. `requires_hold` is whether every
+    /// [`Trigger::requires`] gate currently holds (`true` when the entry has
+    /// none): with it false, the entry is treated as outside regardless of
+    /// its own value, exactly as MSFS would not play a `<Sound>` whose
+    /// `<Requires>` condition is not met. The first reading only records
     /// where the value is, so nothing already true at start-up fires a
     /// one-shot sound, but a continuous sound whose value starts inside
     /// starts.
-    pub fn step(&mut self, trigger: &Trigger, value: f64) -> Action {
-        let inside = trigger.inside(value);
+    pub fn step(&mut self, trigger: &Trigger, value: f64, requires_hold: bool) -> Action {
+        let inside = requires_hold && trigger.inside(value);
         let previous = self.was_inside.replace(inside);
         match (trigger.continuous, previous, inside) {
             (true, None | Some(false), true) => Action::StartLoop,
@@ -159,15 +217,62 @@ mod tests {
         let s = parse(XML).unwrap();
         let (crc, sc) = (&s.triggers[0], &s.triggers[1]);
         let mut a = TriggerState::default();
-        assert_eq!(a.step(crc, 0.), Action::None);
-        assert_eq!(a.step(crc, 1.), Action::StartLoop);
-        assert_eq!(a.step(crc, 1.), Action::None);
-        assert_eq!(a.step(crc, 0.), Action::StopLoop);
+        assert_eq!(a.step(crc, 0., true), Action::None);
+        assert_eq!(a.step(crc, 1., true), Action::StartLoop);
+        assert_eq!(a.step(crc, 1., true), Action::None);
+        assert_eq!(a.step(crc, 0., true), Action::StopLoop);
         let mut b = TriggerState::default();
         // Already set at start: no chime.
-        assert_eq!(b.step(sc, 1.), Action::None);
-        assert_eq!(b.step(sc, 0.), Action::None);
-        assert_eq!(b.step(sc, 1.), Action::PlayOnce);
+        assert_eq!(b.step(sc, 1., true), Action::None);
+        assert_eq!(b.step(sc, 0., true), Action::None);
+        assert_eq!(b.step(sc, 1., true), Action::PlayOnce);
+    }
+
+    /// Real bug (X-Plane 12 session, 2026): the cabin "prepare for landing"
+    /// PA (`cabin_crew_seats_landing`, `A32NX_CABIN_READY`) played nonstop on
+    /// the ground at spawn. Root cause part 1: the package's `runway.FLT`
+    /// sets `A32NX_CABIN_READY=1` at spawn, and the entry's `<Requires
+    /// LocalVar="AIRLINER_FLIGHT_PHASE"><Range LowerBound="6" UpperBound="6"
+    /// /></Requires>` (descent only) was parsed and then silently dropped:
+    /// with no gate, `A32NX_CABIN_READY` reaching 1 fired the PA regardless
+    /// of flight phase. This checks the gate is honoured both ways: held low
+    /// while the phase is wrong, and firing exactly once when the phase
+    /// reaches the required range while the main variable is already set.
+    #[test]
+    fn a_requires_gate_blocks_the_trigger_until_its_own_condition_holds() {
+        const XML: &str = r#"<SoundInfo Version="0.1">
+            <SimVarSounds>
+                <Sound WwiseData="true" WwiseEvent="cabin_crew_seats_landing" LocalVar="A32NX_CABIN_READY" NodeName="PEDALS_LEFT" Continuous="false">
+                    <Range LowerBound="1" />
+                    <Requires LocalVar="AIRLINER_FLIGHT_PHASE">
+                        <Range LowerBound="6" UpperBound="6" />
+                    </Requires>
+                </Sound>
+            </SimVarSounds>
+        </SoundInfo>"#;
+        let s = parse(XML).unwrap();
+        let pa = &s.triggers[0];
+        assert_eq!(pa.requires.len(), 1);
+        assert_eq!(pa.requires[0].variable, "AIRLINER_FLIGHT_PHASE");
+
+        // Cabin already flagged ready (as at spawn on the ground, phase 1):
+        // the gate does not hold, so the PA must never fire, no matter how
+        // long the ground sits at CABIN_READY == 1.
+        let mut st = TriggerState::default();
+        assert_eq!(st.step(pa, 1., false), Action::None);
+        assert_eq!(st.step(pa, 1., false), Action::None);
+        assert_eq!(st.step(pa, 1., false), Action::None);
+
+        // Descent begins, flight phase reaches 6 while cabin is still ready:
+        // the gate now holds, so the combined condition has a fresh 0->1
+        // edge and fires exactly once.
+        assert_eq!(st.step(pa, 1., true), Action::PlayOnce);
+        assert_eq!(st.step(pa, 1., true), Action::None, "one-shot: must not re-fire while still held");
+
+        // Leaving the phase and coming back must not replay it either
+        // (Continuous="false" fires once per entry, not once per tick).
+        assert_eq!(st.step(pa, 1., false), Action::None);
+        assert_eq!(st.step(pa, 1., true), Action::PlayOnce);
     }
 
     #[test]
