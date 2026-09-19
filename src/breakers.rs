@@ -1486,6 +1486,16 @@ mod tests {
 
     #[test]
     fn pulling_an_absorbed_circuit_breaker_really_opens_its_systems_cfg_circuit() {
+        // `pre_systems` below iterates *every* catalogued breaker, not just
+        // "sys-2", and calls `crate::failures::set_active(fail, !closed)` for
+        // each one's own bridged ids -- on the process-wide `failures::STATE`
+        // (see the same lock's doc comment on the test above). Any breaker
+        // left closed in this `Breakers` instance forces its failure id
+        // false every call, which would clobber a concurrently-running
+        // test elsewhere in the crate that has that same id armed. Take the
+        // same test-serialization lock so this test's blanket touch of that
+        // global cannot race one of those.
+        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let mut vars = TestVars::default();
         let mut circuits = crate::circuits::Circuits::new(&mut vars);
         let mut b = Breakers::new(&mut vars);

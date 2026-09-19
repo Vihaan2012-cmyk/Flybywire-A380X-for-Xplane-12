@@ -41,7 +41,7 @@ scripted symptom. You are one of 20 agents working in parallel for a fixed time 
 
 ## Registering failures, components and ECAM alerts (every system agent, mandatory)
 
-Register everything in CODE through the API in `D:bw-xp-systemssrcdeeppi.rs` (read it
+Register everything in CODE through the API in `D:\fbw-xp-systems\src\deep\api.rs` (read it
 fully: `Registry`, `FailureDef`, `ComponentDef`, `ParamDef`, `EcamAlert`, `line(...)`, `var(...)`,
 `Cond`, `Level`, `Phase`, `failure_id`, `Area`). In your directory create `registry.rs` with
 
