@@ -1374,6 +1374,14 @@ pub fn register_component_catalogue() {
         all_ids()
             .into_iter()
             .filter(|&id| !crate::engine_commands::is_engine_component_failure(id))
+            // A deep failure already names a real component, with its own
+            // health parameters, in `deep::registry()`. Mirroring one here
+            // would invent a second, synthetic component for it -- and
+            // since this mirror reads the chapter as `id / 1000`, which is
+            // the older id scheme, an area-coded deep id came out as the
+            // nonsense group "11026 Ata 11026". Several thousand of those
+            // swamped the Study page's component list.
+            .filter(|&id| deep_failure(id).is_none())
             .map(|id| {
                 let ata = id / 1000;
                 let chapter = crate::study::chapter_name(ata);
