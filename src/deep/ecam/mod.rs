@@ -6,15 +6,34 @@
 //! exactly like its own -- see `docs/deep/ecam_bridge.md` for the full
 //! design, FlyByWire's data model, and the worked example.
 //!
-//! Not wired into the crate tree yet: `src/deep/mod.rs` (owned by the lead,
-//! like every other area's directory here) needs one line, `pub mod ecam;`,
-//! documented in `docs/deep/ecam_bridge.md`.
+//! Two halves, sharing the same `Cond` encoding, the same shim and the same
+//! `FwsCore.update()` anchor:
+//!
+//! * **Our alerts in their system** ([`codegen`], [`ids`]): a
+//!   `deep::api::EcamAlert` no FlyByWire procedure exists for gets a
+//!   ten-digit id, its title and items merged into
+//!   `EcamAbnormalSensedProcedures`, and an `EwdAbnormalItem` built for it.
+//! * **Their procedures, given the trigger they never had** ([`fbw`],
+//!   [`fbw_codegen`]): FlyByWire defines 1004 abnormal-sensed procedures
+//!   and triggers 273 of them; the other 732 are text -- and, because the
+//!   ECL's ABN PROC page renders the same table, electronic checklists the
+//!   crew can never be shown. These entries carry **only** a trigger and
+//!   per-item predicates for FlyByWire's *own* nine-digit id. Nothing of
+//!   their text is copied; a second copy would show the crew the same
+//!   warning twice. See `docs/deep/fbw_unwired.md`.
 
 pub mod cond_json;
+#[cfg(test)]
+mod dump_published;
 pub mod codegen;
+pub mod fbw;
+pub mod fbw_codegen;
 pub mod ids;
 #[cfg(feature = "js")]
 pub mod patches;
+
+#[cfg(test)]
+mod fbw_tests;
 
 #[cfg(test)]
 #[cfg(feature = "js")]

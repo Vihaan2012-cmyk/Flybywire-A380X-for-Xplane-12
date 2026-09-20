@@ -203,6 +203,16 @@ pub struct EngineOutputs {
     pub oil_relief_open: bool,
     /// Air-cooled oil cooler valve, 0..1.
     pub acoc_open: f64,
+    /// Oil left in the tank, as a fraction of a full servicing: 1.0 full,
+    /// 0.0 dry (`oil::OilState::quantity_fraction`). Consumption past the
+    /// bearing chambers' carbon seals takes it down slowly; a leak
+    /// (`EngineInputs::oil_faults.leak`) takes it down fast, and once the
+    /// level uncovers the pump's inlet `oil_press_psi` follows it down.
+    pub oil_quantity_fraction: f64,
+    /// Oil leaving the engine this frame, m^3/s: ordinary consumption past
+    /// the chamber seals, and whatever a leak is pouring overboard.
+    pub oil_seal_loss_m3_s: f64,
+    pub oil_leak_m3_s: f64,
 }
 
 /// A design point's fixed reference values, computed once so every frame's
@@ -820,6 +830,9 @@ impl Engine {
             oil_filter_bypassed: oil.filter_bypassed,
             oil_relief_open: oil.relief_open,
             acoc_open: oil.acoc_open,
+            oil_quantity_fraction: oil.quantity_fraction,
+            oil_seal_loss_m3_s: oil.seal_loss_m3_s,
+            oil_leak_m3_s: oil.leak_m3_s,
         }
     }
 }

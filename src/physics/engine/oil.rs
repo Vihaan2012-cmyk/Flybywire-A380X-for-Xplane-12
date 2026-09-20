@@ -20,6 +20,20 @@
 //! burners, and by the air-cooled oil cooler, which the EEC opens when the
 //! fuel would get too hot or the oil is running hot.
 //!
+//! Quantity is a real volume in the tank, and it goes down. Two paths take
+//! it. The bearing chambers' carbon seals pass a little oil into the air
+//! those chambers vent -- that is what "oil consumption" is on a real
+//! engine, the figure quoted in litres per hour -- and it scales with the
+//! oil actually being jetted at the bearings. A leak in the pressurised
+//! feed gallery pours oil overboard through a hole, at a rate the gallery
+//! pressure behind it sets, so it runs fast at take-off power and stops
+//! altogether once the pump does. The level feeds straight back into the
+//! pressure, because a pump can only deliver what its inlet is covered
+//! with: once the level falls past the feed standpipe the pump starts
+//! drawing air with the oil and its volumetric delivery collapses. That is
+//! why a low-quantity caution precedes a low-pressure one on a real
+//! aircraft rather than arriving with it.
+//!
 //! Oil properties are public (MIL-PRF-23699 turbine oil, e.g. Mobil Jet Oil
 //! II's data sheet). No Trent 900 oil-system data is public: pump size,
 //! resistances, chamber and cooler sizes and the ACOC schedule are GENERIC,
@@ -76,9 +90,65 @@ const HEAT_SHARE: [f64; 3] = [0.35, 0.45, 0.20];
 const CHAMBER_CAPACITY_J_K: [f64; 3] = [20_000.0, 19_000.0, 12_000.0];
 const CHAMBER_SOAK_W_K: [f64; 3] = [40.0, 8.0, 10.0];
 
-/// Tank: oil held, kg, and loss to the nacelle, W/K (GENERIC).
+/// Tank: oil held when it is full, kg, and loss to the nacelle, W/K
+/// (GENERIC).
 const TANK_OIL_KG: f64 = 20.0;
 const TANK_LOSS_W_K: f64 = 15.0;
+/// The same full charge as a volume, m^3 (20 kg of MIL-PRF-23699 at
+/// [`OIL_DENSITY`] is 20 L). This is the tank's *usable* capacity: the
+/// quantity a full servicing puts in and the denominator of
+/// [`OilState::quantity_fraction`].
+pub const TANK_CAPACITY_M3: f64 = TANK_OIL_KG / OIL_DENSITY;
+/// Oil the tank keeps wetting its walls and the scavenge lines with even
+/// at zero indicated quantity, kg. It exists here only so the tank's
+/// thermal capacity never reaches zero and divide the heat balance by it:
+/// an empty tank is still a metal box full of hot oil mist, not a body
+/// with no heat capacity at all. GENERIC.
+const TANK_RESIDUAL_KG: f64 = 0.5;
+
+/// Oil consumption past the bearing chambers' carbon seals at the design
+/// jet flow, litres per hour.
+///
+/// **GENERIC.** No Trent 900 oil consumption figure is published; large
+/// turbofans are normally quoted in tenths of a litre per hour, with
+/// certification limits several times that, and 0.3 L/h sits in the middle
+/// of that band. It is expressed at the design jet flow and scaled with
+/// the jet flow actually running, because this is oil escaping past the
+/// seals of chambers that are being fed -- with the pump stopped nothing
+/// is being jetted and nothing is consumed.
+const SEAL_LOSS_L_PER_H_AT_DESIGN_FLOW: f64 = 0.3;
+/// The same figure as the fraction of jetted oil that never comes back.
+const SEAL_LOSS_FRACTION_OF_JET_FLOW: f64 = SEAL_LOSS_L_PER_H_AT_DESIGN_FLOW * 1e-3 / 3600.0 / PUMP_DESIGN_M3_S;
+
+/// A fully-developed leak (`OilFaults::leak` = 1) drains the whole tank in
+/// this many seconds of running at the reference gallery pressure below.
+///
+/// **GENERIC**, and deliberately the same sizing `physics::damage.rs`'s own
+/// `OIL_LEAK_DRAIN_PCT_PER_S` already cites for failure 79_004+n ("a leak
+/// drains a generic-sized sump from full to empty over roughly 6 minutes of
+/// running -- fast enough to matter within one flight, slow enough to be a
+/// diagnosable trend"), so the physical model here and that coarse hook
+/// describe one leak at one rate rather than two.
+const LEAK_FULL_DRAIN_S: f64 = 360.0;
+const LEAK_FULL_SCALE_M3_S: f64 = TANK_CAPACITY_M3 / LEAK_FULL_DRAIN_S;
+/// Feed gallery pressure the figure above is quoted at, psi: the model's
+/// own warm cruise-power indication. A hole in a pressurised line is an
+/// orifice, so the flow through it goes as the square root of the pressure
+/// behind it -- which is why a leak runs fast at take-off power, slows at
+/// idle, and stops when the pump does.
+const LEAK_REFERENCE_PSI: f64 = 80.0;
+
+/// Below this fraction of tank capacity the pump's inlet begins to
+/// uncover: it draws air in with the oil and its volumetric delivery falls
+/// away, reaching nothing at an empty tank.
+///
+/// **GENERIC** -- no standpipe height is published. Deliberately well below
+/// `damage.rs`'s own coarse `OIL_STARVATION_QTY_PCT` (50 %), which derates
+/// `ENGINE_OIL_PRESSURE_FRACTION:n` (and so this model's `pump_fraction`)
+/// from the same failure: the coarse hook is the low-quantity caution
+/// band, this is the point where the pump physically loses its prime, and
+/// keeping them apart stops the two stacking into one cliff.
+const PUMP_INLET_UNCOVERS_FRACTION: f64 = 0.15;
 /// Fuel-cooled oil cooler effectiveness (GENERIC).
 const FCOC_EFFECTIVENESS: f64 = 0.8;
 /// Air-cooled oil cooler: effectiveness, the fan air it takes fully open as
@@ -96,6 +166,12 @@ pub struct OilFaults {
     /// Filter element blocked with debris: its viscous resistance grows as
     /// `1 / (1 - clog)^2`.
     pub filter_clog: f64,
+    /// A hole in the pressurised feed gallery, 0 sound .. 1 a leak that
+    /// empties the tank in [`LEAK_FULL_DRAIN_S`] at the reference gallery
+    /// pressure. This drains the tank -- the pressure only follows once
+    /// the level has fallen far enough to uncover the pump's inlet, which
+    /// is the order the real fault develops in.
+    pub leak: f64,
 }
 
 /// Where the oil exchanges heat with the engine this frame.
@@ -143,21 +219,60 @@ pub struct OilState {
     pub fuel_out_k: f64,
     /// ACOC valve position, 0..1.
     pub acoc_open: f64,
+    /// Oil in the tank, m^3, and the same as a fraction of
+    /// [`TANK_CAPACITY_M3`]: 1.0 freshly serviced, 0.0 dry. This is what
+    /// a quantity probe in the tank has to sense.
+    pub quantity_m3: f64,
+    pub quantity_fraction: f64,
+    /// Where the oil went this frame, m^3/s: past the chamber seals
+    /// (ordinary consumption) and out of a leak.
+    pub seal_loss_m3_s: f64,
+    pub leak_m3_s: f64,
+    /// How much of its rated delivery the pump can actually draw, 0..1.
+    /// 1.0 while its inlet is covered; falling below
+    /// [`PUMP_INLET_UNCOVERS_FRACTION`] of tank capacity as it starts
+    /// pulling air in with the oil.
+    pub pump_prime_fraction: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct OilSystem {
     tank_k: f64,
     chamber_k: [f64; 3],
+    /// Oil in the tank, m^3. Starts at [`TANK_CAPACITY_M3`]: an aircraft
+    /// is serviced before it is handed over, so a cold engine's tank is
+    /// full, not empty.
+    oil_m3: f64,
 }
 
 impl OilSystem {
     pub fn new(temp_k: f64) -> Self {
-        Self { tank_k: temp_k, chamber_k: [temp_k; 3] }
+        Self { tank_k: temp_k, chamber_k: [temp_k; 3], oil_m3: TANK_CAPACITY_M3 }
     }
 
     pub fn tank_k(&self) -> f64 {
         self.tank_k
+    }
+
+    /// Oil in the tank, m^3.
+    pub fn oil_m3(&self) -> f64 {
+        self.oil_m3
+    }
+
+    /// Oil in the tank as a fraction of its full charge, 0..1.
+    pub fn quantity_fraction(&self) -> f64 {
+        (self.oil_m3 / TANK_CAPACITY_M3).clamp(0.0, 1.0)
+    }
+
+    /// How much of its rated delivery a pump can draw at this tank level.
+    ///
+    /// The inlet is covered -- and delivery unaffected -- until the level
+    /// reaches [`PUMP_INLET_UNCOVERS_FRACTION`]; from there the pump takes
+    /// an increasing share of air with the oil, reaching nothing at an
+    /// empty tank. Linear in the level over that band because what is
+    /// being lost is the wetted fraction of a roughly constant-area inlet.
+    fn prime_fraction(quantity_fraction: f64) -> f64 {
+        (quantity_fraction / PUMP_INLET_UNCOVERS_FRACTION).clamp(0.0, 1.0)
     }
 
     /// The flow reaching the jets and the pressures that go with it, for a
@@ -189,7 +304,12 @@ impl OilSystem {
 
     pub fn step(&mut self, s: &Surroundings, faults: &OilFaults) -> OilState {
         let dt = s.dt_s.max(0.0);
-        let pump = PUMP_DESIGN_M3_S * s.n3_frac.max(0.0) * s.pump_fraction.clamp(0.0, 1.0);
+        // The pump is geared to the HP spool and delivers what its inlet
+        // lets it draw: an uncovered inlet is as real a limit on delivery
+        // as a stopped spool or a failed pump.
+        let quantity_fraction = self.quantity_fraction();
+        let prime = Self::prime_fraction(quantity_fraction);
+        let pump = PUMP_DESIGN_M3_S * s.n3_frac.max(0.0) * s.pump_fraction.clamp(0.0, 1.0) * prime;
 
         // ---- Coolers, tank to chambers.
         let oil_capacity = pump * OIL_DENSITY * OIL_CP; // W/K through the pump
@@ -228,13 +348,39 @@ impl OilSystem {
         let returning_w_k = scavenge_w_k + spilled_w_k;
         let returning_k = if returning_w_k > 0.0 { (scavenge_k_w_k + spilled_w_k * supply_k) / returning_w_k } else { self.tank_k };
 
+        // ---- Quantity: what leaves the system this frame.
+        //
+        // Seal loss is a share of the oil actually jetted at the bearings
+        // (nothing jetted, nothing consumed). A leak is a hole in the
+        // pressurised gallery, so it is an orifice: the flow through it
+        // goes as the square root of the pressure behind it, which is the
+        // same `pressure_psi` the feed manifold is running at -- fast at
+        // take-off power, slow at idle, nothing at all with the pump
+        // stopped, because an unpressurised line does not squirt.
+        let seal_loss_m3_s = SEAL_LOSS_FRACTION_OF_JET_FLOW * jet_flow;
+        let leak = faults.leak.clamp(0.0, 1.0);
+        let leak_m3_s = leak * LEAK_FULL_SCALE_M3_S * (pressure_psi.max(0.0) / LEAK_REFERENCE_PSI).sqrt();
+        // Never take out more than is there: the tank cannot go negative,
+        // and a leak out of an empty tank leaks nothing.
+        let wanted_m3 = (seal_loss_m3_s + leak_m3_s) * dt;
+        let taken_m3 = wanted_m3.min(self.oil_m3.max(0.0));
+        self.oil_m3 = (self.oil_m3 - taken_m3).clamp(0.0, TANK_CAPACITY_M3);
+
         // ---- Tank: mixing with what returns, losing heat to the nacelle.
-        let tank_capacity = TANK_OIL_KG * OIL_CP;
+        // Its thermal capacity is the oil actually in it, so a draining
+        // tank heats faster -- with a floor for the oil that stays wetting
+        // its walls and lines whatever the gauge says.
+        let tank_capacity = (self.oil_m3 * OIL_DENSITY).max(TANK_RESIDUAL_KG) * OIL_CP;
         let conductance = returning_w_k + TANK_LOSS_W_K;
         let target = (returning_w_k * returning_k + TANK_LOSS_W_K * s.nacelle_k) / conductance;
         self.tank_k = target + (self.tank_k - target) * (-conductance / tank_capacity * dt).exp();
 
         OilState {
+            quantity_m3: self.oil_m3,
+            quantity_fraction: self.quantity_fraction(),
+            seal_loss_m3_s,
+            leak_m3_s,
+            pump_prime_fraction: prime,
             pressure_psi,
             temp_k: self.tank_k,
             supply_k,
@@ -303,7 +449,7 @@ mod tests {
     #[test]
     fn a_clogging_filter_opens_its_bypass() {
         let clean = OilSystem::hydraulics(PUMP_DESIGN_M3_S, 363.15, &OilFaults::default());
-        let clogged = OilSystem::hydraulics(PUMP_DESIGN_M3_S, 363.15, &OilFaults { filter_clog: 0.8 });
+        let clogged = OilSystem::hydraulics(PUMP_DESIGN_M3_S, 363.15, &OilFaults { filter_clog: 0.8, ..Default::default() });
         assert!(!clean.2 && clogged.2);
     }
 
@@ -324,6 +470,136 @@ mod tests {
         let soaked = settle(&mut oil, &stopped, &OilFaults::default(), 900.0);
         assert!(soaked.chamber_k[1] > running.chamber_k[1] + 20.0, "ran {:.0} K, soaked to {:.0} K", running.chamber_k[1], soaked.chamber_k[1]);
         assert_eq!(soaked.pressure_psi, 0.0);
+    }
+
+    #[test]
+    fn a_cold_engine_stands_with_a_full_tank() {
+        let oil = OilSystem::new(288.0);
+        assert!((oil.quantity_fraction() - 1.0).abs() < 1e-12);
+        assert!((oil.oil_m3() - 20.0e-3).abs() < 1e-9, "20 L of oil: {}", oil.oil_m3());
+    }
+
+    /// Ordinary consumption past the carbon seals: a real, slow loss that
+    /// only runs while oil is being jetted at the bearings. An hour at
+    /// take-off power loses about the quoted litres-per-hour figure, and a
+    /// stopped engine loses nothing at all.
+    #[test]
+    fn oil_is_consumed_past_the_seals_only_while_the_bearings_are_being_fed() {
+        let mut oil = OilSystem::new(363.15);
+        let s = Surroundings { dt_s: 1.0, ..surroundings(0.97) };
+        let start = oil.oil_m3();
+        let mut out = OilState::default();
+        for _ in 0..3600 {
+            out = oil.step(&s, &OilFaults::default());
+        }
+        let litres_per_hour = (start - oil.oil_m3()) * 1000.0;
+        // A little under the rating, because the rating is quoted at the
+        // pump's design flow and take-off power jets slightly less than
+        // that (97 % N3, with the relief valve spilling a trickle).
+        assert!(
+            litres_per_hour < SEAL_LOSS_L_PER_H_AT_DESIGN_FLOW
+                && litres_per_hour > 0.8 * SEAL_LOSS_L_PER_H_AT_DESIGN_FLOW,
+            "{litres_per_hour:.3} L/h against a rated {SEAL_LOSS_L_PER_H_AT_DESIGN_FLOW} L/h"
+        );
+        assert!(out.seal_loss_m3_s > 0.0 && out.leak_m3_s == 0.0);
+        // Consumption alone is nowhere near enough to matter in a flight.
+        assert!(oil.quantity_fraction() > 0.98, "{}", oil.quantity_fraction());
+
+        // Shut down: nothing is jetted, so nothing is consumed.
+        let stopped = Surroundings { n3_frac: 0.0, friction_w: 0.0, fuel_kg_s: 0.0, bypass_kg_s: 0.0, dt_s: 1.0, ..surroundings(0.0) };
+        let before = oil.oil_m3();
+        for _ in 0..3600 {
+            oil.step(&stopped, &OilFaults::default());
+        }
+        assert_eq!(oil.oil_m3(), before, "a stopped engine consumes no oil");
+    }
+
+    /// The chain the quantity probe and the pressure transducer both sit
+    /// on: a leak drains the tank, and the pressure holds up until the
+    /// level uncovers the pump inlet -- then it follows the quantity down.
+    /// A low-quantity indication genuinely precedes a low-pressure one.
+    #[test]
+    fn a_leak_drains_the_tank_and_the_pressure_follows_it_down() {
+        let mut oil = OilSystem::new(363.15);
+        let s = Surroundings { dt_s: 1.0, ..surroundings(0.97) };
+        let faults = OilFaults { leak: 1.0, ..Default::default() };
+
+        let healthy = oil.step(&s, &OilFaults::default());
+        assert!(healthy.pressure_psi > 50.0, "{:.1} psi", healthy.pressure_psi);
+
+        // Half the tank gone, still above the standpipe: pressure intact.
+        let mut half = healthy;
+        while oil.quantity_fraction() > 0.5 {
+            half = oil.step(&s, &faults);
+        }
+        assert!(half.leak_m3_s > 0.0);
+        assert_eq!(half.pump_prime_fraction, 1.0, "the inlet is still covered at half a tank");
+        // The pump is still delivering its full flow, so the indication
+        // barely moves: what little it does is the oil running a touch
+        // hotter (and so thinner) in a tank with less of it to heat, not
+        // the quantity itself. Half the oil is gone and the gauge the crew
+        // watches for a pressure problem has not told them anything.
+        assert!(
+            (half.pressure_psi - healthy.pressure_psi).abs() < 0.05 * healthy.pressure_psi,
+            "pressure must barely move while the inlet is still covered: {:.1} -> {:.1} psi",
+            healthy.pressure_psi,
+            half.pressure_psi
+        );
+
+        // Past the standpipe the pump starts drawing air and the pressure
+        // comes down with the quantity, not before it.
+        let mut low = half;
+        while oil.quantity_fraction() > 0.05 {
+            low = oil.step(&s, &faults);
+        }
+        assert!(low.pressure_psi < 0.5 * healthy.pressure_psi, "{:.1} psi at {:.2} full", low.pressure_psi, low.quantity_fraction);
+        assert!(low.pump_prime_fraction < 0.4);
+
+        // Dry: nothing to pump, nothing left to leak.
+        let mut dry = low;
+        for _ in 0..600 {
+            dry = oil.step(&s, &faults);
+        }
+        assert_eq!(dry.quantity_m3, 0.0);
+        assert_eq!(dry.quantity_fraction, 0.0);
+        assert_eq!(dry.pressure_psi, 0.0);
+        assert!(dry.leak_m3_s >= 0.0 && dry.quantity_m3 >= 0.0, "the tank never goes negative");
+    }
+
+    /// The leak is an orifice in the pressurised gallery, not a scripted
+    /// rate: the same fault drains faster at take-off power than at idle,
+    /// and not at all with the pump stopped.
+    #[test]
+    fn a_leak_runs_at_the_pressure_behind_it() {
+        let faults = OilFaults { leak: 1.0, ..Default::default() };
+        let at = |n3: f64| {
+            let mut oil = OilSystem::new(363.15);
+            oil.step(&Surroundings { dt_s: 0.1, ..surroundings(n3) }, &faults).leak_m3_s
+        };
+        let (idle, takeoff) = (at(0.62), at(0.97));
+        assert!(takeoff > idle && idle > 0.0, "idle {idle:.3e}, take-off {takeoff:.3e} m^3/s");
+
+        let mut stopped_engine = OilSystem::new(300.0);
+        let stopped = Surroundings { n3_frac: 0.0, friction_w: 0.0, fuel_kg_s: 0.0, bypass_kg_s: 0.0, dt_s: 1.0, ..surroundings(0.0) };
+        let out = stopped_engine.step(&stopped, &faults);
+        assert_eq!(out.leak_m3_s, 0.0, "an unpressurised gallery does not squirt");
+        assert_eq!(stopped_engine.quantity_fraction(), 1.0);
+    }
+
+    /// At full magnitude the leak empties the tank on the sizing it is
+    /// quoted on, so the model and `damage.rs`'s coarse 79_004 hook agree
+    /// about how long a crew has.
+    #[test]
+    fn a_full_leak_empties_the_tank_in_the_minutes_it_is_sized_for() {
+        let mut oil = OilSystem::new(363.15);
+        let s = Surroundings { dt_s: 1.0, ..surroundings(0.97) };
+        let faults = OilFaults { leak: 1.0, ..Default::default() };
+        let mut seconds = 0u32;
+        while oil.quantity_fraction() > 0.0 && seconds < 3600 {
+            oil.step(&s, &faults);
+            seconds += 1;
+        }
+        assert!((120..=900).contains(&seconds), "emptied in {seconds} s; sized for {LEAK_FULL_DRAIN_S} s");
     }
 
     #[test]

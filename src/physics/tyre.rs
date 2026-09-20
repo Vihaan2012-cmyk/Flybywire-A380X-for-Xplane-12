@@ -125,6 +125,44 @@ const LEG_WHEEL_INDICES: [[usize; 4]; 4] = [
     [10, 11, 14, 15],
 ];
 
+/// How many wheels carry a braked tyre: indices `0..BRAKED_WHEELS` of
+/// [`Tyres::wheels`], one per `BRAKE_TEMPERATURE_n`/`TYRE_PRESSURE_PA:n`.
+pub const BRAKED_WHEELS: usize = 16;
+
+/// Every tyre on the aircraft. An A380 stands on 22: two on the nose leg,
+/// four on each wing leg, six on each body leg. Sixteen of those are
+/// braked (all four wing-leg wheels a side, and the forward two axles of
+/// each body leg); the nose pair and each body leg's steerable rear axle
+/// are not.
+pub const WHEELS: usize = 22;
+
+/// Each wheel's position, in [`Tyres::wheels`]'/`TYRE_PRESSURE_PA:n`'s
+/// own index order (`n` is the index + 1). Indices `0..16` are unchanged
+/// from when this model carried only the braked wheels, so every existing
+/// wheel map still points at the wheel it always did.
+pub const WHEEL_NAMES: [&str; WHEELS] = [
+    "L wing 1", "L wing 2", "R wing 1", "R wing 2", "L wing 3", "L wing 4", "R wing 3", "R wing 4", "L body 1", "L body 2",
+    "R body 1", "R body 2", "L body 3", "L body 4", "R body 3", "R body 4", "Nose 1", "Nose 2", "L body 5", "L body 6",
+    "R body 5", "R body 6",
+];
+
+/// The unbraked wheels, by the leg whose failure id they share: the nose
+/// pair, then each body leg's rear axle. The nose leg has its own id
+/// (`32_100`, matching X-Plane's own `rel_tire1`), which the braked
+/// wheels' [`LEG_FAILURE_IDS`] does not carry.
+const NOSE_FAILURE_ID: u64 = 32_100;
+/// `(wheel index, failure id)` for every wheel past [`BRAKED_WHEELS`]: the
+/// nose pair on the nose leg's own id, and each body leg's rear axle on
+/// the same leg id its four braked wheels already use.
+const UNBRAKED_WHEELS: [(usize, u64); WHEELS - BRAKED_WHEELS] = [
+    (16, NOSE_FAILURE_ID),
+    (17, NOSE_FAILURE_ID),
+    (18, LEG_FAILURE_IDS[2]),
+    (19, LEG_FAILURE_IDS[2]),
+    (20, LEG_FAILURE_IDS[3]),
+    (21, LEG_FAILURE_IDS[3]),
+];
+
 fn leg_of_wheel(wheel: usize) -> usize {
     LEG_WHEEL_INDICES.iter().position(|indices| indices.contains(&wheel)).expect("every wheel 0..16 is in exactly one leg")
 }
@@ -222,19 +260,37 @@ impl TyreWheel {
         }
         false
     }
+
+    /// One tick for a wheel with no brake on it: the nose pair and each
+    /// body leg's steerable rear axle.
+    ///
+    /// Identical physics, minus the one term that has nothing to couple
+    /// to: there is no brake stack bolted inside these wheels, so there is
+    /// no conduction path from one, and `k_soak * (T_brake - T)` is
+    /// severed by handing the wheel its own temperature rather than by a
+    /// flag. Everything else is real and still runs -- the nitrogen still
+    /// obeys Gay-Lussac, a leak still deflates it, rolling flex still
+    /// heats it (and heats it *more* as it goes soft), and it still cools
+    /// to ambient.
+    pub fn step_unbraked(&mut self, ambient_c: f64, groundspeed_ms: f64, magnitude: f64, delta: f64) -> bool {
+        let own_temp = self.temp_c;
+        self.step(own_temp, ambient_c, groundspeed_ms, magnitude, delta)
+    }
 }
 
 /// All 16 main-gear wheels (`LEG_WHEEL_INDICES`' own ordering, matching
 /// `BRAKE_TEMPERATURE_1..16`), plus the X-Plane/FlyByWire bindings needed
 /// to drive them and publish their state.
 pub struct Tyres {
-    pub wheels: [TyreWheel; 16],
-    brake_temperature: [VariableIdentifier; 16],
-    pressure_out: [VariableIdentifier; 16],
-    temp_out: [VariableIdentifier; 16],
-    leak_out: [VariableIdentifier; 16],
-    tread_out: [VariableIdentifier; 16],
-    fuse_plug_out: [VariableIdentifier; 16],
+    pub wheels: [TyreWheel; WHEELS],
+    /// One per *braked* wheel only: the six unbraked tyres have no brake
+    /// stack to read a temperature from.
+    brake_temperature: [VariableIdentifier; BRAKED_WHEELS],
+    pressure_out: [VariableIdentifier; WHEELS],
+    temp_out: [VariableIdentifier; WHEELS],
+    leak_out: [VariableIdentifier; WHEELS],
+    tread_out: [VariableIdentifier; WHEELS],
+    fuse_plug_out: [VariableIdentifier; WHEELS],
     ambient_c: Option<DataRef>,
     groundspeed_ms: Option<DataRef>,
     pub events: Vec<String>,
@@ -243,7 +299,7 @@ pub struct Tyres {
 impl Tyres {
     pub fn new<W: systems::simulation::VariableRegistry>(vars: &mut W, xplm: Option<&Xplm>) -> Self {
         Self {
-            wheels: [TyreWheel::default(); 16],
+            wheels: [TyreWheel::default(); WHEELS],
             brake_temperature: std::array::from_fn(|i| vars.get(format!("BRAKE_TEMPERATURE_{}", i + 1))),
             pressure_out: std::array::from_fn(|i| vars.get(format!("TYRE_PRESSURE_PA:{}", i + 1))),
             temp_out: std::array::from_fn(|i| vars.get(format!("TYRE_TEMPERATURE_C:{}", i + 1))),
@@ -266,20 +322,23 @@ impl Tyres {
     pub fn update<W: systems::simulation::SimulatorReaderWriter>(&mut self, vars: &mut W, xplm: Option<&Xplm>, delta: f64) {
         let ambient_c = Self::get_f(xplm, self.ambient_c);
         let groundspeed_ms = Self::get_f(xplm, self.groundspeed_ms);
-        for i in 0..16 {
-            let brake_temp_c = vars.read(&self.brake_temperature[i]);
-            let leg = leg_of_wheel(i);
-            let magnitude = failures::magnitude(LEG_FAILURE_IDS[leg]);
-            let melted_now = self.wheels[i].step(brake_temp_c, ambient_c, groundspeed_ms, magnitude, delta);
+        for i in 0..WHEELS {
+            let (melted_now, id) = if i < BRAKED_WHEELS {
+                let brake_temp_c = vars.read(&self.brake_temperature[i]);
+                let id = LEG_FAILURE_IDS[leg_of_wheel(i)];
+                (self.wheels[i].step(brake_temp_c, ambient_c, groundspeed_ms, failures::magnitude(id), delta), id)
+            } else {
+                // No brake inside these wheels, so no brake-heat path.
+                let id = UNBRAKED_WHEELS[i - BRAKED_WHEELS].1;
+                (self.wheels[i].step_unbraked(ambient_c, groundspeed_ms, failures::magnitude(id), delta), id)
+            };
             if melted_now {
-                let names = ["left wing", "right wing", "left body", "right body"];
                 self.events.push(format!(
-                    "{} gear wheel {} fuse plug melted ({:.0} C tyre) -- tyre burst",
-                    names[leg],
-                    i + 1,
+                    "{} tyre fuse plug melted ({:.0} C tyre) -- tyre burst",
+                    WHEEL_NAMES[i],
                     self.wheels[i].temp_c,
                 ));
-                failures::set_magnitude(LEG_FAILURE_IDS[leg], 1.0);
+                failures::set_magnitude(id, 1.0);
             }
             vars.write(&self.pressure_out[i], self.wheels[i].pressure_pa());
             vars.write(&self.temp_out[i], self.wheels[i].temp_c);
@@ -547,6 +606,62 @@ mod tests {
         w.step(15.0, 15.0, 0.0, 1.0, 500.0);
         let expected = NEW_TREAD_DEPTH_MM - WEAR_RATE_MM_PER_S_AT_FULL_MAGNITUDE * 500.0;
         assert!((w.tread_mm - expected).abs() < 1e-9);
+    }
+
+    /// A cold nose tyre stands at its service pressure, and goes on
+    /// behaving like a tyre with no brake behind it: it does not soak up
+    /// brake heat it has no path to, but it still heats as it rolls and
+    /// still loses pressure to a leak.
+    #[test]
+    fn a_cold_nose_tyre_reads_service_pressure_and_has_no_brake_to_soak_from() {
+        let mut nose = TyreWheel { temp_c: 15.0, ..Default::default() };
+        assert!((nose.pressure_pa() - COLD_PRESSURE_PA).abs() < 1.0, "{}", nose.pressure_pa());
+
+        // Parked next to a wing wheel that has just landed hot: the nose
+        // tyre cannot feel it, because there is no brake in the nose hub.
+        let mut braked = TyreWheel { temp_c: 15.0, ..Default::default() };
+        for _ in 0..900 {
+            nose.step_unbraked(15.0, 0.0, 0.0, 1.0);
+            braked.step(300.0, 15.0, 0.0, 0.0, 1.0);
+        }
+        assert!((nose.temp_c - 15.0).abs() < 0.1, "nose tyre drifted to {:.2} C with no brake behind it", nose.temp_c);
+        assert!(braked.temp_c > 100.0, "the braked wheel should have soaked: {:.1} C", braked.temp_c);
+        assert!((nose.pressure_pa() - COLD_PRESSURE_PA).abs() < 6_000.0, "{}", nose.pressure_pa());
+
+        // Rolling heats it, and a leak still takes nitrogen out of it.
+        let before = nose.temp_c;
+        for _ in 0..300 {
+            nose.step_unbraked(15.0, 20.0, 0.5, 1.0);
+        }
+        assert!(nose.temp_c > before + 10.0, "rolling flex must heat it: {:.1} -> {:.1} C", before, nose.temp_c);
+        assert!((nose.leaked_fraction - LEAK_RATE_FRACTION_PER_S_AT_FULL_MAGNITUDE * 0.5 * 300.0).abs() < 1e-9);
+        // It is hotter than cold, so its pressure is *up* on the placard
+        // figure -- but down on what the same tyre at the same temperature
+        // would read with all its nitrogen still in it. Gay-Lussac and the
+        // leak are both acting, and the leak is not hidden by the heat.
+        let sound = TyreWheel { temp_c: nose.temp_c, ..Default::default() };
+        assert!(nose.pressure_pa() > COLD_PRESSURE_PA, "{}", nose.pressure_pa());
+        assert!(
+            (nose.pressure_pa() - sound.pressure_pa() * (1.0 - nose.leaked_fraction)).abs() < 1.0,
+            "{} vs {}",
+            nose.pressure_pa(),
+            sound.pressure_pa()
+        );
+    }
+
+    #[test]
+    fn every_wheel_has_a_name_and_a_failure_id_exactly_once() {
+        assert_eq!(WHEEL_NAMES.len(), WHEELS);
+        assert_eq!(UNBRAKED_WHEELS.len(), WHEELS - BRAKED_WHEELS);
+        for (n, (index, _)) in UNBRAKED_WHEELS.iter().enumerate() {
+            assert_eq!(*index, BRAKED_WHEELS + n, "the unbraked wheels follow the braked ones in order");
+        }
+        // The nose pair are the only wheels on the nose leg's own id.
+        let nose: Vec<_> = UNBRAKED_WHEELS.iter().filter(|(_, id)| *id == NOSE_FAILURE_ID).collect();
+        assert_eq!(nose.len(), 2);
+        // The body legs' rear axles share their leg's existing id.
+        assert_eq!(UNBRAKED_WHEELS[2].1, LEG_FAILURE_IDS[2]);
+        assert_eq!(UNBRAKED_WHEELS[4].1, LEG_FAILURE_IDS[3]);
     }
 
     #[test]

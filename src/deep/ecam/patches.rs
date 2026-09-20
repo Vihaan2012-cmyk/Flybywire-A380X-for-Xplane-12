@@ -95,6 +95,16 @@ pub fn source_patches(alerts: &[EcamAlert]) -> Vec<SourcePatch> {
     let inop_merge = codegen::inop_merge_js(&assigned);
     let infos_merge = codegen::info_merge_js(&assigned);
     let alerts_array = codegen::alerts_js_array(&assigned);
+    // FlyByWire's own procedures that nothing of FlyByWire's triggers, given
+    // the trigger they never had -- behaviour only, against FlyByWire's own
+    // nine-digit ids and its own catalogue text (`deep::ecam::fbw`).
+    // `EcamAbnormalProcedures` is a module-scope `var` in this bundle
+    // (`SystemsHost.js:166035`) and `FwsCore.update` already reads it
+    // (`SystemsHost.js:179259`), so it is in scope at this anchor; passing
+    // it in rather than closing over it keeps the shim's only dependency
+    // `SimVar`, exactly as `deep_ecam_bridge.js`'s own doc comment
+    // requires.
+    let fbw_array = crate::deep::ecam::fbw_codegen::fbw_alerts_js_array(&crate::deep::ecam::fbw::wirings());
 
     let proc_replace = format!("{PROC_SPREAD_FIND}\n  Object.assign(EcamAbnormalSensedProcedures, {procedures_merge});");
 
@@ -110,7 +120,7 @@ pub fn source_patches(alerts: &[EcamAlert]) -> Vec<SourcePatch> {
     // `ewdAbnormalSensed`/`ewdAbnormal`/`allSuppressableItems`) is stepped
     // every tick after that, guard or not.
     let update_replace = format!(
-        "{UPDATE_START_FIND}\n      if (!this.__deepEcamInstalled) {{\n        this.__deepEcamInstalled = true;\n{SHIM_JS}\n        var __deepEcamAlerts = {alerts_array};\n        this.__deepEcamTick = globalThis.installDeepEcam(this, __deepEcamAlerts);\n      }}\n      if (this.__deepEcamTick) {{ this.__deepEcamTick(); }}"
+        "{UPDATE_START_FIND}\n      if (!this.__deepEcamInstalled) {{\n        this.__deepEcamInstalled = true;\n{SHIM_JS}\n        var __deepEcamAlerts = {alerts_array};\n        this.__deepEcamTick = globalThis.installDeepEcam(this, __deepEcamAlerts);\n        var __deepFbwAlerts = {fbw_array};\n        this.__deepFbwTick = globalThis.installDeepEcamFbw(this, __deepFbwAlerts, EcamAbnormalProcedures);\n      }}\n      if (this.__deepEcamTick) {{ this.__deepEcamTick(); }}\n      if (this.__deepFbwTick) {{ this.__deepFbwTick(); }}"
     );
 
     vec![

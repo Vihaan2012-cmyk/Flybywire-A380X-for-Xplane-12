@@ -60,15 +60,22 @@
 //!   nothing else on the engine. The N2/N3 pickups, the TGT thermocouple
 //!   harnesses, the vibration pickups, the P30/T25 probes and the fuel
 //!   flow transmitters that `registry.rs` registers are *not* instantiated
-//!   here, because a sensor with no quantity to sense would be a model
-//!   that does nothing. They need `Truth::engine_n2_frac`,
-//!   `engine_n3_frac`, `engine_tgt_c`, `engine_fuel_flow_kg_s` and
-//!   `engine_vibration` (fan and core).
+//!   here. `Truth` has since grown `engine_n2_frac`, `engine_n3_frac`,
+//!   `engine_hp_port_pressure_pa` and `engine_fuel_flow_kg_s`, so the
+//!   N2/N3 pickups, the P30 probes and the fuel flow transmitters are now
+//!   live in [`super::live_discrete`]; the TGT harnesses, the vibration
+//!   pickups and the T25 probes still are not, for want of a true TGT, a
+//!   vibration amplitude and a station-2.5 temperature.
 //! * The discrete instrumentation `registry.rs` also registers (gear and
 //!   door proximity, brake temperature and wear, tyre pressure, hydraulic
 //!   and engine oil pressure/temperature/quantity, duct and cabin
-//!   pressure/temperature, oxygen bottle pressure, smoke detectors) is in
-//!   the same position: real models, no `Truth` input to drive them.
+//!   pressure/temperature, oxygen bottle pressure, smoke detectors) now
+//!   lives in [`super::live_discrete`], which senses what the other deep
+//!   areas publish rather than what `Truth` carries. The ones still
+//!   without a source -- tyre pressure, the passenger and aft cargo doors,
+//!   engine oil, vibration, TGT, T25, oxygen bottle pressure, the trim air
+//!   duct -- are listed in `live_discrete::BLOCKED` with the variable each
+//!   needs, and are not instantiated.
 
 use super::adr;
 use super::aoa_vane::{AoaVane, AoaVaneFaults};
@@ -81,6 +88,7 @@ use super::static_port::{
 };
 use super::tat_probe::{TatProbe, TatProbeFaults};
 use super::discrete::{self, TemperatureSensorFaults};
+use super::live_discrete::DiscreteSensors;
 use super::{engine_sensors, registry};
 use crate::deep::api::Registry;
 use crate::deep::integration::weather_truth;
@@ -245,7 +253,7 @@ impl FaultIndex {
             .unwrap_or(0)
     }
 
-    fn ids<const N: usize>(&self, component: &str, fields: [&str; N]) -> [u64; N] {
+    pub fn ids<const N: usize>(&self, component: &str, fields: [&str; N]) -> [u64; N] {
         fields.map(|f| self.id(component, f))
     }
 }
@@ -342,6 +350,12 @@ pub struct LiveSensors {
     n1_pickup_faults: [[[u64; 2]; 2]; 4],
     /// Standby OAT probe: open circuit, short circuit.
     oat_faults: [u64; 2],
+    /// Every sensor that senses something another deep area computes --
+    /// gear and door proximity, brake temperature and wear, smoke,
+    /// hydraulic reservoir and system transducers, duct temperature, the
+    /// engine core speed pickups, P30 and the fuel flow transmitters. See
+    /// `live_discrete`.
+    discrete: DiscreteSensors,
     snapshot: Snapshot,
 }
 
@@ -464,6 +478,8 @@ impl LiveSensors {
 
         let oat_faults = index.ids("34_nav.oat_standby", ["open_circuit", "short_circuit"]);
 
+        let discrete = DiscreteSensors::new(&index);
+
         Self {
             channels,
             vanes,
@@ -473,6 +489,7 @@ impl LiveSensors {
             gps,
             n1_pickup_faults,
             oat_faults,
+            discrete,
             snapshot: Snapshot::default(),
         }
     }
@@ -757,6 +774,9 @@ impl Area for LiveSensors {
 
         snap.total_heater_power_w = heater_w;
         self.snapshot = snap;
+
+        // ---- Everything that senses another area's output ---------------
+        self.discrete.tick(truth, faults);
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -831,6 +851,8 @@ impl Area for LiveSensors {
         }
         out("DEEP_STANDBY_OAT_C", s.standby_oat_c);
         out("DEEP_PROBE_HEAT_TOTAL_W", s.total_heater_power_w);
+
+        self.discrete.publish(out);
     }
 }
 
@@ -1150,4 +1172,3 @@ mod tests {
         assert!(published["DEEP_ADR_1_ALT_M"].abs() < 5.0);
     }
 }
-

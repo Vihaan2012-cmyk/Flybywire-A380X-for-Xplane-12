@@ -351,26 +351,35 @@ fn register_brake_temperature(r: &mut Registry, c: &mut Counter) {
         FaultSpec { field: "open_circuit", name: "open circuit", magnitude: "0 healthy .. 1 fully open", effect: "reading pegs to top of indicating range", healthy: 0.0, meaning: "Open-circuit fraction" },
         FaultSpec { field: "short_circuit", name: "short circuit", magnitude: "0 healthy .. 1 fully shorted", effect: "reading pegs to bottom of indicating range", healthy: 0.0, meaning: "Short-circuit fraction" },
     ];
-    // Wing gear: 2 wheels/leg (real A380 wing main gear bogie); body gear:
-    // 6 wheels/leg (real A380 centre/body main gear bogie) -- commonly
-    // published A380 main-gear bogie configuration. Nose gear has no
-    // brakes.
-    let mut wheels = Vec::new();
-    for side in ["Left", "Right"] {
-        for i in 1..=2 {
-            wheels.push(format!("{side} Wing {i}"));
-        }
-    }
-    for side in ["Left", "Right"] {
-        for i in 1..=6 {
-            wheels.push(format!("{side} Body {i}"));
-        }
-    }
-    for wheel in &wheels {
+    for wheel in braked_wheels() {
         let id = format!("32_gear.brake_temp_{}", wheel.to_lowercase().replace(' ', "_"));
         let name = format!("Brake temperature sensor ({wheel})");
         register_instance(r, c, 32, &id, &name, "discrete::temperature_sensor_reading_c", &faults, &[]);
     }
+}
+
+/// The aircraft's sixteen **braked** wheels, in `deep::gear_structure`'s own
+/// order, so that one of these sensors and the brake it senses are the same
+/// wheel.
+///
+/// The A380 carries 22 wheels: 2 on the nose (unbraked), 4 on each wing leg
+/// (all braked) and 6 on each body leg (the forward and middle axles' 4
+/// braked, the rear axle's 2 steerable and unbraked) -- `gear_structure`'s
+/// own module doc, which takes the layout from the plugin's existing
+/// `physics::tyre::Tyres`. So there are four braked wheels per leg on all
+/// four main legs, which is what this table enumerates; an earlier revision
+/// of this file had 2 per wing leg and 6 per body leg, which still totalled
+/// sixteen but did not line up wheel-for-wheel with the brakes
+/// `gear_structure` actually models, so a sensor could not be wired to the
+/// brake it reads (`live_discrete.rs`'s `BRAKE_WHEEL_INDEX`).
+pub(super) fn braked_wheels() -> Vec<String> {
+    let mut wheels = Vec::new();
+    for leg in ["Left Wing", "Right Wing", "Left Body", "Right Body"] {
+        for i in 1..=4 {
+            wheels.push(format!("{leg} {i}"));
+        }
+    }
+    wheels
 }
 
 fn register_brake_wear(r: &mut Registry, c: &mut Counter) {
@@ -379,20 +388,9 @@ fn register_brake_wear(r: &mut Registry, c: &mut Counter) {
         FaultSpec { field: "sender_bias", name: "sender bias", magnitude: "signed fraction of full scale, not 0..1", effect: "constant offset in either direction: optimistic bias overstates remaining life, pessimistic bias triggers early replacement", healthy: 0.0, meaning: "Signed calibration bias" },
         FaultSpec { field: "open_circuit", name: "open circuit", magnitude: "0 healthy .. 1 (>=0.98 open)", effect: "indicated remaining life reads a conservative zero", healthy: 0.0, meaning: "Open-circuit fraction" },
     ];
-    // Same wheel population as brake temperature (wing/body main gear
-    // wheels only -- nose gear has no brakes).
-    let mut wheels = Vec::new();
-    for side in ["Left", "Right"] {
-        for i in 1..=2 {
-            wheels.push(format!("{side} Wing {i}"));
-        }
-    }
-    for side in ["Left", "Right"] {
-        for i in 1..=6 {
-            wheels.push(format!("{side} Body {i}"));
-        }
-    }
-    for wheel in &wheels {
+    // Same wheel population as brake temperature ([`braked_wheels`] -- the
+    // nose gear has no brakes).
+    for wheel in braked_wheels() {
         let id = format!("32_gear.brake_wear_{}", wheel.to_lowercase().replace(' ', "_"));
         let name = format!("Brake wear indicator ({wheel})");
         register_instance(r, c, 32, &id, &name, "brake_wear::BrakeWearPin.step", &faults, &[]);
@@ -404,17 +402,23 @@ fn register_tyre_pressure(r: &mut Registry, c: &mut Counter) {
         FaultSpec { field: "drift_rate_pa_per_hr", name: "zero drift", magnitude: "signed Pa/hr, not 0..1", effect: "indicated pressure slowly diverges from truth", healthy: 0.0, meaning: "Zero-drift rate" },
         FaultSpec { field: "stuck", name: "stuck output", magnitude: "0 healthy .. 1 fully frozen", effect: "indicated pressure stops responding to reality", healthy: 0.0, meaning: "Stuck fraction" },
     ];
+    // The nose pair, then the sixteen main-gear wheels in
+    // [`braked_wheels`]' order -- which is `physics::tyre`'s own wheel
+    // ordering, so each of those sixteen sensors has a real modelled tyre
+    // behind it (`live_discrete.rs`). An earlier revision listed 2 wheels
+    // per wing leg and 6 per body leg; the A380's wing legs carry 4 each
+    // and its body legs 6 each, of which `physics::tyre` models the 4
+    // braked ones, so neither the count nor the split lined up with
+    // anything the aircraft models.
+    //
+    // Not registered, and deliberately: the nose gear's own tyres are here
+    // (they are real sensors, and `live_discrete::BLOCKED` says what they
+    // need), but each body leg's unbraked rear axle carries two more tyres
+    // that `physics::tyre` has no state for at all. Registering a sensor
+    // for a tyre this aircraft does not model would be registering a
+    // failure that can never act on anything.
     let mut wheels = vec!["Nose 1".to_string(), "Nose 2".to_string()];
-    for side in ["Left", "Right"] {
-        for i in 1..=2 {
-            wheels.push(format!("{side} Wing {i}"));
-        }
-    }
-    for side in ["Left", "Right"] {
-        for i in 1..=6 {
-            wheels.push(format!("{side} Body {i}"));
-        }
-    }
+    wheels.extend(braked_wheels());
     for wheel in &wheels {
         let id = format!("32_gear.tyre_pressure_{}", wheel.to_lowercase().replace(' ', "_"));
         let name = format!("Tyre pressure sensor ({wheel})");
@@ -681,11 +685,20 @@ fn register_duct_temperature(r: &mut Registry, c: &mut Counter) {
         FaultSpec { field: "open_circuit", name: "open circuit", magnitude: "0 healthy .. 1 fully open", effect: "reading pegs to top of indicating range (system-dependent whether that is read as an overheat or an invalid signal)", healthy: 0.0, meaning: "Open-circuit fraction" },
         FaultSpec { field: "short_circuit", name: "short circuit", magnitude: "0 healthy .. 1 fully shorted", effect: "reading pegs to bottom of indicating range", healthy: 0.0, meaning: "Short-circuit fraction" },
     ];
-    // GENERIC representative set of duct locations (2 packs' outlets, the
-    // trim air duct, and the two wing leading-edge bleed ducts): not a
-    // claim of the A380's exact overheat-loop zone count, which is not
-    // public.
-    let locations = ["Pack 1 Outlet", "Pack 2 Outlet", "Trim Air Duct", "Wing Bleed Left", "Wing Bleed Right", "APU Bleed Duct"];
+    // GENERIC representative set of duct locations: not a claim of the
+    // A380's exact overheat-loop zone count, which is not public.
+    //
+    // The first two were "Pack 1(2) Outlet" in an earlier revision. A pack
+    // *outlet* carries conditioned air and belongs to ATA 21; nothing in
+    // this crate models one, and `deep::pneumatic_ducts` models the pack
+    // **supply** duct -- the ATA 36 bleed duct feeding the pack, which is
+    // where a duct overheat sensor actually sits. Renamed to what the
+    // sensor really senses rather than instantiated against a duct of a
+    // different name (`docs/deep/BRIEF.md` hard rule 3). "Trim Air Duct"
+    // is left registered and deliberately *not* instantiated: no area
+    // publishes a trim-air duct temperature, and a sensor with nothing to
+    // sense is the placeholder the same rule forbids.
+    let locations = ["Pack 1 Supply Duct", "Pack 2 Supply Duct", "Trim Air Duct", "Wing Bleed Left", "Wing Bleed Right", "APU Bleed Duct"];
     for loc in locations {
         let id = format!("36_pneu.duct_temp_{}", loc.to_lowercase().replace(' ', "_"));
         let name = format!("Duct temperature sensor ({loc}) [GENERIC location set]");
@@ -702,14 +715,17 @@ fn register_oxygen_sensors(r: &mut Registry, c: &mut Counter) {
         FaultSpec { field: "drift_rate_pa_per_hr", name: "zero drift", magnitude: "signed Pa/hr, not 0..1", effect: "indicated bottle pressure (and so computed quantity) slowly diverges from truth", healthy: 0.0, meaning: "Zero-drift rate" },
         FaultSpec { field: "stuck", name: "stuck output", magnitude: "0 healthy .. 1 fully frozen", effect: "indicated pressure stops responding to reality -- a stuck-high reading can mask a real slow leak until the bottle runs dry", healthy: 0.0, meaning: "Stuck fraction" },
     ];
-    // Crew (flight deck) gaseous oxygen bottle, and a separate passenger
-    // system gaseous supply -- a generic assumption (some transport
-    // aircraft use single-use chemical generators for the passenger system
-    // instead, which would have no pressure transducer at all; the A380's
-    // specific passenger oxygen architecture is not verified here, so this
-    // is a GENERIC "gaseous with its own transducer" assumption, not an
-    // A380-specific sourced fact).
-    let systems = ["Crew", "Passenger [GENERIC: assumes gaseous supply, not chemical generators]"];
+    // The two installed high-pressure cylinders `deep::oxygen` models: the
+    // crew (flight deck) bottle, and the first-aid/therapeutic bottle.
+    //
+    // There is deliberately no *passenger* oxygen transducer. An earlier
+    // pass registered one under a GENERIC "assumes gaseous supply" label;
+    // that assumption has since been settled the other way -- the A380's
+    // passenger supply is chemical (sodium-chlorate generators), which
+    // stores no pressure and so has no pressure transducer to fail. A
+    // failure on a sensor the aircraft does not carry is a failure that
+    // can never act on anything.
+    let systems = ["Crew", "Therapeutic (first aid)"];
     for (i, system) in systems.iter().enumerate() {
         let id = format!("35_oxy.pressure_{}", i + 1);
         let name = format!("Oxygen system pressure transducer ({system})");

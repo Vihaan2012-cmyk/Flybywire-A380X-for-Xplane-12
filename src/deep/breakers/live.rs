@@ -105,7 +105,15 @@ pub struct BreakersLive {
     /// (see `deep::electrical::live`'s own note on the duplication).
     welded_mirror: Vec<(usize, u64)>,
     faults_were_armed: bool,
+    /// Every unit that is not closed, whatever opened it -- published as
+    /// `BREAKERS_OPEN_COUNT`. Named for the variable, not for its contents:
+    /// a crew-pulled breaker is counted here too, which is why
+    /// [`Self::fault_tripped_count`] exists beside it.
     tripped_count: f64,
+    /// Units open because a *protection element* opened them -- thermal,
+    /// magnetic, arc-fault or repeated-trip lockout -- and not because
+    /// anyone commanded or pulled them. See [`BreakersLive::publish`].
+    fault_tripped_count: f64,
     locked_out_count: f64,
     unprotected_count: f64,
 }
@@ -174,7 +182,7 @@ impl BreakersLive {
         }
 
         let unprotected_count = units.iter().filter(|u| u.def.protected_load.is_none()).count() as f64;
-        Self { units, routed, welded_mirror, faults_were_armed: false, tripped_count: 0.0, locked_out_count: 0.0, unprotected_count }
+        Self { units, routed, welded_mirror, faults_were_armed: false, tripped_count: 0.0, fault_tripped_count: 0.0, locked_out_count: 0.0, unprotected_count }
     }
 
     /// Read-only access to one unit's live trip state, for tests and for
@@ -244,6 +252,13 @@ impl Area for BreakersLive {
         });
 
         self.tripped_count = self.units.iter().filter(|u| !u.breaker.closed).count() as f64;
+        // A protection element opened it, nobody asked it to. `status()` is
+        // the one place that distinction is already drawn: an open unit with
+        // no `TripCause` is `OpenCommanded` (a CDS/OIT `remote_open`, or a
+        // plain `pull` at the panel), and only a thermal, magnetic or
+        // arc-fault trip -- or the repeated-trip `LockedOut` latch that
+        // follows several of them -- reads as anything else.
+        self.fault_tripped_count = self.units.iter().filter(|u| matches!(u.breaker.status(), SspcStatus::Tripped(_) | SspcStatus::LockedOut)).count() as f64;
         self.locked_out_count = self.units.iter().filter(|u| u.breaker.is_locked_out()).count() as f64;
     }
 
@@ -254,6 +269,16 @@ impl Area for BreakersLive {
         }
         out("BREAKERS_TOTAL", self.units.len() as f64);
         out("BREAKERS_OPEN_COUNT", self.tripped_count);
+        // The aggregate an ELEC C/B TRIPPED annunciation needs, and the one
+        // `BREAKERS_OPEN_COUNT` cannot be: that count is `!closed`, so it
+        // rises the moment the crew pulls a breaker on purpose, and an alert
+        // built on it would announce a fault every time the crew isolated a
+        // circuit. This one counts only units a protection element opened.
+        // It is published as an aggregate rather than left to a consumer
+        // because the alternative -- an `any(...)` over all 399
+        // `BKR_<id>_STATUS` variables -- is 399 `SimVar` reads per FWS per
+        // tick, twice over, for a number this loop already has.
+        out("BREAKERS_TRIPPED_NOT_COMMANDED_COUNT", self.fault_tripped_count);
         out("BREAKERS_LOCKED_OUT_COUNT", self.locked_out_count);
         out("BREAKERS_PROTECTING_NO_MODELLED_LOAD", self.unprotected_count);
 
@@ -526,6 +551,47 @@ mod tests {
         assert_eq!(published[&load_var], 0.0, "and the load behind it must actually go dead");
         assert_eq!(published[&format!("ELEC_BKR_{id}_CLOSED")], 0.0);
         assert_eq!(published["BREAKERS_OPEN_COUNT"], 1.0, "nothing else may move");
+        assert_eq!(published["BREAKERS_TRIPPED_NOT_COMMANDED_COUNT"], 1.0, "a thermal trip is exactly what that aggregate is for");
+        board::clear();
+    }
+
+    /// The distinction `BREAKERS_TRIPPED_NOT_COMMANDED_COUNT` exists to
+    /// draw, and the reason `BREAKERS_OPEN_COUNT` could not be used for an
+    /// ELEC C/B TRIPPED annunciation: a breaker the crew pulled on purpose
+    /// is open, and is not a fault. Pull one by hand and the open count
+    /// rises while the tripped count stays at zero; let a protection element
+    /// open one and both rise.
+    #[test]
+    fn a_crew_pulled_breaker_is_open_but_not_tripped() {
+        board::clear();
+        let truth = flying_truth();
+        let mut elec = ElectricalLive::new();
+        let mut live = BreakersLive::new();
+        let faults = Faults::default();
+        let mut published = BTreeMap::new();
+        let mut settle = |elec: &mut ElectricalLive, live: &mut BreakersLive, published: &mut BTreeMap<String, f64>| {
+            for _ in 0..60 {
+                elec.tick(&truth, &faults);
+                live.tick(&truth, &faults);
+                published.clear();
+                elec.publish(&mut |n, v| {
+                    published.insert(n.to_string(), v);
+                });
+                live.publish(&mut |n, v| {
+                    published.insert(n.to_string(), v);
+                });
+            }
+        };
+        settle(&mut elec, &mut live, &mut published);
+        assert_eq!(published["BREAKERS_TRIPPED_NOT_COMMANDED_COUNT"], 0.0);
+
+        // The same physical action the crew takes at the panel.
+        let id = live.units.iter().find(|u| u.net_index.is_some()).expect("some breaker protects a modelled load").def.id;
+        live.breaker_mut(id).expect("the id came from the unit list").pull();
+        settle(&mut elec, &mut live, &mut published);
+        assert_eq!(published[&format!("BKR_{id}_OPEN")], 1.0, "a pulled breaker is open");
+        assert_eq!(published["BREAKERS_OPEN_COUNT"], 1.0, "and the open count says so");
+        assert_eq!(published["BREAKERS_TRIPPED_NOT_COMMANDED_COUNT"], 0.0, "but nothing tripped -- the crew did it");
         board::clear();
     }
 

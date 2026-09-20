@@ -142,6 +142,11 @@ struct EngineIds {
     fcoc_heat: VariableIdentifier,
     oil_filter_bypass: VariableIdentifier,
     oil_relief_open: VariableIdentifier,
+    /// `physics::engine::oil`'s own tank level, 1.0 serviced full ..
+    /// 0.0 dry: the real quantity, which `deep::live` carries as
+    /// `Truth::engine_oil_quantity_fraction` for the tank's quantity
+    /// probes to sense.
+    oil_quantity_fraction: VariableIdentifier,
     acoc_open: VariableIdentifier,
 }
 
@@ -263,6 +268,7 @@ impl EngineCommands {
             fcoc_heat: vars.get(format!("ENGINE_FCOC_HEAT_W:{n}")),
             oil_filter_bypass: vars.get(format!("ENGINE_OIL_FILTER_BYPASS:{n}")),
             oil_relief_open: vars.get(format!("ENGINE_OIL_RELIEF_OPEN:{n}")),
+            oil_quantity_fraction: vars.get(format!("ENGINE_OIL_QUANTITY_FRACTION:{n}")),
             acoc_open: vars.get(format!("ENGINE_ACOC_OPEN:{n}")),
         };
         let engines = [engine(vars, 1), engine(vars, 2), engine(vars, 3), engine(vars, 4)];
@@ -482,7 +488,17 @@ impl EngineCommands {
                 // 1.0 unless a leak/pump fault is active.
                 oil_pressure_fraction: vars.read(&e.oil_pressure_fraction),
                 fuel_temp_k: vars.read(&e.feed_fuel_temp) + 273.15,
-                oil_faults: Default::default(),
+                // failures::extra 79_004+n ("engine oil leak"): a hole in
+                // the pressurised feed gallery that drains the tank, which is
+                // what that failure's name has always described.
+                // `physics/damage.rs` reads the same id for its coarser
+                // `oil_pressure_fraction` hook above; they are one leak, and
+                // `oil.rs`'s own pump-inlet threshold is set well below that
+                // hook's quantity band so the two do not stack into one cliff.
+                oil_faults: crate::physics::engine::oil::OilFaults {
+                    leak: crate::failures::magnitude(79_004 + i as u64),
+                    ..Default::default()
+                },
                 dt_s: delta,
             };
             let phys = self.physics[i].step(&phys_inputs);
@@ -519,6 +535,7 @@ impl EngineCommands {
             vars.write(&e.fcoc_heat, phys.fuel_heat_w);
             vars.write(&e.oil_filter_bypass, phys.oil_filter_bypassed as i32 as f64);
             vars.write(&e.oil_relief_open, phys.oil_relief_open as i32 as f64);
+            vars.write(&e.oil_quantity_fraction, phys.oil_quantity_fraction);
             vars.write(&e.acoc_open, phys.acoc_open);
             {
                 use crate::physics::engine::bleed_limits::{customer_bleed_limit_kg_s, Configuration, Port};

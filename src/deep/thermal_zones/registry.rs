@@ -97,6 +97,24 @@ fn register_fire_failures(r: &mut Registry) {
     const NACELLE_FIRE_MAX_SMOKE_KG_S: f64 = 0.005;
     const APU_FIRE_MAX_HEAT_W: f64 = 300_000.0;
     const APU_FIRE_MAX_SMOKE_KG_S: f64 = 0.008;
+    // A lavatory waste-bin fire: the one cabin fire the aircraft is
+    // certified to detect by itself. CS/FAR 25.854 requires a smoke
+    // detector in every lavatory and a built-in extinguisher in every
+    // waste receptacle, which is why FlyByWire's catalogue carries a MAIN
+    // DECK and an UPPER DECK LAVATORY SMOKE procedure at all. Before this
+    // there was no cabin-deck smoke source of any kind in the crate --
+    // `apply_fire_failures` injected only into the cargo bays, the nacelle
+    // cowls and the APU compartment -- so the eight lavatory detectors
+    // `deep::sensors` models could physically never alarm.
+    //
+    // GENERIC magnitudes, like every other figure in this function: two
+    // orders below a cargo-compartment fire, because a bin fire is small
+    // and contained, and sized so a full-severity one takes the deck past
+    // the detectors' own obscuration threshold inside a minute rather than
+    // instantly -- which is the order of magnitude the detection
+    // requirement is written in. Not a certification test value.
+    const LAVATORY_FIRE_MAX_HEAT_W: f64 = 20_000.0;
+    const LAVATORY_FIRE_MAX_SMOKE_KG_S: f64 = 0.002;
 
     let cargo = [("CargoFwd", "cargo_fwd", 1u16), ("CargoAft", "cargo_aft", 2u16), ("CargoBulk", "cargo_bulk", 3u16)];
     for (zone_name, field, n) in cargo {
@@ -162,6 +180,37 @@ fn register_fire_failures(r: &mut Registry) {
         magnitude: format!("0..1, fraction of the reference {APU_FIRE_MAX_HEAT_W:.0} W / {APU_FIRE_MAX_SMOKE_KG_S} kg/s full-severity fire"),
         effect: "ApuCompartment air temperature and smoke concentration rise; heat conducts into TailCone through the real structure link.".to_string(),
     });
+
+    // The two cabin decks. `thermal_zones` has no lavatory zone of its own
+    // and this does not invent one: the lavatory extract draws the deck's
+    // own air past the detector (`sensors::live_discrete`'s own note on
+    // these eight detectors says exactly that), so the deck concentration
+    // is what a lavatory detector sees, and the deck is where the smoke is
+    // injected.
+    let decks = [("CabinMainDeck", "cabin_main_deck", "main-deck", 9u16), ("CabinUpperDeck", "cabin_upper_deck", "upper-deck", 10u16)];
+    for (zone_name, field, deck, n) in decks {
+        let component_id = format!("26_thermal.{field}_lavatory_fire_load");
+        r.component(ComponentDef {
+            id: component_id.clone(),
+            area: Area::ThermalZones,
+            ata: 26,
+            name: format!("{zone_name} lavatory waste-bin fire load"),
+            params: vec![frac("severity", "fire severity, 0 = no fire, 1 = full-severity waste-bin fire (reference heat/smoke release rate)", 0.0)],
+            failures: vec![failure_id(Area::ThermalZones, 26, n)],
+        });
+        r.failure(FailureDef {
+            id: failure_id(Area::ThermalZones, 26, n),
+            area: Area::ThermalZones,
+            ata: 26,
+            name: format!("{deck} lavatory waste-bin fire"),
+            component: component_id,
+            model_field: format!("thermal_zones::network::Zone.injected_heat_w / .injected_smoke_kg_s (via ThermalNetwork::inject_heat_w(zones.{field}, magnitude*{LAVATORY_FIRE_MAX_HEAT_W}) and inject_smoke_kg_s(zones.{field}, magnitude*{LAVATORY_FIRE_MAX_SMOKE_KG_S}))"),
+            magnitude: format!("0..1, fraction of the reference {LAVATORY_FIRE_MAX_HEAT_W:.0} W / {LAVATORY_FIRE_MAX_SMOKE_KG_S} kg/s full-severity waste-bin fire"),
+            effect: format!(
+                "{zone_name} smoke concentration rises, which is what the four {deck} lavatory smoke detectors in deep::sensors sample (DEEP_SMOKE_LAV_n_ALARM); the deck's air also warms slowly and the heat conducts into the other deck and the cargo bays through the real structure links."
+            ),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------

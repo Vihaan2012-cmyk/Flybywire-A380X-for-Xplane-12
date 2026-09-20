@@ -255,3 +255,39 @@ module's own doc comment for why two exist):
   `Truth` has no quantity for yet — listed in `live.rs`'s module doc together with the `Truth` fields needed
   (true AoA, cabin pressure, radio height, satellite visibility, engine N2/N3/TGT/fuel flow/vibration).
 - [done] sourced-constants pass — gps.rs, live.rs — `UERE_M` 4.0 is now cited to the GPS SPS Performance Standard's 4 m RMS / 7.8 m 95% SIS URE commitment (with the honest caveat that it is the SIS term only). `NOMINAL_SATELLITES_VISIBLE` (10) and `REFERENCE_SATELLITES` (8) are now one derivation rather than two guesses: spherical-cap visibility above a 5-degree mask (DO-229) at the GPS orbital radius gives 0.3386 of the sphere, x24 baseline slots = 8.13, x31 operational = 10.5.
+
+- [done] Discrete instrumentation brought to life — `live_discrete.rs` (new,
+  declared in `mod.rs`), owned by `live.rs`'s `LiveSensors`. Instantiates the
+  real complement of every non-air-data sensor whose quantity another deep
+  area publishes, resolves each instance's failure ids by component +
+  `model_field` through the existing `FaultIndex`, steps it from that
+  quantity through `Truth::published`, and publishes 147 new `DEEP_*`
+  variables. 251 of this directory's 399 previously-inert failures now act
+  on a real sensor; the remaining 148 are listed in `live_discrete::BLOCKED`
+  with the variable each needs, and are deliberately *not* instantiated
+  (`docs/deep/BRIEF.md` hard rule 3). `registry.rs`: the brake wheel table is
+  now `gear_structure`'s real 4-braked-wheels-per-main-leg layout (it was
+  2 wing / 6 body, which still totalled sixteen but did not line up with the
+  brakes the aircraft models), and the two "Pack n Outlet" duct temperature
+  sensors are renamed "Pack n Supply Duct", the ATA 36 bleed duct that is
+  actually modelled. 7.4 us/frame for the discrete set, 15.0 us/frame for
+  the whole sensors area.
+
+- [done] Second pass on `live_discrete.rs`: the three cross-area blockers
+  landed and are wired. Vibration pickups (8, fan + core per engine) sense
+  `engine_accessories`' per-spool `A32NX_ENG_n_<SPOOL>_VIB_INDEX` -- the fan
+  pickup the N1 order, the core pickup N2 and N3 combined in RMS, since two
+  uncorrelated narrowband orders at one accelerometer add that way and not
+  by sum or by max. Engine oil pressure and temperature transducers (8) and
+  the 16 braked main wheels' tyre pressure transducers now read `Truth`
+  directly (`engine_oil_pressure_pa`, `engine_oil_temp_c`,
+  `tyre_pressure_pa`) -- the oil and tyre models are in the gas path and
+  `physics::tyre`, not deep areas, so they have nothing to publish *into*.
+  `registry.rs`: the tyre wheel table is now the nose pair plus
+  `braked_wheels()`, so each of the sixteen lines up with a modelled tyre
+  (it was 2 wing / 6 body per side, which matched neither the aircraft nor
+  the tyre model). 323 of the 399 originally-inert failures now act on a
+  real sensor; the remaining 76 are in `live_discrete::BLOCKED`, and the
+  module doc states, per family, exactly what the owning area has to model
+  first. 5.1 us/frame for the discrete set, 9.3 us/frame for the whole
+  sensors area.

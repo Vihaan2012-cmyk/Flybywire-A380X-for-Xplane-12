@@ -22,6 +22,11 @@
 //! | `engine_n1_frac[i]` | `ENGINE_N1:n` / 100, this crate's own `physics::engine` output (`engine_commands.rs:494`) |
 //! | `engine_running[i]` | `ENGINE_STATE:n` == `EngineState::On`, FlyByWire's own start-state machine (`fadec.rs`) |
 //! | `engine_bleed_pressure_pa[i]`, `engine_bleed_temp_k[i]` | `ENGINE_{IP,HP}_PORT_{PRESSURE_PA,TEMP_K}:n`, `physics::engine`'s own customer-bleed port outputs, picked by which port the engine is actually bled from (`PNEU_ENG_n_HP_VALVE_OPEN`, exactly as `engine_commands.rs:466` decides it) |
+//! | `engine_oil_quantity_fraction[i]` | `ENGINE_OIL_QUANTITY_FRACTION:n`, `physics::engine::oil`'s own tank level (a real volume drained by seal consumption and by a leak), written by `engine_commands.rs` beside the pressure and temperature |
+//! | `engine_tgt_c[i]` | `ENGINE_EGT_UNTRIMMED:n`, the engine's own *measured* TGT: `hot_section.rs`'s probe temperature (the gas at the IP-LP interstage blended with the metal around it by flow) through the thermocouple's own lag. Not `ENGINE_EGT:n` (carries the EEC's display trim) and not `A32NX_ENG_n_EEC_TGT_SELECTED` (the EEC's voted sensor output -- a loop, not a measurement) |
+//! | `engine_t25_c[i]` | `ENGINE_IP_PORT_TEMP_K:n` - 273.15, read *unconditionally*: `physics::engine` sets that output to the gas path's own `tt25_k`, the IP compressor exit, which is station 2.5 exactly. Unlike `engine_bleed_temp_k`, it never switches to HP6 |
+//! | `door_open_fraction[i]` | `INTERACTIVE POINT OPEN:p` / 100 for each [`DOOR_NAMES`] entry's point (`DOOR_POINTS`), which `src/doors.rs`'s own door model writes every frame: real mechanical travel at `flight_model.cfg`'s rate for that door, with the handle interlock -- not `CABIN_DOOR_LATCHED:n`, which is a latch *indication* and already a sensor output |
+//! | `controls.reverser_deploy_commanded[s]` | `AUTOTHRUST_TLA:n` <= -4.3 deg for engines 2 and 3, FlyByWire's own `A380ReverserController::OPENING_AUTHORIZATION_TLA_ANGLE_DEGREE` on the same Var `fadec.rs` writes from `throttle.rs`'s real lever reading |
 //! | `apu_running` | `A32NX_OVHD_APU_START_PB_IS_AVAILABLE`, FlyByWire's own APU ECB `is_available()` |
 //! | `apu_bleed_pressure_pa` | `A32NX_APU_BLEED_AIR_PRESSURE`, FlyByWire's own ARINC 429 word (psi absolute) |
 //! | `ac_bus_volts[i]` | `A32NX_ELEC_AC_{1..4}_BUS_POTENTIAL`, FlyByWire's own electrical system |
@@ -139,8 +144,9 @@ use std::collections::{BTreeSet, HashMap};
 use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
 use crate::deep::integration::weather_truth::{EnvironmentTruth, WeatherTruthReader};
-use crate::deep::live::{CommandedSurfaces, Deep, Faults, Truth};
+use crate::deep::live::{CommandedSurfaces, Deep, Faults, Truth, DOOR_NAMES};
 use crate::fadec::EngineState;
+use crate::physics::tyre;
 use crate::flight_controls::{aileron_or_elevator_down_deg, rudder_right_deg, spoiler_up_deg};
 use crate::prim::SimReadings;
 use crate::xp::{DataRef, Xplm};
@@ -186,6 +192,16 @@ struct EngineIds {
     /// `engine_commands.rs` writes straight from `physics::engine::oil`.
     oil_pressure_psi: VariableIdentifier,
     oil_temp_c: VariableIdentifier,
+    /// `ENGINE_OIL_QUANTITY_FRACTION:n`, `physics::engine::oil`'s own tank
+    /// level (`EngineOutputs::oil_quantity_fraction`).
+    oil_quantity_fraction: VariableIdentifier,
+    /// `ENGINE_EGT_UNTRIMMED:n`: the engine's own *measured* TGT, before
+    /// the EEC's display trim -- `engine_commands.rs` writes it beside
+    /// `ENGINE_EGT:n` for exactly this reason.
+    tgt_measured_c: VariableIdentifier,
+    /// `AUTOTHRUST_TLA:n`, degrees: the real thrust lever angle `fadec.rs`
+    /// writes every tick from `throttle.rs`'s own lever/axis reading.
+    tla_deg: VariableIdentifier,
     ip_port_pressure_pa: VariableIdentifier,
     ip_port_temp_k: VariableIdentifier,
     hp_port_pressure_pa: VariableIdentifier,
@@ -220,6 +236,9 @@ impl EngineIds {
             state: vars.get(format!("ENGINE_STATE:{n}")),
             oil_pressure_psi: vars.get(format!("GENERAL ENG OIL PRESSURE:{n}")),
             oil_temp_c: vars.get(format!("GENERAL ENG OIL TEMPERATURE:{n}")),
+            oil_quantity_fraction: vars.get(format!("ENGINE_OIL_QUANTITY_FRACTION:{n}")),
+            tgt_measured_c: vars.get(format!("ENGINE_EGT_UNTRIMMED:{n}")),
+            tla_deg: vars.get(format!("AUTOTHRUST_TLA:{n}")),
             ip_port_pressure_pa: vars.get(format!("ENGINE_IP_PORT_PRESSURE_PA:{n}")),
             ip_port_temp_k: vars.get(format!("ENGINE_IP_PORT_TEMP_K:{n}")),
             hp_port_pressure_pa: vars.get(format!("ENGINE_HP_PORT_PRESSURE_PA:{n}")),
@@ -326,11 +345,33 @@ struct Ids {
     /// Green and yellow, in `Truth::hydraulic_pressure_pa`'s order.
     hydraulic_pressure_psi: [VariableIdentifier; 2],
     /// `TYRE_PRESSURE_PA:n`, which `physics::tyre` writes from its own
-    /// per-wheel nitrogen model.
-    tyre_pressure_pa: [VariableIdentifier; 16],
+    /// per-wheel nitrogen model -- all 22 wheels, in that model's own
+    /// index order (`physics::tyre::WHEEL_NAMES`).
+    tyre_pressure_pa: [VariableIdentifier; tyre::WHEELS],
+    /// `INTERACTIVE POINT OPEN:p`, percent, one per [`DOOR_NAMES`] entry:
+    /// where `src/doors.rs`'s own door model has that door this frame.
+    door_open_percent: [VariableIdentifier; DOOR_NAMES.len()],
     surfaces: SurfaceIds,
     controls: ControlIds,
 }
+
+/// Which `flight_model.cfg` interactive point each [`DOOR_NAMES`] entry
+/// is, from `src/doors.rs`'s own `NAMES` table (M1L 0, M1R 1, M2L 2,
+/// M2R 3, ... U1L 10, ... cargo fwd 16, cargo aft 17) -- the same points
+/// `src/sensors.rs`'s doc comment already enumerates as the ones
+/// FlyByWire's own systems read.
+const DOOR_POINTS: [usize; DOOR_NAMES.len()] = [0, 2, 3, 6, 8, 10, 16, 17];
+
+/// The thrust lever angle at or below which the A380's reverser control
+/// commands the doors open, degrees.
+///
+/// FlyByWire's own `A380ReverserController::OPENING_AUTHORIZATION_TLA_
+/// ANGLE_DEGREE` (`fbw-a380x/.../src/reverser/mod.rs`), read off the same
+/// `AUTOTHRUST_TLA:n` this plugin's `fadec.rs` writes -- so the selection
+/// `deep::engine_accessories` acts on and the one FlyByWire's own compiled
+/// reverser acts on are the same lever crossing the same angle, and cannot
+/// disagree about when reverse was selected.
+const REVERSER_OPENING_AUTHORISATION_TLA_DEG: f64 = -4.3;
 
 /// The X-Plane datarefs [`Truth`] is filled from, found once.
 struct Refs {
@@ -466,6 +507,7 @@ impl DeepLayer {
             dc_bus_potential: [1, 2].map(|n| vars.get(format!("ELEC_DC_{n}_BUS_POTENTIAL"))),
             hydraulic_pressure_psi: ["GREEN", "YELLOW"].map(|c| vars.get(format!("HYD_{c}_SYSTEM_1_SECTION_PRESSURE"))),
             tyre_pressure_pa: std::array::from_fn(|i| vars.get(format!("TYRE_PRESSURE_PA:{}", i + 1))),
+            door_open_percent: DOOR_POINTS.map(|p| vars.get(format!("INTERACTIVE POINT OPEN:{p}"))),
             surfaces: SurfaceIds::new(vars),
             controls: ControlIds::new(vars),
         };
@@ -547,6 +589,9 @@ impl DeepLayer {
         let mut engine_fuel_flow_kg_s = [0.0; 4];
         let mut engine_oil_pressure_pa = default.engine_oil_pressure_pa;
         let mut engine_oil_temp_c = default.engine_oil_temp_c;
+        let mut engine_oil_quantity_fraction = default.engine_oil_quantity_fraction;
+        let mut engine_tgt_c = default.engine_tgt_c;
+        let mut engine_t25_c = default.engine_t25_c;
         let mut controls = default.controls;
         for (i, e) in self.ids.engines.iter().enumerate() {
             engine_n1_frac[i] = vars.read(&e.n1_pct) / 100.0;
@@ -555,6 +600,27 @@ impl DeepLayer {
             engine_running[i] = vars.read(&e.state) == ENGINE_STATE_ON;
             engine_oil_pressure_pa[i] = vars.read(&e.oil_pressure_psi) * PSI_TO_PA;
             engine_oil_temp_c[i] = vars.read(&e.oil_temp_c);
+            // Before `engine_commands` has written a frame this reads 0,
+            // which would be four engines whose tanks are already dry
+            // rather than four nobody has looked at yet: keep the
+            // serviced-full default until a real level arrives. A tank
+            // that genuinely empties in flight is written every frame, so
+            // a real zero is never mistaken for this one.
+            let oil_quantity = vars.read(&e.oil_quantity_fraction);
+            if oil_quantity > 0.0 {
+                engine_oil_quantity_fraction[i] = oil_quantity.min(1.0);
+            }
+            // The engine's own measured TGT and station 2.5, each falling
+            // back to the air around the engine rather than to a number no
+            // gas can have: `ENGINE_EGT_UNTRIMMED:n` is in C (exactly 0.0
+            // means never written -- the physics never lands on it), and
+            // `ENGINE_IP_PORT_TEMP_K:n` is absolute, where any value at or
+            // below 0 is impossible. A cold engine's gas path is full of
+            // the air it is sitting in, so that is what ambient is here.
+            let tgt_c = vars.read(&e.tgt_measured_c);
+            engine_tgt_c[i] = if tgt_c != 0.0 { tgt_c } else { environment.sat_c };
+            let t25_k = vars.read(&e.ip_port_temp_k);
+            engine_t25_c[i] = if t25_k > 0.0 { t25_k - 273.15 } else { environment.sat_c };
             // `engine_commands.rs:466`: the IP port feeds the customer
             // bleed unless the HP valve is open.
             let from_ip = vars.read(&e.hp_valve_open) == 0.0;
@@ -590,6 +656,14 @@ impl DeepLayer {
             controls.nacelle_anti_ice_selected[i] = vars.read(&e.nacelle_anti_ice_position) != 0.0;
             controls.engine_bleed_pb_auto[i] = vars.read(&e.bleed_pb_auto) != 0.0;
             controls.eng_gen_pb_on[i] = vars.read(&e.eng_gen_pb_on) != 0.0;
+            // Reverse thrust selected, engines 2 and 3 only (indices 1 and
+            // 2: `throttle::HAS_REVERSER`). The lever itself, at or past
+            // the opening-authorisation angle FlyByWire's own A380
+            // reverser controller uses on the same Var.
+            if let Some(slot) = [1usize, 2].iter().position(|&e_index| e_index == i) {
+                controls.reverser_deploy_commanded[slot] =
+                    vars.read(&e.tla_deg) <= REVERSER_OPENING_AUTHORISATION_TLA_DEG;
+            }
             let master = vars.read(&e.master) != 0.0;
             controls.engine_master_on[i] = master;
             // `physics::engine::mod.rs`'s own `phys_inputs.starter_engaged`
@@ -724,6 +798,16 @@ impl DeepLayer {
             engine_bleed_temp_k,
             engine_oil_pressure_pa,
             engine_oil_temp_c,
+            engine_oil_quantity_fraction,
+            engine_tgt_c,
+            engine_t25_c,
+            // `src/doors.rs`'s own door model writes each interactive
+            // point's percent every frame, before the systems run: real
+            // mechanical travel at the rate `flight_model.cfg` gives that
+            // door, not a latch indication. A door nobody has written yet
+            // reads 0, which is also a shut door -- the one case where the
+            // absent reading and the real one mean the same thing.
+            door_open_fraction: std::array::from_fn(|i| (vars.read(&self.ids.door_open_percent[i]) / 100.0).clamp(0.0, 1.0)),
             // `physics::tyre` writes these every frame from its own
             // per-wheel nitrogen model; a wheel it has not written yet
             // reads its service pressure, not zero, because zero is a flat
@@ -841,6 +925,12 @@ mod tests {
         (xplm, Vars::new(xplm))
     }
 
+    /// Write one variable by name, the way the systems that own it would.
+    fn set(vars: &mut Vars, name: &str, value: f64) {
+        let id = vars.get(name.to_owned());
+        vars.write(&id, value);
+    }
+
     #[test]
     fn a_truth_with_nothing_written_is_the_documented_default_not_zero() {
         let (xplm, mut vars) = rig();
@@ -917,6 +1007,110 @@ mod tests {
         let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
         assert_eq!(t.engine_bleed_pressure_pa, [300_000.0, 900_000.0, 300_000.0, 300_000.0]);
         assert_eq!(t.engine_bleed_temp_k, [500.0, 700.0, 500.0, 500.0]);
+    }
+
+    /// TGT is the engine's own *measured* value, not the trimmed number
+    /// the cockpit sees and not the EEC's voted sensor output; T25 is the
+    /// IP compressor exit, read whatever port the bleed is coming from.
+    #[test]
+    fn tgt_and_t25_are_measurements_and_not_the_signals_derived_from_them() {
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+        for n in 1..=4 {
+            set(&mut vars, &format!("ENGINE_EGT_UNTRIMMED:{n}"), 640.0 + n as f64);
+            // The trimmed cockpit indication and the EEC's voted output
+            // both disagree with it on purpose: taking either would show
+            // up here.
+            set(&mut vars, &format!("ENGINE_EGT:{n}"), 100.0);
+            set(&mut vars, &format!("ENG_{n}_EEC_TGT_SELECTED"), 200.0);
+            set(&mut vars, &format!("ENGINE_IP_PORT_TEMP_K:{n}"), 420.0 + n as f64);
+            set(&mut vars, &format!("ENGINE_HP_PORT_TEMP_K:{n}"), 900.0);
+        }
+        // Engine 2 bled from HP6: station 2.5 must not move with the port.
+        set(&mut vars, "PNEU_ENG_2_HP_VALVE_OPEN", 1.0);
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert_eq!(t.engine_tgt_c, [641.0, 642.0, 643.0, 644.0]);
+        for (i, c) in t.engine_t25_c.iter().enumerate() {
+            assert!((c - (420.0 + (i + 1) as f64 - 273.15)).abs() < 1e-9, "engine {} read {c} C", i + 1);
+        }
+        assert_ne!(t.engine_bleed_temp_k[1], 421.0 + 1.0, "engine 2 is bled from HP6 this tick");
+    }
+
+    /// The oil tank level reaches the areas, and a tank nobody has written
+    /// yet is a serviced one rather than four dry engines.
+    #[test]
+    fn the_oil_tank_level_reaches_truth_and_starts_serviced() {
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+        assert_eq!(layer.truth(&mut vars, Some(xplm), 1.0 / 60.0).engine_oil_quantity_fraction, [1.0; 4]);
+        set(&mut vars, "ENGINE_OIL_QUANTITY_FRACTION:3", 0.42);
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert_eq!(t.engine_oil_quantity_fraction, [1.0, 1.0, 0.42, 1.0]);
+    }
+
+    /// The reverse lever: engines 2 and 3 only, at the same angle
+    /// FlyByWire's own A380 reverser controller opens on.
+    #[test]
+    fn the_reverse_levers_selection_reaches_truth_for_the_two_engines_that_have_one() {
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+        let tla: Vec<_> = (1..=4).map(|n| vars.get(format!("AUTOTHRUST_TLA:{n}"))).collect();
+        for id in &tla {
+            vars.write(id, 25.0); // climb detent
+        }
+        assert_eq!(layer.truth(&mut vars, Some(xplm), 1.0 / 60.0).controls.reverser_deploy_commanded, [false; 2]);
+        // Idle, and just short of the opening angle: still not selected.
+        for id in &tla {
+            vars.write(id, REVERSER_OPENING_AUTHORISATION_TLA_DEG + 0.1);
+        }
+        assert_eq!(layer.truth(&mut vars, Some(xplm), 1.0 / 60.0).controls.reverser_deploy_commanded, [false; 2]);
+        // Lever 3 lifted into reverse; 1 and 4 have no reverser to select.
+        vars.write(&tla[2], crate::throttle::TLA_REVERSE);
+        vars.write(&tla[0], crate::throttle::TLA_REVERSE);
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert_eq!(t.controls.reverser_deploy_commanded, [false, true], "engine 3 is slot 1; engine 1 carries no reverser");
+    }
+
+    /// Door travel is the real mechanical position, and the array lines up
+    /// with `DOOR_NAMES` rather than with the raw interactive points.
+    #[test]
+    fn door_travel_arrives_as_a_fraction_in_door_names_order() {
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+        assert_eq!(layer.truth(&mut vars, Some(xplm), 1.0 / 60.0).door_open_fraction, [0.0; DOOR_NAMES.len()]);
+        // M2R is interactive point 3, the aft cargo door is 17. A point
+        // that is *not* one of ours (M1R, point 1) must not leak in.
+        set(&mut vars, "INTERACTIVE POINT OPEN:3", 45.0);
+        set(&mut vars, "INTERACTIVE POINT OPEN:17", 100.0);
+        set(&mut vars, "INTERACTIVE POINT OPEN:1", 100.0);
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        let at = |name: &str| t.door_open_fraction[DOOR_NAMES.iter().position(|d| *d == name).unwrap()];
+        assert!((at("M2R") - 0.45).abs() < 1e-9, "{}", at("M2R"));
+        assert_eq!(at("CARGO_AFT"), 1.0);
+        assert_eq!(at("M1L"), 0.0);
+        assert_eq!(at("M2L"), 0.0);
+        // Every name maps to a point `src/doors.rs` actually has, under
+        // that file's own name for it.
+        for (name, point) in DOOR_NAMES.iter().zip(DOOR_POINTS) {
+            assert_eq!(crate::doors::NAMES[point], *name);
+        }
+    }
+
+    /// All 22 tyres arrive, and a wheel nobody has written stands at its
+    /// service pressure rather than reading flat.
+    #[test]
+    fn every_tyre_including_the_nose_pair_reaches_truth() {
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+        let cold = tyre::COLD_PRESSURE_PA;
+        assert_eq!(layer.truth(&mut vars, Some(xplm), 1.0 / 60.0).tyre_pressure_pa, [cold; tyre::WHEELS]);
+        // Nose 1 is wheel index 16, so `TYRE_PRESSURE_PA:17`.
+        assert_eq!(tyre::WHEEL_NAMES[16], "Nose 1");
+        set(&mut vars, "TYRE_PRESSURE_PA:17", 900_000.0);
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert_eq!(t.tyre_pressure_pa[16], 900_000.0);
+        assert_eq!(t.tyre_pressure_pa[0], cold);
+        assert_eq!(t.tyre_pressure_pa.len(), 22);
     }
 
     #[test]

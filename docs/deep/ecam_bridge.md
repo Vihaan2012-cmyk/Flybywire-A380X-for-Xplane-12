@@ -256,7 +256,19 @@ rg -F '<find text>' <file>   # each returns exactly 1
 | 2 | `SystemsHost/SystemsHost.js` | the same line, byte-identical (`SystemsHost.js:166034`) | same merge, this bundle's own copy |
 | 3 | `SystemsHost/SystemsHost.js` | end of `var EcamInopSys = {…}` (`SystemsHost.js:165977`) | `Object.assign(EcamInopSys, <INOP text data>)` |
 | 4 | `SystemsHost/SystemsHost.js` | end of `var EcamMemos = {…}` (`SystemsHost.js:165535`) | `Object.assign(EcamMemos, <STATUS text data>)` |
-| 5 | `SystemsHost/SystemsHost.js` | first line of `FwsCore.update(_deltaTime)` (`SystemsHost.js:177576`, unique: `fwsUpdateThrottler` only exists on `FwsCore`) | once per `FwsCore` instance: inlines `deep_ecam_bridge.js`, declares `__deepEcamAlerts`, calls `installDeepEcam`; every tick after that, steps it |
+| 5 | `SystemsHost/SystemsHost.js` | first line of `FwsCore.update(_deltaTime)` (`SystemsHost.js:177576`, unique: `fwsUpdateThrottler` only exists on `FwsCore`) | once per `FwsCore` instance: inlines `deep_ecam_bridge.js`, declares `__deepEcamAlerts` **and `__deepFbwAlerts`**, calls `installDeepEcam` **and `installDeepEcamFbw`**; every tick after that, steps both |
+
+Patch 5 carries the second half of this bridge as well: the entries that
+give **FlyByWire's own** abnormal-sensed procedures the trigger they never
+had. FlyByWire defines 1004 of them and triggers 273; the other 732 are
+text, and -- because the ECL's ABN PROC page renders the same table --
+electronic checklists the crew can never be shown. `installDeepEcamFbw`
+adds an `EwdAbnormalItem` for FlyByWire's *own* nine-digit id, emitting none
+of its text, and sizes each entry's item vectors from the live procedure
+(`EcamAbnormalProcedures[id].items.length`, passed in at the call site,
+which is in scope there: `SystemsHost.js:166035` declares it and
+`FwsCore.update` already reads it at `:179259`). See
+`docs/deep/fbw_unwired.md` and `src/deep/ecam/fbw/`.
 
 Patch 5's inserted text, structurally:
 
@@ -267,8 +279,11 @@ if (!this.__deepEcamInstalled) {
   /* deep_ecam_bridge.js, verbatim */
   var __deepEcamAlerts = [ /* codegen::alerts_js_array */ ];
   this.__deepEcamTick = globalThis.installDeepEcam(this, __deepEcamAlerts);
+  var __deepFbwAlerts = [ /* fbw_codegen::fbw_alerts_js_array */ ];
+  this.__deepFbwTick = globalThis.installDeepEcamFbw(this, __deepFbwAlerts, EcamAbnormalProcedures);
 }
 if (this.__deepEcamTick) { this.__deepEcamTick(); }
+if (this.__deepFbwTick) { this.__deepFbwTick(); }
 ```
 
 Guarded to run once per `FwsCore` instance (there are two, FWS1/FWS2,

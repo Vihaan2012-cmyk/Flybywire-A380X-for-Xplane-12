@@ -112,6 +112,20 @@ impl PublishedFrame {
     }
 }
 
+/// The doors [`Truth::door_open_fraction`] carries, in its own order.
+///
+/// The six passenger doors and both cargo doors `deep::sensors`'
+/// `registry.rs` registers proximity sensors for, under the same names it
+/// uses (`["M1L", "M2L", "M2R", "M4L", "M5L", "U1L", "Cargo :16",
+/// "Cargo :17"]`) -- the two cargo doors spelled here as `src/doors.rs`'s
+/// own `NAMES` spells interactive points 16 and 17, which is what they are
+/// called everywhere else in this crate.
+///
+/// These are the doors the plugin has a real mechanical position for; the
+/// fuel hose and the ground power connection are interactive points too
+/// but are not doors and are not carried.
+pub const DOOR_NAMES: [&str; 8] = ["M1L", "M2L", "M2R", "M4L", "M5L", "U1L", "CARGO_FWD", "CARGO_AFT"];
+
 /// Everything the deep areas read about the rest of the simulation.
 ///
 /// Filled once per frame by the plugin. Anything an area needs that is not
@@ -139,18 +153,65 @@ pub struct Truth {
     /// Per engine: indicated oil pressure at the bearing feed manifold
     /// (Pa above the chamber vents) and indicated tank oil temperature,
     /// from this crate's own `physics::engine::oil` model.
-    ///
-    /// There is deliberately no oil *quantity* here: the engine's oil
-    /// model carries pressures, temperatures and flows but no tank level,
-    /// so a quantity would have to be invented. The sensors area has four
-    /// oil quantity transducers waiting on one.
     pub engine_oil_pressure_pa: [f64; 4],
     pub engine_oil_temp_c: [f64; 4],
+    /// Per engine: oil left in the tank as a fraction of a full servicing,
+    /// 1.0 full .. 0.0 dry -- the true level, not a probe's reading of it.
+    ///
+    /// `physics::engine::oil` carries a real tank volume with the two
+    /// paths that empty it: consumption past the bearing chambers' carbon
+    /// seals (a share of the oil being jetted, so nothing is consumed with
+    /// the engine stopped), and a leak in the pressurised feed gallery,
+    /// which is an orifice and so runs at the gallery pressure behind it.
+    /// Once the level uncovers the pump's inlet, `engine_oil_pressure_pa`
+    /// follows it down -- the order the real fault develops in.
+    pub engine_oil_quantity_fraction: [f64; 4],
+    /// Per engine: turbine gas temperature, C -- the IP-LP interstage
+    /// plane, which is the Trent's TGT station.
+    ///
+    /// This is what a *thermocouple harness* senses, not the bare gas
+    /// station. `physics::engine::gas_path` computes `tt45_k` at that
+    /// plane, but `hot_section.rs` sits between the gas and the probe: a
+    /// thermocouple in a fast gas stream reads the gas, in stagnant gas it
+    /// settles to the metal around it, so the probe sees the two blended
+    /// by flow -- plus the thermocouple's own first-order response. A
+    /// harness averages probes, so the probe temperature is the honest
+    /// input to one; `tt45_k` is a station no object in the engine is at.
+    ///
+    /// Deliberately **not** `A32NX_ENG_n_EEC_TGT_SELECTED`, the EEC's
+    /// *voted sensor output*: feeding that into the harness that produces
+    /// it is a loop, not a measurement. Not the cockpit's `ENGINE_EGT:n`
+    /// either, which carries the EEC's TGT trim (EASA.E.012 Note 16) on
+    /// top of the measurement.
+    pub engine_tgt_c: [f64; 4],
+    /// Per engine: station 2.5, the HP compressor inlet, C -- the IP
+    /// compressor's own exit total temperature out of the gas path
+    /// (`gas_path`'s `tt25_k`), read unconditionally.
+    ///
+    /// Not `engine_bleed_temp_k`, which carries whichever of IP8/HP6 is
+    /// feeding the customer bleed this tick: calling that station 2.5
+    /// would be relabelling a signal that changes port under the reader.
+    pub engine_t25_c: [f64; 4],
     /// Tyre inflation pressure per wheel, Pa absolute, from this crate's
     /// own `physics::tyre` model (nitrogen, Gay-Lussac with carcass
-    /// temperature). 16 wheels: the four main legs' braked wheels. The nose
-    /// pair is not in that model, so a sensor on those has nothing to read.
-    pub tyre_pressure_pa: [f64; 16],
+    /// temperature).
+    ///
+    /// All 22 of the aircraft's tyres, in `physics::tyre`'s own wheel
+    /// order ([`crate::physics::tyre::WHEEL_NAMES`]): 0..16 are the four
+    /// main legs' braked wheels -- unchanged, so every existing wheel map
+    /// still indexes the wheel it always did -- then 16..18 the nose pair
+    /// and 18..22 the two body legs' unbraked rear axles.
+    pub tyre_pressure_pa: [f64; crate::physics::tyre::WHEELS],
+    /// True mechanical open fraction per door, 0 shut .. 1 fully open.
+    /// Not a latch indication -- a proximity sensor driven off a latch
+    /// would be sensing another sensor.
+    ///
+    /// In [`DOOR_NAMES`]' order. The travel is `src/doors.rs`'s own door
+    /// model: each interactive point moving at the rate
+    /// `flight_model.cfg` gives it, with the handle's cabin-differential
+    /// interlock, and taking a position written from outside as where the
+    /// door is.
+    pub door_open_fraction: [f64; DOOR_NAMES.len()],
     /// APU: running, and its bleed available at the valve.
     pub apu_running: bool,
     pub apu_bleed_pressure_pa: f64,
@@ -355,6 +416,19 @@ pub struct Controls {
     pub ground_spoiler_lever_armed: bool,
     pub apu_master_sw_on: bool,
     pub apu_start_pb_on: bool,
+    /// Reverse thrust commanded, **engines 2 and 3 in that order** --
+    /// `[bool; 2]`, not `[bool; 4]`, because engines 1 and 4 carry no
+    /// reverser at all (`throttle::HAS_REVERSER`), and the same shape
+    /// `deep::engine_accessories`' own `EngineAccessoryCommands::
+    /// reverser_deploy_commanded` already takes, so wiring it there is one
+    /// line with no index arithmetic to get wrong.
+    ///
+    /// The reverse lever itself: the thrust lever angle, below the
+    /// A380's own opening-authorisation angle. This is the *selection*, not
+    /// the deployment -- the reverser's locks, its hydraulic actuation and
+    /// the N3 and weight-on-wheels interlocks are all in that area's own
+    /// model and are not pre-empted here.
+    pub reverser_deploy_commanded: [bool; 2],
 }
 
 impl Default for Controls {
@@ -397,6 +471,7 @@ impl Default for Controls {
             ground_spoiler_lever_armed: false,
             apu_master_sw_on: false,
             apu_start_pb_on: false,
+            reverser_deploy_commanded: [false; 2],
         }
     }
 }
@@ -445,11 +520,22 @@ impl Default for Truth {
             engine_bleed_pressure_pa: [101_325.0; 4],
             engine_bleed_temp_k: [288.15; 4],
             // A cold aircraft's tyres sit at their service pressure; zero
-            // would read as sixteen flat tyres before the first frame.
-            tyre_pressure_pa: [crate::physics::tyre::COLD_PRESSURE_PA; 16],
-            // A cold engine's oil sits at ambient with the pump stopped.
+            // would read as twenty-two flat tyres before the first frame.
+            tyre_pressure_pa: [crate::physics::tyre::COLD_PRESSURE_PA; crate::physics::tyre::WHEELS],
+            // A cold engine's oil sits at ambient with the pump stopped,
+            // in a tank that was serviced full before the aircraft was
+            // handed over -- an empty one would read as four engines that
+            // have already lost their oil.
             engine_oil_pressure_pa: [0.0; 4],
             engine_oil_temp_c: [15.0; 4],
+            engine_oil_quantity_fraction: [1.0; 4],
+            // A cold engine's gas path is full of the air around it, so
+            // both stations sit at the same 15 C ISA sea-level ambient the
+            // rest of this state is quoted at.
+            engine_tgt_c: [15.0; 4],
+            engine_t25_c: [15.0; 4],
+            // A parked aircraft is shut up: every door closed.
+            door_open_fraction: [0.0; DOOR_NAMES.len()],
             apu_running: false,
             apu_bleed_pressure_pa: 101_325.0,
             ac_bus_volts: [0.0; 4],
@@ -719,6 +805,7 @@ pub fn all_areas() -> Deep {
         .with_area(crate::deep::fuel::live::live_system())
         .with_area(crate::deep::gear_structure::live::live_system())
         .with_area(crate::deep::hydraulics::live::live_system())
+        .with_area(crate::deep::oxygen::live::live_system())
         .with_area(crate::deep::pneumatic_ducts::live::live_system())
         .with_area(crate::deep::sensors::live::live_system())
         .with_area(crate::deep::thermal_zones::live::live_system())

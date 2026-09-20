@@ -107,6 +107,8 @@ const NACELLE_FIRE_MAX_HEAT_W: f64 = 500_000.0;
 const NACELLE_FIRE_MAX_SMOKE_KG_S: f64 = 0.005;
 const APU_FIRE_MAX_HEAT_W: f64 = 300_000.0;
 const APU_FIRE_MAX_SMOKE_KG_S: f64 = 0.008;
+const LAVATORY_FIRE_MAX_HEAT_W: f64 = 20_000.0;
+const LAVATORY_FIRE_MAX_SMOKE_KG_S: f64 = 0.002;
 const WING_DUCT_LEAK_MAX_HEAT_W: f64 = 30_000.0;
 const NACELLE_DUCT_LEAK_MAX_HEAT_W: f64 = 20_000.0;
 const APU_DUCT_LEAK_MAX_HEAT_W: f64 = 25_000.0;
@@ -375,6 +377,16 @@ impl ThermalZonesLive {
         if apu > 0.0 {
             self.a380.network.inject_heat_w(z.apu_compartment, apu * APU_FIRE_MAX_HEAT_W);
             self.a380.network.inject_smoke_kg_s(z.apu_compartment, apu * APU_FIRE_MAX_SMOKE_KG_S);
+        }
+        // The two cabin-deck lavatory waste-bin fires: the only smoke
+        // source in the crate that puts smoke where the eight lavatory
+        // detectors can see it. See `registry::register_fire_failures`.
+        for (zone, id) in [(z.cabin_main_deck, f(26, 9)), (z.cabin_upper_deck, f(26, 10))] {
+            let severity = faults.get(id);
+            if severity > 0.0 {
+                self.a380.network.inject_heat_w(zone, severity * LAVATORY_FIRE_MAX_HEAT_W);
+                self.a380.network.inject_smoke_kg_s(zone, severity * LAVATORY_FIRE_MAX_SMOKE_KG_S);
+            }
         }
     }
 

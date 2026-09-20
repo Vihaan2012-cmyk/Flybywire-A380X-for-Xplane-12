@@ -162,6 +162,123 @@
     };
   }
 
+  // ---------------------------------------------------------------------
+  // FlyByWire's own abnormal procedures that nothing of theirs triggers.
+  // ---------------------------------------------------------------------
+  //
+  // 1004 abnormal-sensed procedures are defined in
+  // `EcamMessages/AbnormalSensed/ata*.ts` -- title, items, INOP SYS,
+  // recommendation, everything the EWD and the ECL's ABN PROC page need --
+  // but only 273 of those ids appear in `FwsAbnormalSensed.ts`'s
+  // `ewdAbnormalSensed` map, which is the only thing that gives a procedure
+  // a `simVarIsActive`. The other 731 can never be raised: not on the EWD,
+  // and not on the electronic checklist either, since
+  // `WdAbnormalSensedProcedures.tsx` renders whatever
+  // `presentedAbnormalProceduresList` holds and only an entry in that map
+  // can put a procedure there.
+  //
+  // `installDeepEcamFbw` adds an entry for FlyByWire's *own* id, so
+  // FlyByWire's *own* definition fires -- never a second copy of the alert.
+  // Nothing here touches `EcamAbnormalSensedProcedures`: the title and the
+  // items are already there and are left exactly as FlyByWire wrote them.
+  //
+  // The per-item vectors are built against the live procedure
+  // (`procs[def.id].items.length`), not against a length compiled into the
+  // definition, so an entry can never be the wrong size for the procedure
+  // it belongs to -- which is what `FwsCore.ts:5594-5607` warns about and
+  // what would leave the ECL rendering a checklist against a mis-sized
+  // state vector.
+  global.installDeepEcamFbw = function (fws, defs, procs) {
+    if (!fws || !fws.ewdAbnormal || !fws.allSuppressableItems || !procs) {
+      return function () {};
+    }
+    var sensed = fws.abnormalSensed && fws.abnormalSensed.ewdAbnormalSensed;
+    var runtimes = [];
+    for (var d = 0; d < defs.length; d++) {
+      var def = defs[d];
+      var proc = procs[def.id];
+      // Never invent a procedure: if FlyByWire's own catalogue does not
+      // carry this id, there is nothing to raise and FwsCore would only
+      // `console.warn` and skip it every tick.
+      if (!proc || !proc.items) continue;
+      // Never take an id FlyByWire (or anything else) already drives: two
+      // triggers on one procedure is worse than none.
+      if (fws.ewdAbnormal[def.id]) continue;
+      runtimes.push(makeFbwRuntime(def, proc.items.length, fws, sensed));
+    }
+    var lastMs = Date.now();
+    return function stepAllFbw() {
+      var nowMs = Date.now();
+      var dtS = Math.min(Math.max((nowMs - lastMs) / 1000, 0), 1);
+      lastMs = nowMs;
+      for (var i = 0; i < runtimes.length; i++) {
+        runtimes[i].step(dtS);
+      }
+    };
+  };
+
+  // One wired FlyByWire procedure's live state. `n` is the procedure's own
+  // item count, read from its own definition.
+  function makeFbwRuntime(def, n, fws, sensed) {
+    var heldS = 0;
+    var flag = makeFlag(false);
+    // Per-item conditions, spread into a dense vector of the procedure's own
+    // length: `show[i]` null means "always shown" (FlyByWire's own default),
+    // `checked[i]` null means "this line is crew-actioned" -- the honest
+    // representation of a line whose state this port does not compute, and
+    // the one FlyByWire's own `fusedChecked` (FwsCore.ts:5650) then leaves
+    // entirely to the crew.
+    var show = new Array(n);
+    var checked = new Array(n);
+    for (var i = 0; i < n; i++) {
+      show[i] = null;
+      checked[i] = null;
+    }
+    for (var k = 0; k < def.items.length; k++) {
+      var it = def.items[k];
+      if (it.index < 0 || it.index >= n) continue;
+      if (it.show) show[it.index] = it.show;
+      if (it.checked) checked[it.index] = it.checked;
+    }
+    var item = {
+      flightPhaseInhib: def.flightPhaseInhib,
+      simVarIsActive: flag,
+      notActiveWhenItemActive: def.notActiveWhenItemActive || [],
+      // Our own confirm delay is already served below; FlyByWire's default
+      // 0.6 s on top of it would silently lengthen every one of these.
+      monitorConfirmTime: 0,
+      whichItemsToShow: function () {
+        var out = new Array(n);
+        for (var i = 0; i < n; i++) {
+          out[i] = show[i] === null ? true : evalCond(show[i]);
+        }
+        return out;
+      },
+      whichItemsChecked: function () {
+        var out = new Array(n);
+        for (var i = 0; i < n; i++) {
+          out[i] = checked[i] === null ? false : evalCond(checked[i]);
+        }
+        return out;
+      },
+      failure: def.failure,
+      sysPage: def.sysPage,
+    };
+    if (sensed) {
+      sensed[def.id] = item;
+    }
+    fws.ewdAbnormal[def.id] = item;
+    fws.allSuppressableItems[def.id] = item;
+    return {
+      item: item,
+      step: function (dtS) {
+        var triggered = evalCond(def.trigger);
+        heldS = triggered ? heldS + Math.max(dtS, 0) : 0;
+        flag.set(triggered && heldS >= def.confirmS);
+      },
+    };
+  }
+
   // Called once per `FwsCore` instance, the first time it ticks (see the
   // file doc comment for why that is early enough): adds every alert's
   // `EwdAbnormalItem` straight into the three live dicts FlyByWire's own

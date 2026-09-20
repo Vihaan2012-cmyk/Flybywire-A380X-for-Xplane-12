@@ -149,9 +149,19 @@ fn cruise() -> Truth {
         engine_n2_frac: [0.90; 4],
         engine_n3_frac: [0.93; 4],
         engine_fuel_flow_kg_s: [0.9; 4],
-        tyre_pressure_pa: [1_550_000.0; 16],
+        tyre_pressure_pa: [1_550_000.0; crate::physics::tyre::WHEELS],
         engine_oil_pressure_pa: [3.1e5; 4],
         engine_oil_temp_c: [85.0; 4],
+        // Tanks serviced full; nothing has consumed a measurable
+        // fraction of 20 L in one sector.
+        engine_oil_quantity_fraction: [1.0; 4],
+        // Cruise TGT for a Trent-class engine, and station 2.5 behind
+        // an IP compressor working on this profile's own ram air --
+        // both well below the T3 of 703 K this fixture already states.
+        engine_tgt_c: [700.0; 4],
+        engine_t25_c: [140.0; 4],
+        // Shut up and pressurised.
+        door_open_fraction: [0.0; crate::deep::live::DOOR_NAMES.len()],
         apu_running: false,
         apu_bleed_pressure_pa: 21_662.0,
         ac_bus_volts: [115.0; 4],
@@ -406,6 +416,7 @@ fn all_commands_exercised() -> Truth {
             ground_spoiler_lever_armed: true,
             apu_master_sw_on: true,
             apu_start_pb_on: true,
+            reverser_deploy_commanded: [true; 2],
         },
         ..Truth::default()
     }

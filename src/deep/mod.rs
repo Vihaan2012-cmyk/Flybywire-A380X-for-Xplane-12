@@ -17,6 +17,7 @@ pub mod gear_structure;
 pub mod hydraulics;
 pub mod integration;
 pub mod live;
+pub mod oxygen;
 /// The plugin's own side of `live`: filling `Truth`, snapshotting `Faults`
 /// and turning a published name into a `Vars` write. Kept out of `live`
 /// itself so the contract stays free of `crate::Vars`/X-Plane.
@@ -42,6 +43,7 @@ pub fn registry() -> api::Registry {
     gear_structure::registry::register(&mut r);
     hydraulics::registry::register(&mut r);
     integration::registry::register(&mut r);
+    oxygen::registry::register(&mut r);
     pneumatic_ducts::registry::register(&mut r);
     sensors::registry::register(&mut r);
     thermal_zones::registry::register(&mut r);
