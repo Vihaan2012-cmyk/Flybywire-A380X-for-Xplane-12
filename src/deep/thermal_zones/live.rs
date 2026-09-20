@@ -31,18 +31,28 @@
 //! Ram-air paths (nacelle, pylon, APU compartment, belly fairing, tail
 //! cone) need no power and are driven only by their own failures.
 //!
-//! ## What is not driven yet, and why
-//! - **Solar flux**: `ThermalNetwork::step` takes an incident solar flux
-//!   and every zone already carries its own `sun_exposure_fraction`, but
-//!   [`Truth`] carries no solar irradiance (nor sun elevation to derive
-//!   one from), so this passes 0. Publishing a guessed 800 W/m^2 would be
-//!   a fabricated input, not a modelled one.
+//! ## What now drives what used to be zero/resting-state
+//! - **Solar flux**: [`Truth::sun_elevation_deg`] is real (X-Plane's own
+//!   `sim/graphics/scenery/sun_pitch_degrees`), but it is an elevation, not
+//!   an irradiance -- turning one into the other needs the atmosphere's own
+//!   optical depth, which that dataref does not carry (`docs/deep/
+//!   truth-requests.md`), so [`solar_flux_w_m2`] derives a **GENERIC**
+//!   clear-sky flux (`SOLAR_CONSTANT_W_M2 * CLEAR_SKY_TRANSMITTANCE *
+//!   sin(elevation)`, zero once the sun is below the horizon) rather than
+//!   leaving every zone's real `sun_exposure_fraction` permanently
+//!   multiplied by zero. Cloud attenuation is not modelled (no optical
+//!   depth to model it from); this is a clear-sky figure only.
 //! - **Gear bay door position**: `registry`'s ATA 32 door-jam failures
 //!   freeze a door's ventilation link away from its commanded position.
-//!   The jam itself is implemented (the link's health latches at the value
-//!   it held when the fault engaged), but `Truth` carries no commanded
-//!   gear/door position, so the commanded value is `topology_a380`'s own
-//!   resting state (doors closed) and a jam has nothing to diverge from.
+//!   The jam itself was always implemented (the link's health latches at
+//!   the value it held when the fault engaged); what was missing was a
+//!   real commanded position for it to diverge *from* --
+//!   `truth.controls.gear_door_commanded_open` (`[nose, left, right]`,
+//!   FlyByWire's own undamaged door-actuator output) now drives every
+//!   healthy door every tick, with a jam blending toward its own stuck
+//!   value exactly as before.
+//!
+//! ## What is still not driven, and why
 //! - **Zone heat from other areas** (engine heat into a nacelle, a
 //!   pneumatic duct leak's enthalpy, brake heat into a gear bay): those
 //!   are other areas' models. `ThermalNetwork::inject_heat_w` is the
@@ -60,10 +70,32 @@ use crate::deep::live::{Faults, Truth};
 /// which equipment is not required to operate.
 pub const MIN_FAN_BUS_VOLTS: f64 = 100.0;
 
-/// Incident solar flux handed to `ThermalNetwork::step`. Zero because
-/// [`Truth`] has no solar irradiance field (module doc) -- not a modelling
-/// claim that the sun is never up.
-const SOLAR_FLUX_W_M2: f64 = 0.0;
+/// Solar constant at the top of the atmosphere, W/m^2 (WMO/NASA-cited
+/// public figure, ~1361 W/m^2 at 1 AU average Earth-Sun distance).
+const SOLAR_CONSTANT_W_M2: f64 = 1361.0;
+
+/// **GENERIC** broadband clear-sky atmospheric transmittance at typical
+/// operating altitudes: commonly cited clear-sky broadband transmittance
+/// figures (solar-engineering/ASHRAE-style clear-sky models) sit roughly
+/// 0.7-0.8 at low altitude, higher at cruise altitude above most of the
+/// attenuating atmosphere; a single mid-range value is used uniformly
+/// rather than modelling altitude-dependent optical depth, which `Truth`
+/// has no input for (module doc).
+const CLEAR_SKY_TRANSMITTANCE: f64 = 0.75;
+
+/// Incident solar flux handed to `ThermalNetwork::step`, from
+/// [`Truth::sun_elevation_deg`] (module doc): a clear-sky flux, zero once
+/// the sun is below the horizon. Not a claim about real cloud cover --
+/// `Truth` carries no optical-depth/cloud-attenuation input to model that
+/// with, only elevation.
+fn solar_flux_w_m2(truth: &Truth) -> f64 {
+    let elevation_rad = truth.sun_elevation_deg.to_radians();
+    if elevation_rad <= 0.0 {
+        0.0
+    } else {
+        SOLAR_CONSTANT_W_M2 * CLEAR_SKY_TRANSMITTANCE * elevation_rad.sin()
+    }
+}
 
 // Reference full-severity magnitudes. Each one is the exact figure the
 // matching `FailureDef::model_field`/`magnitude` text in `registry.rs`
@@ -219,27 +251,30 @@ impl ThermalZonesLive {
     }
 
     /// ATA 32: a jammed bay door stops following its commanded position
-    /// and stays where it was. `Truth` carries no commanded door position
-    /// yet (module doc), so "where it was" is `topology_a380`'s resting
-    /// closed state; the latch itself is real and needs no change once
-    /// that input exists.
-    fn apply_gear_door_failures(&mut self, faults: &Faults) {
+    /// and stays where it was. `commanded_open` (`[nose, left, right]`) is
+    /// now `truth.controls.gear_door_commanded_open`, FlyByWire's own real
+    /// (undamaged) door-actuator output -- previously this had no real
+    /// input and every door held `topology_a380`'s own resting closed
+    /// state forever, so a jam had nothing to diverge from; the latch
+    /// logic itself is unchanged.
+    fn apply_gear_door_failures(&mut self, faults: &Faults, commanded_open: [f64; 3]) {
         let doors = [
             (0usize, self.a380.vents.nose_gear_door, f(32, 1)),
             (1, self.a380.vents.wing_gear_door, f(32, 2)),
             (2, self.a380.vents.body_gear_door, f(32, 3)),
         ];
         for (i, link, id) in doors {
+            let commanded = commanded_open[i].clamp(0.0, 1.0);
             let jam = faults.get(id);
             if jam > 0.0 {
                 let stuck_at = *self.gear_door_jammed_at[i].get_or_insert_with(|| self.a380.network.ventilation_links[link].health);
                 // A partial jam still partly follows the commanded
                 // position; a full jam holds `stuck_at` outright.
-                let commanded = self.a380.network.ventilation_links[link].health;
                 let health = commanded + (stuck_at - commanded) * jam;
                 self.a380.network.set_ventilation_health(link, health);
             } else {
                 self.gear_door_jammed_at[i] = None;
+                self.a380.network.set_ventilation_health(link, commanded);
             }
         }
     }
@@ -281,7 +316,7 @@ impl crate::deep::live::Area for ThermalZonesLive {
         let fan_power = Self::fan_power_fraction(truth);
         self.apply_ventilation_failures(faults, fan_power);
         self.apply_ice_and_duct_failures(faults);
-        self.apply_gear_door_failures(faults);
+        self.apply_gear_door_failures(faults, truth.controls.gear_door_commanded_open);
         self.apply_insulation_failures(faults);
         // Heat/smoke sources are accumulated per tick and consumed by the
         // step below, so they are injected last, immediately before it.
@@ -289,7 +324,7 @@ impl crate::deep::live::Area for ThermalZonesLive {
         self.apply_bleed_duct_failures(faults);
 
         let outside = Self::outside_air(truth);
-        self.a380.network.step(truth.dt_s, &outside, SOLAR_FLUX_W_M2);
+        self.a380.network.step(truth.dt_s, &outside, solar_flux_w_m2(truth));
         self.a380.damage.update(&self.a380.network, truth.dt_s);
     }
 
@@ -446,6 +481,62 @@ mod tests {
         let damaged_c = published(damaged.as_ref())["THERMAL_ZONE_CROWNAREA_STRUCTURE_TEMPERATURE_C"];
         let intact_c = published(intact.as_ref())["THERMAL_ZONE_CROWNAREA_STRUCTURE_TEMPERATURE_C"];
         assert!(damaged_c < intact_c - 2.0, "a damaged blanket must chill faster: {damaged_c} vs {intact_c}");
+    }
+
+    #[test]
+    fn a_commanded_open_gear_door_ventilates_the_bay_toward_outside_air_faster_than_closed() {
+        // Before this pass `truth.controls.gear_door_commanded_open` had
+        // no effect at all: every door held `topology_a380`'s own resting
+        // closed state forever (module doc). Wiring it in must let a
+        // genuinely commanded-open door ventilate its bay, the same
+        // coupling `topology_a380.rs`'s own direct-`ThermalNetwork` test
+        // proves the underlying link already supports.
+        let cold_air = Truth {
+            dt_s: 1.0,
+            environment: crate::deep::integration::weather_truth::EnvironmentTruth { sat_c: -50.0, tas_ms: 230.0, ambient_pressure_pa: 25_000.0, ..Truth::default().environment },
+            altitude_ft: 35_000.0,
+            on_ground: false,
+            ac_bus_volts: [115.0; 4],
+            ..Truth::default()
+        };
+        let mut open_truth = cold_air.clone();
+        open_truth.controls.gear_door_commanded_open = [0.0, 1.0, 0.0]; // wing gear door commanded open
+        let closed_truth = cold_air;
+
+        let mut open = live_system();
+        let mut closed = live_system();
+        run(open.as_mut(), &open_truth, &Faults::default(), 300);
+        run(closed.as_mut(), &closed_truth, &Faults::default(), 300);
+        let open_c = published(open.as_ref())["THERMAL_ZONE_WINGGEARWELL_TEMPERATURE_C"];
+        let closed_c = published(closed.as_ref())["THERMAL_ZONE_WINGGEARWELL_TEMPERATURE_C"];
+        assert!(closed_c > open_c + 5.0, "a door truly commanded open must ventilate the bay toward the cold outside air faster than one held closed: open {open_c} vs closed {closed_c}");
+    }
+
+    #[test]
+    fn a_high_sun_elevation_heats_a_sun_exposed_zones_structure_more_than_no_sun_at_all() {
+        // Before this pass every zone received a flat 0 W/m^2 regardless
+        // of `truth.sun_elevation_deg` (module doc's own old "not a
+        // modelling claim that the sun is never up"). CrownArea carries
+        // the highest `sun_exposure_fraction` (0.8) of any zone
+        // (`topology_a380::build`).
+        let mut high_sun = powered_ground_truth();
+        high_sun.sun_elevation_deg = 60.0;
+        let mut no_sun = powered_ground_truth();
+        no_sun.sun_elevation_deg = -10.0; // below the horizon: zero flux
+        let mut high = live_system();
+        let mut low = live_system();
+        run(high.as_mut(), &high_sun, &Faults::default(), 3000);
+        run(low.as_mut(), &no_sun, &Faults::default(), 3000);
+        let hot = published(high.as_ref())["THERMAL_ZONE_CROWNAREA_STRUCTURE_TEMPERATURE_C"];
+        let cold = published(low.as_ref())["THERMAL_ZONE_CROWNAREA_STRUCTURE_TEMPERATURE_C"];
+        assert!(hot > cold + 1.0, "a high sun elevation must warm a sun-exposed zone's structure more than no sun at all: {hot} vs {cold}");
+    }
+
+    #[test]
+    fn a_below_horizon_sun_never_produces_a_negative_or_nonzero_flux() {
+        assert_eq!(solar_flux_w_m2(&Truth { sun_elevation_deg: -5.0, ..Truth::default() }), 0.0);
+        assert_eq!(solar_flux_w_m2(&Truth { sun_elevation_deg: 0.0, ..Truth::default() }), 0.0);
+        assert!(solar_flux_w_m2(&Truth { sun_elevation_deg: 90.0, ..Truth::default() }) > 0.0);
     }
 
     #[test]

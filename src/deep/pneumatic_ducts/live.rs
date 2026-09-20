@@ -14,44 +14,52 @@
 //!   pressure and temperature every leak discharges into, every relief
 //!   valve references and every duct conducts to.
 //! - **Engine bleed ports**: `engine_bleed_pressure_pa`/`engine_bleed_
-//!   temp_k` are the IP8 tap's own upstream condition, per their own doc
-//!   in `live.rs` ("bleed air available at the pylon ... IP8/HP6 port
-//!   outputs"). `Truth` carries **one** port per engine, not the two the
-//!   real stage has, so the HP6 branch is driven with
-//!   [`HP_PORT_UNAVAILABLE_PA`] -- zero, i.e. below FlyByWire's own
-//!   `psi(15.)` HP-valve interlock, so the HP valve correctly stays shut
-//!   instead of being fed a fabricated pressure. See the report: `Truth`
-//!   needs `engine_hp_port_pressure_pa`/`_temp_k` for that branch (and
-//!   with it failure 15_036_015, HP valve stuck) to do anything.
+//!   temp_k` are the IP8 tap's own upstream condition; `engine_hp_port_
+//!   pressure_pa`/`_temp_k` are the HP6 tap's own, read *unconditionally*
+//!   (module doc on that pair in `deep::live`), so the HP valve's own
+//!   stuck-valve failure (15_036_015) and the precooler's real hot source
+//!   are both reachable now -- previously this branch was fed a fixed
+//!   [`HP_PORT_UNAVAILABLE_PA`] (zero), which correctly held the valve
+//!   shut but meant nothing behind it could ever be exercised.
 //! - **Precooler cooling air**: the precooler is an air-to-air exchanger
 //!   against engine fan-duct air. `Truth` has no bypass mass flow, so it
 //!   is derived from `engine_n1_frac` and the ambient density at
 //!   [`TRENT_900_BYPASS_MDOT_SLS_KG_S`] (public Trent 900 sea-level-static
 //!   figures) -- a real relation between a real `Truth` input and the
 //!   quantity the model needs, not a stand-in constant. The engine's own
-//!   `bypass_mdot_kg_s` in `Truth` would be strictly better.
-//! - **APU**: `apu_running` plus `apu_bleed_pressure_pa`. The APU's bleed
-//!   *temperature* is not in `Truth`, so it is computed from the pressure
-//!   ratio the load compressor is actually achieving against ambient
+//!   `bypass_mdot_kg_s` in `Truth` would be strictly better (still not
+//!   sourced, `docs/deep/truth-requests.md`).
+//! - **APU**: `apu_running` plus `apu_bleed_pressure_pa`, gated by the real
+//!   `controls.apu_bleed_pb_on` pushbutton. The APU's bleed *temperature*
+//!   is not in `Truth`, so it is computed from the pressure ratio the load
+//!   compressor is actually achieving against ambient
 //!   ([`APU_LOAD_COMPRESSOR_POLYTROPIC_EFFICIENCY`]) -- thermodynamics on
 //!   a real input rather than a chosen number.
-//!
-//! ## Inputs this area needs that `Truth` does not carry yet
-//! Every one of these is a cockpit control or another area's output, not
-//! a physical quantity this module may invent; each is listed in the
-//! report with what it gates.
-//! - Bleed/cross-bleed/pack/wing-anti-ice/starter selections. Interim
-//!   positions are in [`ControlAssumptions`], which documents each one and
-//!   is the single place a wiring pass replaces with real inputs.
+//! - **Cockpit controls** (`truth.controls`, real this pass): pack
+//!   pushbuttons (both feed valves of a pack open together, since only the
+//!   pushbutton is a real crew control -- the flow-control valve itself is
+//!   this area's own modelled component, `docs/deep/truth-requests.md`),
+//!   wing anti-ice selection (one pushbutton, both sides), the cross-bleed
+//!   selector (raw 0 SHUT/1 AUTO/2 OPEN), the engine bleed pushbuttons
+//!   (this area's own `network::NetworkInputs::engine_bleed_pb_auto`, the
+//!   real shutoff the "ENG n BLEED" pushbutton *is*) and starter
+//!   engagement, replacing the interim `ControlAssumptions` struct this
+//!   area used to run on entirely (packs always open, wing anti-ice always
+//!   off, starters always off, cross-bleed opened only by the same
+//!   heuristic this area still uses for the selector's own AUTO position,
+//!   since FBW's real AUTO logic is flight-deck software out of this plant
+//!   model's scope, `network.rs`'s own module doc).
 //! - **Zone air temperatures.** ODLS watches the temperature of the bay
-//!   each duct runs through, which is `deep::thermal_zones`' output, and
-//!   an area cannot read another area's published variables from inside
-//!   `tick`. Until those reach `Truth`, every zone is given the recovery
-//!   temperature -- the temperature an unheated, ram-ventilated bay
-//!   actually tends to, so the loops see a true baseline and false-trip
-//!   faults still work, but a real duct leak's own heat (published here as
-//!   `DEEP_PNEU_ZONE_<zone>_HEAT_W`) cannot yet come back round to trip
-//!   the loop it would in the aircraft.
+//!   each duct runs through, which is `deep::thermal_zones`' own output.
+//!   `Truth::published` now carries it (this pass's own contract fix, see
+//!   `docs/deep/truth-requests.md`'s "Contract gap" section), so this area
+//!   reads `THERMAL_ZONE_<NAME>_TEMPERATURE_C` back through
+//!   `truth.published.get_or(...)` with the recovery temperature as the
+//!   fallback for a frame nothing has published yet -- closing the leak ->
+//!   bay overheat -> isolation chain this area exists for, previously cut
+//!   in the middle because a duct leak's own heat (published here as
+//!   `DEEP_PNEU_ZONE_<zone>_HEAT_W`) could never come back round to the
+//!   loop that should trip on it.
 
 use super::duct::DuctSectionFaults;
 use super::network::{ApuBleedInput, DuctNetwork, DuctNetworkFaults, EngineBleedInput, NetworkInputs, NetworkOutputs, ODLS_ZONE_COUNT, ZONE_COUNT, ZONE_NAMES};
@@ -66,13 +74,6 @@ const GAMMA_AIR: f64 = 1.4;
 const SEA_LEVEL_DENSITY_KG_M3: f64 = 1.225;
 /// Specific gas constant for dry air, J/(kg K).
 const R_AIR_J_KG_K: f64 = 287.057_005;
-
-/// The HP6 port pressure handed to the upstream stage while `Truth`
-/// carries only one bleed port per engine (module doc). Zero is below
-/// FlyByWire's own HP-valve minimum-source interlock, so the valve stays
-/// shut -- the model's own correct response to "no usable HP source",
-/// rather than a made-up pressure.
-const HP_PORT_UNAVAILABLE_PA: f64 = 0.0;
 
 /// Trent 900 sea-level-static bypass mass flow, kg/s. Public engine data
 /// for the Trent 970/972 family gives about 1204 kg/s total intake flow at
@@ -99,34 +100,6 @@ const APU_LOAD_COMPRESSOR_POLYTROPIC_EFFICIENCY: f64 = 0.8;
 
 fn f(ata: u16, n: u16) -> u64 {
     failure_id(RegArea::PneumaticDucts, ata, n)
-}
-
-/// Cockpit/controller positions this area needs and `Truth` does not
-/// carry yet (module doc). Every field is an *input* to the pneumatic
-/// plant, not a physical property of it, so each is documented with the
-/// position it is held at and why -- and all of them are replaced in one
-/// place once the corresponding `Truth` fields exist.
-#[derive(Clone, Copy, Debug)]
-pub struct ControlAssumptions {
-    /// Both flow-control valves of both packs, open: the packs are the
-    /// duct system's normal continuous consumer, and with every consumer
-    /// shut the network is a dead-end in which no leak, precooler or
-    /// isolation fault can express itself at all.
-    pub pack_valve_open: [[f64; 2]; 2],
-    /// Wing anti-ice selected, per side. Held off: anti-ice is a crew
-    /// selection made for an icing encounter, and assuming it on would
-    /// flow hot air through the leading edge of an aircraft in clear air.
-    /// The three ATA 30 wing-anti-ice duct failures cannot express
-    /// themselves until this is a real input.
-    pub wai_selected: [bool; 2],
-    /// Starter air valves, per engine. Held shut for the same reason.
-    pub starter_engaged: [bool; 4],
-}
-
-impl Default for ControlAssumptions {
-    fn default() -> Self {
-        Self { pack_valve_open: [[1.0, 1.0], [1.0, 1.0]], wai_selected: [false, false], starter_engaged: [false; 4] }
-    }
 }
 
 /// Every variable name this area publishes, built once (the `Area` trait
@@ -193,7 +166,6 @@ pub struct PneumaticDuctsLive {
     faults: DuctNetworkFaults,
     out: NetworkOutputs,
     names: VarNames,
-    controls: ControlAssumptions,
 }
 
 impl Default for PneumaticDuctsLive {
@@ -212,7 +184,7 @@ fn on(b: bool) -> f64 {
 
 impl PneumaticDuctsLive {
     pub fn new() -> Self {
-        Self { network: DuctNetwork::new(), faults: DuctNetworkFaults::default(), out: NetworkOutputs::default(), names: VarNames::new(), controls: ControlAssumptions::default() }
+        Self { network: DuctNetwork::new(), faults: DuctNetworkFaults::default(), out: NetworkOutputs::default(), names: VarNames::new() }
     }
 
     /// The last tick's outputs, for anything that wants the model's state
@@ -246,11 +218,12 @@ impl PneumaticDuctsLive {
         std::array::from_fn(|i| EngineBleedInput {
             ip_port_pressure_pa: truth.engine_bleed_pressure_pa[i].max(0.0),
             ip_port_temp_k: truth.engine_bleed_temp_k[i].max(1.0),
-            hp_port_pressure_pa: HP_PORT_UNAVAILABLE_PA,
-            // Never used while the HP valve's orifice area is zero; kept
-            // at the same port's temperature so no branch ever sees a
-            // physically impossible 0 K gas.
-            hp_port_temp_k: truth.engine_bleed_temp_k[i].max(1.0),
+            // Real HP6 port condition, read unconditionally (`Truth`'s own
+            // doc on this pair): below FlyByWire's HP-valve interlock
+            // whenever the engine genuinely has no usable HP source, and a
+            // real hot pressure once it does -- no longer a fixed zero.
+            hp_port_pressure_pa: truth.engine_hp_port_pressure_pa[i].max(0.0),
+            hp_port_temp_k: truth.engine_hp_port_temp_k[i].max(1.0),
             fan_air_available_kg_s: Self::bypass_mdot_kg_s(truth, i),
             fan_air_k,
         })
@@ -273,23 +246,35 @@ impl PneumaticDuctsLive {
         }
     }
 
-    /// Whether the APU is actually able to deliver bleed: running, and its
-    /// port genuinely above the air it would have to push into. The
-    /// pushbutton itself is not in `Truth` (module doc).
+    /// Whether the APU is actually able to deliver bleed: the real APU
+    /// bleed pushbutton on (`truth.controls.apu_bleed_pb_on`), the APU
+    /// running, and its port genuinely above the air it would have to push
+    /// into.
     fn apu_bleed_available(truth: &Truth) -> bool {
-        truth.apu_running && truth.apu_bleed_pressure_pa > truth.environment.ambient_pressure_pa * 1.05
+        truth.controls.apu_bleed_pb_on && truth.apu_running && truth.apu_bleed_pressure_pa > truth.environment.ambient_pressure_pa * 1.05
+    }
+
+    /// The three cross-bleed valves' commanded position from the real
+    /// selector knob (`truth.controls.cross_bleed_selector`, raw 0 SHUT /
+    /// 1 AUTO / 2 OPEN -- `Controls`' own doc). SHUT and OPEN are the
+    /// selector's own literal positions; AUTO keeps this area's prior
+    /// heuristic (open only when the APU is genuinely the sole bleed
+    /// source available) because FlyByWire's own AUTO logic is flight-deck
+    /// computer software, out of this self-contained plant model's scope
+    /// (`network.rs`'s own module doc precedent for the upstream stage).
+    fn cross_bleed_command(truth: &Truth) -> f64 {
+        if truth.controls.cross_bleed_selector <= 0.5 {
+            0.0 // SHUT
+        } else if truth.controls.cross_bleed_selector >= 1.5 {
+            1.0 // OPEN
+        } else {
+            on(Self::apu_bleed_available(truth)) // AUTO
+        }
     }
 
     fn inputs(&self, truth: &Truth) -> NetworkInputs {
         let apu_available = Self::apu_bleed_available(truth);
-        // Interim cross-bleed control: the real selector is not in `Truth`
-        // (module doc). FlyByWire's own AUTO logic opens the cross-bleed
-        // valves so one source can feed the other ducts, which is exactly
-        // the case where the APU is the only source, and leaves them shut
-        // otherwise so a leak on one engine cannot be fed by its
-        // neighbours.
-        let cross = if apu_available { 1.0 } else { 0.0 };
-        // Every zone at the recovery temperature (module doc).
+        let cross = Self::cross_bleed_command(truth);
         let recovery_k = Self::recovery_temp_k(truth);
         NetworkInputs {
             dt_s: truth.dt_s,
@@ -300,10 +285,15 @@ impl PneumaticDuctsLive {
             apu_bleed_selected: apu_available,
             apu_bleed_valve_command: on(apu_available),
             cross_bleed_valve_command: [cross; 3],
-            pack_valve_open: self.controls.pack_valve_open,
-            wai_selected: self.controls.wai_selected,
-            starter_engaged: self.controls.starter_engaged,
-            zone_air_k: [recovery_k; ZONE_COUNT],
+            // Only the pushbutton is a real crew control (`docs/deep/
+            // truth-requests.md`): both feed valves of a pack open
+            // together once its own pushbutton is on.
+            pack_valve_open: [[on(truth.controls.pack_pb_on[0]); 2], [on(truth.controls.pack_pb_on[1]); 2]],
+            // One pushbutton, both sides (`Controls`' own doc).
+            wai_selected: [truth.controls.wing_anti_ice_selected; 2],
+            starter_engaged: truth.controls.starter_engaged,
+            engine_bleed_pb_auto: truth.controls.engine_bleed_pb_auto,
+            zone_air_k: Self::zone_air_k(truth, recovery_k),
         }
     }
 
@@ -315,6 +305,27 @@ impl PneumaticDuctsLive {
         let static_k = (truth.environment.sat_c + 273.15).max(1.0);
         let mach = truth.environment.mach();
         static_k * (1.0 + RECOVERY_FACTOR * (GAMMA_AIR - 1.0) / 2.0 * mach * mach)
+    }
+
+    /// Each zone's air temperature this tick, K, indexed by `ZONE_NAMES`:
+    /// `deep::thermal_zones`' own published `THERMAL_ZONE_<NAME>_
+    /// TEMPERATURE_C` (previous frame, `Truth::published`'s documented
+    /// one-frame lag) when it has published one, the same recovery
+    /// temperature as before otherwise -- an unheated, ram-ventilated
+    /// bay's own physically sane resting state, and what every zone reads
+    /// on the first frame or if `thermal_zones` were ever absent from
+    /// `all_areas()`. This is the coupling that lets a real duct leak's own
+    /// heat (via `thermal_zones`' identically-named ATA 36/49 leak
+    /// failures heating the same zones, `network.rs`'s own module doc)
+    /// come back around and trip this area's own ODLS, instead of every
+    /// zone being permanently pinned at recovery temperature regardless of
+    /// what is actually leaking into it.
+    fn zone_air_k(truth: &Truth, recovery_k: f64) -> [f64; ZONE_COUNT] {
+        let recovery_c = recovery_k - 273.15;
+        std::array::from_fn(|z| {
+            let name = format!("THERMAL_ZONE_{}_TEMPERATURE_C", ZONE_NAMES[z].to_ascii_uppercase());
+            truth.published.get_or(&name, recovery_c) + 273.15
+        })
     }
 
     /// Every failure `registry.rs` registers, onto the exact model field
@@ -617,6 +628,7 @@ mod tests {
         truth.environment.tas_ms = 0.0;
         truth.apu_running = true;
         truth.apu_bleed_pressure_pa = 320_000.0;
+        truth.controls.apu_bleed_pb_on = true;
 
         let mut area = live_system();
         run(area.as_mut(), &truth, &Faults::default(), 300);
@@ -624,6 +636,147 @@ mod tests {
         assert_eq!(map["DEEP_PNEU_APU_BLEED_VALVE_OPEN"], 1.0);
         assert!(map["DEEP_PNEU_ENG_1_DUCT_PRESSURE_PA"] > 120_000.0, "the APU must pressurise engine 1's duct, got {}", map["DEEP_PNEU_ENG_1_DUCT_PRESSURE_PA"]);
         assert!(map["DEEP_PNEU_APU_DUCT_TEMPERATURE_C"] > 15.0, "load-compressor discharge must be hotter than the air it drew in");
+    }
+
+    #[test]
+    fn the_hp6_branch_now_uses_the_real_hp_port_instead_of_a_fixed_zero() {
+        // Before this pass `Truth::engine_hp_port_pressure_pa`/`_temp_k`
+        // were ignored entirely (this file's own old `HP_PORT_UNAVAILABLE_
+        // PA` = 0), so the HP valve could never open regardless of what
+        // the engine's own HP6 port was doing. With the real port wired
+        // in, an engine isolated from every other source and starved of
+        // IP8 must still pressurise through its own HP valve, exactly like
+        // `network.rs`'s own `the_hp_valve_opens_when_ip8_alone_cannot_
+        // hold_regulation` test proves the underlying model already can.
+        let mut truth = cruise_truth();
+        truth.controls.cross_bleed_selector = 0.0; // SHUT: no neighbour can help
+        truth.controls.pack_pb_on = [false, false]; // no consumer to mask the source
+        truth.engine_bleed_pressure_pa[0] = 150_000.0; // below the 206.8 kPa IP8/HP6 switch-over
+        truth.engine_bleed_temp_k[0] = 400.0;
+        truth.engine_hp_port_pressure_pa[0] = 500_000.0;
+        truth.engine_hp_port_temp_k[0] = 600.0;
+
+        let mut area = live_system();
+        let mut peak_hp_open = 0.0_f64;
+        for _ in 0..300 {
+            area.tick(&truth, &Faults::default());
+            peak_hp_open = peak_hp_open.max(published(area.as_ref())["DEEP_PNEU_ENG_1_HP_VALVE_OPEN"]);
+        }
+        assert!(peak_hp_open > 0.1, "the HP valve must open off the real HP6 port once IP8 alone cannot hold regulation, peak {peak_hp_open}");
+    }
+
+    #[test]
+    fn cross_bleed_selector_shut_overrides_the_apu_sole_source_heuristic() {
+        let mut truth = cruise_truth();
+        truth.engine_running = [false; 4];
+        truth.engine_n1_frac = [0.0; 4];
+        truth.engine_bleed_pressure_pa = [101_325.0; 4];
+        truth.engine_bleed_temp_k = [288.15; 4];
+        truth.on_ground = true;
+        truth.environment.sat_c = 15.0;
+        truth.environment.ambient_pressure_pa = 101_325.0;
+        truth.environment.tas_ms = 0.0;
+        truth.apu_running = true;
+        truth.apu_bleed_pressure_pa = 320_000.0;
+        truth.controls.apu_bleed_pb_on = true;
+        truth.controls.cross_bleed_selector = 0.0; // SHUT
+        // Pack 1's own dual feed (engines 1 *and* 2) is itself a second
+        // bridge between their ducts, entirely independent of the
+        // cross-bleed valves (`network.rs`'s own `closing_all_cross_bleed_
+        // valves_stops_a_non_running_engine_from_pressurising` test notes
+        // exactly this) -- shut here so this test isolates what the
+        // cross-bleed selector itself controls.
+        truth.controls.pack_pb_on = [false, false];
+
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::default(), 300);
+        let map = published(area.as_ref());
+        assert_eq!(map["DEEP_PNEU_XBLEED_L_OPEN"], 0.0, "SHUT must override even the sole-source AUTO heuristic");
+        // The APU's own bleed valve feeds engine 1's duct directly and is
+        // not one of the three valves this selector controls (`Controls`'
+        // own doc: "a single knob controls all three cross-bleed valves",
+        // i.e. L/C/R, not the separate APU valve), so engine 1 still
+        // pressurises; SHUT is proven by engine 2 -- reachable only
+        // through the now-shut left cross-bleed valve -- staying unfed.
+        assert!(map["DEEP_PNEU_ENG_1_DUCT_PRESSURE_PA"] > 120_000.0, "the APU's own valve into engine 1 is unrelated to the cross-bleed selector, got {}", map["DEEP_PNEU_ENG_1_DUCT_PRESSURE_PA"]);
+        assert!(map["DEEP_PNEU_ENG_2_DUCT_PRESSURE_PA"] < 110_000.0, "with the cross-bleed selector SHUT, engine 2 must not be fed through the left valve, got {}", map["DEEP_PNEU_ENG_2_DUCT_PRESSURE_PA"]);
+    }
+
+    #[test]
+    fn cross_bleed_selector_open_forces_every_valve_open_with_no_sole_source_condition() {
+        let mut truth = cruise_truth();
+        truth.controls.cross_bleed_selector = 2.0; // OPEN
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::default(), 30);
+        let map = published(area.as_ref());
+        assert_eq!(map["DEEP_PNEU_XBLEED_L_OPEN"], 1.0);
+        assert_eq!(map["DEEP_PNEU_XBLEED_C_OPEN"], 1.0);
+        assert_eq!(map["DEEP_PNEU_XBLEED_R_OPEN"], 1.0);
+    }
+
+    #[test]
+    fn switching_a_pack_pushbutton_off_stops_feeding_that_pack() {
+        let truth = cruise_truth(); // default pack_pb_on = [true, true]
+        let mut off_truth = cruise_truth();
+        off_truth.controls.pack_pb_on[0] = false;
+
+        let mut on_area = live_system();
+        let mut off_area = live_system();
+        run(on_area.as_mut(), &truth, &Faults::default(), 300);
+        run(off_area.as_mut(), &off_truth, &Faults::default(), 300);
+        let on_pressure = published(on_area.as_ref())["DEEP_PNEU_PACK_1_SUPPLY_PRESSURE_PA"];
+        let off_pressure = published(off_area.as_ref())["DEEP_PNEU_PACK_1_SUPPLY_PRESSURE_PA"];
+        assert!(on_pressure > off_pressure + 5000.0, "switching pack 1's pushbutton off must stop feeding it: on {on_pressure} vs off {off_pressure}");
+    }
+
+    #[test]
+    fn a_thermal_areas_own_wing_duct_leak_heats_the_bay_enough_to_trip_this_areas_odls() {
+        // End-to-end coupling test: `thermal_zones` carries its own
+        // (pre-existing, interim) ATA 30 wing-anti-ice-duct-leak failure
+        // that heats WingLeLeft's real air node directly
+        // (`thermal_zones::live::apply_ice_and_duct_failures`). Before this
+        // pass this area could never see that heat -- every zone was given
+        // recovery temperature regardless (module doc's old "Contract
+        // gap") -- so the leak -> bay overheat -> isolation chain this
+        // area exists for was cut in the middle. With `Self::zone_air_k`
+        // now reading `truth.published` instead, the other area's real
+        // heat must reach this area's own ODLS and trip it.
+        //
+        // WingLeLeft (unlike a pylon) has no forced-ventilation link at
+        // all in `topology_a380::build` (anti-ice heat is a transient
+        // system input into an otherwise unventilated compartment, that
+        // module's own doc), so its air node's only loss path is the
+        // 40 W/K air<->structure coupling -- a full-severity 30 kW leak
+        // drives it far past the 100 K ODLS margin, unlike a ram-vented
+        // pylon's own 40 kW leak, which this test found settles only
+        // ~75 K above ambient under this area's own 0.5 kg/s pylon vent
+        // and so never confirms a trip (a real, if modest, gap between
+        // `thermal_zones`' interim leak magnitude and this area's fixed
+        // detection margin -- noted in the report, not papered over here).
+        let mut deep = crate::deep::live::Deep::new().with_area(live_system()).with_area(crate::deep::thermal_zones::live::live_system());
+        let leak_id = f_thermal(30, 1); // thermal_zones' own WingLeLeft anti-ice duct leak id
+        let armed = Faults::from_pairs([(leak_id, 1.0)]);
+        let truth = Truth { dt_s: 1.0, ..Truth::default() };
+        let mut published = BTreeMap::new();
+        for _ in 0..600 {
+            deep.tick(truth.clone(), &armed, &mut |name, value| {
+                published.insert(name.to_string(), value);
+            });
+        }
+        assert!(published["THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C"] > 150.0, "setup: the thermal area's own leak failure must actually heat the bay, got {}", published["THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C"]);
+        assert_eq!(published["DEEP_PNEU_ODLS_WingLeLeft_TRIP"], 1.0, "the real bay heat must now reach this area's own ODLS and trip it");
+
+        // The right wing never had anything leak into it.
+        assert_eq!(published["DEEP_PNEU_ODLS_WingLeRight_TRIP"], 0.0);
+    }
+
+    /// `thermal_zones` registers its ATA 30/36 duct-leak failures under
+    /// `Area::ThermalZones`, a different (interim, pre-existing) failure
+    /// id from this area's own equivalent faults -- both model a leak into
+    /// the same physical bay, from two different areas' own components,
+    /// per `network.rs`'s own module doc.
+    fn f_thermal(ata: u16, n: u16) -> u64 {
+        crate::deep::api::failure_id(RegArea::ThermalZones, ata, n)
     }
 
     #[test]

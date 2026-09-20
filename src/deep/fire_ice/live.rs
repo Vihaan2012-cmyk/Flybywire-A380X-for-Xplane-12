@@ -37,25 +37,35 @@
 //!   beta`), which is what the rain-removal jet has to shear off.
 //!
 //! ## Inputs this area needs that `Truth` does not carry yet
-//! Listed in the report; each is a cockpit control, not a physical
-//! quantity this module may invent:
-//! - **Fire/agent pushbuttons.** Without them the engine and cargo
-//!   bottles can never be commanded to fire, so only their *leak* faults
-//!   (and the APU's automatic ground discharge) are observable.
-//! - **Wing/nacelle anti-ice selection.** Held off, so the valve-stuck-
-//!   *closed* and duct-leak failures have no commanded flow to subtract
-//!   from; valve-stuck-*open* works, because that failure floors flow
-//!   regardless of command.
-//! - **Rain-removal selection.** Held off; the water film still
-//!   accumulates from real precipitation, but the jet's own fault has no
-//!   jet to degrade.
-//! - **Cabin/lavatory local temperature**, for the fusible-link
-//!   extinguisher.
+//! `docs/deep/truth-requests.md`'s 2026-09-20 pass sourced most of the
+//! cockpit controls this area used to assume; this pass wires them in:
+//! - **Fire/agent pushbuttons, per engine and the APU** -- now read from
+//!   `truth.controls.fire_pb_released`/`fire_agent_pb_pressed`(+APU),
+//!   which brings every bottle squib live (previously only the APU's
+//!   automatic ground discharge could ever fire a bottle).
+//! - **Wing/nacelle anti-ice selection** -- now read from
+//!   `truth.controls.wing_anti_ice_selected`/`nacelle_anti_ice_selected`,
+//!   so the valve-stuck-*closed* and duct-leak failures finally have a
+//!   commanded flow to subtract from; valve-stuck-*open* worked already,
+//!   because that failure floors flow regardless of command.
+//! - **Cabin/lavatory local temperature** -- now read from
+//!   `truth.cabin_temp_k` (one representative cabin zone; `Truth` carries
+//!   no lavatory-specific reading, see the truth-requests doc) for the
+//!   fusible-link extinguisher, instead of the outside static air
+//!   temperature.
+//! - **Rain-removal selection.** `truth.controls.rain_removal_selected`
+//!   exists and is read here, but stays permanently off: no real
+//!   pushbutton exists in this port (`plugin.rs`'s own sourcing table), so
+//!   `Controls::default()` never sets it. The water film still accumulates
+//!   from real precipitation; the jet's own fault has no jet to shear it
+//!   with until a real control surfaces.
 //! - **Cargo BULK**: `fire_loops::ZONES` has no bulk hold and no bulk
 //!   detector is registered, so `CARGO_BULK_SMOKE_DETECTED` is not
 //!   published here. That alert still reaches its trigger through
 //!   `thermal_zones`' contribution on the bulk hold's own smoke
-//!   concentration.
+//!   concentration. No cargo-bay fire/agent pushbutton exists in this port
+//!   either (`Controls`'s own doc), so cargo bottles still only leak, they
+//!   are never commanded to fire.
 
 use super::anti_ice::{BleedAntiIceFaults, BleedAntiIceSurface, ProbeHeater, ProbeHeaterFaults, RainRemoval, RainRemovalFaults, WindowHeat, WindowHeatFaults, NACELLE_ANTI_ICE, WINDOW_TARGET_C, WING_ANTI_ICE};
 use super::combustion::{Fluid, ZoneCombustion, ZoneSupply, HYDRAULIC_FLUID, JET_FUEL};
@@ -115,6 +125,15 @@ const HEAVY_RAIN_LWC_KG_M3: f64 = 2.0e-3;
 
 /// Turbulent-boundary-layer recovery factor, standard.
 const RECOVERY_FACTOR: f64 = 0.9;
+
+/// **GENERIC** rain-removal jet velocity once selected on, m/s: the same
+/// order-of-magnitude figure `anti_ice.rs`'s own rain-removal tests already
+/// exercise for "the jet is on" (a bleed-air-blower duct's jet velocity is
+/// not a published A380 figure). `truth.controls.rain_removal_selected`
+/// never actually reads true in this port (no real pushbutton exists, see
+/// this module's own doc), so this constant is exercised only by this
+/// file's own coupling test today.
+const RAIN_REMOVAL_JET_VELOCITY_M_S: f64 = 200.0;
 
 /// Which fluid leaks in which zone. Engine and APU zones sit among fuel
 /// and oil manifolds (`JET_FUEL`, the most easily ignited of the three);
@@ -468,14 +487,13 @@ impl FireIceLive {
             self.cargo_smoke_alarm[b] = self.cargo_smoke[b].step(self.zones[zone].burn_rate_kg_s, vent_m3_s, &faults_det, dt);
         }
 
-        // Lavatory fusible link. `Truth` carries no cabin or lavatory
-        // local temperature (module doc), so the only temperature
-        // available to melt it is the outside air's -- the link is wired
-        // to the right model field and will behave correctly the moment a
-        // local temperature exists.
+        // Lavatory fusible link. `Truth` carries no lavatory-specific
+        // temperature, but it now carries one representative cabin zone's
+        // (`truth.cabin_temp_k`), which is a far better local reading than
+        // the outside static air this used to fall back to.
         let lav_smoke = SmokeDetectorFaults::default();
         let lav_link = LavatoryFaults { link_degraded: faults.get(fire(225)) };
-        self.lavatory.step(cond.static_air_c, 0.0, 0.01, &lav_smoke, &lav_link, dt);
+        self.lavatory.step(truth.cabin_temp_k - 273.15, 0.0, 0.01, &lav_smoke, &lav_link, dt);
     }
 
     /// Steps every bottle and returns the agent mass flow each zone
@@ -490,22 +508,24 @@ impl FireIceLive {
             for b in 0..2usize {
                 let leak_id = fire(201 + (e as u16) * 4 + (b as u16) * 2);
                 let bottle_faults = BottleFaults { leak: faults.get(leak_id), squib_failure: faults.get(leak_id + 1) };
-                // No fire/agent pushbutton in `Truth` (module doc), so the
-                // squib is never commanded; the bottle still leaks, loses
-                // pressure and annunciates, which is the fault this area
-                // can express today.
-                let delivered = self.engine_bottles[e][b].step(ambient_c, false, zone_pa, &bottle_faults, dt);
+                // The squib fires once the crew has pulled that engine's
+                // fire pushbutton (arms the squib circuit) *and* pressed
+                // this bottle's own agent pushbutton (the real two-step
+                // engine fire drill), both now real cockpit reads
+                // (`truth.controls`) instead of an unreachable `false`.
+                let fire_command = truth.controls.fire_pb_released[e] && truth.controls.fire_agent_pb_pressed[e][b];
+                let delivered = self.engine_bottles[e][b].step(ambient_c, fire_command, zone_pa, &bottle_faults, dt);
                 agent[e] += delivered;
                 self.engine_bottle_low[e][b] = self.engine_bottles[e][b].is_low_pressure();
                 self.engine_squib_discharged[e][b] = self.engine_bottles[e][b].is_discharged();
             }
         }
 
-        // The APU's agent discharge is automatic on the ground -- the one
-        // extinguishing path that needs no crew action, and so the one
-        // this area can drive from `Truth` alone.
+        // The APU bottle fires either automatically on the ground (the one
+        // extinguishing path that never needed crew action) or on the same
+        // two-pushbutton drill as the engines', now both real.
         let apu_faults = BottleFaults { leak: faults.get(fire(217)), squib_failure: faults.get(fire(218)) };
-        let apu_command = self.zones[4].fire && truth.on_ground;
+        let apu_command = (self.zones[4].fire && truth.on_ground) || (truth.controls.fire_pb_apu_released && truth.controls.fire_agent_pb_apu_pressed);
         agent[4] += self.apu_bottle.step(ambient_c, apu_command, zone_pa, &apu_faults, dt);
         self.apu_squib_discharged = self.apu_bottle.is_discharged();
 
@@ -526,9 +546,12 @@ impl FireIceLive {
     fn step_ice(&mut self, truth: &Truth, faults: &Faults, cond: &Conditions) {
         let dt = truth.dt_s;
 
-        // -- Wing leading edges. The anti-ice valve command is not in
-        // `Truth` (module doc); a stuck-open valve floors flow regardless,
-        // which is why that failure still expresses itself.
+        // -- Wing leading edges. The anti-ice valve command is now the real
+        // wing anti-ice pushbutton (one selection, both wings --
+        // `truth.controls.wing_anti_ice_selected`): a stuck-open valve
+        // still floors flow regardless of command, but stuck-*closed* and
+        // duct-leak now have a real commanded flow to act against.
+        let wing_command = on(truth.controls.wing_anti_ice_selected);
         let wing_beta = cond.beta0(WING_LEADING_EDGE.characteristic_length_m);
         for s in 0..2usize {
             let base = 1 + (s as u16) * 3;
@@ -537,7 +560,7 @@ impl FireIceLive {
                 valve_stuck_open: faults.get(ice(base + 1)),
                 duct_leak: faults.get(ice(base + 2)),
             };
-            let out = self.wing_anti_ice[s].step(0.0, cond.static_air_c, cond.recovery_c, cond.lwc_kg_m3, wing_beta, cond.tas_m_s, cond.ambient_pressure_pa, &f, dt);
+            let out = self.wing_anti_ice[s].step(wing_command, cond.static_air_c, cond.recovery_c, cond.lwc_kg_m3, wing_beta, cond.tas_m_s, cond.ambient_pressure_pa, &f, dt);
             self.wing_anti_ice_out[s] = out;
 
             // What the heated surface stops freezing is removed from the
@@ -549,7 +572,8 @@ impl FireIceLive {
             self.wing_ice_out[s] = self.wing_ice[s].step(&cond.icing_environment(), removal, dt);
         }
 
-        // -- Nacelle inlets.
+        // -- Nacelle inlets, per engine's own real nacelle anti-ice
+        // pushbutton (`truth.controls.nacelle_anti_ice_selected`).
         let nacelle_beta = cond.beta0(NACELLE_INLET.characteristic_length_m);
         for e in 0..4usize {
             let base = 7 + (e as u16) * 3;
@@ -558,7 +582,8 @@ impl FireIceLive {
                 valve_stuck_open: faults.get(ice(base + 1)),
                 duct_leak: faults.get(ice(base + 2)),
             };
-            let out = self.nacelle_anti_ice[e].step(0.0, cond.static_air_c, cond.recovery_c, cond.lwc_kg_m3, nacelle_beta, cond.tas_m_s, cond.ambient_pressure_pa, &f, dt);
+            let nacelle_command = on(truth.controls.nacelle_anti_ice_selected[e]);
+            let out = self.nacelle_anti_ice[e].step(nacelle_command, cond.static_air_c, cond.recovery_c, cond.lwc_kg_m3, nacelle_beta, cond.tas_m_s, cond.ambient_pressure_pa, &f, dt);
             self.nacelle_anti_ice_out[e] = out;
             let natural_ff = self.nacelle_ice_out[e].freezing_fraction;
             let removal = (self.nacelle_ice_out[e].impingement_kg_m2_s * (natural_ff - out.freezing_fraction)).max(0.0);
@@ -593,9 +618,14 @@ impl FireIceLive {
             self.window_out[w] = self.windows[w].step(cond.static_air_c, cond.recovery_c, cond.lwc_kg_m3, window_beta, cond.tas_m_s, cond.ambient_pressure_pa, &f, dt);
 
             let rain_faults = RainRemovalFaults { system_fault: faults.get(ice(49 + w as u16)) };
-            // Jet velocity is a crew selection `Truth` does not carry
-            // (module doc): the film still accumulates from real rain.
-            self.rain_film_kg_m2[w] = self.rain[w].step(rain_catch_kg_m2_s, 0.0, 0.0, &rain_faults, dt);
+            // `truth.controls.rain_removal_selected` is real and read here,
+            // but stays permanently false in this port (no rain-removal
+            // pushbutton exists to write it, module doc) -- the coupling is
+            // wired and ready for the moment a real source appears, but
+            // today the film still only accumulates from real rain, since
+            // no jet is ever commanded.
+            let jet_velocity_m_s = if truth.controls.rain_removal_selected[w] { RAIN_REMOVAL_JET_VELOCITY_M_S } else { 0.0 };
+            self.rain_film_kg_m2[w] = self.rain[w].step(rain_catch_kg_m2_s, jet_velocity_m_s, 0.0, &rain_faults, dt);
         }
     }
 
@@ -886,6 +916,92 @@ mod tests {
         assert_eq!(map["FIRE_BOTTLE_ENG1_1_LOW_PRESSURE"], 1.0, "a full-severity leak must empty the bottle over hours");
         assert_eq!(map["FIRE_BOTTLE_ENG1_2_LOW_PRESSURE"], 0.0, "the second bottle is healthy");
         assert_eq!(map["FIRE_DETECTED_ENG:1"], 0.0, "a leaking bottle is not a fire");
+    }
+
+    #[test]
+    fn pressing_the_fire_and_agent_pushbuttons_actually_fires_a_healthy_bottle() {
+        // Coupling test: before this pass, no cockpit path could ever set
+        // `fire_command` true for an engine bottle (module doc's old "no
+        // fire/agent pushbutton in `Truth`"), so a squib could never
+        // discharge outside the APU's automatic ground path. With
+        // `truth.controls.fire_pb_released`/`fire_agent_pb_pressed` wired
+        // in, the real two-step drill (pull the fire handle, then press an
+        // agent bottle) must discharge that bottle -- with no fire and no
+        // leak fault armed at all, isolating this from every other model.
+        let mut truth = ground_running_truth();
+        truth.engine_running = [false; 4];
+        truth.apu_running = false;
+        truth.controls.fire_pb_released[0] = true;
+        truth.controls.fire_agent_pb_pressed[0][0] = true;
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::default(), 5);
+        let map = published(area.as_ref());
+        assert_eq!(map["FIRE_SQUIB_1_ENG_1_IS_DISCHARGED"], 1.0, "the fire and agent pushbuttons together must fire bottle 1's squib");
+        assert_eq!(map["FIRE_SQUIB_2_ENG_1_IS_DISCHARGED"], 0.0, "only the pressed bottle's squib fires");
+        assert!(map["FIRE_ZONE_ENG1_AGENT_FRACTION"] > 0.0, "agent must actually reach the zone");
+    }
+
+    #[test]
+    fn pulling_only_the_fire_handle_without_pressing_an_agent_bottle_fires_nothing() {
+        let mut truth = ground_running_truth();
+        truth.engine_running = [false; 4];
+        truth.apu_running = false;
+        truth.controls.fire_pb_released[0] = true; // handle pulled, no bottle pressed yet
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::default(), 5);
+        let map = published(area.as_ref());
+        assert_eq!(map["FIRE_SQUIB_1_ENG_1_IS_DISCHARGED"], 0.0);
+        assert_eq!(map["FIRE_SQUIB_2_ENG_1_IS_DISCHARGED"], 0.0);
+    }
+
+    #[test]
+    fn an_apu_bottle_also_fires_from_the_real_pushbutton_pair_in_flight_with_no_automatic_path() {
+        // The APU's automatic ground discharge only applies `on_ground`;
+        // in flight the only path left is the same two-pushbutton drill,
+        // now real.
+        let mut truth = ground_running_truth();
+        truth.on_ground = false;
+        truth.apu_running = true;
+        truth.controls.fire_pb_apu_released = true;
+        truth.controls.fire_agent_pb_apu_pressed = true;
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::default(), 5);
+        assert_eq!(published(area.as_ref())["FIRE_SQUIB_1_APU_1_IS_DISCHARGED"], 1.0);
+    }
+
+    #[test]
+    fn a_wing_anti_ice_valve_stuck_closed_with_the_crew_selected_on_still_ices_the_leading_edge() {
+        // Failure 8_030_001 (L WING anti-ice valve stuck closed), effect:
+        // "commanded flow is reduced toward zero regardless of demand".
+        // Before this pass the valve command was hardcoded to 0 (off), so
+        // this failure was indistinguishable from the crew simply never
+        // selecting anti-ice on; with `truth.controls.
+        // wing_anti_ice_selected` wired in, arming this fault must diverge
+        // from a healthy selected-on wing, which it could not before.
+        let truth = icing_truth();
+        let mut stuck = live_system();
+        let mut healthy = live_system();
+        let selected_on = Truth { controls: crate::deep::live::Controls { wing_anti_ice_selected: true, ..truth.controls }, ..truth.clone() };
+        run(stuck.as_mut(), &selected_on, &Faults::from_pairs([(ice(1), 1.0)]), 300);
+        run(healthy.as_mut(), &selected_on, &Faults::default(), 300);
+        let stuck_map = published(stuck.as_ref());
+        let healthy_map = published(healthy.as_ref());
+        assert_eq!(stuck_map["ANTI_ICE_WING_L_VALVE_OPEN"], 0.0, "a valve stuck closed must deliver no bleed even though the crew selected anti-ice on");
+        assert!(healthy_map["ANTI_ICE_WING_L_VALVE_OPEN"] > 0.0, "the healthy wing must actually flow once selected on");
+        assert!(stuck_map["ANTI_ICE_WING_L_SURFACE_C"] < healthy_map["ANTI_ICE_WING_L_SURFACE_C"] - 5.0, "the stuck-closed wing must run colder than the heated one");
+    }
+
+    #[test]
+    fn without_any_selection_a_healthy_wing_anti_ice_valve_stays_shut_in_icing_air() {
+        // The other half of the same coupling: with the pushbutton wired
+        // in, a *healthy* system must now genuinely respect "off" (it used
+        // to be hardcoded off already, but for the wrong reason -- no
+        // command existed at all, so this is the regression guard that the
+        // new command path defaults to the same safe state).
+        let truth = icing_truth();
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::default(), 300);
+        assert_eq!(published(area.as_ref())["ANTI_ICE_WING_L_VALVE_OPEN"], 0.0, "with anti-ice not selected, a healthy valve must stay shut");
     }
 
     #[test]

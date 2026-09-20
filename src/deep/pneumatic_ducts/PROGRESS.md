@@ -211,3 +211,32 @@ suffix is confirmed, rather than this module inventing a permanent parallel stat
   than fed a fabricated pressure), the zone air temperatures ODLS watches (every zone is given
   the recovery temperature), and the bleed/cross-bleed/pack/WAI/starter selections (interim
   positions documented in `live::ControlAssumptions`).
+
+- [done] truth-wiring pass (`docs/deep/truth-requests.md`'s 2026-09-20 pass) — removed
+  `ControlAssumptions` entirely; `live.rs` now reads `truth.controls.pack_pb_on` (both feed
+  valves of a pack open together), `wing_anti_ice_selected` (one pushbutton, both sides),
+  `apu_bleed_pb_on` (gates `apu_bleed_available`), `cross_bleed_selector` (raw 0 SHUT/1 AUTO/
+  2 OPEN, AUTO keeping the old APU-sole-source heuristic), and `starter_engaged`. Added
+  `NetworkInputs::engine_bleed_pb_auto: [bool; 4]` (`network.rs`) and folded it into every gate
+  that already checked ODLS's own `isolated[i]` latch (PR valve, all three cross-bleed valves,
+  the APU valve, both pack feeds, both WAI feeds) through a new *local*, non-latching
+  `source_shut` closure -- the pushbutton is a normal switch, so it must never touch
+  `self.engine_isolated`/`out.engine_isolated`, which stay the ODLS trip's own latch. Also wired
+  `truth.engine_hp_port_pressure_pa`/`_temp_k` into the HP6 branch (removed the fixed
+  `HP_PORT_UNAVAILABLE_PA` = 0), and `Self::zone_air_k` now reads
+  `truth.published.get_or("THERMAL_ZONE_<NAME>_TEMPERATURE_C", recovery_c)` instead of pinning
+  every zone at recovery temperature -- `thermal_zones`' own ATA 30/36 duct-leak failures
+  (registered independently under `Area::ThermalZones`) now reach this area's own ODLS. 7 new
+  tests: the HP6 branch opening the HP valve off a real HP6 port, the cross-bleed selector's
+  SHUT and OPEN positions, a pack pushbutton stopping its own pack, the ENG BLEED pushbutton
+  shutting (and non-latchingly restoring) an engine's own source (`network.rs`), and an
+  end-to-end test arming `thermal_zones`' own WingLeLeft anti-ice-duct-leak failure and
+  confirming it now trips this area's own `DEEP_PNEU_ODLS_WingLeLeft_TRIP` through the published
+  frame. That same test found the equivalent pylon leak (`PYLON_BLEED_LEAK_MAX_HEAT_W` = 40 kW
+  against this area's own 0.5 kg/s pylon ram vent) settles only ~75 K above ambient -- real,
+  substantial heating, but short of the fixed 100 K confirm margin; not fixed here since it is a
+  gap in `thermal_zones`' own interim leak magnitude, not in this area's consumption of it.
+  Still missing from `Truth`: nothing new; per-FCV pack valve positions were confirmed to not
+  exist as a separate cockpit control (only the pushbutton is real, `docs/deep/
+  truth-requests.md`).
+  positions documented in `live::ControlAssumptions`).

@@ -172,3 +172,18 @@ OVERHEAT}`, `ANTI_ICE_{WING_L,WING_R}_OVERHEAT`, `WINDOW_HEAT_{L,R}_FAULT`,
   cabin/lavatory local temperature. No bulk hold exists in `fire_loops::ZONES`, so
   `CARGO_BULK_SMOKE_DETECTED` is not published here (that alert reaches its trigger through
   `thermal_zones`' contribution instead).
+
+- [done] truth-wiring pass (`docs/deep/truth-requests.md`'s 2026-09-20 pass) — `live.rs` now
+  reads `truth.controls.fire_pb_released`/`fire_agent_pb_pressed`(+APU) for every squib command
+  instead of `false` (brings all 20 bottle squib failures live, engine + APU, on top of the
+  APU's pre-existing automatic ground path), `truth.controls.wing_anti_ice_selected`/
+  `nacelle_anti_ice_selected` for the anti-ice valve command instead of a hardcoded 0.0 (brings
+  the stuck-closed and duct-leak halves of the 12 anti-ice failures live; stuck-open already
+  worked), and `truth.cabin_temp_k` for the lavatory fusible link instead of outside static air.
+  `truth.controls.rain_removal_selected` is now read too but stays permanently false (no real
+  pushbutton exists in this port, `Controls`' own doc) -- wired and ready, not yet reachable.
+  5 new tests: pressing both pushbuttons fires a bottle, the handle alone fires nothing, the APU
+  bottle fires in flight via the same two pushbuttons, a wing valve stuck closed still ices the
+  leading edge despite the crew selecting anti-ice on, and a healthy valve still stays shut with
+  nothing selected. Still missing from `Truth`: no cargo-bay fire/agent pushbutton exists in
+  this port, so cargo bottles still only leak.

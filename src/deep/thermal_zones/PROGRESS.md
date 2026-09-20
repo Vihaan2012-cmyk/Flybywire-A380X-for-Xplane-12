@@ -92,3 +92,16 @@ once wired in.
   avionics fan, the crown blanket, a nacelle fire and a vent-scoop blockage.
   Still missing from `Truth`: solar irradiance (solar load passes 0), commanded gear-door
   position (the ATA 32 jam latch is implemented but has nothing to diverge from).
+
+- [done] truth-wiring pass (`docs/deep/truth-requests.md`'s 2026-09-20 pass) — `apply_gear_door_
+  failures` now takes `truth.controls.gear_door_commanded_open` (`[nose, left, right]`) and
+  drives every healthy door's ventilation-link health to it every tick (a jam still blends
+  toward its own stuck value exactly as before) instead of leaving every door pinned at
+  `topology_a380`'s own resting closed state forever. Added `solar_flux_w_m2(&Truth)`, a
+  **GENERIC** clear-sky flux (`1361 W/m^2 * 0.75 transmittance * sin(sun_elevation_deg)`, zero
+  below the horizon) from the now-real `truth.sun_elevation_deg`, replacing the flat
+  `SOLAR_FLUX_W_M2 = 0.0` handed to `ThermalNetwork::step`. 3 new tests: a commanded-open gear
+  door ventilating its bay faster than one held closed, a high sun elevation warming
+  CrownArea's structure (highest `sun_exposure_fraction` of any zone) more than no sun, and a
+  unit check that a below-horizon sun never produces a nonzero/negative flux. Cloud attenuation
+  is not modelled (no optical-depth input exists on `Truth`) -- this is a clear-sky figure only.

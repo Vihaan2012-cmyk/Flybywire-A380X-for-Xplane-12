@@ -279,6 +279,14 @@ pub struct NetworkInputs {
     pub pack_valve_open: [[f64; 2]; 2],
     pub wai_selected: [bool; 2],
     pub starter_engaged: [bool; 4],
+    /// The real ENG BLEED pushbutton, per engine: `false` (OFF) shuts that
+    /// engine's own PR/shutoff valve -- the literal valve that pushbutton
+    /// switches (module docs: "the real 'ENG n BLEED' pushbutton's own
+    /// valve") -- and every cross-bleed/pack/wing-anti-ice/hydraulic tap
+    /// fed from its duct, the same way a confirmed ODLS trip already does,
+    /// without latching: unlike a trip, toggling the pushbutton back on
+    /// restores the source immediately.
+    pub engine_bleed_pb_auto: [bool; 4],
     /// This tick's zone air temperature, K, indexed by `ZONE_NAMES`.
     pub zone_air_k: [f64; ZONE_COUNT],
 }
@@ -434,6 +442,13 @@ impl DuctNetwork {
         out.apu_isolated = self.apu_isolated;
         let isolated = self.engine_isolated;
         let apu_isolated = self.apu_isolated;
+        // The ENG BLEED pushbutton's own effect on gas flow (module docs on
+        // `NetworkInputs::engine_bleed_pb_auto`): folded into every gate
+        // below that already checks `isolated[i]`, but kept a *local*,
+        // non-latching condition -- it must never feed `self.engine_
+        // isolated`/`out.engine_isolated`, which are specifically the ODLS
+        // trip's own latch and annunciation.
+        let source_shut = |i: usize| isolated[i] || !inputs.engine_bleed_pb_auto[i];
 
         // --- Upstream: IP tap + HP valve -> transfer pipe -> PR valve ->
         // precooler -> engine local duct, per engine (module docs).
@@ -458,7 +473,7 @@ impl DuctNetwork {
             let hp_mdot = orifice_mass_flow_kg_s(VALVE_CD, HP_VALVE_AREA_M2 * self.hp_valve_open[i].clamp(0.0, 1.0), ports.hp_port_pressure_pa, ports.hp_port_temp_k, self.transfer_pipe[i].pressure_pa());
             self.transfer_pipe[i].add_mass(hp_mdot * dt, ports.hp_port_temp_k, ports.hp_port_pressure_pa);
 
-            let pr_commanded = if isolated[i] || inputs.starter_engaged[i] || self.transfer_pipe[i].pressure_pa() < PR_VALVE_MIN_TRANSFER_PA {
+            let pr_commanded = if source_shut(i) || inputs.starter_engaged[i] || self.transfer_pipe[i].pressure_pa() < PR_VALVE_MIN_TRANSFER_PA {
                 0.0
             } else {
                 ((REGULATION_TARGET_PA - self.engine_duct[i].gas.pressure_pa()) * VALVE_GAIN_PER_PA).clamp(0.0, 1.0)
@@ -546,30 +561,30 @@ impl DuctNetwork {
         {
             let [d0, d1, d2, d3] = &mut self.engine_duct;
 
-            let l_open = if isolated[0] || isolated[1] { 0.0 } else { inputs.cross_bleed_valve_command[0].clamp(0.0, 1.0) };
-            let c_open = if isolated[0] || isolated[3] { 0.0 } else { inputs.cross_bleed_valve_command[1].clamp(0.0, 1.0) };
-            let r_open = if isolated[2] || isolated[3] { 0.0 } else { inputs.cross_bleed_valve_command[2].clamp(0.0, 1.0) };
+            let l_open = if source_shut(0) || source_shut(1) { 0.0 } else { inputs.cross_bleed_valve_command[0].clamp(0.0, 1.0) };
+            let c_open = if source_shut(0) || source_shut(3) { 0.0 } else { inputs.cross_bleed_valve_command[1].clamp(0.0, 1.0) };
+            let r_open = if source_shut(2) || source_shut(3) { 0.0 } else { inputs.cross_bleed_valve_command[2].clamp(0.0, 1.0) };
             transfer_kg(dt, VALVE_CD, CROSSBLEED_AREA_M2 * l_open, &mut d0.gas, &mut d1.gas);
             transfer_kg(dt, VALVE_CD, CROSSBLEED_AREA_M2 * c_open, &mut d0.gas, &mut d3.gas);
             transfer_kg(dt, VALVE_CD, CROSSBLEED_AREA_M2 * r_open, &mut d2.gas, &mut d3.gas);
             out.cross_bleed_valve_open = [l_open, c_open, r_open];
 
-            let apu_open = if apu_isolated || isolated[0] { 0.0 } else { inputs.apu_bleed_valve_command.clamp(0.0, 1.0) };
+            let apu_open = if apu_isolated || source_shut(0) { 0.0 } else { inputs.apu_bleed_valve_command.clamp(0.0, 1.0) };
             out.apu_bleed_valve_open = apu_open;
             transfer_kg(dt, VALVE_CD, APU_VALVE_AREA_M2 * apu_open, &mut self.apu_duct.gas, &mut d0.gas);
 
-            let pack1_from_1 = if isolated[0] { 0.0 } else { inputs.pack_valve_open[0][0].clamp(0.0, 1.0) };
-            let pack1_from_2 = if isolated[1] { 0.0 } else { inputs.pack_valve_open[0][1].clamp(0.0, 1.0) };
+            let pack1_from_1 = if source_shut(0) { 0.0 } else { inputs.pack_valve_open[0][0].clamp(0.0, 1.0) };
+            let pack1_from_2 = if source_shut(1) { 0.0 } else { inputs.pack_valve_open[0][1].clamp(0.0, 1.0) };
             transfer_kg(dt, VALVE_CD, PACK_VALVE_AREA_M2 * pack1_from_1, &mut d0.gas, &mut self.packs[0].gas);
             transfer_kg(dt, VALVE_CD, PACK_VALVE_AREA_M2 * pack1_from_2, &mut d1.gas, &mut self.packs[0].gas);
 
-            let pack2_from_3 = if isolated[2] { 0.0 } else { inputs.pack_valve_open[1][0].clamp(0.0, 1.0) };
-            let pack2_from_4 = if isolated[3] { 0.0 } else { inputs.pack_valve_open[1][1].clamp(0.0, 1.0) };
+            let pack2_from_3 = if source_shut(2) { 0.0 } else { inputs.pack_valve_open[1][0].clamp(0.0, 1.0) };
+            let pack2_from_4 = if source_shut(3) { 0.0 } else { inputs.pack_valve_open[1][1].clamp(0.0, 1.0) };
             transfer_kg(dt, VALVE_CD, PACK_VALVE_AREA_M2 * pack2_from_3, &mut d2.gas, &mut self.packs[1].gas);
             transfer_kg(dt, VALVE_CD, PACK_VALVE_AREA_M2 * pack2_from_4, &mut d3.gas, &mut self.packs[1].gas);
 
-            let wai_left_open = if isolated[1] { 0.0 } else { self.wai_valve_open[0] };
-            let wai_right_open = if isolated[2] { 0.0 } else { self.wai_valve_open[1] };
+            let wai_left_open = if source_shut(1) { 0.0 } else { self.wai_valve_open[0] };
+            let wai_right_open = if source_shut(2) { 0.0 } else { self.wai_valve_open[1] };
             transfer_kg(dt, VALVE_CD, WAI_VALVE_AREA_M2 * wai_left_open, &mut d1.gas, &mut self.wai[0].gas);
             transfer_kg(dt, VALVE_CD, WAI_VALVE_AREA_M2 * wai_right_open, &mut d2.gas, &mut self.wai[1].gas);
 
@@ -653,6 +668,7 @@ mod tests {
             pack_valve_open: [[1.0, 1.0], [1.0, 1.0]],
             wai_selected: [false, false],
             starter_engaged: [false; 4],
+            engine_bleed_pb_auto: [true; 4],
             zone_air_k: [250.0; ZONE_COUNT],
         }
     }
@@ -812,6 +828,27 @@ mod tests {
         inputs.zone_air_k[0] = 250.0;
         let out2 = net.step(&inputs, &DuctNetworkFaults::default());
         assert!(out2.pr_valve_open[0] < 0.01, "a real ODLS trip requires a reset, not self-clearing");
+    }
+
+    #[test]
+    fn the_eng_bleed_pushbutton_off_shuts_that_engines_own_source_without_latching() {
+        let mut net = DuctNetwork::new();
+        let mut inputs = base_inputs();
+        inputs.engine_bleed_pb_auto[0] = false;
+        let mut out = NetworkOutputs::default();
+        for _ in 0..300 {
+            out = net.step(&inputs, &DuctNetworkFaults::default());
+        }
+        assert!(out.pr_valve_open[0] < 0.01, "the pushbutton off must shut engine 1's own PR valve, got {}", out.pr_valve_open[0]);
+        assert!(!out.engine_isolated[0], "a pushbutton off must not read as an ODLS fault/trip -- it is a normal switch, not a latch");
+
+        // Selecting it back on restores the source immediately, unlike a
+        // real ODLS trip, which needs a reset.
+        inputs.engine_bleed_pb_auto[0] = true;
+        for _ in 0..300 {
+            out = net.step(&inputs, &DuctNetworkFaults::default());
+        }
+        assert!(out.engine_duct_pressure_pa[0] > 101_325.0 + 1000.0, "turning the pushbutton back on must re-pressurise the duct, got {}", out.engine_duct_pressure_pa[0]);
     }
 
     #[test]
