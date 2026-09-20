@@ -73,3 +73,41 @@ Worth a decision before the EFB exposes these to the crew.
   hardcoded zero. The bulk alert still reaches its trigger through
   `thermal_zones`' contribution on the bay's smoke concentration. If the
   primary trigger should be live, a bulk detector needs registering.
+
+---
+
+## From hydraulics and flight controls
+
+Each of these has a public setter on the concrete live struct, so the
+plugin can feed it before the consolidated `Truth` pass lands.
+
+| Field | Unblocks | What happens without it |
+|---|---|---|
+| **Commanded surface positions** (flight controls) | The whole point of the area: it models what a surface physically does with what PRIM/SEC asked for. | Everything is commanded to neutral. Runaway, disconnect, supply loss and blow-back still act, but **a jam at neutral is invisible** — and a jam is the headline failure. The plugin can read the same 33 `HYD_*_DEFLECTION` Vars `SurfaceOverrideWriter` already caches ids for, and convert back with `flight_controls.rs`'s own `aileron_or_elevator_down_deg` / `rudder_right_deg` / `spoiler_up_deg`. |
+| **`engine_n3_frac: [f64; 4]`** (hydraulics) | The engine-driven pumps are driven off the HP spool; `Truth` carries only N1. The plugin already publishes `ENGINE_N3:n` from our own engine model, so this is a copy. | A stand-in interpolates N3 from N1 between this aircraft's own two cited operating points. Labelled as a stand-in, not physics. |
+| **Hydraulic consumer flow demand** (hydraulics) | `deep::flight_controls` knows its own half, but the `Area` trait is tick-then-publish with no inter-area channel. Same root cause as the contract gap above. | Every circuit runs unloaded: optimistic about pressure, cold about fluid temperature. |
+| **Fire handle position, per engine** (hydraulics) | The registered fire-shutoff-valve failures need a healthy counterpart to act against. | Inert. |
+| **Engine feed fuel flow and temperature** (hydraulics) | The fuel/hydraulic heat exchangers. | The only cooling left is the passive 40 W/K bay loss. |
+| **Ground-spoiler lever armed / go-around selected** (flight controls) | The 2 ground-spoiler-logic failures. | Unreachable — unarmed logic never deploys. |
+| **`alpha_rad`** (flight controls) | `hinge_moment.rs`'s Ch_alpha term. | Zero. The larger Ch_delta term, which blow-back depends on, is unaffected. |
+
+Gated on "any AC bus live" for want of a named bus: the EHA/EBHA 247XP
+and AC-ESS supplies, and the per-computer PRIM/SEC buses.
+
+## Catalogue gaps found while wiring
+
+- **The green circuit is missing two real pumps.** `hydraulics/topology.rs`'s
+  module doc asserts the A380 has no green electric pump, but FlyByWire's
+  own `A380Hydraulic` constructs `green_electric_pump_a`/`_b` on AC 1 and
+  AC 2 (`a380_systems/src/hydraulic/mod.rs:1772-1775`). So the green
+  circuit has two fewer pumps than the aircraft and the registry has no
+  failures for them. Pre-existing, in the area's topology rather than the
+  live layer.
+- **Runaway has no direction.** `ActuatorFaults.runaway_sign` is driven
+  to +1 (TE-up / spoiler-extend / rudder-right); the catalogue registers
+  one runaway per surface with no direction parameter. An
+  opposite-direction hardover needs a second failure id.
+- **Flight-control failures are per surface, not per actuator**, so an
+  armed magnitude applies to every actuator on that surface. That matches
+  the registered effect text (a surface-level jam pins the surface), but
+  it means a single-actuator fault cannot be expressed.

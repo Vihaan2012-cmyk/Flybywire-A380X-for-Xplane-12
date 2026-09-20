@@ -122,3 +122,4 @@
 - Nose wheel steering ram/metering valve model with the same treatment.
 - Reverser hydraulic actuator (deploy/stow time from `Line`/`Restriction`
   sizing) rather than a flat demand.
+- [done] live system — src/deep/hydraulics/live.rs, mod.rs — `HydraulicsLive` owns `topology::A380Hydraulics` (green + yellow) and implements `deep::live::Area`. Truth -> CircuitInputs (HP spool through the 0.31 accessory-gearbox ratio into EDP shaft rpm; AC3/AC4 supply + DC1 control for the yellow electric pump; bleed/electrical availability into reservoir bootstrap pressurisation; SAT into bay temperature). All 30 registered failures bound to their model fields, ids read out of registry.rs itself so they cannot drift. Publishes the 8 ECAM trigger variables plus 30 study variables. Needs on Truth: engine_n3_frac (stand-in interpolation in use), fire handle position, consumer flow demand, HHX fuel flow — setters provided for all four. 10 tests.
