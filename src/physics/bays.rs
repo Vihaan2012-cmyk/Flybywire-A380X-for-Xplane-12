@@ -419,6 +419,11 @@ mod tests {
 
     #[test]
     fn bleed_leak_heats_avionics_bay_and_trips_a_breaker_fine_when_cold() {
+        // This test calls reset_global_state(), which wipes every armed failure.
+        // `failures::STATE` is process-global, so this test and any other
+        // touching it must take turns -- the same lock breakers.rs already
+        // uses for exactly this reason.
+        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         crate::scenarios::reset_global_state();
         // `36_000` ("Engine 1 bleed duct leak") is a real id in
         // `failures.rs`'s own catalogue; `set_active`/`set_magnitude` only

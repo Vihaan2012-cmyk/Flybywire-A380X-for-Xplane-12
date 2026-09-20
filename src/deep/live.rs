@@ -166,6 +166,13 @@ pub struct Truth {
     /// Once the level uncovers the pump's inlet, `engine_oil_pressure_pa`
     /// follows it down -- the order the real fault develops in.
     pub engine_oil_quantity_fraction: [f64; 4],
+    /// Per engine: whether the oil filter's bypass valve is open --
+    /// `ENGINE_OIL_FILTER_BYPASS:n`, written by `engine_commands.rs` from
+    /// `physics::engine::oil::OilState::filter_bypassed` (the filter's own
+    /// differential pressure crossing its cracking pressure). A clogged
+    /// filter is exactly what opens this valve, so this is a real,
+    /// computed signal for a clogged filter, not an approximation of one.
+    pub engine_oil_filter_bypassed: [bool; 4],
     /// Per engine: turbine gas temperature, C -- the IP-LP interstage
     /// plane, which is the Trent's TGT station.
     ///
@@ -529,6 +536,7 @@ impl Default for Truth {
             engine_oil_pressure_pa: [0.0; 4],
             engine_oil_temp_c: [15.0; 4],
             engine_oil_quantity_fraction: [1.0; 4],
+            engine_oil_filter_bypassed: [false; 4],
             // A cold engine's gas path is full of the air around it, so
             // both stations sit at the same 15 C ISA sea-level ambient the
             // rest of this state is quoted at.

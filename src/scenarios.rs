@@ -83,6 +83,11 @@ mod tests {
     /// registered set once a `Failures` has been constructed.
     #[test]
     fn reset_global_state_clears_failure_activation() {
+        // This test asserts the GLOBAL active set is empty, and resets it.
+        // `failures::STATE` is process-global, so this test and any other
+        // touching it must take turns -- the same lock breakers.rs already
+        // uses for exactly this reason.
+        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let _f = crate::failures::Failures::new();
         crate::failures::set_active(24_020, true);
         assert!(crate::failures::active_ids().contains(&24_020), "setup: id should be active before reset");

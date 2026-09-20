@@ -72,6 +72,58 @@
 //!   not modelled -- there is no engine-level fuel leak detector, no
 //!   overthrust protection, no start-sequence supervisor, no thrust lever
 //!   transducer health and no published engine-out discrete.
+//!
+//! # Re-checked in a later pass, still unwired
+//!
+//! * `701800029`..`701800032` ENG n FAIL, `701800109`..`701800112` ENG n
+//!   SHUTDOWN, `701800151` ALL ENGINES FAILURE and `701800158` ENGINE
+//!   THRUST LOCKED are the only ATA 70 ids FlyByWire itself triggers
+//!   (`FwsAbnormalSensed.ts` lines 4564-4739, checked with a grep that
+//!   matches the file's real four-space indent -- a two-space anchor finds
+//!   nothing and reads as "FlyByWire drives none of ATA 70," which is
+//!   false). Confirmed disjoint from every id wired in this file.
+//! * `701800081`..`701800084` OIL FILTER CLOGGED is not unwired any more --
+//!   `ata_cheap_wins.rs` wires it from `A32NX_ENG_n_OIL_FILTER_BYPASSED`,
+//!   which now exists. Left out of this file's `wire()` because that is
+//!   where it already lives; noted here so a later pass does not
+//!   re-diagnose it as open.
+//! * `701800009`..`701800012` EGT OVER LIMIT: still unwired, and for a
+//!   sharper reason than "nothing publishes EGT". This engine publishes
+//!   *TGT* (`DEEP_ENG_n_TGT_SENSED_C`, the turbine-gas-temperature figure a
+//!   Trent-family EEC actually limits on), not EGT. Those are different
+//!   stations in the gas path; wiring FlyByWire's EGT procedure off a TGT
+//!   reading would be answering the wrong question with a number that
+//!   merely sounds similar, which is worse than the quantity being absent.
+//! * `701800073`..`701800076` N1/N2 OVER LIMIT: re-checked against
+//!   `physics::engine::governor` and the rest of `physics::engine` for an
+//!   overspeed trip or red-line fraction. None exists -- shaft speeds are
+//!   published only as pick-up fractions of *rated* speed, with no
+//!   certified maximum recorded anywhere in either repository to compare
+//!   them against. Still unwired.
+//! * `701800114`..`701800116` ENG 2/3/4 STALL: re-examined past the
+//!   "duplicates our own ENG 1 STALL" reasoning that covers only id
+//!   `701800113`. `A32NX_ENG_n_{HP,IP}_HANDLING_BLEED_STALL_MARGIN_PCT`
+//!   turns out to be the *same* value as
+//!   `A32NX_ENG_n_VSV_STALL_MARGIN_DELTA_PCT`
+//!   (`engine_accessories/live.rs:1478`, both read from one
+//!   `stall_margin_delta_pct`), which `airflow_control::vsv` computes as
+//!   `-STALL_MARGIN_COEFF_PCT_PER_DEG2 * schedule_error_deg^2`
+//!   (`vsv.rs:96`) -- a continuous, always-non-positive penalty for a VSV
+//!   schedule error, not a margin measured from a 100 %-at-nominal
+//!   baseline down to a real 0 %-at-surge floor. There is no zero-crossing
+//!   in it that means "this engine has actually surged"; any cutoff picked
+//!   on it (e.g. "below -5 %") would be an invented threshold on a
+//!   quantity that was never built to be compared against one. Left
+//!   unwired for all four engines, not just the one our own alert already
+//!   covers.
+//! * Starter health (`A32NX_ENG_n_STARTER_DISENGAGE_FAULT`,
+//!   `_DISINTEGRATED`, `_OVERHEAT`, `_HOUSING_RISE_K`) is published and
+//!   genuinely modelled, but `ata70.ts` has no procedure that names the
+//!   starter itself -- `701800117`-`701800120` START FAULT and
+//!   `701800121`-`701800128` START VLV FAULT are the only start-sequence
+//!   ids, and both are the "not modelled" start-sequence-supervisor /
+//!   start-valve case above, not a starter-health case these variables
+//!   would answer. No id to wire them to.
 
 use super::{phase, proc, sd_page, FbwProc};
 use crate::deep::api::{all, any, var, Cond, Level};

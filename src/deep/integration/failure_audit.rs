@@ -139,6 +139,9 @@ fn cruise() -> Truth {
         on_ground: false,
         engine_n1_frac: [0.88; 4],
         engine_running: [true; 4],
+        // A healthy engine does not bypass its oil filter; a clogged
+        // one is what the failure under test has to cause.
+        engine_oil_filter_bypassed: [false; 4],
         // Ordinary customer-bleed conditions: about 30 psia / 250 C at the
         // IP8 tap and 120 psia / 430 C at HP6, both well above the ambient
         // a leak discharges into at this altitude.

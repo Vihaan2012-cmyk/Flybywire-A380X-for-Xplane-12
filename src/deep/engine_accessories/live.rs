@@ -631,6 +631,7 @@ struct ChainNames {
     filter_impending_bypass: String,
     filter_bypassed: String,
     filter_dp_pa: String,
+    oil_filter_bypassed: String,
     hp_pump_low_flow: String,
     hp_pump_flow: String,
     lp_pump_outlet_pa: String,
@@ -704,6 +705,7 @@ impl ChainNames {
             filter_impending_bypass: v("FUEL_FILTER_IMPENDING_BYPASS"),
             filter_bypassed: v("FUEL_FILTER_BYPASSED"),
             filter_dp_pa: v("FUEL_FILTER_DP_PA"),
+            oil_filter_bypassed: v("OIL_FILTER_BYPASSED"),
             hp_pump_low_flow: v("HP_PUMP_LOW_FLOW"),
             hp_pump_flow: v("HP_PUMP_FLOW_KG_S"),
             lp_pump_outlet_pa: v("LP_PUMP_OUTLET_PA"),
@@ -908,6 +910,12 @@ struct EngineChain {
     /// Whether this engine was running this frame -- cached because
     /// `publish` does not see `Truth`.
     engine_running: bool,
+    /// Whether the oil filter's own bypass valve is open this frame, cached
+    /// from `Truth::engine_oil_filter_bypassed` (`physics::engine::oil`'s
+    /// `OilState::filter_bypassed`, sourced through `engine_commands.rs`'s
+    /// `ENGINE_OIL_FILTER_BYPASS:n`) for the same reason `engine_running`
+    /// is cached: `publish` does not see `Truth`.
+    oil_filter_bypassed: bool,
 
     // ---- Thrust reverser (ATA 78, engines 2 and 3 only).
     reverser: Option<ReverserUnit>,
@@ -979,6 +987,7 @@ impl EngineChain {
             ventilation_state: VentilationState::default(),
             fire_reading: [FireZoneReading::default(); N_FIRE_ZONES],
             engine_running: false,
+            oil_filter_bypassed: false,
 
             reverser: REVERSER_ENGINES.contains(&n).then(|| ReverserUnit::new(reg, n)),
         }
@@ -1256,6 +1265,7 @@ impl EngineChain {
         let dynamic_pressure_pa = 0.5 * rho * tas * tas;
         let vent_faults = VentilationFaults { scoop_blockage: faults.get(self.nacelle_ids.scoop), eductor_blockage: faults.get(self.nacelle_ids.eductor) };
         self.engine_running = truth.engine_running[eng];
+        self.oil_filter_bypassed = truth.engine_oil_filter_bypassed[eng];
         self.ventilation_state = ventilation::step(dynamic_pressure_pa, self.engine_running, &vent_faults);
 
         // Fire detection: both zones' loops sense the nacelle cowl zone
@@ -1385,6 +1395,7 @@ impl crate::deep::live::Area for EngineAccessoriesLive {
             out(&n.filter_impending_bypass, b(chain.filter.impending_bypass));
             out(&n.filter_bypassed, b(chain.filter.bypassed));
             out(&n.filter_dp_pa, chain.filter.differential_pa);
+            out(&n.oil_filter_bypassed, b(chain.oil_filter_bypassed));
 
             // ---- Fuel pumps.
             out(&n.hp_pump_low_flow, b(chain.hp_pump_low_flow()));

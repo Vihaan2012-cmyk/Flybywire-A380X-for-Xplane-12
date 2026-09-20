@@ -195,6 +195,9 @@ struct EngineIds {
     /// `ENGINE_OIL_QUANTITY_FRACTION:n`, `physics::engine::oil`'s own tank
     /// level (`EngineOutputs::oil_quantity_fraction`).
     oil_quantity_fraction: VariableIdentifier,
+    /// `ENGINE_OIL_FILTER_BYPASS:n`, `engine_commands.rs`'s own write of
+    /// `physics::engine::oil::OilState::filter_bypassed`.
+    oil_filter_bypass: VariableIdentifier,
     /// `ENGINE_EGT_UNTRIMMED:n`: the engine's own *measured* TGT, before
     /// the EEC's display trim -- `engine_commands.rs` writes it beside
     /// `ENGINE_EGT:n` for exactly this reason.
@@ -237,6 +240,7 @@ impl EngineIds {
             oil_pressure_psi: vars.get(format!("GENERAL ENG OIL PRESSURE:{n}")),
             oil_temp_c: vars.get(format!("GENERAL ENG OIL TEMPERATURE:{n}")),
             oil_quantity_fraction: vars.get(format!("ENGINE_OIL_QUANTITY_FRACTION:{n}")),
+            oil_filter_bypass: vars.get(format!("ENGINE_OIL_FILTER_BYPASS:{n}")),
             tgt_measured_c: vars.get(format!("ENGINE_EGT_UNTRIMMED:{n}")),
             tla_deg: vars.get(format!("AUTOTHRUST_TLA:{n}")),
             ip_port_pressure_pa: vars.get(format!("ENGINE_IP_PORT_PRESSURE_PA:{n}")),
@@ -590,6 +594,7 @@ impl DeepLayer {
         let mut engine_oil_pressure_pa = default.engine_oil_pressure_pa;
         let mut engine_oil_temp_c = default.engine_oil_temp_c;
         let mut engine_oil_quantity_fraction = default.engine_oil_quantity_fraction;
+        let mut engine_oil_filter_bypassed = default.engine_oil_filter_bypassed;
         let mut engine_tgt_c = default.engine_tgt_c;
         let mut engine_t25_c = default.engine_t25_c;
         let mut controls = default.controls;
@@ -600,6 +605,7 @@ impl DeepLayer {
             engine_running[i] = vars.read(&e.state) == ENGINE_STATE_ON;
             engine_oil_pressure_pa[i] = vars.read(&e.oil_pressure_psi) * PSI_TO_PA;
             engine_oil_temp_c[i] = vars.read(&e.oil_temp_c);
+            engine_oil_filter_bypassed[i] = vars.read(&e.oil_filter_bypass) != 0.0;
             // Before `engine_commands` has written a frame this reads 0,
             // which would be four engines whose tanks are already dry
             // rather than four nobody has looked at yet: keep the
@@ -799,6 +805,7 @@ impl DeepLayer {
             engine_oil_pressure_pa,
             engine_oil_temp_c,
             engine_oil_quantity_fraction,
+            engine_oil_filter_bypassed,
             engine_tgt_c,
             engine_t25_c,
             // `src/doors.rs`'s own door model writes each interactive

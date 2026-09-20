@@ -78,12 +78,17 @@
 
 use crate::deep::api::{Cond, Level};
 
+pub mod ata21_22_23;
 pub mod ata24;
 pub mod ata26;
+pub mod ata27;
 pub mod ata28;
 pub mod ata29;
+pub mod ata31_33;
 pub mod ata32;
+pub mod ata34;
 pub mod ata70;
+pub mod ata_cheap_wins;
 
 /// FlyByWire's `SdPages` (`fbw-a380x/src/systems/shared/src/
 /// EcamSystemPages.ts`), by the numbers its own comment says nothing may
@@ -252,12 +257,17 @@ impl FbwProc {
 /// Every FlyByWire procedure this port wires, in id order.
 pub fn wirings() -> Vec<FbwProc> {
     let mut v = Vec::new();
+    ata21_22_23::wire(&mut v);
     ata24::wire(&mut v);
     ata26::wire(&mut v);
+    ata27::wire(&mut v);
     ata28::wire(&mut v);
     ata29::wire(&mut v);
+    ata31_33::wire(&mut v);
     ata32::wire(&mut v);
+    ata34::wire(&mut v);
     ata70::wire(&mut v);
+    ata_cheap_wins::wire(&mut v);
     v.sort_by_key(|p| p.id);
     v
 }
