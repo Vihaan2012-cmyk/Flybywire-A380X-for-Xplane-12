@@ -33,6 +33,68 @@ is deleted, and what replaces it (real TypeScript, built by FlyByWire's own
 toolchain) is less code and structurally sounder than what it replaces. That
 is the one place where "port" is the wrong word for "this gets smaller."
 
+## 0a. CHOSEN APPROACH (post-plan): a fifth WASM module, not a port
+
+The body of this document weighs two routes: bring our crate into MSFS
+inside the sandbox (section 7), or run it out of process (7b). A third
+route was found afterwards and is the one to build. It is better than
+both, and most of the constraints the rest of this document reasons about
+do not apply to it.
+
+**MSFS already loads four independent WASM modules for this aircraft.**
+From `SimObjects/AirPlanes/FlyByWire_A380X/attachments/flybywire/Part_Interior_Cockpit/panel/panel.cfg`:
+
+```
+[VCockpit21]
+htmlgauge00=...wasm_module=systems.wasm&wasm_gauge=systems, 0,0,1,1
+htmlgauge01=...wasm_module=fbw.wasm&wasm_gauge=fbw, 0,0,1,1
+htmlgauge02=...wasm_module=fadec-a380x.wasm&wasm_gauge=Gauge_Fadec,0,0,1,1
+htmlgauge03=...wasm_module=extra-backend-a380x.wasm&wasm_gauge=Gauge_Extra_Backend,0,0,1,1
+```
+
+We add a fifth. No fork of their Rust, no replacement of `systems.wasm`,
+no decompilation, no rebasing onto their releases. The two modules talk
+through LVars and simvars, which is exactly the authority inversion
+already built and proven in X-Plane (`docs/deep/authority.md`, 49
+couplings): our model computes the physics and drives their failure
+variables at their resolution.
+
+**Integration is additive, not a patch.** The aircraft uses MSFS's
+modular SimObject system -- `common/`, `attachments/`, `presets/`, with no
+`base_container` anywhere -- and the preset's own `panel.cfg` is nothing
+but `[MODULAR_MERGE] auto = true`. Attachments are auto-discovered and
+merged. So the module is registered by adding one attachment folder
+carrying a `panel.cfg` with a single extra `htmlgauge` line. **No file of
+FlyByWire's is edited.**
+
+One question is still open and worth settling before building: whether
+that attachment folder must sit inside their package directory (so an
+installer writes files into their install, still adding only, never
+editing) or whether a *separate* package can contribute an attachment (so
+the mod is entirely self-contained). Either way the integration is
+additive; the difference is only whether their folder is touched at all.
+
+**What this route costs**, stated plainly, because it is not free:
+
+- Our module influences theirs only through variables. It cannot reach
+  inside their models, so anything we want to override must have a
+  variable they read.
+- Their failure channel is a *set* of active ids with no magnitude (see
+  the RESOLVED note in section 8), so the authority couplings threshold
+  to on/off.
+- We share the frame budget with four other modules, and the output-side
+  question in section 4 -- what it costs to publish thousands of values
+  per frame as LVars -- is unchanged and still unmeasured. **That
+  measurement remains the first thing to do before writing code.**
+
+Sections 1, 2, 3 and 4 (the existing pipeline, how much of our code is
+platform-free, the `Truth` mapping and the output side) all still apply,
+because our module is still a Rust WASM module built the way theirs are.
+Sections 5, 6 and 7 are written for a route we are no longer taking: the
+ECAM/ECL bridge and the EFB pages become ordinary TypeScript work in
+their repo, and persistence is a question for whatever hosts our
+catalogue, not for the sandbox.
+
 ## 0. Method
 
 Every count in this document was produced by one of:
