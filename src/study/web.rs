@@ -418,6 +418,7 @@ pub(crate) fn components_json() -> String {
         .map(|c| {
             json!({
                 "component": c.component,
+                "chapter": component_chapter(&c.component),
                 "param": c.spec.name,
                 "unit": c.spec.unit,
                 "healthy": c.spec.healthy,
@@ -447,7 +448,7 @@ pub(crate) fn components_json() -> String {
                 "component": c.id,
                 "area": format!("{:?}", c.area),
                 "ata": c.ata,
-                "chapter": failures::chapter(u64::from(c.ata)),
+                "chapter": failures::chapter(u64::from(c.ata)).to_string(),
                 "componentName": c.name,
                 "param": param.name,
                 "healthy": param.healthy,
@@ -458,6 +459,30 @@ pub(crate) fn components_json() -> String {
         }
     }
     json!({ "components": list }).to_string()
+}
+
+/// The ATA chapter a component id belongs to, for grouping.
+///
+/// Component ids carry their chapter as a numeric prefix (`24_elec.vfg-1`,
+/// `73_fuel.flow_transmitter_1`), which is the only thing in them that
+/// means the same across every area -- the short area name after it
+/// (`elec`, `hyd`) is an internal tag, not something to show a pilot.
+/// Anything without one groups by its own head word instead.
+fn component_chapter(id: &str) -> String {
+    let head = id.split('.').next().unwrap_or(id);
+    if let Some((digits, _)) = head.split_once('_') {
+        if let Ok(ata) = digits.parse::<u64>() {
+            let named = failures::chapter(failures::ata_of(ata * 1_000));
+            if named != "Other" {
+                return named.to_string();
+            }
+        }
+    }
+    let mut c = head.replace('_', " ");
+    if let Some(first) = c.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    c
 }
 
 /// Every component the `deep` areas register, built once.

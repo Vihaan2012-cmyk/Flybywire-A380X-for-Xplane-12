@@ -1162,6 +1162,13 @@ struct State {
     /// larger of this and its armed magnitude, so a component degraded in
     /// the Components tab drives the same physics as the failure itself.
     component_levels: std::collections::BTreeMap<u64, f64>,
+    /// What `deep::live`'s areas concluded this frame about components
+    /// FlyByWire also models (`docs/deep/authority.md` level 2). A third
+    /// source alongside the crew's own arming and the components system,
+    /// combined the same way: a failure acts at the largest of the three,
+    /// so a derived failure can never clear one the crew armed, and the
+    /// crew can never hide one the deep model is presently concluding.
+    derived_levels: std::collections::BTreeMap<u64, f64>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -1170,6 +1177,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     magnitudes: std::collections::BTreeMap::new(),
     dirty: true,
     component_levels: std::collections::BTreeMap::new(),
+    derived_levels: std::collections::BTreeMap::new(),
 });
 
 impl State {
@@ -1177,12 +1185,32 @@ impl State {
     fn effective(&self) -> BTreeSet<u64> {
         let mut set = self.active.clone();
         set.extend(self.component_levels.keys().copied());
+        set.extend(self.derived_levels.keys().copied());
         set
     }
 }
 
 /// The components system's combined loss per failure (`components.rs`,
 /// after every recompute). Marks the set changed when it differs.
+/// The deep areas' level-2 verdicts (`deep::live::Deep::derived_magnitudes`),
+/// after every tick. Marks the set changed when the *ids* differ, matching
+/// `set_component_levels`: a magnitude that merely moves is read fresh by
+/// `magnitude()` and needs no re-apply.
+///
+/// Deliberately separate from `active`/`magnitudes`: a derived failure is
+/// the deep model's present conclusion, not something the crew armed, so
+/// it must never be written to the save file as though it were, and must
+/// clear the moment the model stops concluding it.
+pub fn set_derived_levels(levels: std::collections::BTreeMap<u64, f64>) {
+    with_state(|s| {
+        if s.derived_levels != levels {
+            let keys_changed = !s.derived_levels.keys().eq(levels.keys());
+            s.derived_levels = levels;
+            s.dirty |= keys_changed;
+        }
+    });
+}
+
 pub fn set_component_levels(levels: std::collections::BTreeMap<u64, f64>) {
     with_state(|s| {
         if s.component_levels != levels {
@@ -1266,6 +1294,7 @@ pub fn reset_for_tests() {
         s.active.clear();
         s.magnitudes.clear();
         s.component_levels.clear();
+        s.derived_levels.clear();
         s.dirty = true;
     });
 }
@@ -1279,7 +1308,8 @@ pub fn reset_for_tests() {
 /// Active means `magnitude(id) > 0.0`; every existing consumer of this
 /// binary reading keeps working unchanged under the continuous model.
 pub fn is_active(id: u64) -> bool {
-    with_state(|s| s.active.contains(&id) || s.component_levels.contains_key(&id)).unwrap_or(false)
+    with_state(|s| s.active.contains(&id) || s.component_levels.contains_key(&id) || s.derived_levels.contains_key(&id))
+        .unwrap_or(false)
 }
 
 /// Activate `id` at a continuous magnitude in `0.0..=1.0` -- a physical
@@ -1317,7 +1347,7 @@ pub fn set_magnitude(id: u64, magnitude: f64) {
 pub fn magnitude(id: u64) -> f64 {
     with_state(|s| {
         let armed = if s.active.contains(&id) { s.magnitudes.get(&id).copied().unwrap_or(1.0) } else { 0.0 };
-        armed.max(s.component_levels.get(&id).copied().unwrap_or(0.0))
+        armed.max(s.component_levels.get(&id).copied().unwrap_or(0.0)).max(s.derived_levels.get(&id).copied().unwrap_or(0.0))
     })
     .unwrap_or(0.0)
 }
@@ -1402,6 +1432,7 @@ pub fn reset_all() {
         s.active.clear();
         s.magnitudes.clear();
         s.component_levels.clear();
+        s.derived_levels.clear();
         s.dirty = true;
     });
 }

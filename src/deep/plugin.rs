@@ -745,6 +745,20 @@ impl DeepLayer {
             at += in_step as usize;
             vars.write(&id, value);
         });
+
+        // Level 2 of `docs/deep/authority.md`: where a deep area has
+        // concluded that a component FlyByWire *also* models has failed,
+        // tell FlyByWire's own failure system so its coarse solve follows.
+        // That is what makes the deep models the aircraft rather than a
+        // commentary on it -- nothing inside `a380_systems` reads the
+        // variables we publish, but it does read its own failures.
+        //
+        // A level, re-stated every frame, never an event: an area emits
+        // its whole coupling table with the healthy entries at zero, so a
+        // component that recovers clears itself. Kept apart from the
+        // crew's own arming, so a derived failure is never saved to the
+        // airframe file as though a pilot had armed it.
+        crate::failures::set_derived_levels(deep.derived_magnitudes());
     }
 }
 
