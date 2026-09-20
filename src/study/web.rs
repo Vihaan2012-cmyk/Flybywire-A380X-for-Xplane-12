@@ -275,8 +275,8 @@ pub(crate) fn failures_json() -> String {
             json!({
                 "id": id,
                 "name": crate::failures::any_failure_name(id),
-                "ata": id / 1000,
-                "chapter": failures::chapter(id / 1000),
+                "ata": failures::ata_of(id),
+                "chapter": failures::chapter(failures::ata_of(id)),
                 "active": active.contains(&id),
                 "cause": crate::failures::cause_description(id),
                 "affectedComponents": crate::failures::affected_components(id),
@@ -351,7 +351,7 @@ pub(crate) fn maintenance_json() -> String {
             json!({
                 "id": id,
                 "name": name,
-                "ata": id / 1000,
+                "ata": failures::ata_of(id),
                 "magnitude": crate::failures::magnitude(id),
                 "cause": crate::failures::cause_description(id),
                 "genericCategory": crate::failures::mel_item(id).map(|c| c.label()),

@@ -9,23 +9,68 @@ use super::canvas::{palette as p, Action, Canvas};
 use crate::xp::FONT_BASIC;
 
 /// ATA chapter names for the failure ids' thousands (FlyByWire's EFB groups
-/// failures the same way, by `id / 1000`); also the web Study tab's grouping.
+/// failures the same way); also the web Study tab's grouping. See
+/// [`ata_of`] for why a deep id's chapter is not simply `id / 1000`.
 pub(super) fn chapter(ata: u64) -> &'static str {
     match ata {
+        20 => "20 Standard Practices",
         21 => "21 Air Conditioning and Pressurisation",
         22 => "22 Auto Flight",
+        23 => "23 Communications",
         24 => "24 Electrical Power",
+        25 => "25 Equipment and Furnishings",
         26 => "26 Fire Protection",
         27 => "27 Flight Controls",
         28 => "28 Fuel",
         29 => "29 Hydraulic Power",
+        30 => "30 Ice and Rain Protection",
         31 => "31 Indicating and Recording",
         32 => "32 Landing Gear",
+        33 => "33 Lights",
         34 => "34 Navigation",
+        35 => "35 Oxygen",
         36 => "36 Pneumatic",
+        38 => "38 Water and Waste",
+        42 => "42 Integrated Modular Avionics",
+        44 => "44 Cabin Systems",
+        45 => "45 Onboard Maintenance",
+        46 => "46 Information Systems",
         49 => "49 Airborne Auxiliary Power",
-        70..=80 => "70 Engines",
+        52 => "52 Doors",
+        53 => "53 Fuselage",
+        56 => "56 Windows",
+        57 => "57 Wings",
+        71 => "71 Power Plant",
+        72 => "72 Engine",
+        73 => "73 Engine Fuel and Control",
+        74 => "74 Ignition",
+        75 => "75 Engine Air",
+        76 => "76 Engine Controls",
+        77 => "77 Engine Indicating",
+        78 => "78 Exhaust",
+        79 => "79 Engine Oil",
+        80 => "80 Starting",
+        91 => "91 Charts",
+        92 => "92 Electrical Installation",
+        70 => "70 Engines",
         _ => "Other",
+    }
+}
+
+/// The ATA chapter an id belongs to, across both id schemes.
+///
+/// FlyByWire's own ids and this crate's extra catalogue put the chapter in
+/// the thousands (`24_000` is ATA 24). `deep::api` ids are area-coded --
+/// `area * 1_000_000 + ata * 1_000 + n`, which `Registry::failure` checks
+/// on registration -- so their chapter is the *middle* three digits.
+/// Reading a deep id the old way gives `11_026` for a thermal-zone fire
+/// failure, which is no chapter at all, and every one of the several
+/// thousand deep failures lands in "Other".
+pub(crate) fn ata_of(id: u64) -> u64 {
+    if id >= 1_000_000 {
+        id / 1_000 % 1_000
+    } else {
+        id / 1_000
     }
 }
 
@@ -38,7 +83,7 @@ pub fn draw(cv: &mut Canvas, scroll: c_int) -> c_int {
     let ids = crate::failures::all_ids();
     let mut chapters: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
     for id in ids {
-        chapters.entry(chapter(id / 1000)).or_default().push(id);
+        chapters.entry(chapter(ata_of(id))).or_default().push(id);
     }
 
     // Header band: how many are armed, and a button clearing them all.
@@ -77,4 +122,41 @@ pub fn draw(cv: &mut Canvas, scroll: c_int) -> c_int {
         height += 6;
     }
     (height - (band_b - b)).max(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every catalogued failure lands in a real ATA chapter.
+    ///
+    /// The deep catalogue's several thousand failures are area-coded, so
+    /// reading their chapter the old way (`id / 1000`) put every one of
+    /// them in "Other" -- a Study page with one enormous unnamed group.
+    #[test]
+    fn every_catalogued_failure_falls_in_a_named_chapter() {
+        let ids = crate::failures::all_ids();
+        assert!(ids.len() > 4_000, "the deep catalogue should be in here: {}", ids.len());
+
+        let mut other: Vec<u64> = Vec::new();
+        for id in &ids {
+            if chapter(ata_of(*id)) == "Other" {
+                other.push(*id);
+            }
+        }
+        assert!(other.is_empty(), "{} failures have no named chapter, e.g. {:?}", other.len(), &other[..other.len().min(10)]);
+    }
+
+    /// The two id schemes put the chapter in different places.
+    #[test]
+    fn a_deep_ids_chapter_is_its_middle_digits_and_a_legacy_ids_is_its_thousands() {
+        // FlyByWire's own: ATA 24, electrical.
+        assert_eq!(ata_of(24_000), 24);
+        assert_eq!(chapter(ata_of(24_000)), "24 Electrical Power");
+        // Deep: area 11 (thermal zones), ATA 26, eighth failure.
+        assert_eq!(ata_of(11_026_008), 26);
+        assert_eq!(chapter(ata_of(11_026_008)), "26 Fire Protection");
+        // Read the old way that id gives 11_026, which is not a chapter.
+        assert_eq!(chapter(11_026_008 / 1000), "Other");
+    }
 }

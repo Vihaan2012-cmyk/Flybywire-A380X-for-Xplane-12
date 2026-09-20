@@ -57,6 +57,7 @@ pub fn registry() -> api::Registry {
 
 #[cfg(test)]
 mod tests {
+
     #[test]
     fn every_area_registers_together_without_collisions_or_dangling_references() {
         let r = super::registry();
