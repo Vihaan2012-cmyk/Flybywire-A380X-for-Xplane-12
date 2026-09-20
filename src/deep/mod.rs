@@ -41,6 +41,12 @@ pub fn registry() -> api::Registry {
     sensors::registry::register(&mut r);
     thermal_zones::registry::register(&mut r);
     wiring::registry::register(&mut r);
+    // One flight-deck warning, one catalogue entry: an area that models a
+    // further cause for an alert another area owns, or another side of a
+    // component another area owns, registers a contribution instead of a
+    // second copy, and this folds them in. Nothing may read the registry
+    // before it runs.
+    r.resolve();
     r
 }
 

@@ -475,7 +475,13 @@ fn register_ecam(r: &mut Registry) {
         );
     }
     r.alert(
+        // This area owns the one APU FIRE warning. Two further causes are
+        // contributed to it: the APU's own detection loop (`apu::registry`)
+        // and the APU compartment running away thermally
+        // (`thermal_zones::registry`). The APU is shut down before the
+        // bottle is fired, so the agent meets a stopped, unfuelled APU.
         EcamAlert::new("APU_FIRE", ATA_FIRE_PROTECTION, "APU FIRE", Level::Warning, var("FIRE_DETECTED_APU").on())
+            .step(line("APU MASTER SW", "OFF").done(var("OVHD_APU_MASTER_SW_PB_IS_ON").off()))
             .step(line("APU FIRE PB", "PUSH").done(var("FIRE_BUTTON_APU").on()))
             .step(line("AGENT", "DISCH").only_if(var("FIRE_BUTTON_APU").on()).done(var("FIRE_SQUIB_1_APU_1_IS_DISCHARGED").on()).after(1.0))
             .inop_sys("APU")
@@ -488,11 +494,29 @@ fn register_ecam(r: &mut Registry) {
     );
 
     // -- Cargo smoke (level 3, red on the A380) --
-    for (bay, title) in [("fwd", "CARGO SMOKE FWD"), ("aft", "CARGO SMOKE AFT")] {
+    //
+    // This area owns the three cargo smoke warnings; `thermal_zones`
+    // contributes the physical trigger (a bay's modelled smoke
+    // concentration passing what the detectors see) and its own failures,
+    // through `Registry::contribute`. All three of the A380's holds are
+    // here: forward, aft and bulk.
+    //
+    // The two-second confirmation and the take-off inhibit are the
+    // detectors' own: a smoke warning is not annunciated on a single
+    // sample, and CS-25 inhibits level-3 warnings through lift-off and
+    // above 80 kt so nothing draws the crew off the roll.
+    for (bay, title) in [("fwd", "CARGO SMOKE FWD"), ("aft", "CARGO SMOKE AFT"), ("bulk", "CARGO SMOKE BULK")] {
+        let up = bay.to_uppercase();
         r.alert(
-            EcamAlert::new(&format!("CARGO_SMOKE_{}", bay.to_uppercase()), ATA_FIRE_PROTECTION, title, Level::Warning, var(&format!("CARGO_{}_SMOKE_DETECTED", bay.to_uppercase())).on())
-                .step(line(&format!("CARGO {} FIRE AGENT", bay.to_uppercase()), "PUSH").done(var(&format!("CARGO_{}_SUPPRESSION_ARMED", bay.to_uppercase())).on()))
-                .status_line("Suppression: high-rate knockdown then metered discharge for the extended diversion time (14 CFR/EASA CS-25.858)"),
+            EcamAlert::new(&format!("CARGO_SMOKE_{up}"), ATA_FIRE_PROTECTION, title, Level::Warning, var(&format!("CARGO_{up}_SMOKE_DETECTED")).on())
+                .confirm(2.0)
+                .inhibit(&[Phase::LiftOff, Phase::Above80Kt])
+                .step(line("CARGO HEAT", "OFF").done(var(&format!("CARGO_HEAT_SW:{up}")).off()))
+                .step(line("CARGO VENT SYS", "OFF").done(var("CARGO_VENT_SYS_SW").off()).after(5.0))
+                .step(line(&format!("CARGO {up} FIRE AGENT"), "PUSH").done(var(&format!("CARGO_{up}_SUPPRESSION_ARMED")).on()))
+                .status_line("LAND ASAP")
+                .status_line("Suppression: high-rate knockdown then metered discharge for the extended diversion time (14 CFR/EASA CS-25.858)")
+                .inop_sys("CARGO COMPT"),
         );
     }
 

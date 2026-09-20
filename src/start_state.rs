@@ -436,21 +436,54 @@ mod tests {
         use a380_systems::A380;
         use systems::simulation::Simulation;
 
+        /// Is this variable an ARINC 429 word FlyByWire packed into a
+        /// variable (`Arinc429Utils::toSimVar`, `prim::to_simvar`), rather
+        /// than a plain engineering-unit reading?
+        ///
+        /// There is no type information left by the time a word reaches a
+        /// variable -- `toSimVar` writes `(f32 bits | SSM << 32) as f64`,
+        /// so a word arrives as a whole number, and nothing in the name
+        /// marks it. What does distinguish it is its magnitude: the bit
+        /// pattern of any normal f32 is at least 2^23 (0x00800000), and
+        /// every packed word is therefore a non-negative integer of at
+        /// least that size, while no reading this harness bounds
+        /// (temperatures and pressures in C/psi/Pa, percentages) is ever an
+        /// exact whole number in the millions without already being a
+        /// runaway. So: a non-negative integral value of 2^23 or more is a
+        /// word, and its *payload* is what gets checked below.
+        fn arinc429_payload(v: f64) -> Option<crate::fbw_types::BaseArinc429> {
+            if v < 8_388_608.0 || v.fract() != 0.0 {
+                return None;
+            }
+            Some(crate::prim::from_simvar(v))
+        }
+
         fn check_every_variable(vars: &TestVars, phase: &str) {
             for (name, &i) in &vars.index {
-                let v = vars.values[i];
-                assert!(v.is_finite(), "{phase}: {name} is {v} (not finite)");
+                let raw = vars.values[i];
+                assert!(raw.is_finite(), "{phase}: {name} is {raw} (not finite)");
                 let upper = name.to_ascii_uppercase();
-                // ARINC429-encoded words (raw SSM+data bit patterns, e.g.
-                // `APU_EGT_CAUTION`/`APU_EGT_WARNING`'s threshold words) are
-                // not engineering-unit values at all, so the shape-by-name
-                // heuristics below would misread their encoded bit pattern
-                // as, say, a temperature in the billions; skip them.
-                let is_ratio_or_ssm = upper.contains("_SSM")
-                    || upper.contains("RATIO")
-                    || upper.contains("NORMAL")
-                    || upper.contains("CAUTION")
-                    || upper.contains("WARNING");
+                // An ARINC 429 word is checked through its decoded payload,
+                // not its bit pattern -- and only when its SSM says the
+                // payload means anything. With SSM FailureWarning or
+                // NoComputedData (an unpowered ADR on a cold aircraft, say,
+                // publishing -273.15 C as its "no data" filler) the payload
+                // is deliberately not a reading, so all that is required of
+                // it is that it be finite.
+                let (v, payload_is_meaningful) = match arinc429_payload(raw) {
+                    Some(word) => {
+                        assert!(word.Data.is_finite(), "{phase}: {name} carries a non-finite ARINC429 payload {}", word.Data);
+                        (word.Data as f64, word.SSM == crate::prim::SSM_NO || word.SSM == crate::prim::SSM_FT)
+                    }
+                    None => (raw, true),
+                };
+                if !payload_is_meaningful {
+                    continue;
+                }
+                // `*_SSM` variables carry a sign-status word on its own and
+                // ratios are dimensionless, so neither is a reading in the
+                // units the shape-by-name checks below assume.
+                let is_ratio_or_ssm = upper.contains("_SSM") || upper.contains("RATIO");
                 if (upper.contains("TEMP") || upper.contains("EGT")) && !is_ratio_or_ssm {
                     // Celsius, generous either side of anything an engine,
                     // APU, brake or cabin could show cold or lit.

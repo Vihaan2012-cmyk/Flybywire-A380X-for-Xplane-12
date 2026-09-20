@@ -368,7 +368,160 @@ pub struct Registry {
     pub failures: Vec<FailureDef>,
     pub components: Vec<ComponentDef>,
     pub alerts: Vec<EcamAlert>,
+    pub contributions: Vec<AlertContribution>,
+    pub extensions: Vec<ComponentExtension>,
     pub errors: Vec<String>,
+}
+
+/// A further cause for an alert another area owns.
+///
+/// One warning on the flight deck can have causes spread across several of
+/// the areas in this directory: APU FIRE is announced by the fire
+/// protection system (`fire_ice`, ATA 26), but the APU's own fire loop
+/// (`apu`) and the APU compartment running away thermally
+/// (`thermal_zones`) are both real ways to reach it. Only one area may own
+/// an alert -- the one that announces it, so the crew sees one title, one
+/// procedure and one catalogue entry -- and the others contribute their
+/// trigger and their failures with `Registry::contribute`. `resolve` then
+/// ORs the triggers together and unions the failure lists, so a cause
+/// modelled anywhere raises the one alert.
+#[derive(Clone, Debug)]
+pub struct AlertContribution {
+    pub key: String,
+    /// A further way to reach the alert, ORed with the owner's trigger.
+    pub trigger: Option<Cond>,
+    /// Failures in the contributing area that can raise it.
+    pub failures: Vec<u64>,
+}
+
+/// Further parameters and failures for a component another area owns.
+///
+/// One physical unit can be modelled from two sides: the engine fuel flow
+/// transmitter is a rotor in the fuel line (bearing wear, debris, seizure
+/// -- `sensors`) *and* a pair of electrical pick-offs reading that rotor
+/// (channel bias, channel freeze -- `engine_accessories`). Both are real,
+/// neither is a duplicate of the other, and the crew sees one transmitter.
+/// So one area owns the component and the other extends it with
+/// `Registry::extend_component`; `resolve` merges the parameters and
+/// failures into the owner's entry.
+#[derive(Clone, Debug)]
+pub struct ComponentExtension {
+    pub id: String,
+    pub params: Vec<ParamDef>,
+    pub failures: Vec<u64>,
+}
+
+/// `r.extend_component("73_fuel.flow_transmitter_1").params(&[..]).failures(&[..])`
+pub struct Extension<'a> {
+    registry: &'a mut Registry,
+    inner: ComponentExtension,
+}
+
+impl Extension<'_> {
+    pub fn params(mut self, p: &[ParamDef]) -> Self {
+        self.inner.params.extend_from_slice(p);
+        self
+    }
+
+    pub fn failures(mut self, ids: &[u64]) -> Self {
+        self.inner.failures.extend_from_slice(ids);
+        self
+    }
+}
+
+impl Drop for Extension<'_> {
+    fn drop(&mut self) {
+        let inner = ComponentExtension { id: std::mem::take(&mut self.inner.id), params: std::mem::take(&mut self.inner.params), failures: std::mem::take(&mut self.inner.failures) };
+        self.registry.extensions.push(inner);
+    }
+}
+
+/// `r.contribute("APU_FIRE").when(var("APU_FIRE_LOOP_DETECTED").on()).raised_by(&[loop_failure])`
+pub struct Contribution<'a> {
+    registry: &'a mut Registry,
+    inner: AlertContribution,
+}
+
+impl Contribution<'_> {
+    pub fn when(mut self, c: Cond) -> Self {
+        self.inner.trigger = Some(match self.inner.trigger.take() {
+            Some(Cond::Or(mut v)) => {
+                v.push(c);
+                Cond::Or(v)
+            }
+            Some(first) => Cond::Or(vec![first, c]),
+            None => c,
+        });
+        self
+    }
+
+    pub fn raised_by(mut self, ids: &[u64]) -> Self {
+        self.inner.failures.extend_from_slice(ids);
+        self
+    }
+}
+
+impl Drop for Contribution<'_> {
+    fn drop(&mut self) {
+        let inner = AlertContribution { key: std::mem::take(&mut self.inner.key), trigger: self.inner.trigger.take(), failures: std::mem::take(&mut self.inner.failures) };
+        self.registry.contributions.push(inner);
+    }
+}
+
+impl Registry {
+    /// Add a cause to an alert another area owns; see `AlertContribution`.
+    pub fn contribute(&mut self, key: &str) -> Contribution<'_> {
+        Contribution { registry: self, inner: AlertContribution { key: key.to_string(), trigger: None, failures: Vec::new() } }
+    }
+
+    /// Model another side of a component another area owns; see
+    /// `ComponentExtension`.
+    pub fn extend_component(&mut self, id: &str) -> Extension<'_> {
+        Extension { registry: self, inner: ComponentExtension { id: id.to_string(), params: Vec::new(), failures: Vec::new() } }
+    }
+
+    /// Folds every contribution and component extension into the area that
+    /// owns it. Call once after every area has registered and before
+    /// `validate`.
+    pub fn resolve(&mut self) {
+        for extension in std::mem::take(&mut self.extensions) {
+            let Some(component) = self.components.iter_mut().find(|c| c.id == extension.id) else {
+                self.errors.push(format!("extension of unknown component {}", extension.id));
+                continue;
+            };
+            for p in extension.params {
+                if !component.params.iter().any(|existing| existing.name == p.name) {
+                    component.params.push(p);
+                }
+            }
+            for id in extension.failures {
+                if !component.failures.contains(&id) {
+                    component.failures.push(id);
+                }
+            }
+        }
+        for contribution in std::mem::take(&mut self.contributions) {
+            let Some(alert) = self.alerts.iter_mut().find(|a| a.key == contribution.key) else {
+                self.errors.push(format!("contribution to unknown ECAM alert {}", contribution.key));
+                continue;
+            };
+            if let Some(extra) = contribution.trigger {
+                let owned = std::mem::replace(&mut alert.trigger, Cond::Always);
+                alert.trigger = match owned {
+                    Cond::Or(mut v) => {
+                        v.push(extra);
+                        Cond::Or(v)
+                    }
+                    first => Cond::Or(vec![first, extra]),
+                };
+            }
+            for id in contribution.failures {
+                if !alert.failures.contains(&id) {
+                    alert.failures.push(id);
+                }
+            }
+        }
+    }
 }
 
 impl Registry {
@@ -402,6 +555,12 @@ impl Registry {
     /// exists, every alert's failures exist.
     pub fn validate(&self) -> Vec<String> {
         let mut e = self.errors.clone();
+        for c in &self.contributions {
+            e.push(format!("contribution to {} was never resolved (call Registry::resolve before validate)", c.key));
+        }
+        for x in &self.extensions {
+            e.push(format!("extension of {} was never resolved (call Registry::resolve before validate)", x.id));
+        }
         for f in &self.failures {
             if !self.components.iter().any(|c| c.id == f.component) {
                 e.push(format!("failure {} names unknown component {}", f.id, f.component));

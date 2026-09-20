@@ -377,14 +377,12 @@ pub fn register(r: &mut Registry) {
             .raised_by(&[oil_leak]),
     );
 
-    r.alert(
-        EcamAlert::new("APU_FIRE", ATA, "APU FIRE", Level::Warning, var("APU_FIRE_LOOP_DETECTED").on())
-            .step(line("APU MASTER SW", "OFF").done(var("OVHD_APU_MASTER_SW_PB_IS_ON").off()))
-            .step(line("APU FIRE PB", "PUSH").done(var("APU_FIRE_BOTTLE_DISCHARGED").on()).after(1.0))
-            .status_line("APU FIRE")
-            .inop_sys("APU")
-            .raised_by(&[fire_loop_failure, fire_squib_failure]),
-    );
+    // APU FIRE is announced by the fire protection system, which owns the
+    // single alert (`fire_ice::registry`, ATA 26, with the real fire
+    // pushbutton and squib variables and the full procedure). The APU's own
+    // detection loop is a further way to reach it, contributed here rather
+    // than declared as a competing second alert of the same name.
+    r.contribute("APU_FIRE").when(var("APU_FIRE_LOOP_DETECTED").on()).raised_by(&[fire_loop_failure, fire_squib_failure]);
 
     r.alert(
         EcamAlert::new("APU_BLEED_FAULT", ATA, "APU BLEED FAULT", Level::Caution, var("APU_LOAD_COMPRESSOR_SURGE").on())

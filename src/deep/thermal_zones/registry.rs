@@ -346,22 +346,19 @@ fn register_insulation_failures(r: &mut Registry) {
 // ---------------------------------------------------------------------------
 
 fn register_ecam_alerts(r: &mut Registry) {
+    // Cargo smoke is announced by the fire protection system, which owns
+    // the three alerts (`fire_ice::registry`, ATA 26, carrying the
+    // detection loops, the confirmation time, the take-off inhibit and the
+    // suppression procedure). What this area adds is the physical side: a
+    // bay's smoke concentration rising from a fire or an overheat modelled
+    // here, at the same 2e-4 kg/m3 the detectors see.
     let cargo = [
-        ("CARGO_SMOKE_FWD", "CARGO SMOKE FWD", "THERMAL_ZONE_CARGOFWD_SMOKE_CONCENTRATION", "CARGO_HEAT_SW:FWD", 1u16),
-        ("CARGO_SMOKE_AFT", "CARGO SMOKE AFT", "THERMAL_ZONE_CARGOAFT_SMOKE_CONCENTRATION", "CARGO_HEAT_SW:AFT", 2u16),
-        ("CARGO_SMOKE_BULK", "CARGO SMOKE BULK", "THERMAL_ZONE_CARGOBULK_SMOKE_CONCENTRATION", "CARGO_HEAT_SW:BULK", 3u16),
+        ("CARGO_SMOKE_FWD", "THERMAL_ZONE_CARGOFWD_SMOKE_CONCENTRATION", 1u16),
+        ("CARGO_SMOKE_AFT", "THERMAL_ZONE_CARGOAFT_SMOKE_CONCENTRATION", 2u16),
+        ("CARGO_SMOKE_BULK", "THERMAL_ZONE_CARGOBULK_SMOKE_CONCENTRATION", 3u16),
     ];
-    for (key, title, smoke_var, heat_sw_var, fnum) in cargo {
-        r.alert(
-            EcamAlert::new(key, 26, title, Level::Warning, var(smoke_var).gt(0.0002))
-                .confirm(2.0)
-                .inhibit(&[Phase::LiftOff, Phase::Above80Kt])
-                .step(line("CARGO HEAT", "OFF").done(var(heat_sw_var).off()))
-                .step(line("CARGO VENT SYS", "OFF").done(var("CARGO_VENT_SYS_SW").off()).after(5.0))
-                .status_line("LAND ASAP")
-                .inop_sys("CARGO COMPT")
-                .raised_by(&[failure_id(Area::ThermalZones, 26, fnum)]),
-        );
+    for (key, smoke_var, fnum) in cargo {
+        r.contribute(key).when(var(smoke_var).gt(0.0002)).raised_by(&[failure_id(Area::ThermalZones, 26, fnum)]);
     }
 
     for engine in 1..=4u64 {
@@ -382,16 +379,10 @@ fn register_ecam_alerts(r: &mut Registry) {
         );
     }
 
-    r.alert(
-        EcamAlert::new("APU_FIRE", 26, "APU FIRE", Level::Warning, var("THERMAL_ZONE_APUCOMPARTMENT_TEMPERATURE_C").gt(250.0))
-            .confirm(1.0)
-            .step(line("APU MASTER SW", "OFF").done(var("APU_MASTER_SW").off()))
-            .step(line("APU FIRE PB", "PUSH").done(var("APU_FIRE_PB_PUSHED").on()).after(2.0))
-            .step(line("APU FIRE EXTINGUISHER", "DISCH").done(var("APU_FIRE_EXTINGUISHER_DISCHARGED").on()).after(2.0))
-            .status_line("APU INOP")
-            .inop_sys("APU")
-            .raised_by(&[failure_id(Area::ThermalZones, 26, 8)]),
-    );
+    // The APU compartment running away past 250 C is a third way to reach
+    // the one APU FIRE warning `fire_ice::registry` owns (the APU's own
+    // detection loop is the second, contributed from `apu::registry`).
+    r.contribute("APU_FIRE").when(var("THERMAL_ZONE_APUCOMPARTMENT_TEMPERATURE_C").gt(250.0)).raised_by(&[failure_id(Area::ThermalZones, 26, 8)]);
 
     r.alert(
         EcamAlert::new("APU_COMPT_OVHT", 49, "APU COMPT OVHT", Level::Caution, var("THERMAL_ZONE_APUCOMPARTMENT_TEMPERATURE_C").gt(120.0))

@@ -85,16 +85,10 @@ struct FaultSpec {
 /// for `EcamAlert::raised_by`. `extra_params` adds component parameters
 /// that are not faults in their own right (e.g. a documented GENERIC probe
 /// count).
-fn register_instance(
-    r: &mut Registry,
-    counter: &mut Counter,
-    ata: u16,
-    id: &str,
-    name: &str,
-    model_path: &str,
-    faults: &[FaultSpec],
-    extra_params: &[ParamDef],
-) -> Vec<u64> {
+/// Registers one instance's failures against a component id without
+/// registering the component itself -- for a device another area owns (see
+/// `Registry::extend_component`).
+fn register_failures_only(r: &mut Registry, counter: &mut Counter, ata: u16, id: &str, name: &str, model_path: &str, faults: &[FaultSpec]) -> Vec<u64> {
     let mut ids = Vec::with_capacity(faults.len());
     for f in faults {
         let fid = failure_id(Area::Sensors, ata, counter.next());
@@ -110,6 +104,20 @@ fn register_instance(
         });
         ids.push(fid);
     }
+    ids
+}
+
+fn register_instance(
+    r: &mut Registry,
+    counter: &mut Counter,
+    ata: u16,
+    id: &str,
+    name: &str,
+    model_path: &str,
+    faults: &[FaultSpec],
+    extra_params: &[ParamDef],
+) -> Vec<u64> {
+    let ids = register_failures_only(r, counter, ata, id, name, model_path, faults);
     let mut params: Vec<ParamDef> = faults
         .iter()
         .map(|f| ParamDef { name: f.field.to_string(), meaning: f.meaning.to_string(), healthy: f.healthy })
@@ -590,10 +598,19 @@ fn register_engine_fuel_flow(r: &mut Registry, c: &mut Counter) {
         FaultSpec { field: "debris_blockage", name: "debris partial blockage", magnitude: "0 none .. 1 fully blocked", effect: "less flow reaches the rotor than the engine actually burns, the meter under-reads (distinct cause from bearing wear)", healthy: 0.0, meaning: "Flow blockage fraction upstream of the rotor" },
         FaultSpec { field: "stuck_rotor", name: "stuck rotor", magnitude: "0 healthy .. 1 (>=0.98 seized)", effect: "reads zero/fixed regardless of true flow", healthy: 0.0, meaning: "Rotor seizure fraction" },
     ];
+    // The transmitter is one device modelled from two sides: the rotor in
+    // the fuel line is here, and its pair of electrical pick-offs is in
+    // `engine_accessories` (`fuel::flow_transmitter`), which owns the
+    // component entry. These rotor faults extend that entry instead of
+    // registering a second component of the same name -- the crew has one
+    // transmitter per engine, and the catalogue must show one.
     for engine in 1..=4 {
         let id = format!("73_fuel.flow_transmitter_{engine}");
         let name = format!("Engine {engine} fuel flow transmitter");
-        register_instance(r, c, 73, &id, &name, "engine_sensors::fuel_flow_transmitter_reading", &faults, &[]);
+        let ids = register_failures_only(r, c, 73, &id, &name, "engine_sensors::fuel_flow_transmitter_reading", &faults);
+        let params: Vec<ParamDef> =
+            faults.iter().map(|f| ParamDef { name: f.field.to_string(), meaning: f.meaning.to_string(), healthy: f.healthy }).collect();
+        r.extend_component(&id).params(&params).failures(&ids);
     }
 }
 

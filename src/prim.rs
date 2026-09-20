@@ -257,9 +257,9 @@ pub fn ils_bus(nav: &NavSimData, ls_course_deg: f64) -> BaseIlsBus {
 // ARINC 429 words as FlyByWire packs them into variables (Arinc429Utils.cpp).
 // ---------------------------------------------------------------------------
 
-const SSM_NCD: u32 = 1;
-const SSM_NO: u32 = 3;
-const SSM_FT: u32 = 2;
+pub const SSM_NCD: u32 = 1;
+pub const SSM_NO: u32 = 3;
+pub const SSM_FT: u32 = 2;
 
 /// Arinc429Utils::fromSimVar (Arinc429Utils.cpp:3-10).
 pub fn from_simvar(value: f64) -> BaseArinc429 {

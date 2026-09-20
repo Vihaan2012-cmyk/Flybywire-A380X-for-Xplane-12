@@ -113,14 +113,21 @@ fn isa_sea_level() -> EngineInputs {
 }
 
 /// Runs an engine from rest to a steady state at a fixed corrected-N1
-/// target, disengaging the starter once the core has lit off -- the same
+/// target, disengaging the starter once the core carries itself -- the same
 /// start-sequence shape `physics::engine::tests::run_to_steady_state` uses
 /// (duplicated locally for the same reason as `isa_sea_level` above).
 fn run_to_steady_state(engine: &mut Engine, mut inputs: EngineInputs, seconds: f64) -> EngineOutputs {
     let steps = (seconds / inputs.dt_s).round() as u32;
     let mut out = EngineOutputs::default();
     for _ in 0..steps {
-        inputs.starter_engaged = out.n3_pct < params::MIN_N3_FOR_COMBUSTION_PCT + 5.0;
+        // The starter stays in until the core can carry itself, which is
+        // the starter's own cut-out speed (`starter::CUTOFF_N3_FRAC`, 50%
+        // N3), not light-off speed: between light-off and cut-out the
+        // turbine still cannot cover the compressor's work, so cutting the
+        // starter at `MIN_N3_FOR_COMBUSTION_PCT + 5` (what this helper used
+        // to do, having drifted from the engine's own copy) leaves the core
+        // hung at a quarter speed with no N1 at all for the whole run.
+        inputs.starter_engaged = out.n3_pct < crate::physics::engine::starter::CUTOFF_N3_FRAC * 100.0;
         out = engine.step(&inputs);
     }
     out
@@ -251,3 +258,4 @@ mod tests {
         );
     }
 }
+

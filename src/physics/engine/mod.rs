@@ -75,7 +75,7 @@ mod inlet;
 mod nozzle;
 pub mod params;
 mod spool;
-mod starter;
+pub mod starter;
 mod turbine;
 
 use gas::{GAMMA_AIR, GAMMA_GAS, R_AIR, R_GAS};
