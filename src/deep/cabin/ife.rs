@@ -60,13 +60,26 @@ const SERVER_RATED_W: f64 = 1500.0;
 /// whole cabin (a typical redundant IFE architecture). GENERIC count.
 pub const N_SERVERS: usize = 2;
 
-/// GENERIC: extra heat a fully faulted zone's short dissipates into its
-/// wiring bundle, W (module doc: the same I^2R self-heating idea
+/// Extra heat a fully faulted zone's short dissipates into its wiring
+/// bundle, W (module doc: the same I^2R self-heating idea
 /// `physics::electrical`'s breaker curve uses, not that curve itself).
-const FAULT_HEAT_W: f64 = 400.0;
+///
+/// Bounded by the branch that feeds the seat boxes rather than picked: a
+/// cabin seat-power branch is 115 V AC single phase behind a 10 A SSPC, and
+/// a fault drawing more than that opens its protection at once, so the
+/// worst *sustained* heating a developing (high-resistance / arc-tracking)
+/// fault can put into the bundle is 115 V * 10 A = 1150 W. That is the
+/// fault = 1.0 end of the scale; anything larger is the instant-trip case,
+/// not the slow-cook one this thermal model is for.
+const FAULT_HEAT_W: f64 = 1150.0;
 /// GENERIC zone wiring bundle: thermal capacity (J/K) and loss to the
 /// surrounding structure (W/K), sized so a full-fault heats from cabin
-/// ambient to the smoke threshold over a few minutes, not instantly.
+/// ambient to the smoke threshold over a few minutes, not instantly. Hand
+/// check with the figures below: the bundle's equilibrium rise under a full
+/// fault is 1150/6 = 191.7 K (to 215.7 C, so it does reach both thresholds
+/// rather than levelling off below them), with a time constant of
+/// 6000/6 = 1000 s, giving `-tau*ln(1 - dT/191.7)` = 274 s to the 70 C
+/// overheat call and 595 s to 110 C and smoke.
 const ZONE_CAPACITY_J_K: f64 = 6000.0;
 const ZONE_LOSS_W_K: f64 = 6.0;
 const ZONE_AMBIENT_C: f64 = 24.0;
@@ -293,10 +306,18 @@ mod tests {
         let mut faults = IfeFaults::default();
         faults.seat_fault[Zone::Mid.index()] = 1.0;
         let mut events = Vec::new();
-        for _ in 0..36000 {
+        let mut smoke_at_s: Option<f64> = None;
+        for step in 0..36000 {
             let (_, e) = s.step(&IfeInputs::default(), &faults, 1.0);
+            if smoke_at_s.is_none() && e.iter().any(|e| matches!(e, IfeEvent::SeatFault { kind: SeatFaultKind::Smoke, .. })) {
+                smoke_at_s = Some((step + 1) as f64);
+            }
             events.extend(e);
         }
+        // From the heat balance in FAULT_HEAT_W/ZONE_CAPACITY_J_K's docs:
+        // -1000 * ln(1 - (110 - 24)/191.7) = 595 s to reach the smoke
+        // threshold. Minutes, as the module doc requires, not seconds.
+        assert!((smoke_at_s.unwrap_or(f64::NAN) - 595.0).abs() < 5.0, "{smoke_at_s:?}");
         assert!(matches!(events.iter().find(|e| matches!(e, IfeEvent::SeatFault { kind: SeatFaultKind::Short, .. })), Some(_)));
         assert!(matches!(events.iter().find(|e| matches!(e, IfeEvent::SeatFault { kind: SeatFaultKind::Overheating, .. })), Some(_)));
         assert!(matches!(events.iter().find(|e| matches!(e, IfeEvent::SeatFault { kind: SeatFaultKind::Smoke, .. })), Some(_)));

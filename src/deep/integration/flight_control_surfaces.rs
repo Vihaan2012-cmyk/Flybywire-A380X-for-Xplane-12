@@ -302,11 +302,25 @@ mod tests {
 
     #[test]
     fn aileron_and_elevator_round_trip_through_flight_controls_rs_real_conversion() {
-        for body_deg in [-20.0, -12.5, 0.0, 7.0, 20.0, 30.0] {
+        // `flight_controls.rs`'s own conversion is `down_deg = 20 - 50*n`
+        // over the actuator's physical `n` in 0..1, so the representable
+        // body-angle range is exactly 20 deg trailing edge down (n = 0) to
+        // -30 deg, i.e. 30 deg up (n = 1). Those endpoints are the surface's
+        // travel stops, so the round trip is asserted across that whole
+        // range and at both ends of it.
+        for body_deg in [-30.0, -20.0, -12.5, 0.0, 7.0, 20.0] {
             let n = normalized_aileron_or_elevator(body_deg);
             let back = aileron_or_elevator_down_deg(n);
             assert!((back - body_deg).abs() < 1e-9, "{body_deg} -> {n} -> {back}");
         }
+        // Outside that range there is no normalised position to round trip
+        // to: the conversion clamps to the travel stop, which is the right
+        // answer (a surface cannot be driven past its stop) and is what the
+        // deep model's own `SurfaceLimits` would have produced anyway.
+        assert_eq!(normalized_aileron_or_elevator(30.0), 0.0);
+        assert_eq!(aileron_or_elevator_down_deg(normalized_aileron_or_elevator(30.0)), 20.0);
+        assert_eq!(normalized_aileron_or_elevator(-45.0), 1.0);
+        assert_eq!(aileron_or_elevator_down_deg(normalized_aileron_or_elevator(-45.0)), -30.0);
     }
 
     #[test]

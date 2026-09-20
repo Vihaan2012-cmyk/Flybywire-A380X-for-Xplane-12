@@ -55,17 +55,33 @@ pub struct Spec {
     pub surge_line_flatness: f64,
     /// Choke corrected flow as a multiple of the design corrected flow.
     pub choke_flow_multiple: f64,
+    /// Erosion/damage state, 0 (clean, as designed) .. 1 (fully degraded).
+    /// Applied by [`Spec::degraded`]; healthy specs leave it at 0.
+    ///
+    /// It is kept *separate* from `eta_design` on purpose. `eta_design` is
+    /// the clean machine's design-point efficiency, and it is what sets the
+    /// *work* the blading puts into the flow (see `evaluate`): eroded
+    /// blading still spins at the same speed and still does the same Euler
+    /// work on the air. What erosion changes is how much of that work comes
+    /// back out as useful pressure rise. Folding the erosion into
+    /// `eta_design` itself would (through `w_design_per_kelvin`'s `1/eta`)
+    /// silently raise the work input by exactly the factor it lowered the
+    /// efficiency by, leaving the delivered pressure rise unchanged -- an
+    /// eroded compressor that costs more shaft power but suffers no
+    /// pressure-ratio penalty at all, which is not what erosion does.
+    pub erosion_efficiency_loss: f64,
 }
 
 impl Spec {
     /// Applies a compressor-erosion/damage fault (0 healthy .. 1 fully
     /// degraded) as a fractional loss of isentropic efficiency, floored so a
-    /// "fully degraded" compressor is a badly worn machine, not a
-    /// mathematical singularity.
+    /// "fully degraded" compressor is a badly worn machine (30% of its clean
+    /// efficiency), not a mathematical singularity.
     pub fn degraded(&self, efficiency_loss_frac: f64) -> Spec {
-        let loss = efficiency_loss_frac.clamp(0.0, 1.0);
         Spec {
-            eta_design: (self.eta_design * (1.0 - loss)).max(0.3 * self.eta_design),
+            erosion_efficiency_loss: (self.erosion_efficiency_loss
+                + efficiency_loss_frac.clamp(0.0, 1.0))
+            .clamp(0.0, 0.7),
             ..*self
         }
     }
@@ -138,9 +154,16 @@ pub fn evaluate(
     let in_surge = n > 0.05 && requested < surge_flow;
     let choked = requested > choke_flow;
 
-    let eta_nominal =
+    // Off-design efficiency island, then the erosion penalty on top of it.
+    // Note `specific_work_ideal_shape` above deliberately uses the *clean*
+    // `eta_design`: the work the blading puts in is set by blade speed
+    // (Euler), not by how efficiently that work is recovered, so erosion
+    // shows up purely as a lower delivered pressure ratio for the same
+    // temperature rise and the same shaft power.
+    let eta_clean =
         (spec.eta_design * (1.0 - spec.efficiency_falloff.clamp(0.0, 1.0) * (1.0 - n).powi(2)))
             .clamp(0.35 * spec.eta_design, spec.eta_design);
+    let eta_nominal = eta_clean * (1.0 - spec.erosion_efficiency_loss.clamp(0.0, 0.7));
 
     let (mdot_corrected, specific_work, eta) = if in_surge {
         // A real single-stage surge is a violent breakdown of steady flow
@@ -197,6 +220,7 @@ mod tests {
             surge_margin_design_frac: 0.12,
             surge_line_flatness: 0.5,
             choke_flow_multiple: 1.3,
+            erosion_efficiency_loss: 0.0,
         }
     }
 

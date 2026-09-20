@@ -93,16 +93,30 @@ impl OilSystem {
     /// spool, over and above the (already-modelled) hot-oil baseline
     /// friction -- item 1's "cold-soaked oil ... slowing the start". A cold
     /// start genuinely has to shear much more viscous oil through the
-    /// bearings/gearbox at the same shaft speed; modelled as a viscous
-    /// (proportional to speed) drag scaled by how far the current viscosity
-    /// exceeds the hot reference (`params::OIL_HOT_REFERENCE_K`), so it is
+    /// bearings/gearbox at the same shaft speed.
+    ///
+    /// Palmgren's rolling-bearing no-load friction relation (see
+    /// `params::OIL_VISCOUS_DRAG_EXPONENT`) gives the viscous torque as
+    /// `M_0 ~ (nu * n)^(2/3)`. Written relative to this model's own hot
+    /// reference point -- where that torque is
+    /// `params::oil_viscous_drag_torque_hot_rated_nm()` at rated speed --
+    /// the torque at any other viscosity and speed is
+    ///
+    ///   `M_0(nu, omega) = M_hot_rated * (nu/nu_hot)^(2/3) * (omega/omega_rated)^(2/3)`
+    ///
+    /// and what this function returns is the *excess* over the hot-oil
+    /// baseline at the same speed (the `-1` below), because that baseline is
+    /// already carried by `apu.rs`'s fixed accessory torque. It is therefore
     /// exactly zero once the oil is warmed to its normal running
-    /// temperature and only significant on a genuinely cold-soaked start.
+    /// temperature, and only significant on a genuinely cold-soaked start.
     pub fn cold_drag_torque_nm(&self, omega_rad_s: f64) -> f64 {
-        let hot_cst = viscosity_cst(params::OIL_HOT_REFERENCE_K);
-        let current_cst = viscosity_cst(self.temp_k);
-        let excess_ratio = (current_cst / hot_cst - 1.0).max(0.0);
-        params::OIL_COLD_DRAG_COEFF_NM_PER_RAD_S * excess_ratio * omega_rad_s.max(0.0)
+        let hot_cst = viscosity_cst(params::OIL_HOT_REFERENCE_K).max(1e-9);
+        let viscosity_ratio = (viscosity_cst(self.temp_k) / hot_cst).max(1.0);
+        let speed_ratio = (omega_rad_s.max(0.0) / params::omega_rated_rad_s()).max(0.0);
+        let e = params::OIL_VISCOUS_DRAG_EXPONENT;
+        params::oil_viscous_drag_torque_hot_rated_nm()
+            * (viscosity_ratio.powf(e) - 1.0).max(0.0)
+            * speed_ratio.powf(e)
     }
 
     pub fn step(
@@ -166,11 +180,19 @@ impl OilSystem {
 mod tests {
     use super::*;
 
+    /// The heat the oil actually has to carry away on a running APU: the
+    /// whole of the modelled accessory drag (`params::FIXED_ACCESSORY_POWER_W`
+    /// -- bearing/gear shear, gearbox windage and the oil pump's own
+    /// displacement work) is dissipated into the oil charge. `apu.rs`
+    /// computes the same quantity as `torque * omega`; at rated speed the
+    /// two are the same 3 kW by construction.
+    const RUNNING_FRICTION_HEAT_W: f64 = params::FIXED_ACCESSORY_POWER_W;
+
     fn run(oil: &mut OilSystem, n_percent: f64, seconds: f64, faults: &OilFaults) -> OilState {
         let dt = 0.1;
         let mut out = OilState::default();
         for _ in 0..(seconds / dt) as u64 {
-            out = oil.step(n_percent, true, 288.15, 300.0, faults, dt);
+            out = oil.step(n_percent, true, 288.15, RUNNING_FRICTION_HEAT_W, faults, dt);
         }
         out
     }
@@ -232,8 +254,19 @@ mod tests {
     #[test]
     fn friction_heat_raises_steady_state_oil_temperature_above_ambient() {
         let mut oil = OilSystem::new(288.15);
+        // 1800 s is twelve of the oil system's 150 s time constants, so the
+        // balance is fully settled and the answer is the steady state of
+        // `heat in = conductance * (T_oil - T_ambient)`:
+        //   conductance = C/tau = 9000 J/K / 150 s = 60 W/K
+        //   rise        = 3000 W / 60 W/K = 50 K
+        //   T_oil       = 15 degC ambient + 50 K = 65 degC
+        // which is a believable oil-out temperature for a small APU
+        // gearbox on a standard-day ground start.
         let out = run(&mut oil, 100.0, 1800.0, &OilFaults::default());
-        assert!(out.temp_c > 288.15 - 273.15 + 5.0, "{}", out.temp_c);
+        let expected_rise_k =
+            RUNNING_FRICTION_HEAT_W / (params::OIL_HEAT_CAPACITY_J_K / params::OIL_TIME_CONSTANT_S);
+        assert!((expected_rise_k - 50.0).abs() < 1e-9, "{expected_rise_k}");
+        assert!((out.temp_c - (15.0 + expected_rise_k)).abs() < 0.1, "{}", out.temp_c);
     }
 
     #[test]

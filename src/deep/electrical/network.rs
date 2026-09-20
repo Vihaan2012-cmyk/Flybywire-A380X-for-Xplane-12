@@ -867,7 +867,22 @@ impl Load {
 
         let freq_hz = frequencies[self.feeds[feed_idx].bus.index()];
         let (p, g) = self.contribution(v, freq_hz, dt_s, tick);
-        let is_on = p > 0.0 || g > 0.0;
+        // `p`/`g` are this load's *demand* at the selected feed, which exists
+        // whether or not that feed is actually live: a load whose own
+        // `min_operating_voltage` is zero (a pure resistive/heater-like
+        // consumer) still selects a feed sitting at 0 V. Nothing is energised
+        // without voltage, so both "is this load running" and "is it drawing
+        // inrush" have to be gated on real terminal voltage -- the same
+        // `MIN_VOLTAGE_V` gate the current calculation below already uses, so
+        // a load can never report itself powered while drawing zero current.
+        //
+        // This is what makes a bus transfer produce a real transient: with
+        // the bus dead the load de-energises, `time_energized_s` resets, and
+        // when the tie re-closes `inrush_multiplier` starts again from
+        // `inrush_multiple`. Without the gate the timer would keep running
+        // through the dead gap and the load would come back already settled.
+        let energised = v > MIN_VOLTAGE_V;
+        let is_on = energised && (p > 0.0 || g > 0.0);
         if is_on && !self.was_on {
             self.time_energized_s = 0.0;
         }
@@ -875,10 +890,10 @@ impl Load {
         self.was_on = is_on;
 
         let fault_current_a = g * v;
-        let base_current_a = if v > MIN_VOLTAGE_V && self.spec.power_factor > 1.0e-6 { p / (v * self.spec.power_factor) } else { 0.0 };
+        let base_current_a = if energised && self.spec.power_factor > 1.0e-6 { p / (v * self.spec.power_factor) } else { 0.0 };
         let current_a = base_current_a + fault_current_a;
         self.current_a = current_a;
-        self.powered = p > 0.0;
+        self.powered = energised && p > 0.0;
 
         LoadOutputs { current_a, power_w: p, powered: self.powered, fault_current_a }
     }
@@ -901,6 +916,34 @@ pub struct NetworkReport {
 impl Default for NetworkReport {
     fn default() -> Self {
         Self { bus_voltage: [0.0; NUM_BUSES], bus_powered: [false; NUM_BUSES], total_power_w: 0.0, tripped_breakers: Vec::new() }
+    }
+}
+
+/// Solves one bus's voltage from its aggregated Thevenin supply and its
+/// aggregated demand -- the closed form behind every relaxation sweep, see
+/// this module's own doc comment for the derivation.
+///
+/// `vth_over_r` is the sum of `V_branch / R_branch` over every conducting
+/// supply branch and `y_th` the sum of `1 / R_branch`, so `R_th = 1/y_th` and
+/// `V_th = vth_over_r * R_th` (Millman's theorem). `agg_p` is the buses's
+/// constant-power demand, W, and `agg_g` its constant-conductance (fault)
+/// demand, S; the node equation `V = V_th - R_th*(P/V + G*V)` rearranges to
+/// the quadratic `(1 + R_th*G)V^2 - V_th*V + R_th*P = 0`, whose upper root is
+/// the physical (high-voltage) operating point. A negative discriminant means
+/// the demand exceeds what this source can deliver at any voltage -- the
+/// collapse branch, held at the quadratic's vertex.
+fn solve_bus_voltage(vth_over_r: f64, y_th: f64, agg_p: f64, agg_g: f64) -> f64 {
+    if y_th <= MIN_ADMITTANCE {
+        return 0.0;
+    }
+    let rth = 1.0 / y_th;
+    let vth = vth_over_r * rth;
+    let a = 1.0 + rth * agg_g;
+    let disc = vth * vth - 4.0 * a * rth * agg_p;
+    if disc < 0.0 {
+        (vth / (2.0 * a)).max(0.0)
+    } else {
+        ((vth + disc.sqrt()) / (2.0 * a)).max(0.0)
     }
 }
 
@@ -1161,6 +1204,22 @@ impl Network {
                 }
             }
         }
+        // A diode only conducts when it is genuinely forward-biased, i.e.
+        // when its upstream voltage *less its own forward drop* is above the
+        // voltage the destination bus would sit at without it. Reverse-biased
+        // it is an open circuit, not a weak source; adding its branch to the
+        // Thevenin combination regardless of bias would let a low bus drag a
+        // higher one down through the very diode whose whole purpose is to
+        // block that (the DC hot-bus / battery-bus isolation case).
+        //
+        // The bias test is made against each bus's own *diode-free* solution
+        // (`open_v`), which no diode's own on/off state can change, so a
+        // diode cannot flip state because of its own contribution and the
+        // Jacobi sweeps below cannot chatter between conducting and blocking.
+        let mut open_v = [0.0f64; NUM_BUSES];
+        for i in 0..NUM_BUSES {
+            open_v[i] = solve_bus_voltage(vth[i], yth[i], agg_p[i], agg_g[i]);
+        }
         for d in &self.diodes {
             if d.open_fault(tick) {
                 continue;
@@ -1170,7 +1229,7 @@ impl Network {
                 FeedSource::Bus(b) => (voltage[b.index()], 0.0),
             };
             let biased = from_v - d.forward_drop_v;
-            if biased > 0.0 {
+            if biased > 0.0 && biased > open_v[d.to.index()] {
                 // Same series combination as the contactor case above: a
                 // diode fed directly from a `Source` must include that
                 // source's own internal resistance, not only the diode's.
@@ -1183,16 +1242,7 @@ impl Network {
 
         let mut next = [0.0f64; NUM_BUSES];
         for i in 0..NUM_BUSES {
-            if yth[i] <= MIN_ADMITTANCE {
-                next[i] = 0.0;
-                continue;
-            }
-            let rth = 1.0 / yth[i];
-            let vth_i = vth[i] * rth;
-            let a = 1.0 + rth * agg_g[i];
-            let p = agg_p[i];
-            let disc = vth_i * vth_i - 4.0 * a * rth * p;
-            next[i] = if disc < 0.0 { (vth_i / (2.0 * a)).max(0.0) } else { ((vth_i + disc.sqrt()) / (2.0 * a)).max(0.0) };
+            next[i] = solve_bus_voltage(vth[i], yth[i], agg_p[i], agg_g[i]);
         }
         next
     }

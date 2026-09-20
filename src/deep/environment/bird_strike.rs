@@ -457,11 +457,31 @@ mod tests {
 
     #[test]
     fn no_nan_at_rest() {
-        let s = state(Phase::Taxi, 0.0, 0.0);
+        // Genuinely at rest: stopped *and* with the fans stopped. The
+        // helper's default state leaves N1 at 90%, which is not "at rest" --
+        // the blade a bird meets there is still closing on it at 90% of fan
+        // tip speed, and the model is right to shred it (see the companion
+        // assertion below). With nothing moving at all there is no relative
+        // velocity, so no energy and no damage.
+        let mut s = state(Phase::Taxi, 0.0, 0.0);
+        s.n1_frac = [0.0; 4];
         let out = resolve(ImpactTarget::EngineInlet(0), BirdClass::Large, 1, &s);
         assert_eq!(out.impact_energy_j, 0.0);
         assert!(!out.fan_damage_frac.is_nan());
         assert_eq!(out.fan_damage_frac, 0.0);
+    }
+
+    #[test]
+    fn a_stationary_aircraft_with_the_fan_turning_still_damages_the_fan() {
+        // The closing speed a fan blade sees is the vector sum of the
+        // aircraft's speed and the blade's own tangential speed, so a bird
+        // walked into a running engine on the stand is still a fan-blade
+        // event even though the airframe's own impact energy is zero.
+        let mut s = state(Phase::Taxi, 0.0, 0.0);
+        s.n1_frac = [0.9; 4];
+        let out = resolve(ImpactTarget::EngineInlet(0), BirdClass::Large, 1, &s);
+        assert_eq!(out.impact_energy_j, 0.0, "the airframe is not moving");
+        assert!(out.fan_damage_frac > 0.0, "but the blades are");
     }
 
     #[test]

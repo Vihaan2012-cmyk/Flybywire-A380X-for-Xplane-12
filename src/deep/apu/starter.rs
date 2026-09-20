@@ -224,31 +224,79 @@ mod tests {
 
     #[test]
     fn a_weaker_battery_sags_more_under_the_same_starter_load() {
+        // "Weaker" here is the *internal resistance* half of the Thevenin
+        // source (`interfaces::BatteryInput`'s own doc: a depleted or
+        // cold-soaked battery shows up as a lower open-circuit voltage
+        // and/or a higher internal resistance). Sag is what the internal
+        // resistance does, and it does it monotonically:
+        //
+        //   I    = (Voc - Ke*omega) / (Rb + Ra)
+        //   sag  = Voc - Vterm = I*Rb = (Voc - Ke*omega) * Rb/(Rb + Ra)
+        //
+        // `Rb/(Rb + Ra)` rises with `Rb` for any positive `Ra`, so a
+        // higher-resistance battery always sags further under the same
+        // starter and the same spool speed -- while drawing *less* current,
+        // not more (the series circuit is more resistive), which is exactly
+        // why a weak battery gives a slow, torque-starved crank rather than
+        // a violent one. Hand-check at omega = 300 rad/s, Voc = 24 V,
+        // Ke = 0.016, Ra = 0.022 ohm:
+        //   back-EMF          = 4.8 V, so (Voc - E) = 19.2 V
+        //   healthy Rb = 0.018: I = 480 A,   sag = 8.64 V
+        //   weak    Rb = 0.090: I = 171.4 A, sag = 15.43 V
+        let omega = 300.0;
         let mut strong = Starter::new();
         let strong_out = strong.step(
+            &Inputs { battery: BatteryInput::healthy(), ..inputs(0.0, true) },
+            &StarterFaults::default(),
+            omega,
+        );
+        let mut weak = Starter::new();
+        let weak_out = weak.step(
+            &Inputs {
+                battery: BatteryInput { internal_resistance_ohm: 0.090, ..BatteryInput::healthy() },
+                ..inputs(0.0, true)
+            },
+            &StarterFaults::default(),
+            omega,
+        );
+        let voc = params::BATTERY_NOMINAL_OPEN_CIRCUIT_V;
+        let strong_sag = voc - strong_out.battery_terminal_v;
+        let weak_sag = voc - weak_out.battery_terminal_v;
+        assert!(weak_sag > strong_sag, "weak {weak_sag} strong {strong_sag}");
+        assert!((strong_sag - 8.64).abs() < 0.01, "{strong_sag}");
+        assert!((weak_sag - 15.43).abs() < 0.01, "{weak_sag}");
+        // Less current, hence less torque: the weak battery cranks slower.
+        assert!(weak_out.starter_current_a < strong_out.starter_current_a);
+        assert!(weak_out.starter_torque_nm < strong_out.starter_torque_nm);
+    }
+
+    #[test]
+    fn a_flatter_battery_cranks_with_less_torque_at_the_same_speed() {
+        // The other half of "weak": a depleted battery's open-circuit
+        // voltage has fallen. Less voltage over the same back-EMF means
+        // less current and so less torque -- the documented reason a
+        // depleted battery visibly slows a real APU start.
+        let omega = 300.0;
+        let mut full = Starter::new();
+        let full_out = full.step(
             &Inputs {
                 battery: BatteryInput { open_circuit_v: 24.0, ..BatteryInput::healthy() },
                 ..inputs(0.0, true)
             },
             &StarterFaults::default(),
-            300.0,
+            omega,
         );
-        let mut weak = Starter::new();
-        let weak_out = weak.step(
+        let mut flat = Starter::new();
+        let flat_out = flat.step(
             &Inputs {
                 battery: BatteryInput { open_circuit_v: 18.0, ..BatteryInput::healthy() },
                 ..inputs(0.0, true)
             },
             &StarterFaults::default(),
-            300.0,
+            omega,
         );
-        let strong_sag = 24.0 - strong_out.battery_terminal_v;
-        let weak_sag = 18.0 - weak_out.battery_terminal_v;
-        // Lower open-circuit voltage means less back-EMF headroom, so more
-        // current flows for the same speed, and that larger current sags
-        // the (already weaker) battery even further.
-        assert!(weak_out.starter_current_a > strong_out.starter_current_a);
-        assert!(weak_sag > strong_sag);
+        assert!(flat_out.starter_current_a < full_out.starter_current_a);
+        assert!(flat_out.starter_torque_nm < full_out.starter_torque_nm);
     }
 
     #[test]

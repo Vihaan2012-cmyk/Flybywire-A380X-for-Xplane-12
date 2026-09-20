@@ -518,6 +518,38 @@ mod tests {
         StrutFaults::default()
     }
 
+    /// Flies a freshly built strut, then lands it at `sink_speed_ms` and holds
+    /// it on the ground for `ticks` ticks of 1 ms. Returns the last tick's
+    /// outputs and whether any tick of the touchdown raised an overload event.
+    ///
+    /// `Strut::new` builds the leg *parked*: `x_m` sits at the static
+    /// equilibrium and `was_on_ground` is already true, which is the correct
+    /// state for an aircraft standing on its gear at the gate.
+    /// `sink_speed_ms` is only read on the tick `on_ground` goes false ->
+    /// true (see `StrutInputs`), so a test that wants a genuine touchdown
+    /// transient must put the leg in the air first -- otherwise the drop is
+    /// silently ignored and the leg simply sits at its static reaction, well
+    /// under any limit.
+    fn land(s: &mut Strut, sink_speed_ms: f64, ticks: usize) -> (StrutOutputs, bool) {
+        let faults = healthy();
+        s.step(&StrutInputs { on_ground: false, sink_speed_ms: 0.0, load_n: 0.0, side_load_n: 0.0, locked_down: true, dt_s: 0.05 }, &faults);
+        let mut out = StrutOutputs::default();
+        let mut saw_overload = false;
+        for tick in 0..ticks {
+            let inputs = StrutInputs {
+                on_ground: true,
+                sink_speed_ms: if tick == 0 { sink_speed_ms } else { 0.0 },
+                load_n: s.f_ref_n,
+                side_load_n: 0.0,
+                locked_down: true,
+                dt_s: 0.001,
+            };
+            out = s.step(&inputs, &faults);
+            saw_overload |= out.overload_event;
+        }
+        (out, saw_overload)
+    }
+
     #[test]
     fn ultimate_is_exactly_one_and_a_half_times_limit() {
         let s = Strut::new(LegKind::Wing);
@@ -551,44 +583,20 @@ mod tests {
     #[test]
     fn a_touchdown_at_exactly_the_limit_condition_does_not_collapse() {
         let mut s = Strut::new(LegKind::Wing);
-        let faults = healthy();
-        let mut out = StrutOutputs::default();
-        let mut on_ground = false;
-        for i in 0..3_000 {
-            let inputs = StrutInputs {
-                on_ground: true,
-                sink_speed_ms: if !on_ground { SINK_SPEED_LIMIT_MS } else { 0.0 },
-                load_n: s.f_ref_n,
-                side_load_n: 0.0,
-                locked_down: true,
-                dt_s: 0.001,
-            };
-            on_ground = true;
-            out = s.step(&inputs, &faults);
-            let _ = i;
-        }
+        let (out, _) = land(&mut s, SINK_SPEED_LIMIT_MS, 3_000);
         assert!(!out.collapsed, "the certification limit condition must not itself collapse the leg");
         assert!(out.life_fraction_consumed >= 0.0);
     }
 
     #[test]
     fn a_touchdown_well_past_the_limit_sink_speed_collapses_the_leg() {
+        // A drop's absorbed energy goes as v^2, so the sink speed that reaches
+        // ultimate (1.5x limit) is roughly sqrt(1.5) ~ 1.22x the limit sink
+        // speed for a constant-force absorber, and somewhat more once the gas
+        // spring's rising polytropic force curve is included; 2.2x the limit
+        // sink speed is ~4.8x the energy and is unambiguously past ultimate.
         let mut s = Strut::new(LegKind::Wing);
-        let faults = healthy();
-        let mut out = StrutOutputs::default();
-        let mut on_ground = false;
-        for _ in 0..3_000 {
-            let inputs = StrutInputs {
-                on_ground: true,
-                sink_speed_ms: if !on_ground { SINK_SPEED_LIMIT_MS * 2.2 } else { 0.0 },
-                load_n: s.f_ref_n,
-                side_load_n: 0.0,
-                locked_down: true,
-                dt_s: 0.001,
-            };
-            on_ground = true;
-            out = s.step(&inputs, &faults);
-        }
+        let (out, _) = land(&mut s, SINK_SPEED_LIMIT_MS * 2.2, 3_000);
         assert!(out.collapsed, "a sink speed well past the limit condition must exceed ultimate and collapse the leg");
     }
 
@@ -623,26 +631,11 @@ mod tests {
     #[test]
     fn an_overload_event_leaves_lasting_seal_damage_that_accelerates_the_leak() {
         let mut s = Strut::new(LegKind::Wing);
-        let faults = healthy();
-        let mut saw_overload = false;
-        let mut on_ground = false;
         // A sink speed comfortably between the limit (no overload) and 2.2x
-        // limit (collapse) cases above: an overload without a collapse.
-        for _ in 0..3_000 {
-            let inputs = StrutInputs {
-                on_ground: true,
-                sink_speed_ms: if !on_ground { SINK_SPEED_LIMIT_MS * 1.35 } else { 0.0 },
-                load_n: s.f_ref_n,
-                side_load_n: 0.0,
-                locked_down: true,
-                dt_s: 0.001,
-            };
-            on_ground = true;
-            let out = s.step(&inputs, &faults);
-            if out.overload_event {
-                saw_overload = true;
-            }
-        }
+        // limit (collapse) cases above: an overload without a collapse. 1.35x
+        // the limit sink speed is ~1.8x the kinetic energy of the limit drop,
+        // enough to pass limit but short of the 1.5x factor of safety.
+        let (_, saw_overload) = land(&mut s, SINK_SPEED_LIMIT_MS * 1.35, 3_000);
         assert!(saw_overload, "a sink speed above the limit condition (but well under 2.2x) should overload without collapsing");
         assert!(!s.collapsed);
         assert!(s.seal_damage > 0.0, "an overload event must leave lasting seal damage");
@@ -653,30 +646,8 @@ mod tests {
         let mut gentle = Strut::new(LegKind::Wing);
         let mut hard = Strut::new(LegKind::Wing);
         let faults = healthy();
-        let mut gentle_on_ground = false;
-        let mut hard_on_ground = false;
-        for _ in 0..3_000 {
-            let gi = StrutInputs {
-                on_ground: true,
-                sink_speed_ms: if !gentle_on_ground { SINK_SPEED_LIMIT_MS * 0.3 } else { 0.0 },
-                load_n: gentle.f_ref_n,
-                side_load_n: 0.0,
-                locked_down: true,
-                dt_s: 0.001,
-            };
-            gentle_on_ground = true;
-            gentle.step(&gi, &faults);
-            let hi = StrutInputs {
-                on_ground: true,
-                sink_speed_ms: if !hard_on_ground { SINK_SPEED_LIMIT_MS * 0.95 } else { 0.0 },
-                load_n: hard.f_ref_n,
-                side_load_n: 0.0,
-                locked_down: true,
-                dt_s: 0.001,
-            };
-            hard_on_ground = true;
-            hard.step(&hi, &faults);
-        }
+        land(&mut gentle, SINK_SPEED_LIMIT_MS * 0.3, 3_000);
+        land(&mut hard, SINK_SPEED_LIMIT_MS * 0.95, 3_000);
         // Liftoff: return both to airborne so their in-progress cycle closes
         // out and contributes its Miner's-rule increment.
         let air = StrutInputs { on_ground: false, sink_speed_ms: 0.0, load_n: 0.0, side_load_n: 0.0, locked_down: true, dt_s: 0.05 };
@@ -702,3 +673,4 @@ mod tests {
         assert!(!out.force_n.is_nan());
     }
 }
+

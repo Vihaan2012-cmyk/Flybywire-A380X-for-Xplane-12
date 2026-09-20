@@ -293,17 +293,39 @@ mod tests {
     #[test]
     fn electric_pump_spins_down_when_unpowered() {
         let mut pump = ElectricPump::a380_yellow_electric();
+        let mut running = None;
         for _ in 0..200 {
-            pump.step(true, 3000.0 * PSI_PA, 50.0 * PSI_PA, 115.0, &PumpFaults::default(), 0.02);
+            running = Some(pump.step(true, 3000.0 * PSI_PA, 50.0 * PSI_PA, 115.0, &PumpFaults::default(), 0.02));
         }
+        let (running_out, running_current) = running.unwrap();
         assert!(pump.speed_rpm() > 1000.0);
+        assert!(running_out.flow_m3_s > 0.0 && running_current > 0.0);
+
         for _ in 0..200 {
             pump.step(false, 3000.0 * PSI_PA, 50.0 * PSI_PA, 115.0, &PumpFaults::default(), 0.02);
         }
         assert!(pump.speed_rpm() < 1.0);
         let (out, current) = pump.step(false, 3000.0 * PSI_PA, 50.0 * PSI_PA, 115.0, &PumpFaults::default(), 0.02);
-        assert_eq!(out.flow_m3_s, 0.0);
-        assert_eq!(current, 0.0);
+
+        // The motor's spin-down is a first-order lag (`spin_time_constant_s`
+        // = 0.4 s), and an exponential is asymptotic: it never reaches
+        // exactly zero, so asserting `== 0.0` here would be asserting that
+        // the model is *not* a first-order lag. Hand solve: 201 unpowered
+        // steps of 0.02 s = 4.02 s = 10.05 time constants, so the shaft is
+        // at exp(-10.05) = 4.3e-5 of the 8000 rpm it was turning, i.e.
+        // ~0.34 rpm. A fixed-displacement pump's delivered flow, and hence
+        // its shaft power and motor current, are all linear in shaft speed,
+        // so each must be that same 4.3e-5 fraction of its running value.
+        // Bound them at 1e-4 of the running value: about 2.3x the predicted
+        // residual (so a correct 0.4 s lag passes with margin) but still
+        // four decades below the running value, and in absolute terms well
+        // under a millilitre per minute and a microamp -- nothing the rest
+        // of the network can resolve. A pump that genuinely failed to spin
+        // down would sit at ~1.0 of the running value and fail this by four
+        // orders of magnitude.
+        const SPUN_DOWN_FRACTION: f64 = 1.0e-4;
+        assert!(out.flow_m3_s >= 0.0 && out.flow_m3_s < running_out.flow_m3_s * SPUN_DOWN_FRACTION, "flow {} must be a negligible fraction of the running {}", out.flow_m3_s, running_out.flow_m3_s);
+        assert!(current >= 0.0 && current < running_current * SPUN_DOWN_FRACTION, "current {} must be a negligible fraction of the running {}", current, running_current);
     }
 
     #[test]

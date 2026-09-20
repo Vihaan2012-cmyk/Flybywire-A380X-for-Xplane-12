@@ -374,7 +374,7 @@ mod tests {
     fn registers_without_duplicate_or_dangling_ids() {
         let mut r = Registry::default();
         register(&mut r);
-        let errors = r.validate();
+        let errors = r.validate_area();
         assert!(errors.is_empty(), "{errors:?}");
     }
 

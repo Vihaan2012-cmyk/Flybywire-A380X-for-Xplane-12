@@ -173,21 +173,75 @@ impl DuctVolume {
     }
 }
 
-/// A linearised bound on how much mass can move from the higher- to the
-/// lower-pressure of two volumes before a single step would overshoot
-/// equilibrium (their own gas treated as locally isothermal for this bound
-/// only -- a stability guard, not a physics law). Plays the same role
-/// `PneumaticContainerConnector::update_move_fluid_with_orifice`'s
+/// The pressure the upstream volume would be left at after `dm_kg` of its
+/// own gas is withdrawn, and the pressure the downstream volume would be
+/// driven to by receiving it -- both evaluated with exactly the relations
+/// [`DuctVolume::add_mass`] itself applies, so this is the model's own
+/// answer and not a separate approximation of it.
+fn pressures_after_transfer(up: &DuctVolume, down: &DuctVolume, dm_kg: f64) -> (f64, f64) {
+    // Upstream: isentropic expansion of what is left, P ∝ m^gamma.
+    let m_up = up.mass_kg.max(0.0);
+    let remaining = (m_up - dm_kg).max(0.0);
+    let up_pa = if m_up > 0.0 { up.pressure_pa * (remaining / m_up).powf(GAMMA) } else { 0.0 };
+    // Downstream: the charge relation, rearranged. `add_mass` sets
+    //   P = (m*T + dm*T_in) * R / (V + V_in) * (1 + V_in/V)^gamma
+    // and since `(V + V_in) = V * (1 + V_in/V)` that is exactly
+    //   P = (m*T + dm*T_in) * R / V * (1 + V_in/V)^(gamma-1).
+    let v_in = dm_kg * R_AIR_J_KG_K * up.temp_k.max(1.0) / up.pressure_pa.max(1.0);
+    let m_c_t = down.mass_kg.max(0.0) * down.temp_k + dm_kg * up.temp_k.max(1.0);
+    let down_pa = m_c_t * R_AIR_J_KG_K / down.volume_m3 * (1.0 + v_in / down.volume_m3).powf(GAMMA - 1.0);
+    (up_pa, down_pa)
+}
+
+/// How much mass may move from the higher- to the lower-pressure of two
+/// volumes in one step before that step would overshoot equalisation --
+/// the same job `PneumaticContainerConnector::update_move_fluid_with_orifice`'s
 /// `get_mass_flow_for_equilibrium` clamp does in fbw-common (module docs'
-/// citation), reproduced independently here in closed form rather than by
-/// Newton iteration since these are both plain ideal-gas volumes.
-fn equilibrium_clamp_kg(a: &DuctVolume, b: &DuctVolume) -> f64 {
-    let ca = a.mass_kg.max(0.0) / a.pressure_pa.max(1.0); // kg of a's gas per Pa
-    let cb = b.mass_kg.max(0.0) / b.pressure_pa.max(1.0);
-    if ca + cb <= 0.0 {
+/// citation). Returns `requested_kg` itself when that much does not
+/// overshoot, so the guard costs one pressure evaluation and nothing more
+/// on the overwhelming majority of ticks, where the flow is far from
+/// equalising the two volumes in a single step.
+///
+/// This used to be a closed-form *isothermal* bound (`dP = dm / (m/P)` on
+/// each side). That understates the real movement badly: the volumes
+/// actually charge and discharge isentropically, so their pressures swing
+/// `gamma` times faster per unit mass near the current state, and the
+/// receiving volume is additionally heated by the hotter gas arriving in
+/// it. A clamp computed isothermally therefore let a single large step
+/// blow straight past equalisation and invert the pressure gradient (a
+/// 300/100 kPa pair across a wide-open valve ended up at 141/226 kPa in
+/// one 5 s step). Because the model's own relations are not invertible in
+/// closed form once the incoming gas's enthalpy is folded in, the
+/// crossing point is found by bisection on
+/// `f(dm) = P_up(dm) - P_down(dm)`, which is strictly decreasing in `dm`
+/// (the upstream falls monotonically as it empties, the downstream rises
+/// monotonically as it fills), starts positive at `dm = 0` by definition
+/// of "upstream", and is bracketed above by the upstream's entire mass.
+/// 60 bisection steps take the bracket below one part in 10^18 of that
+/// mass, i.e. to the f64 floor.
+fn equilibrium_clamp_kg(up: &DuctVolume, down: &DuctVolume, requested_kg: f64) -> f64 {
+    let requested = requested_kg.max(0.0);
+    let m_up = up.mass_kg.max(0.0);
+    if requested <= 0.0 || m_up <= 0.0 || up.pressure_pa <= down.pressure_pa {
         return 0.0;
     }
-    ((a.pressure_pa - b.pressure_pa).max(0.0) * ca * cb / (ca + cb)).max(0.0)
+    let overshoot = |dm: f64| {
+        let (p_up, p_down) = pressures_after_transfer(up, down, dm);
+        p_up - p_down
+    };
+    if overshoot(requested.min(m_up)) >= 0.0 {
+        return requested.min(m_up);
+    }
+    let (mut lo, mut hi) = (0.0_f64, requested.min(m_up));
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        if overshoot(mid) > 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 /// Move gas from `a` to `b` (or the reverse, whichever is upstream) through
@@ -201,7 +255,7 @@ pub fn transfer_kg(dt_s: f64, discharge_coefficient: f64, area_m2: f64, a: &mut 
     }
     let (upstream, downstream, sign) = if a.pressure_pa >= b.pressure_pa { (&*a, &*b, 1.0) } else { (&*b, &*a, -1.0) };
     let rate = orifice_mass_flow_kg_s(discharge_coefficient, area_m2, upstream.pressure_pa, upstream.temp_k, downstream.pressure_pa);
-    let mut dm = (rate * dt).max(0.0).min(equilibrium_clamp_kg(upstream, downstream));
+    let mut dm = equilibrium_clamp_kg(upstream, downstream, rate * dt);
     let (from_temp, from_pa) = (upstream.temp_k, upstream.pressure_pa);
     if sign > 0.0 {
         a.add_mass(-dm, from_temp, from_pa);
@@ -248,7 +302,7 @@ pub fn one_way_transfer_kg(
             return 0.0;
         }
         let rate = orifice_mass_flow_kg_s(discharge_coefficient, forward_area_m2, upstream.pressure_pa, upstream.temp_k, downstream.pressure_pa);
-        let dm = (rate * dt).max(0.0).min(equilibrium_clamp_kg(upstream, downstream));
+        let dm = equilibrium_clamp_kg(upstream, downstream, rate * dt);
         let (t, p) = (upstream.temp_k, upstream.pressure_pa);
         upstream.add_mass(-dm, t, p);
         downstream.add_mass(dm, t, p);
@@ -259,7 +313,7 @@ pub fn one_way_transfer_kg(
             return 0.0;
         }
         let rate = orifice_mass_flow_kg_s(discharge_coefficient * leak, check_valve_seat_area_m2, downstream.pressure_pa, downstream.temp_k, upstream.pressure_pa);
-        let dm = (rate * dt).max(0.0).min(equilibrium_clamp_kg(downstream, upstream));
+        let dm = equilibrium_clamp_kg(downstream, upstream, rate * dt);
         let (t, p) = (downstream.temp_k, downstream.pressure_pa);
         downstream.add_mass(-dm, t, p);
         upstream.add_mass(dm, t, p);
@@ -376,15 +430,47 @@ mod tests {
     }
 
     #[test]
-    fn adding_and_removing_the_same_mass_returns_to_the_start() {
+    fn adding_and_removing_the_same_mass_returns_the_mass_but_not_the_state() {
         let mut v = DuctVolume::new(1.0, 300_000.0, 400.0);
         let (p0, t0, m0) = (v.pressure_pa(), v.temp_k(), v.mass_kg());
         v.add_mass(0.05, 500.0, 400_000.0);
         assert!(v.pressure_pa() > p0, "adding mass at higher pressure raises this volume's pressure");
         v.add_mass(-0.05, v.temp_k(), v.pressure_pa());
+
+        // Mass is conserved exactly: that much *is* a round trip.
         assert!((v.mass_kg() - m0).abs() < 1e-9);
-        assert!((v.pressure_pa() - p0).abs() / p0 < 1e-6, "round trip returns pressure (isentropic charge/discharge is reversible)");
-        let _ = t0;
+
+        // The state is not, and must not be. Charging a vessel from a
+        // source at a *higher* pressure throttles gas across the inlet,
+        // which is irreversible and raises entropy; the isentropic
+        // discharge that follows cannot take that back, so the volume is
+        // left hotter and at a higher pressure than it started. (The
+        // previous "isentropic charge/discharge is reversible" claim here
+        // was simply not true of filling and emptying a vessel, and is not
+        // what FBW's own relations -- see the module docs -- say either.)
+        //
+        // Hand solve, straight from those relations with gamma = 1.4,
+        // R = 287.057005, V = 1 m^3, dm = 0.05 kg at 500 K / 400 kPa:
+        //   m0     = P0*V/(R*T0) = 300000/(287.057005*400) = 2.612731 kg
+        //   m1     = m0 + dm                               = 2.662731 kg
+        //   V_in   = dm*R*T_in/P_in = 0.05*287.057005*500/400000
+        //                                                  = 0.01794106 m^3
+        //   q      = 1 + V_in/V                            = 1.01794106
+        //   T1     = (m0*T0 + dm*T_in)/m1 * q^0.4
+        //          = (1045.09252 + 25)/2.662731 * 1.0071382 = 404.7456 K
+        //   r      = m0/m1                                 = 0.9812226
+        //   T2     = T1 * r^0.4 = 404.7456 * 0.9924463      = 401.6887 K
+        //   P2     = m0*R*T2/V = 750 * 401.6887             = 301 266.5 Pa
+        // i.e. it comes back 1.69 K and 1267 Pa (0.42%) high.
+        let t2_expected = 401.6887;
+        let p2_expected = 301_266.5;
+        assert!((v.temp_k() - t2_expected).abs() < 0.01, "temp {} vs hand-solved {}", v.temp_k(), t2_expected);
+        assert!((v.pressure_pa() - p2_expected).abs() / p2_expected < 1e-5, "pressure {} vs hand-solved {}", v.pressure_pa(), p2_expected);
+        // And the direction is the second law's, not an accident of the
+        // arithmetic: never back below where it started.
+        assert!(v.pressure_pa() > p0 && v.temp_k() > t0);
+        // Whatever state it lands in is a consistent ideal-gas state.
+        assert!((v.pressure_pa() - v.mass_kg() * R_AIR_J_KG_K * v.temp_k() / v.volume_m3()).abs() / p0 < 1e-9);
     }
 
     #[test]

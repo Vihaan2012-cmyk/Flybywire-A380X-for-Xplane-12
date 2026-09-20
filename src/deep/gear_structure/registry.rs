@@ -358,7 +358,7 @@ mod tests {
     fn everything_registered_validates_clean() {
         let mut r = Registry::default();
         register(&mut r);
-        let errors = r.validate();
+        let errors = r.validate_area();
         assert!(errors.is_empty(), "registry validation errors: {errors:?}");
     }
 

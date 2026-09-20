@@ -498,17 +498,33 @@ mod tests {
         net.add_conduction_link(z0, z1, 20.0);
 
         let outside = calm_ground_air(15.0);
-        for _ in 0..40_000 {
+        // The slowest eigenvalue of this two-structure-node chain is
+        // 6.1e-5 /s (tau = 16 000 s: C = 1e5 J/K per node against a 20 W/K
+        // link and a 15 W/K exit), so 40 000 s left it 8% short of the
+        // steady state it is asymptoting to. 150 000 s is ~9 tau.
+        for _ in 0..150_000 {
             net.step(1.0, &outside, 0.0);
         }
 
         // Hand solve: at steady state all of z0's baseline heat must flow
         // out through the conduction link, then all the way out through
-        // z1's exterior convection (ext_h=10 at TAS=0):
+        // z1's exterior convection:
         //   ua_link*(T0-T1) = ext_ua*(T1-Tamb) = Q0
-        let ext_ua = 10.0 * 5.0;
-        let t1_predicted = 15.0 + 1000.0 / ext_ua;
-        let t0_predicted = t1_predicted + 1000.0 / 20.0;
+        // `ext_ua` is NOT h*A: every zone is built with an intact
+        // insulation blanket (`insulation_effectiveness` = 1.0), and
+        // `substep` applies `1 - insulation_effectiveness *
+        // INSULATION_ATTENUATION` = 0.3 to the exterior convective term,
+        // so the blanketed exit conductance is h*A*0.3 = 10*5*0.3 = 15 W/K
+        // and the chain has to sit far hotter than bare metal would to
+        // push the same 1000 W out.
+        let ext_ua = 10.0 * 5.0 * (1.0 - INSULATION_ATTENUATION);
+        let t1_predicted = 15.0 + 1000.0 / ext_ua; // 81.67 C
+        let t0_predicted = t1_predicted + 1000.0 / 20.0; // 131.67 C
+        // Both assertions read the *air* nodes. z1's air carries no source
+        // of its own, so at steady state it sits exactly on its structure.
+        // z0's air carries the 1000 W and has to be 1000/5000 = 0.2 K above
+        // its own structure to push it across, comfortably inside the 1 K
+        // tolerance below.
 
         assert!((net.air_temp_c(z0) - t0_predicted).abs() < 1.0, "z0 {} vs predicted {}", net.air_temp_c(z0), t0_predicted);
         assert!((net.air_temp_c(z1) - t1_predicted).abs() < 1.0, "z1 {} vs predicted {}", net.air_temp_c(z1), t1_predicted);
@@ -562,13 +578,28 @@ mod tests {
         let mut sunny = ThermalNetwork::new();
         let z_sunny = sunny.add_zone(Zone::new("Sunny", 5.0, 2.0e5, 100.0, 10.0, 0.5, 0.0, 15.0));
 
-        for _ in 0..20_000 {
+        // tau = C/ext_ua = 2e5/30 = 6670 s, so 20 000 s was only 3 tau and
+        // still 5% short; 60 000 s is 9 tau.
+        for _ in 0..60_000 {
             shaded.step(1.0, &outside, FLUX_W_M2);
             sunny.step(1.0, &outside, FLUX_W_M2);
         }
 
         assert!((shaded.structure_temp_c(z_shaded) - 15.0).abs() < 0.5, "no sun exposure: should stay near ambient, got {}", shaded.structure_temp_c(z_shaded));
-        let predicted_sunny = 15.0 + FLUX_W_M2 * 0.5 * 0.3 / 10.0; // ext_ua = h*A = 10*10
+        // Hand solve: absorbed solar power in = blanketed convection out.
+        //   Q_sun = flux * A * sun_fraction * absorptivity
+        //         = 800 * 10 * 0.5 * 0.3 = 1200 W
+        //     (the old expression here dropped the 10 m^2 area from the
+        //      absorbed power and then divided by 10 instead of by the
+        //      exit conductance, which happened to be within 6x)
+        //   ext_ua = h * A * (1 - insulation_effectiveness * ATTENUATION)
+        //          = 10 * 10 * 0.3 = 30 W/K
+        //     (solar lands on the skin, so the blanket behind it does not
+        //      attenuate the absorbed flux, only the convective exchange)
+        //   T = 15 + 1200/30 = 55 C
+        let q_sun_w = FLUX_W_M2 * 10.0 * 0.5 * SOLAR_ABSORPTIVITY_TYPICAL;
+        let ext_ua = 10.0 * 10.0 * (1.0 - INSULATION_ATTENUATION);
+        let predicted_sunny = 15.0 + q_sun_w / ext_ua; // 55 C
         assert!((sunny.structure_temp_c(z_sunny) - predicted_sunny).abs() < 1.0, "sunny {} vs predicted {}", sunny.structure_temp_c(z_sunny), predicted_sunny);
         assert!(sunny.structure_temp_c(z_sunny) > shaded.structure_temp_c(z_shaded));
     }
@@ -622,19 +653,47 @@ mod tests {
     #[test]
     fn substepping_keeps_a_stiff_zone_stable_at_a_large_timestep() {
         let mut net = ThermalNetwork::new();
-        // Tiny thermal mass, huge UA to outside: a very fast time
-        // constant relative to a 100s single call -- a plain one-shot
-        // Euler step here would wildly overshoot/oscillate.
-        let z0 = net.add_zone(Zone::new("Stiff", 0.01, 10.0, 0.0, 1.0, 0.0, 500.0, 15.0));
+        // A 50 J/K structure node against 200 W/K of coupling: tau = 0.25 s
+        // against a single 100 s call, i.e. 400x stiff. A plain one-shot
+        // Euler step would multiply the structure node's error by
+        // (1 - 200/50*100) = -399 per step; only sub-stepping can land it
+        // on the steady state below.
+        //
+        // The zone's 500 W of equipment dissipation lands on the *air*
+        // node (that is what `baseline_heat_w` is: see `Zone`'s own doc and
+        // `substep`, which adds it to `q_air`), so the heat has to reach
+        // the outside through the air<->structure coupling and then the
+        // skin. The previous version of this test set
+        // `air_structure_ua_w_per_k` to 0.0, which left the air node with
+        // no loss path at all (it just ramped) and the structure node
+        // decoupled from the heat entirely, so its "predicted" 65 C could
+        // never have been reached by any amount of sub-stepping. It also
+        // needs a defined sink for the air node, so the zone is given a
+        // ventilation path to outside as well.
+        //
+        // Hand solve, with theta = T - 15, U = air<->structure = 100 W/K,
+        // E = structure<->outside = h*A*(1 - insulation*ATTENUATION), and
+        // V = vent flow * cp:
+        //   structure:  U*(theta_a - theta_s) = E*theta_s
+        //   air:        500 = V*theta_a + U*(theta_a - theta_s)
+        // With the blanket removed (bare skin) E = 10*10*1.0 = 100 W/K, so
+        // theta_s = theta_a/2 and 500 = V*theta_a + 50*theta_a; choosing
+        // V = 50 W/K gives theta_a = 5 and theta_s = 2.5, i.e. air 20 C and
+        // structure 17.5 C.
+        const U_W_PER_K: f64 = 100.0;
+        const VENT_UA_W_PER_K: f64 = 50.0;
+        let z0 = net.add_zone(Zone::new("Stiff", 0.01, 50.0, U_W_PER_K, 10.0, 0.0, 500.0, 15.0));
+        net.zones[z0].insulation_effectiveness = 0.0; // bare skin: E = h*A
+        net.add_ventilation_link(z0, ZoneRef::OutsideAir, VENT_UA_W_PER_K / CP_AIR_J_PER_KG_K);
         let outside = calm_ground_air(15.0);
         net.step(100.0, &outside, 0.0);
 
         assert!(net.structure_temp_c(z0).is_finite());
-        // Time constant here is tiny (mass=10 J/K, ext_ua=10*1=10 W/K =>
-        // tau=1s), so 100s is far past steady state:
-        // 0 = 500 - 10*(T-15) => T = 65.
-        let predicted = 15.0 + 500.0 / 10.0;
-        assert!((net.structure_temp_c(z0) - predicted).abs() < 1.0, "structure {} vs predicted {}", net.structure_temp_c(z0), predicted);
+        assert!(net.air_temp_c(z0).is_finite());
+        let predicted_air = 15.0 + 5.0;
+        let predicted_structure = 15.0 + 2.5;
+        assert!((net.air_temp_c(z0) - predicted_air).abs() < 0.1, "air {} vs predicted {}", net.air_temp_c(z0), predicted_air);
+        assert!((net.structure_temp_c(z0) - predicted_structure).abs() < 0.1, "structure {} vs predicted {}", net.structure_temp_c(z0), predicted_structure);
     }
 
     // -- 7. Insulation damage: a damaged blanket lets a cold zone chill

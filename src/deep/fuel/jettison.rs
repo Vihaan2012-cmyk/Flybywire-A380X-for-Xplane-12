@@ -12,11 +12,12 @@
 //! already looked up by name in `fuel.rs`'s own `Jettison` struct) gets its
 //! own transit-time dynamics and its own stuck/blockage faults, and flow is
 //! computed from the *actual* hydrostatic head of the tank (which falls as
-//! it drains) plus a boost pump's assist pressure, against the ambient
-//! static pressure at altitude the real orifice equation already includes --
-//! so jettison rate genuinely falls through the dump as the tanks empty, and
-//! genuinely varies with altitude, rather than being read once from a
-//! decreasing pair of tank quantities against a fixed combined orifice.
+//! it drains) plus a boost pump's assist pressure, against the pressure at
+//! the nozzle's own exit -- so jettison rate genuinely falls through the
+//! dump as the tanks empty, rather than being read once from a decreasing
+//! pair of tank quantities against a fixed combined orifice. Because the
+//! tanks are vented, the ambient static pressure appears on both sides of
+//! the nozzle and cancels: see [`jettison_mass_flow_kg_s`].
 
 use super::geometry::G;
 
@@ -93,17 +94,60 @@ pub fn effective_cda_m2(nominal_cda_m2: f64, blockage_fraction: f64, valve_posit
     (nominal_cda_m2.max(0.0) * (1.0 - blockage_fraction.clamp(0.0, 1.0)) * valve_position.clamp(0.0, 1.0)).max(0.0)
 }
 
-/// Mass flow rate overboard through one nozzle, kg/s: head pressure from the
-/// tank's own remaining liquid depth, plus an optional boost-pump assist
-/// pressure, against ambient static pressure at the aircraft's current
-/// altitude (falls with altitude -- the real reason published jettison rates
-/// are usually quoted at a reference altitude: the *same* tank head jettisons
-/// faster once ambient back-pressure has dropped).
-pub fn jettison_mass_flow_kg_s(cda_m2: f64, liquid_depth_m: f64, boost_pump_pressure_pa: f64, ambient_pressure_pa: f64, density_kg_m3: f64) -> f64 {
-    let drive_pressure = head_pressure_pa(liquid_depth_m, density_kg_m3) + boost_pump_pressure_pa.max(0.0);
-    let delta_p = drive_pressure - ambient_pressure_pa.max(0.0);
+/// Mass flow rate overboard through one nozzle, kg/s.
+///
+/// The pressure that drives fuel out of the nozzle is the difference across
+/// it, not an absolute pressure:
+///
+/// ```text
+/// dP = (ullage + rho*g*h + pump) - nozzle exit
+/// ```
+///
+/// The A380's tanks are *vented* (NACA vents through the surge tanks), so
+/// the ullage sits at the ambient static pressure of whatever altitude the
+/// aircraft is at, and the nozzle discharges into air at very nearly that
+/// same static pressure. The two ambients therefore cancel, and what is
+/// left is the gauge head `rho*g*h` plus the jettison pump's own rise --
+/// which is why a vented-tank jettison rate is essentially independent of
+/// altitude and why it falls as the tanks drain. (Subtracting the *absolute*
+/// ambient from the *gauge* head, as an earlier version of this function
+/// did, mixes two different datums: 3 m of fuel is 23.5 kPa of head, so that
+/// arithmetic gave zero flow at any sea-level altitude -- it would have
+/// meant the fuel could not even leave a tank on the ground.)
+///
+/// `nozzle_exit_pressure_pa` is kept separate from `ullage_pressure_pa`
+/// precisely so the one real coupling to the airflow is expressible: the
+/// nozzle sticks out into a stream whose local static pressure is below
+/// free-stream by `-Cp * q`, which sucks a little extra flow out, and a
+/// blocked/iced vent that lets the ullage drop below ambient throttles it.
+pub fn jettison_mass_flow_kg_s(
+    cda_m2: f64,
+    liquid_depth_m: f64,
+    boost_pump_pressure_pa: f64,
+    ullage_pressure_pa: f64,
+    nozzle_exit_pressure_pa: f64,
+    density_kg_m3: f64,
+) -> f64 {
+    let drive_pressure = ullage_pressure_pa.max(0.0) + head_pressure_pa(liquid_depth_m, density_kg_m3) + boost_pump_pressure_pa.max(0.0);
+    let delta_p = drive_pressure - nozzle_exit_pressure_pa.max(0.0);
     orifice_flow_m3_s(cda_m2, delta_p, density_kg_m3) * density_kg_m3.max(0.0)
 }
+
+/// Nominal `Cd*A` of one jettison nozzle, m^2. Sized from the published
+/// A380 jettison rate of about 2,000 kg/min per side (~33.3 kg/s, i.e.
+/// 0.0417 m^3/s of 800 kg/m^3 fuel) with the jettison pumps running at
+/// [`NOMINAL_JETTISON_PUMP_RISE_PA`] and a nearly full tank:
+///   v = sqrt(2 * (50 000 + 800*9.81*2.0) / 800) = 12.9 m/s
+///   Cd*A = 0.0417 / 12.9 = 3.2e-3 m^2
+/// (a ~70 mm effective throat with Cd ~ 0.8, the right order for a nozzle
+/// fed by a 3-inch jettison line). GENERIC in the sense that only the rate,
+/// not the hardware dimension, is published.
+pub const NOMINAL_NOZZLE_CDA_M2: f64 = 3.2e-3;
+/// Pressure rise of a jettison/transfer pump at its jettison flow, Pa.
+/// GENERIC: aircraft fuel boost pumps are quoted in the 5-15 psi class;
+/// 50 kPa = 7.3 psi sits in that band and is the figure the nozzle above is
+/// sized against, so the two are consistent by construction.
+pub const NOMINAL_JETTISON_PUMP_RISE_PA: f64 = 50_000.0;
 
 #[cfg(test)]
 mod tests {
@@ -174,27 +218,64 @@ mod tests {
     #[test]
     fn jettison_flow_falls_as_the_tank_drains() {
         let cda = 0.0015;
-        let full = jettison_mass_flow_kg_s(cda, 3.0, 0.0, SEA_LEVEL_PA, RHO);
-        let half = jettison_mass_flow_kg_s(cda, 1.5, 0.0, SEA_LEVEL_PA, RHO);
-        let empty = jettison_mass_flow_kg_s(cda, 0.0, 0.0, SEA_LEVEL_PA, RHO);
+        let full = jettison_mass_flow_kg_s(cda, 3.0, 0.0, SEA_LEVEL_PA, SEA_LEVEL_PA, RHO);
+        let half = jettison_mass_flow_kg_s(cda, 1.5, 0.0, SEA_LEVEL_PA, SEA_LEVEL_PA, RHO);
+        let empty = jettison_mass_flow_kg_s(cda, 0.0, 0.0, SEA_LEVEL_PA, SEA_LEVEL_PA, RHO);
         assert!(full > half);
         assert!(half > empty);
         assert_eq!(empty, 0.0);
+        // Gravity-only flow goes as sqrt(h), so halving the head must cost
+        // exactly a factor sqrt(2): Q(3.0 m)/Q(1.5 m) = sqrt(2) = 1.4142.
+        assert!((full / half - std::f64::consts::SQRT_2).abs() < 1e-9, "{full} / {half}");
     }
 
     #[test]
-    fn jettison_flow_is_higher_at_altitude_for_the_same_tank_head() {
+    fn jettison_flow_is_set_by_the_pressure_across_the_nozzle_not_by_altitude() {
         let cda = 0.0015;
-        let sea_level = jettison_mass_flow_kg_s(cda, 2.0, 0.0, SEA_LEVEL_PA, RHO);
-        let cruise = jettison_mass_flow_kg_s(cda, 2.0, 0.0, CRUISE_PA, RHO);
-        assert!(cruise > sea_level, "lower ambient back-pressure should pass more flow");
+        // The tanks are vented, so the ullage is at ambient and the nozzle
+        // discharges into ambient: the same tank head jettisons at the same
+        // rate at sea level and at FL350. (The old expectation here -- that
+        // a lower ambient passes more flow -- would only hold for a sealed,
+        // pressurised tank, which this aircraft does not have.)
+        let sea_level = jettison_mass_flow_kg_s(cda, 2.0, 0.0, SEA_LEVEL_PA, SEA_LEVEL_PA, RHO);
+        let cruise = jettison_mass_flow_kg_s(cda, 2.0, 0.0, CRUISE_PA, CRUISE_PA, RHO);
+        assert!(sea_level > 0.0);
+        assert!((cruise - sea_level).abs() < 1e-9, "{cruise} vs {sea_level}");
+        // What the altitude/airflow really buys is the suction at the nozzle
+        // exit, which sits in a stream at a local static pressure below
+        // free-stream. 5 kPa of it on top of 2 m of head
+        // (rho*g*h = 800*9.81*2 = 15.70 kPa) is a 32% bigger dP, i.e. a
+        // sqrt(20.70/15.70) = 1.148x flow.
+        let with_suction = jettison_mass_flow_kg_s(cda, 2.0, 0.0, CRUISE_PA, CRUISE_PA - 5_000.0, RHO);
+        assert!((with_suction / cruise - 1.148).abs() < 0.002, "{}", with_suction / cruise);
     }
 
     #[test]
     fn a_boost_pump_assist_adds_to_the_driving_pressure() {
         let cda = 0.0015;
-        let gravity_only = jettison_mass_flow_kg_s(cda, 1.0, 0.0, SEA_LEVEL_PA, RHO);
-        let pump_assisted = jettison_mass_flow_kg_s(cda, 1.0, 50_000.0, SEA_LEVEL_PA, RHO);
+        let gravity_only = jettison_mass_flow_kg_s(cda, 1.0, 0.0, SEA_LEVEL_PA, SEA_LEVEL_PA, RHO);
+        let pump_assisted = jettison_mass_flow_kg_s(cda, 1.0, 50_000.0, SEA_LEVEL_PA, SEA_LEVEL_PA, RHO);
         assert!(pump_assisted > gravity_only);
+        // dP goes from 800*9.81*1 = 7.85 kPa to 57.85 kPa, so the flow goes
+        // up by sqrt(57.85/7.85) = 2.714x -- the pumps, not gravity, are
+        // what make a jettison quick.
+        assert!((pump_assisted / gravity_only - 2.714).abs() < 0.005, "{}", pump_assisted / gravity_only);
+    }
+
+    #[test]
+    fn the_nominal_nozzle_dumps_about_two_thousand_kg_per_minute_per_side() {
+        // The sizing anchor for NOMINAL_NOZZLE_CDA_M2: a nearly full tank
+        // (2 m of head) with the jettison pumps running should dump at the
+        // published A380 rate of roughly 2,000 kg/min per side.
+        let kg_s = jettison_mass_flow_kg_s(
+            NOMINAL_NOZZLE_CDA_M2,
+            2.0,
+            NOMINAL_JETTISON_PUMP_RISE_PA,
+            SEA_LEVEL_PA,
+            SEA_LEVEL_PA,
+            RHO,
+        );
+        let kg_min = kg_s * 60.0;
+        assert!((kg_min - 2000.0).abs() < 100.0, "{kg_min} kg/min");
     }
 }

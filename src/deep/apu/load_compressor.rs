@@ -121,6 +121,7 @@ impl LoadCompressor {
                 surge_margin_design_frac: params::LOAD_SURGE_MARGIN_DESIGN_FRAC,
                 surge_line_flatness: params::LOAD_SURGE_LINE_FLATNESS,
                 choke_flow_multiple: params::LOAD_CHOKE_FLOW_MULTIPLE,
+                erosion_efficiency_loss: 0.0,
             },
             igv: Actuator::new(0.0, params::IGV_FULL_TRAVEL_RATE_PER_S),
             scv: Actuator::new(0.0, params::SCV_FULL_TRAVEL_RATE_PER_S),

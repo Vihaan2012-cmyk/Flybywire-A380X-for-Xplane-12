@@ -418,7 +418,16 @@ fn ata21(v: &mut Vec<BreakerDef>) {
             push_electrical(v, id, name, 21, Bus::DcEss, 50.0, 0.8, "pack flow valve actuator", "deep::electrical::loads.rs::ata21 PACK FLOW VALVE (pneumatic.rs PackComplex ElectroPneumaticValve, DC_ESS)");
         }
     }
-    for (id, name, bus) in [("avionics-fan-1", "AVIONICS BAY FAN 1", Bus::AcEss), ("avionics-fan-2", "AVIONICS BAY FAN 2", Bus::AcEssShed)] {
+    // Four avionics-bay cooling fans, matching
+    // `deep::electrical::loads.rs::ata21`'s own four one for one: fans 1/2 on
+    // the essential pair, fans 3/4 on AC 1 / AC 2 so bay ventilation survives
+    // the loss of the essential channel.
+    for (id, name, bus) in [
+        ("avionics-fan-1", "AVIONICS BAY FAN 1", Bus::AcEss),
+        ("avionics-fan-2", "AVIONICS BAY FAN 2", Bus::AcEssShed),
+        ("avionics-fan-3", "AVIONICS BAY FAN 3", Bus::Ac1),
+        ("avionics-fan-4", "AVIONICS BAY FAN 4", Bus::Ac2),
+    ] {
         push_electrical(v, id, name, 21, bus, 300.0, 0.85, "avionics-bay cooling fan motor", "deep::electrical::loads.rs::ata21 avionics-bay cooling fans (GENERIC, not individually named in src/breakers.rs)");
     }
 }
@@ -952,7 +961,17 @@ mod tests {
 
     #[test]
     fn every_ata_chapter_used_is_a_real_a380_chapter_and_matches_its_own_group() {
-        const VALID: [u16; 20] = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 44, 49, 73, 74];
+        // Every chapter this catalogue actually uses, each a real ATA 100
+        // chapter with a real A380 system behind it: 21 air conditioning,
+        // 22 auto flight, 23 communications, 24 electrical power, 25
+        // equipment/furnishings, 26 fire protection, 27 flight controls,
+        // 28 fuel, 29 hydraulic power, 30 ice and rain protection, 31
+        // indicating/recording, 32 landing gear, 33 lights, 34 navigation,
+        // 35 oxygen, 36 pneumatic, 44 cabin systems, 49 APU, 52 doors
+        // (the cargo/passenger door actuator controls), 73 engine fuel and
+        // control, 74 ignition. Kept as a whitelist, not a range, so a
+        // mistyped chapter on a new entry still fails here.
+        const VALID: [u16; 21] = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 44, 49, 52, 73, 74];
         for def in all() {
             assert!(VALID.contains(&def.ata), "{} has an unexpected ATA chapter {}", def.id, def.ata);
         }

@@ -331,13 +331,42 @@ pub const WINDMILL_TORQUE_COEFF_NM_PER_PA: f64 = 0.02;
 /// independently here per this directory's self-containment rule.
 pub const OIL_VISCOSITY_WALTHER_A: f64 = 9.3116;
 pub const OIL_VISCOSITY_WALTHER_B: f64 = 3.6661;
-/// GENERIC: extra cranking drag torque per rad/s of spool speed, per unit
-/// of (viscosity ratio above the hot reference) -- chosen as a small
-/// fraction of starter torque at a *hot* reference so cold-soaked oil (tens
-/// to hundreds of times more viscous well below freezing, per the Walther
-/// relation) becomes a genuine, testable extra load on a cold start without
-/// dominating a normal-temperature one.
-pub const OIL_COLD_DRAG_COEFF_NM_PER_RAD_S: f64 = 0.0015;
+/// The gas-generator spool's rated angular velocity, rad/s (derived from
+/// `N_DESIGN_RPM`, not an independent number).
+pub fn omega_rated_rad_s() -> f64 {
+    N_DESIGN_RPM * std::f64::consts::TAU / 60.0
+}
+
+/// The viscous (bearing and gear shear) part of the accessory drag torque,
+/// at rated speed and at the hot reference oil viscosity, N*m.
+///
+/// Derived, not asserted: it is the whole of `FIXED_ACCESSORY_POWER_W`
+/// expressed as a torque at rated speed (3000 W / 6283.2 rad/s =
+/// 0.477 N*m). Treating all of that un-itemised accessory power as viscous
+/// shear at *hot* viscosity is the conservative reading -- some of it is
+/// really the oil pump's own displacement work -- and it means the cold-oil
+/// penalty below needs no free constant of its own: it is that same shear,
+/// scaled by how much thicker than hot the oil currently is.
+pub fn oil_viscous_drag_torque_hot_rated_nm() -> f64 {
+    FIXED_ACCESSORY_POWER_W / omega_rated_rad_s()
+}
+
+/// Exponent on both the viscosity ratio and the speed ratio in the bearing/
+/// gearbox viscous drag term (`oil.rs`'s `cold_drag_torque_nm`).
+///
+/// Palmgren's standard rolling-bearing no-load friction relation (A.
+/// Palmgren, *Ball and Roller Bearing Engineering*, 1959; reproduced in
+/// every bearing manufacturer's catalogue, e.g. SKF's `M_0 = f_0 (nu*n)^(2/3)
+/// d_m^3 * 1e-7`) makes the viscous term grow as the *two-thirds* power of
+/// the viscosity-speed product, not linearly in either. That matters a great
+/// deal here: MIL-PRF-23699 oil is ~2400 times more viscous at -40 degC than
+/// at this model's hot reference, so a linear-in-viscosity drag term would
+/// claim thousands of newton-metres of cranking drag on a cold-soaked start
+/// -- two orders of magnitude more than the starter can produce, i.e. no
+/// cold start would ever be physically possible, and even a 15 degC ambient
+/// start would stall the spool below light-off. The 2/3 power is the
+/// published, measured shape.
+pub const OIL_VISCOUS_DRAG_EXPONENT: f64 = 2.0 / 3.0;
 /// Reference (fully warmed) oil temperature the cold-drag term is measured
 /// relative to -- no extra drag once oil is at/above this.
 pub const OIL_HOT_REFERENCE_K: f64 = 353.15;

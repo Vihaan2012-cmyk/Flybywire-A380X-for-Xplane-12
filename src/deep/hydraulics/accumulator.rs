@@ -176,15 +176,56 @@ mod tests {
 
     #[test]
     fn precharge_loss_lowers_both_resting_and_charged_pressure() {
-        let healthy = Accumulator::a380();
-        let mut leaked = Accumulator::a380();
+        let ok = faults_ok();
         let leak_fault = AccumulatorFaults { precharge_loss: 1.0 };
-        assert!(leaked.pressure_pa(&leak_fault) < healthy.pressure_pa(&faults_ok()));
+        let mut healthy = Accumulator::a380();
+        let mut leaked = Accumulator::a380();
+
+        // -- Resting (no fluid in, gas filling the whole shell): a fully
+        // bled accumulator's gas cushion has relaxed to atmospheric, so it
+        // holds no stored pressure at all, against the healthy one's 2612
+        // psi precharge.
+        assert!((leaked.pressure_pa(&leak_fault) - fluid::ATM_PA).abs() < 1.0);
+        assert!(leaked.pressure_pa(&leak_fault) < healthy.pressure_pa(&ok));
+
+        // -- Charged from the same 5000 psi *gauge* line. Both end at the
+        // line's own pressure (that is what charged means: port flow stops
+        // when dp = 0), so what differs is how much fluid each had to
+        // swallow to get there. Note the accumulator's own pressure is
+        // absolute, so the charged value is 5000 psi + 1 atm -- the old
+        // `< 5000 psi` assertion here was comparing an absolute pressure
+        // against a gauge one. Hand solve from `P0*V0^n = P*Vgas^n`,
+        // n = 1.2, line_abs = 5000*6894.757 + 101325 = 34.575 MPa:
+        //   healthy (P0 = 2612 psi = 18.009 MPa):
+        //     (V0/Vgas)^1.2 = 34.575/18.009 = 1.9199 -> V0/Vgas = 1.7220
+        //     -> fluid held = 1 - 1/1.7220 = 0.419 of the shell
+        //   leaked  (P0 = 1 atm = 0.10133 MPa):
+        //     (V0/Vgas)^1.2 = 34.575/0.10133 = 341.2 -> V0/Vgas = 129.1
+        //     -> fluid held = 1 - 1/129.1 = 0.992 of the shell
+        // i.e. the bled unit ends up almost solid fluid at line pressure.
         for _ in 0..500 {
+            healthy.step(5000.0 * PSI_PA, &ok, 0.02);
             leaked.step(5000.0 * PSI_PA, &leak_fault, 0.02);
         }
-        // With no precharge, the same charging flow buys far less pressure rise for the same fluid in.
-        assert!(leaked.pressure_pa(&leak_fault) < 5000.0 * PSI_PA);
+        let shell = GALLON_M3 * 0.5;
+        assert!((healthy.fluid_volume_m3() / shell - 0.419).abs() < 0.01, "healthy charged fill fraction {}", healthy.fluid_volume_m3() / shell);
+        assert!((leaked.fluid_volume_m3() / shell - 0.992).abs() < 0.01, "leaked charged fill fraction {}", leaked.fluid_volume_m3() / shell);
+
+        // -- Delivering into a dead line (0 psi gauge): the gas can only
+        // expand until it fills the shell again, so the healthy unit pushes
+        // its last drop of fluid out at its full 2612 psi precharge while
+        // the bled one runs out of push at atmospheric. That stored
+        // delivery pressure is the whole function of a precharge, and it is
+        // what `precharge_loss` takes away.
+        // (2000 steps = 40 s: the gas spring's push falls off as
+        // sqrt(dp) near the end, so the last few millilitres take ~12 s.)
+        for _ in 0..2000 {
+            healthy.step(0.0, &ok, 0.02);
+            leaked.step(0.0, &leak_fault, 0.02);
+        }
+        assert!((healthy.pressure_pa(&ok) - 2612.0 * PSI_PA).abs() / (2612.0 * PSI_PA) < 1e-9, "healthy relaxes back to exactly its precharge, got {}", healthy.pressure_pa(&ok));
+        assert!((leaked.pressure_pa(&leak_fault) - fluid::ATM_PA).abs() / fluid::ATM_PA < 1e-9, "a fully bled accumulator relaxes to ambient, got {}", leaked.pressure_pa(&leak_fault));
+        assert!(leaked.pressure_pa(&leak_fault) < healthy.pressure_pa(&ok));
     }
 
     #[test]

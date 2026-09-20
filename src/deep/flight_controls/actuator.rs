@@ -182,14 +182,137 @@ pub struct ActuatorFaults {
     pub piston_seal_wear: f64,
 }
 
+/// The torque law one PCU presents to the body it drives, in the one form
+/// all three modes share: **a clamped affine function of that body's rate**,
+///
+/// `S(r) = clamp(open_torque_nm - damping_nm_s_per_rad * r, +-max_torque_nm)`
+///
+/// (`Active`: the inner rate loop, `open = k * rate_cmd`; `Damping`: the
+/// damping orifices, `open = 0`; `Standby`: the trapped fluid's spring and
+/// damper, `open` = the spring term). Callers need the law, not just its
+/// value at the current rate, because `damping_nm_s_per_rad` is enormous --
+/// `c/I` runs from 10^3 to 10^4 s^-1, while an explicit (or semi-implicit)
+/// Euler step on a damper is only stable while `c*dt/I < 2`, which no
+/// affordable sub-step satisfies. Handing the law to [`servo_rate_step`]
+/// solves the step exactly instead, clamp included, at any `dt`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ServoLoad {
+    pub open_torque_nm: f64,
+    pub damping_nm_s_per_rad: f64,
+    pub max_torque_nm: f64,
+}
+
+impl ServoLoad {
+    /// No servo at all (a free body, or one whose linkage has sheared).
+    pub const NONE: Self = Self { open_torque_nm: 0.0, damping_nm_s_per_rad: 0.0, max_torque_nm: 0.0 };
+
+    /// Several actuators on one body, lumped into a single clamped affine
+    /// law. Inside the linear band the sum is exact and says the physically
+    /// right thing about actuators that disagree: they fight each other and
+    /// settle at the gradient-weighted mean of their rate demands,
+    /// `sum(c_i r_i) / sum(c_i)`, which is what parallel servos on a common
+    /// shaft actually do. Outside it the lumped clamp is an approximation,
+    /// exact whenever they saturate together -- the case that matters, since
+    /// actuators on a common surface share a rate command. An actuator with
+    /// no torque ceiling left contributes nothing at all (its law is
+    /// `clamp(.., +-0) == 0`), so it gets no vote; `PowerControlUnit::step`
+    /// reports [`ServoLoad::NONE`] for it.
+    pub fn add(&mut self, other: &Self) {
+        self.open_torque_nm += other.open_torque_nm;
+        self.damping_nm_s_per_rad += other.damping_nm_s_per_rad;
+        self.max_torque_nm += other.max_torque_nm;
+    }
+
+    /// The same law seen through a gear ratio `g` (motor shaft rate =
+    /// `g` * output rate, output torque = `g` * motor torque), so the
+    /// intercept and the ceiling scale with `g` and the rate gradient with
+    /// `g^2`. Used by `ths.rs`'s speed-summing differential.
+    pub fn geared(&self, g: f64) -> Self {
+        Self {
+            open_torque_nm: g * self.open_torque_nm,
+            damping_nm_s_per_rad: g * g * self.damping_nm_s_per_rad,
+            max_torque_nm: g.abs() * self.max_torque_nm,
+        }
+    }
+
+    /// This law's value at a given body rate.
+    pub fn torque_at(&self, rate_rad_s: f64) -> f64 {
+        (self.open_torque_nm - self.damping_nm_s_per_rad * rate_rad_s)
+            .clamp(-self.max_torque_nm.max(0.0), self.max_torque_nm.max(0.0))
+    }
+}
+
 /// What one `step` gives back: the torque the PCU is applying about the
 /// hinge this tick, its current torque ceiling (for surface.rs's blow-back
-/// bookkeeping) and whether it is at that ceiling.
+/// bookkeeping), whether it is at that ceiling, and the pieces its caller's
+/// integrator needs (see [`ServoLoad`] and [`servo_rate_step`]).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ActuatorOutput {
     pub torque_nm: f64,
     pub max_torque_nm: f64,
     pub saturated: bool,
+    /// The servo's own clamped affine torque law.
+    pub servo: ServoLoad,
+    /// The seized mechanism's own spring/damper torque at the rate passed
+    /// in. It is additive to the servo's and never clamped, so it is
+    /// reported separately rather than folded into `servo`.
+    pub jam_torque_nm: f64,
+    /// `-d(jam_torque_nm)/d(rate)`, for the caller's implicit step.
+    pub jam_damping_nm_s_per_rad: f64,
+}
+
+/// One body-rate update, solving
+///
+/// `I*(r' - r)/dt = S(r') + T_other(r') `,
+/// `S(r) = clamp(A - c_s*r, +-T_max)`, `T_other(r) = B - c_o*r`
+///
+/// **exactly** for `r'` -- backward Euler in every velocity-proportional
+/// term, clamp and all, and therefore stable at any `dt`. That matters for
+/// more than stability: a rate-limited servo's linear band is only
+/// `2*T_max/c_s` wide (for the THS, 0.0075 rad/s), narrower than the rate
+/// change a single sub-step at the torque ceiling produces, so an explicit
+/// step jumps clean across the band and chatters between the two clamps
+/// instead of settling on the commanded rate. Solving the clamp gives the
+/// physically right answer directly: accelerate at the torque ceiling,
+/// stopping at the commanded rate.
+///
+/// `other_torque_nm` is `T_other` already evaluated at the current rate (the
+/// form a caller naturally has) and `other_damping_nm_s_per_rad` is `c_o`.
+/// A *negative* `c_o` -- a genuinely destabilising aerodynamic rate term,
+/// see `surface::SurfaceDamping` -- is deliberately left explicit, because
+/// divergence there is physics, not a numerical artefact.
+///
+/// The solution is a two-branch case split, valid because the right-hand
+/// side is monotonically non-increasing in `r'`: try the linear branch, and
+/// if the servo torque it implies lies outside the clamp, redo it with the
+/// servo pinned at whichever bound it exceeded.
+pub fn servo_rate_step(
+    rate_rad_s: f64,
+    servo: &ServoLoad,
+    other_torque_nm: f64,
+    other_damping_nm_s_per_rad: f64,
+    inertia_kg_m2: f64,
+    dt_s: f64,
+) -> f64 {
+    let dt = dt_s.max(0.0);
+    if dt <= 0.0 {
+        return rate_rad_s;
+    }
+    let i_over_dt = inertia_kg_m2.max(1e-9) / dt;
+    let c_other = other_damping_nm_s_per_rad.max(0.0);
+    let c_servo = servo.damping_nm_s_per_rad.max(0.0);
+    let t_max = servo.max_torque_nm.max(0.0);
+    // Re-reference the implicitly-treated part of `T_other` to zero rate;
+    // anything left (including a negative `c_o`) stays as evaluated.
+    let b = other_torque_nm + c_other * rate_rad_s;
+
+    let linear = (i_over_dt * rate_rad_s + b + servo.open_torque_nm) / (i_over_dt + c_other + c_servo);
+    let servo_torque = servo.open_torque_nm - c_servo * linear;
+    if servo_torque.abs() <= t_max {
+        return linear;
+    }
+    let pinned = if servo_torque > 0.0 { t_max } else { -t_max };
+    (i_over_dt * rate_rad_s + b + pinned) / (i_over_dt + c_other)
 }
 
 /// One servo-hydraulic (or EHA/EBHA) power control unit.
@@ -290,7 +413,9 @@ impl PowerControlUnit {
             angle_rad + faults.transducer_bias_rad
         };
 
-        let mut torque = match mode {
+        // Every mode's torque law is `clamp(open - damping*rate, +-max)`;
+        // only the intercept and the gradient differ (see `ServoLoad`).
+        let servo = match mode {
             ActuatorMode::Active => {
                 let normal_rate_cmd =
                     (self.kp_rate_per_rad * (commanded_angle_rad - feedback)).clamp(-rate_limit, rate_limit);
@@ -301,25 +426,49 @@ impl PowerControlUnit {
                 } else {
                     normal_rate_cmd
                 };
-                stiffness_factor * self.k_torque_per_rate * (rate_cmd - rate_rad_s)
+                let k = stiffness_factor * self.k_torque_per_rate;
+                ServoLoad { open_torque_nm: k * rate_cmd, damping_nm_s_per_rad: k, max_torque_nm: max_torque }
             }
-            ActuatorMode::Damping => -stiffness_factor * self.k_damping * rate_rad_s,
-            ActuatorMode::Standby => {
-                stiffness_factor
-                    * (-self.k_standby_spring * (angle_rad - self.standby_angle_rad) - self.k_standby_damp * rate_rad_s)
-            }
+            ActuatorMode::Damping => ServoLoad {
+                open_torque_nm: 0.0,
+                damping_nm_s_per_rad: stiffness_factor * self.k_damping,
+                max_torque_nm: max_torque,
+            },
+            ActuatorMode::Standby => ServoLoad {
+                open_torque_nm: -stiffness_factor * self.k_standby_spring * (angle_rad - self.standby_angle_rad),
+                damping_nm_s_per_rad: stiffness_factor * self.k_standby_damp,
+                max_torque_nm: max_torque,
+            },
         };
-        let saturated = torque.abs() > max_torque;
-        torque = torque.clamp(-max_torque, max_torque);
+        // With no torque ceiling left -- no supply, or a total jam -- the law
+        // `clamp(.., +-0)` is identically zero: such an actuator exerts
+        // nothing and must not be given a share of a lumped `ServoLoad`
+        // either (see `ServoLoad::add`).
+        let servo = if max_torque <= 0.0 { ServoLoad::NONE } else { servo };
+        let unclamped = servo.open_torque_nm - servo.damping_nm_s_per_rad * rate_rad_s;
+        let saturated = unclamped.abs() > max_torque;
+        let mut torque = servo.torque_at(rate_rad_s);
 
         // The seized mechanism's own resistance is additive to whatever the
         // (now authority-reduced) servo can still do, so a partial jam
-        // fights the servo rather than simply capping it.
+        // fights the servo rather than simply capping it. It is never
+        // clamped, so the caller's integrator is handed it separately.
+        let mut jam_torque = 0.0;
+        let mut jam_damping = 0.0;
         if let Some(seize_angle) = self.jam_angle_rad {
-            torque += -self.k_jam_spring * jam * (angle_rad - seize_angle) - self.k_jam_damp * jam * rate_rad_s;
+            jam_damping = self.k_jam_damp * jam;
+            jam_torque = -self.k_jam_spring * jam * (angle_rad - seize_angle) - jam_damping * rate_rad_s;
+            torque += jam_torque;
         }
 
-        ActuatorOutput { torque_nm: torque, max_torque_nm: max_torque, saturated }
+        ActuatorOutput {
+            torque_nm: torque,
+            max_torque_nm: max_torque,
+            saturated,
+            servo,
+            jam_torque_nm: jam_torque,
+            jam_damping_nm_s_per_rad: jam_damping,
+        }
     }
 }
 
@@ -417,14 +566,27 @@ mod tests {
         let (mut ha, mut hr, mut da, mut dr) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
         for _ in 0..200_000 {
             let ho = healthy.step(ActuatorMode::Standby, 0.0, ha, hr, 1.0, &ActuatorFaults::default());
-            hr += (ho.torque_nm + external_torque) / inertia * FINE_DT;
+            hr = servo_rate_step(hr, &ho.servo, external_torque, 0.0, inertia, FINE_DT);
             ha += hr * FINE_DT;
 
             let deg_out = degraded.step(ActuatorMode::Standby, 0.0, da, dr, 1.0, &degraded_faults);
-            dr += (deg_out.torque_nm + external_torque) / inertia * FINE_DT;
+            dr = servo_rate_step(dr, &deg_out.servo, external_torque, 0.0, inertia, FINE_DT);
             da += dr * FINE_DT;
         }
         assert!(ha.abs() > 0.0 && da.abs() > 0.0);
+        // Hand calculation. Standby is a spring of `k_standby_spring =
+        // max_torque * 200`, scaled by `stiffness_factor`; at rest the droop
+        // is just `external_torque / (stiffness_factor * k)`.
+        //   elevator max torque = 5250 psi * pi*(0.08/2)^2 * 0.15 m
+        //                       = 36.20 MPa * 5.0265e-3 m^2 * 0.15 = 27292 N*m
+        //   healthy  k = 27292*200 = 5.458e6 N*m/rad, sf = 1
+        //            -> droop = 2000 / 5.458e6 = 3.66e-4 rad
+        //   degraded sf = rate_derate*force_derate = (1-0.6-0.2)*(1-0.5-0.2)
+        //                 = 0.2*0.3 = 0.06
+        //            -> droop = 2000 / (0.06*5.458e6) = 6.11e-3 rad
+        // i.e. a factor 1/0.06 = 16.7, comfortably past the 5x this asserts.
+        assert!((ha.abs() - 3.66e-4).abs() < 1e-5, "healthy droop {ha} should match the spring hand calculation");
+        assert!((da.abs() - 6.11e-3).abs() < 1e-4, "degraded droop {da} should match the softened-spring hand calculation");
         assert!(da.abs() > ha.abs() * 5.0, "degraded droop {da} should far exceed healthy droop {ha}");
     }
 
@@ -444,7 +606,7 @@ mod tests {
         let mut rate = 0.0_f64;
         for _ in 0..200_000 {
             let out = pcu.step(ActuatorMode::Active, 0.1, angle, rate, 1.0, &ActuatorFaults::default());
-            rate += out.torque_nm / inertia * FINE_DT;
+            rate = servo_rate_step(rate, &out.servo, 0.0, 0.0, inertia, FINE_DT);
             angle += rate * FINE_DT;
         }
         assert!((angle - 0.1).abs() < 0.01, "settled at {angle}");

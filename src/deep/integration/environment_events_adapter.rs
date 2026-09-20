@@ -92,6 +92,18 @@ pub fn ice_water_content_g_m3(truth: &EnvironmentTruth) -> f64 {
 /// something non-arbitrary to compare against; a real source (a scenery/
 /// METAR/NOTAM-driven contamination report) would replace this outright
 /// rather than refine it.
+/// Coldest static air temperature at which falling snow still behaves as
+/// *wet* snow. ICAO Doc 9981 / EASA's runway condition assessment matrix
+/// define the two by cohesion, not by a number: dry snow can be blown or
+/// brushed and will not hold together when squeezed, wet snow sticks and
+/// packs into a snowball. That cohesion comes from liquid water in the
+/// snowpack, which only survives within a few degrees of melting, so wet
+/// snow is a near-freezing phenomenon -- around -5 C the free water is gone
+/// and the fall is dry. The previous -15 C here classified ordinary dry
+/// continental snowfall as wet, which is both meteorologically wrong and
+/// the more optimistic of the two for braking action.
+const WET_SNOW_MIN_C: f64 = -5.0;
+
 pub fn contaminant_from_weather(sat_c: f64, precipitation_on_aircraft_ratio: f64) -> Contaminant {
     let precip = precipitation_on_aircraft_ratio.clamp(0.0, 1.0);
     if precip < 0.05 {
@@ -102,7 +114,7 @@ pub fn contaminant_from_weather(sat_c: f64, precipitation_on_aircraft_ratio: f64
         Contaminant::Water { depth_mm }
     } else if sat_c > 0.0 {
         Contaminant::Slush { depth_mm }
-    } else if sat_c > -15.0 {
+    } else if sat_c > WET_SNOW_MIN_C {
         Contaminant::WetSnow { depth_mm }
     } else {
         Contaminant::DrySnow { depth_mm }

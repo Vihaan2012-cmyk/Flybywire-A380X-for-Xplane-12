@@ -112,6 +112,7 @@ pub fn egt_limit_fuel_flow_kg_s(
         surge_margin_design_frac: params::CORE_SURGE_MARGIN_DESIGN_FRAC,
         surge_line_flatness: params::CORE_SURGE_LINE_FLATNESS,
         choke_flow_multiple: params::CORE_CHOKE_FLOW_MULTIPLE,
+        erosion_efficiency_loss: 0.0,
     };
     let compressor = compressor_map::evaluate(
         &core_spec,

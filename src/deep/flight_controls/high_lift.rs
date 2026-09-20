@@ -20,7 +20,10 @@
 
 use std::f64::consts::PI;
 
-use super::actuator::{ActuatorFaults, ActuatorGeometry, ActuatorMode, PowerControlUnit, GALLON_M3, HYDRAULIC_SUPPLY_PA};
+use super::actuator::{
+    servo_rate_step, ActuatorFaults, ActuatorGeometry, ActuatorMode, PowerControlUnit, ServoLoad, GALLON_M3,
+    HYDRAULIC_SUPPLY_PA,
+};
 use super::surface::AsymmetryMonitor;
 
 /// A hydraulic rotary motor's geometry expressed as an `ActuatorGeometry`
@@ -49,10 +52,19 @@ impl RotatingInertia {
         Self { angle_rad: initial_angle_rad, rate_rad_s: 0.0, inertia_kg_m2: inertia_kg_m2.max(1e-3) }
     }
 
-    pub fn integrate(&mut self, net_torque_nm: f64, dt_s: f64) {
-        let accel = net_torque_nm / self.inertia_kg_m2;
-        self.rate_rad_s += accel * dt_s.max(0.0);
-        self.angle_rad += self.rate_rad_s * dt_s.max(0.0);
+    /// `servo` is the clamped affine torque law of whatever PCU drives this
+    /// mass ([`ServoLoad::NONE`] for a driven station), `net_torque_nm` is
+    /// every *other* torque on it evaluated at the current rate, and
+    /// `damping_nm_s_per_rad` those others' rate gradient (the torque tubes'
+    /// viscous terms, the wingtip brake's damper). Both go to
+    /// [`servo_rate_step`], which solves the step exactly: the servo's own
+    /// gradient is orders of magnitude too stiff to integrate explicitly at
+    /// any usable sub-step.
+    pub fn integrate(&mut self, servo: &ServoLoad, net_torque_nm: f64, damping_nm_s_per_rad: f64, dt_s: f64) {
+        let dt = dt_s.max(0.0);
+        self.rate_rad_s =
+            servo_rate_step(self.rate_rad_s, servo, net_torque_nm, damping_nm_s_per_rad, self.inertia_kg_m2, dt);
+        self.angle_rad += self.rate_rad_s * dt;
     }
 }
 
@@ -113,9 +125,12 @@ pub struct WingTipBrake {
 }
 
 impl WingTipBrake {
-    pub fn torque(&self, engaged: bool, angle_rad: f64, rate_rad_s: f64, lock_angle_rad: f64, fail_fraction: f64) -> f64 {
+    /// Returns the holding torque and the rate-damping gradient it presents
+    /// to the station's integrator (zero once it is slipping at capacity,
+    /// where the torque no longer responds to rate).
+    pub fn torque(&self, engaged: bool, angle_rad: f64, rate_rad_s: f64, lock_angle_rad: f64, fail_fraction: f64) -> (f64, f64) {
         if !engaged {
-            return 0.0;
+            return (0.0, 0.0);
         }
         let capacity = self.holding_torque_nm.max(0.0) * (1.0 - fail_fraction.clamp(0.0, 1.0));
         // A stiff spring/damper toward the lock angle, itself capacity
@@ -124,7 +139,9 @@ impl WingTipBrake {
         // stiffness.
         let k = capacity * 50.0;
         let c = capacity * 5.0;
-        (-k * (angle_rad - lock_angle_rad) - c * rate_rad_s).clamp(-capacity, capacity)
+        let raw = -k * (angle_rad - lock_angle_rad) - c * rate_rad_s;
+        let held = raw.clamp(-capacity, capacity);
+        (held, if raw == held { c } else { 0.0 })
     }
 }
 
@@ -273,7 +290,10 @@ impl HighLiftSystem {
     /// wingtip brake's spring (up to `holding_torque_nm * 50` per radian)
     /// against a 40 kg*m^2 station gives `omega` ~ 106 rad/s, so this is
     /// sized with margin under the semi-implicit Euler stability bound
-    /// `omega*dt <= 2` regardless of the caller's own tick rate.
+    /// `omega*dt <= 2` regardless of the caller's own tick rate. Only the
+    /// *springs* need that bound: every damper here (the PCU's rate loop
+    /// above all, whose `c/I` is ~ 10^4 s^-1) is solved exactly by
+    /// `actuator::servo_rate_step`.
     const MAX_SUBSTEP_S: f64 = 0.0005;
 
     #[allow(clippy::too_many_arguments)]
@@ -319,6 +339,16 @@ impl HighLiftSystem {
             faults.inboard_shaft_break,
         );
         let (to_inboard, tripped) = self.limiter.clamp(raw, faults.limiter_bypass);
+        // A slipping limiter decouples the shaft's own viscous gradient from
+        // both masses it sits between (the transmitted torque is pinned at
+        // the cap, so it no longer responds to either rate).
+        let inboard_shaft_damping = if to_inboard == raw {
+            self.shaft_to_inboard.damping_nm_s_per_rad * (1.0 - faults.inboard_shaft_break.clamp(0.0, 1.0))
+        } else {
+            0.0
+        };
+        let outboard_shaft_damping =
+            self.shaft_to_outboard.damping_nm_s_per_rad * (1.0 - faults.outboard_shaft_break.clamp(0.0, 1.0));
 
         let to_outboard = self.shaft_to_outboard.torque_on_b(
             self.inboard.angle_rad,
@@ -336,14 +366,29 @@ impl HighLiftSystem {
             self.brake_lock_angle = None;
         }
         let lock_angle = self.brake_lock_angle.unwrap_or(self.outboard.angle_rad);
-        let brake_torque =
+        let (brake_torque, brake_damping) =
             self.brake.torque(brake_commanded, self.outboard.angle_rad, self.outboard.rate_rad_s, lock_angle, faults.wingtip_brake_fail);
 
         let aero = |angle: f64| -self.aero_load_nm_per_rad_per_pa * dynamic_pressure_pa.max(0.0) * angle;
 
-        self.pcu_shaft.integrate(pcu_out.torque_nm - to_inboard, dt);
-        self.inboard.integrate(to_inboard - to_outboard + aero(self.inboard.angle_rad), dt);
-        self.outboard.integrate(to_outboard + aero(self.outboard.angle_rad) + brake_torque, dt);
+        self.pcu_shaft.integrate(
+            &pcu_out.servo,
+            pcu_out.jam_torque_nm - to_inboard,
+            pcu_out.jam_damping_nm_s_per_rad + inboard_shaft_damping,
+            dt,
+        );
+        self.inboard.integrate(
+            &ServoLoad::NONE,
+            to_inboard - to_outboard + aero(self.inboard.angle_rad),
+            inboard_shaft_damping + outboard_shaft_damping,
+            dt,
+        );
+        self.outboard.integrate(
+            &ServoLoad::NONE,
+            to_outboard + aero(self.outboard.angle_rad) + brake_torque,
+            outboard_shaft_damping + brake_damping,
+            dt,
+        );
 
         HighLiftOutput {
             inboard_angle_rad: self.inboard.angle_rad,
@@ -464,23 +509,66 @@ mod tests {
     }
 
     #[test]
-    fn a_jam_downstream_of_the_pcu_drives_it_to_max_torque_and_trips_the_healthy_limiter() {
+    fn a_large_commanded_step_alone_never_trips_the_limiter() {
+        // The limiter must not trip during ordinary operation, and with this
+        // sizing it cannot: the PCU is rate limited to 0.5 rad/s, so the
+        // most the torque tube can ever wind up against the stations it is
+        // accelerating is bounded by that rate. Treating the (rate-limited)
+        // PCU as a velocity source, the wind-up angle `x = theta_pcu -
+        // theta_station` obeys `I x'' + c x' + k x = 0` with `I = 80 kg m^2`
+        // (both stations), `c = 2000`, `k = 200_000`, `x(0) = 0`,
+        // `x'(0) = 0.5 rad/s`: omega_n = sqrt(200000/80) = 50 rad/s,
+        // zeta = 2000/(2*sqrt(200000*80)) = 0.25, so
+        //   x_max ~ (0.5/omega_d) * exp(-zeta*omega_n*t_peak) ~ 0.0064 rad
+        // and the peak transmitted torque is of order
+        //   k*x_max + c*x'  ~  1300 + 1000  ~  2.3 kN*m,
+        // comfortably under the 4 kN*m threshold. A limiter that tripped
+        // here would be mis-sized, so this is asserted, not tolerated.
         let mut sys = HighLiftSystem::new_generic();
-        // Freezing the inboard/outboard stations in place (their own jam is
-        // out of this system's scope) is emulated directly by commanding a
-        // large step with the PCU alone unable to move a very heavy load:
-        // instead, jam the PCU's own shaft to force sustained max-torque
-        // demand from the position loop.
-        let faults = HighLiftFaults { pcu: ActuatorFaults::default(), ..Default::default() };
-        // A simpler, still valid check: a large commanded step from rest
-        // demands near-maximum PCU torque during the initial transient,
-        // which must trip the healthy limiter at least once.
         let mut tripped_once = false;
-        for _ in 0..200 {
-            let out = sys.step(ActuatorMode::Active, 5.0, 1.0, &faults, 0.0, false, DT);
+        for _ in 0..2000 {
+            let out = sys.step(ActuatorMode::Active, 5.0, 1.0, &HighLiftFaults::default(), 0.0, false, DT);
             tripped_once |= out.limiter_tripped;
         }
-        assert!(tripped_once, "a large step should momentarily exceed the limiter's threshold");
+        assert!(!tripped_once, "a normal commanded step must stay inside the limiter's threshold");
+    }
+
+    #[test]
+    fn a_jam_downstream_of_the_pcu_drives_it_to_max_torque_and_trips_the_healthy_limiter() {
+        // A genuine downstream lock: the wingtip brake holds the outboard
+        // station (9 kN*m of holding torque, more than the 4 kN*m limiter
+        // threshold) while the PCU is commanded to keep driving. The torque
+        // tube then winds up without limit, so the limiter -- the part whose
+        // whole purpose is exactly this -- must slip and stay slipping.
+        let mut sys = HighLiftSystem::new_generic();
+        let mut out = HighLiftOutput::default();
+        for _ in 0..500 {
+            out = sys.step(ActuatorMode::Active, 5.0, 1.0, &HighLiftFaults::default(), 0.0, true, DT);
+        }
+        assert!(out.limiter_tripped, "a locked drive train must make the limiter slip");
+        // With the limiter slipping at its threshold the PCU is still free to
+        // turn at its rate limit, so it settles delivering exactly the torque
+        // the limiter passes -- the 4 kN*m threshold, not its own 6 kN*m
+        // stall torque. That gap is the protection the limiter provides.
+        assert!((out.pcu_torque_nm - 4000.0).abs() < 200.0, "PCU should settle at the limiter threshold: {}", out.pcu_torque_nm);
+        // The stations are held: the inboard stalls where the shaft to the
+        // braked outboard balances the 4 kN*m coming through the limiter,
+        // 4000/200000 = 0.02 rad past the outboard, which itself sits
+        // 4000/(9000*50) = 0.0089 rad past its lock angle.
+        assert!(out.outboard_angle_rad.abs() < 0.02, "brake should hold the outboard: {}", out.outboard_angle_rad);
+        assert!(out.inboard_angle_rad.abs() < 0.05, "inboard should stall against the lock: {}", out.inboard_angle_rad);
+
+        // A seized (bypassed) limiter passes the whole wind-up instead, so
+        // the PCU is dragged to its own stall torque -- the failure the
+        // limiter exists to prevent.
+        let mut bypassed = HighLiftSystem::new_generic();
+        let faults = HighLiftFaults { limiter_bypass: 1.0, ..Default::default() };
+        let mut bo = HighLiftOutput::default();
+        for _ in 0..500 {
+            bo = bypassed.step(ActuatorMode::Active, 5.0, 1.0, &faults, 0.0, true, DT);
+        }
+        assert!(!bo.limiter_tripped);
+        assert!(bo.pcu_torque_nm.abs() > out.pcu_torque_nm.abs() * 1.2, "a bypassed limiter should load the PCU harder: {} vs {}", bo.pcu_torque_nm, out.pcu_torque_nm);
     }
 
     #[test]
@@ -513,12 +601,16 @@ mod tests {
     #[test]
     fn an_engaged_brake_arrests_the_outboard_station() {
         let mut sys = HighLiftSystem::new_generic();
-        // Get it moving first.
-        for _ in 0..2000 {
+        // Get it moving first -- and catch it while it still is. The PCU's
+        // rate limit is 0.5 rad/s, so a 0.5 rad command is reached in a
+        // little over a second and the drive train is at rest after that;
+        // 0.5 s in, it is half way there and running at close to the full
+        // 0.5 rad/s, which is when a wingtip brake has something to arrest.
+        for _ in 0..50 {
             sys.step(ActuatorMode::Active, 0.5, 1.0, &HighLiftFaults::default(), 0.0, false, DT);
         }
         let moving_rate = sys.outboard.rate_rad_s;
-        assert!(moving_rate.abs() > 1e-4, "should be moving before the brake test: {moving_rate}");
+        assert!(moving_rate.abs() > 0.1, "should be moving before the brake test: {moving_rate}");
         for _ in 0..500 {
             sys.step(ActuatorMode::Active, 0.5, 1.0, &HighLiftFaults::default(), 0.0, true, DT);
         }

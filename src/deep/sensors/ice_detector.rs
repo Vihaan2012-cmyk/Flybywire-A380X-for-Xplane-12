@@ -187,14 +187,27 @@ mod tests {
         let mut masked = IceDetector::new();
         let mut healthy = IceDetector::new();
         let masking_faults = IceDetectorFaults { frequency_sensor_bias: -1.0, ..Default::default() };
-        let mut masked_out = IceDetectorOutput::default();
-        let mut healthy_out = IceDetectorOutput::default();
+        // The detector duty-cycles (detect -> deice -> monitor again), so its
+        // *instantaneous* output is false while it is shedding what it just
+        // found: what distinguishes a masked detector is that it never trips
+        // at all over a window in which the healthy one does. Hand check of
+        // the window: the healthy probe reaches the trip mass
+        // (0.025 / (0.5 / PROBE_EFFECTIVE_MASS_KG) = 1.5e-4 kg) after
+        // 1.5e-4 / (ACCUM_KG_S_PER_LWC_TAS * 0.8 g/m^3 * 200 m/s) = 2.3 s,
+        // well inside the 5 s window; the masked one needs a true shift of
+        // 1.025 (a probe carrying twice its own mass in ice, ~96 s) before
+        // the -1.0 bias stops hiding it.
+        let mut masked_ever = false;
+        let mut healthy_ever = false;
         for _ in 0..50 {
-            masked_out = masked.step(-20.0, 200.0, 0.8, &masking_faults, 0.1);
-            healthy_out = healthy.step(-20.0, 200.0, 0.8, &IceDetectorFaults::default(), 0.1);
+            masked_ever |= masked.step(-20.0, 200.0, 0.8, &masking_faults, 0.1).ice_detected;
+            healthy_ever |= healthy.step(-20.0, 200.0, 0.8, &IceDetectorFaults::default(), 0.1).ice_detected;
         }
-        assert!(!masked_out.ice_detected);
-        assert!(healthy_out.ice_detected);
+        assert!(healthy_ever, "the healthy detector should find this icing");
+        assert!(!masked_ever, "the biased detector should never report it");
+        // The ice is physically there in both probes; only the sensing of it
+        // differs.
+        assert!(masked.step(-20.0, 200.0, 0.8, &masking_faults, 0.1).ice_kg > 0.0);
     }
 
     #[test]

@@ -360,9 +360,22 @@ mod tests {
 
     #[test]
     fn partial_open_circuit_reads_high_but_not_pegged() {
-        let faults = TemperatureSensorFaults { open_circuit: 0.5, ..Default::default() };
+        // Hand calculation for this Pt100 on a -60..200 C channel:
+        //   healthy R at 20 C = 100 * (1 + 0.00385*20)   = 107.70 ohm
+        //   top-of-range R    = 100 * (1 + 0.00385*200)  = 177.00 ohm
+        // so the added series resistance of a degraded joint only stays on
+        // scale while 1/(1 - open) < 177.00/107.70 = 1.6434, i.e. open <
+        // 0.39. At open = 0.25 the loop reads 107.70/0.75 = 143.60 ohm =
+        // (1.4360 - 1)/0.00385 = 113.2 C: high, and still on scale.
+        let faults = TemperatureSensorFaults { open_circuit: 0.25, ..Default::default() };
         let reading = temperature_sensor_reading_c(20.0, (-60.0, 200.0), &faults);
         assert!(reading > 20.0 && reading < 200.0, "{reading}");
+        assert!((reading - 113.2).abs() < 0.5, "{reading}");
+        // Beyond that the added resistance is worth more degrees than the
+        // channel can represent, so it does peg -- an open circuit is not a
+        // gentle fault.
+        let worse = TemperatureSensorFaults { open_circuit: 0.5, ..Default::default() };
+        assert_eq!(temperature_sensor_reading_c(20.0, (-60.0, 200.0), &worse), 200.0);
     }
 
     // ---- Pressure transducer.

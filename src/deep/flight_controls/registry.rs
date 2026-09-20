@@ -526,7 +526,7 @@ mod tests {
     fn registering_everything_produces_no_validation_errors() {
         let mut r = Registry::default();
         register(&mut r);
-        let errors = r.validate();
+        let errors = r.validate_area();
         assert!(errors.is_empty(), "{errors:?}");
     }
 

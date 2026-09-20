@@ -188,3 +188,29 @@ an undamped harmonic oscillator is stable exactly while `omega*dt <= 2`, and
 0.5 ms has comfortable margin for every constant used here. If a future
 change increases any spring/inertia ratio meaningfully, re-check that bound
 before assuming a naive per-tick integration is safe.
+
+- [done] Numerical: the PCU's inner rate loop is a damper of `c/I` = 3e3..4e7
+  s^-1, so every caller's semi-implicit Euler step (`c*dt/I` of 3 to 320 at
+  the 0.5 ms sub-step, 320 for the un-sub-stepped rudder trim) was
+  unconditionally unstable and chattered between the torque clamps instead of
+  tracking. Worse, a rate-limited servo's *linear band* is only `2*Tmax/c`
+  wide (0.0075 rad/s for the THS) — narrower than one sub-step's rate change
+  at the torque ceiling — so no affordable sub-step fixes it either.
+  `actuator.rs` now publishes each mode's torque law as a `ServoLoad`
+  (`clamp(open - c*rate, +-max)`, which all three modes are) and
+  `servo_rate_step` solves the step exactly for the rate, clamp included:
+  backward Euler in every velocity-proportional term, a two-branch case split
+  on the clamp. Callers updated: `surface.rs`, `high_lift.rs` (three bodies),
+  `ths.rs` (both the THS and the rudder trim). Equilibria are unchanged; a
+  *negative* net damping (`SurfaceDamping`'s flutter drive) stays explicit on
+  purpose, since divergence there is physics.
+  Files: actuator.rs, surface.rs, high_lift.rs, ths.rs.
+- [done] THS: the two motors drive the screw through a speed-summing
+  differential, not in parallel — which is why losing one hydraulic system
+  halves the Airbus trim *rate* while the torque capability survives (the
+  dead motor is braked and reacts torque). Modelled as a gear ratio
+  `2 / (motors with supply)` reflected through `ServoLoad::geared`. Also
+  fixed: an actuator with no torque ceiling left now reports
+  `ServoLoad::NONE`, so it gets no vote in a lumped multi-actuator law
+  (before, a dead motor's rate-loop gradient still dragged the aggregate,
+  quartering the screw rate instead of halving it). Files: ths.rs, actuator.rs.

@@ -948,10 +948,38 @@ mod tests {
         let stowed = rat.terminal(250.0, RatFaults::default());
         assert_eq!(stowed.open_circuit_v, 0.0);
         rat.deploy();
-        let slow = rat.terminal(150.0, RatFaults::default());
+
+        // Available shaft power is `0.5 * rho * A * Cp * v^3`, so it crosses
+        // the emergency generator's own 70 kW rating (FBW's
+        // `MAX_ALLOWED_POWER_MAP` plateau) at
+        //   A   = pi*(1.6256/2)^2                     = 2.0755 m^2
+        //   v^3 = 70000 / (0.5*1.225*2.0755*0.35)
+        //       = 70000 / 0.44494                     = 1.5733e5 m^3/s^3
+        //   v   = 54.0 m/s                            = 105 kt.
+        // Below that the RAT is aerodynamically limited and stiffens with
+        // airspeed; at and above it the turbine is governed and the
+        // generator's rating is the limit, so output is flat across the rest
+        // of the envelope -- which is how a real RAT is specified (full rated
+        // output from its minimum operating airspeed all the way to Vmo).
+        let slow = rat.terminal(60.0, RatFaults::default());
+        let faster = rat.terminal(90.0, RatFaults::default());
+        assert!(faster.open_circuit_v > 0.0 && slow.open_circuit_v > 0.0);
+        assert!(
+            faster.resistance_ohm < slow.resistance_ohm,
+            "below the generator's rating, higher airspeed must mean a stiffer (more capable) equivalent source: {} vs {}",
+            faster.resistance_ohm,
+            slow.resistance_ohm
+        );
+
+        // On the governed plateau, 150 kt and 300 kt must give the identical
+        // equivalent source: the max-power-transfer resistance of a 115 V
+        // source delivering the rated 70 kW is V_oc^2/(4P) = 115^2/280000
+        // = 0.047232 ohm.
+        let plateau_r = Rat::RATED_VOLTAGE_VOLT * Rat::RATED_VOLTAGE_VOLT / (4.0 * Rat::MAX_POWER_W);
+        let cruise = rat.terminal(150.0, RatFaults::default());
         let fast = rat.terminal(300.0, RatFaults::default());
-        assert!(fast.open_circuit_v > 0.0 && slow.open_circuit_v > 0.0);
-        assert!(fast.resistance_ohm < slow.resistance_ohm, "higher airspeed should mean a stiffer (more capable) equivalent source");
+        assert!((cruise.resistance_ohm - plateau_r).abs() < 1e-12, "150 kt is already on the 70 kW plateau: {}", cruise.resistance_ohm);
+        assert!((fast.resistance_ohm - plateau_r).abs() < 1e-12, "300 kt is governed to the same 70 kW rating: {}", fast.resistance_ohm);
     }
 
     #[test]

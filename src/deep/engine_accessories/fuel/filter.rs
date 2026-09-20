@@ -94,10 +94,26 @@ mod tests {
 
     #[test]
     fn a_partially_clogged_filter_warns_before_it_bypasses() {
-        // Solve for a clog fraction that lands the element drop just under
-        // the crack pressure but over the warning fraction.
-        let s = step(3.0e5, DESIGN_FLOW_M3_S, REFERENCE_TEMP_K, &FilterFaults { clog: 0.85 });
+        // Solve for a clog fraction that lands the element drop between the
+        // warning threshold and the cracking differential. At the design
+        // flow and reference temperature the viscosity ratio is 1 and the
+        // element drop is just `DESIGN_DROP_PA / (1 - clog)^2`, i.e.
+        // 0.5 psi / (1 - clog)^2, so the window is
+        //   warn at 0.7 * 35 = 24.5 psi  ->  (1-clog)^2 = 0.5/24.5
+        //                                ->  clog = 0.8571
+        //   crack at       35 psi        ->  (1-clog)^2 = 0.5/35
+        //                                ->  clog = 0.8805
+        // 0.87 sits inside it: 0.5/0.13^2 = 29.6 psi, warning but not yet
+        // bypassing. (The old 0.85 was outside the window it claimed to be
+        // inside -- 0.5/0.15^2 is only 22.2 psi, below the warning point.)
+        let s = step(3.0e5, DESIGN_FLOW_M3_S, REFERENCE_TEMP_K, &FilterFaults { clog: 0.87 });
         assert!(s.impending_bypass);
+        assert!(!s.bypassed, "must warn *before* it bypasses, not at the same time");
+        assert!(
+            (s.differential_pa / PSI_PA - 29.586).abs() < 0.01,
+            "{}",
+            s.differential_pa / PSI_PA
+        );
     }
 
     #[test]

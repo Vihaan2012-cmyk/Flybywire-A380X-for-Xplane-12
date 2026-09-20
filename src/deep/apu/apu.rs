@@ -225,8 +225,23 @@ impl Apu {
         let (gen2_shaft_w, gen2_overloaded) = self.generators.gen2.shaft_power_w(gen2_load, &faults.gen2);
 
         let cold_drag_nm = self.oil.cold_drag_torque_nm(omega);
+        // `FIXED_ACCESSORY_POWER_W` is quoted as a power *at rated speed*.
+        // Turning it back into a torque by dividing by the *instantaneous*
+        // speed is physically wrong away from the design point: it makes the
+        // implied torque diverge as the spool approaches rest (3 kW at 2.7%
+        // N, i.e. ~171 rad/s, is 17.6 N*m -- nearly twice the starter's own
+        // 9.6 N*m stall torque, so the core could never be motored off the
+        // stops at all). The dominant part of this un-modelled load is the
+        // positive-displacement oil gear pump working against its own
+        // regulated relief pressure: constant displacement x constant
+        // delta-p is a constant *torque*, independent of speed, and gearbox
+        // windage only adds to it as speed rises. Applied as that constant
+        // torque, it still absorbs exactly the quoted 3 kW at rated speed
+        // (3000 W / 6283.2 rad/s = 0.477 N*m) while correctly vanishing to a
+        // fraction of a newton-metre of drag on a cranking, near-stationary
+        // spool.
         let fixed_accessory_torque_nm =
-            if omega > 1.0 { params::FIXED_ACCESSORY_POWER_W / omega } else { 0.0 };
+            params::FIXED_ACCESSORY_POWER_W / self.power_section.omega_rated_rad_s().max(1.0);
         let load_compressor_torque_nm = if omega > 1.0 { load_out.shaft_power_w / omega } else { 0.0 };
         let generator_torque_nm = if omega > 1.0 { gens_out.total_shaft_power_w / omega } else { 0.0 };
         let accessory_torque_nm =
@@ -255,7 +270,17 @@ impl Apu {
         );
         self.core_life.accumulate(running, ps_out.egt_c, dt);
 
-        let friction_heat_w = ps_out.compressor_power_w * 0.05;
+        // Everything the accessory drag torque absorbs is dissipated, and it
+        // is dissipated into the oil: bearing and gear shear, gearbox
+        // windage and the oil pump's own displacement work all end up as
+        // heat in the oil charge. So the heat load is exactly that torque
+        // times the speed it is being dragged at -- `P = tau * omega`, no
+        // fitted fraction needed. (It is *not* a fraction of compressor
+        // power: the compressor's work goes into the air it is pumping, and
+        // taking 5% of the ~750 kW it absorbs at rated speed would have put
+        // 37 kW into an 8-litre oil charge with a 60 W/K cooler, i.e. an
+        // oil-out temperature some 600 K above ambient.)
+        let friction_heat_w = (fixed_accessory_torque_nm + cold_drag_nm).max(0.0) * omega.max(0.0);
         let oil_out = self.oil.step(
             n_percent,
             running,

@@ -93,7 +93,7 @@ mod tests {
     fn the_whole_catalogue_registers_with_no_dangling_references_or_collisions() {
         let mut r = Registry::default();
         register(&mut r);
-        let errors = r.validate();
+        let errors = r.validate_area();
         assert!(errors.is_empty(), "registry errors: {errors:?}");
     }
 

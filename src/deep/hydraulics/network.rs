@@ -622,7 +622,20 @@ mod tests {
         let clean = filter.effective_diameter_m(&FilterFaults::default());
         let clogged = filter.effective_diameter_m(&FilterFaults { clog: 0.75 });
         assert!(clogged < clean);
-        assert!((clogged / clean - 0.5f64.sqrt()).abs() < 1e-9);
+        // `clog` is the fraction of *flow area* the contamination has taken
+        // away, so the effective bore goes as `sqrt(1 - clog)`:
+        //   clog 0.75 -> a quarter of the area left -> sqrt(0.25) = 1/2 of
+        //   the clean diameter;
+        //   clog 0.50 -> half the area left          -> sqrt(0.5) of it.
+        // Tolerance rather than exact equality: each ratio goes through a
+        // sqrt and a division, so a couple of ULP (~1e-16 relative at these
+        // magnitudes) of rounding is expected; 1e-12 is four decades looser
+        // than that and still ten decades tighter than the difference
+        // between the two cases (0.5 vs 0.7071), so it cannot pass by
+        // accident.
+        assert!((clogged / clean - 0.5).abs() < 1e-12, "clog 0.75 leaves a quarter of the area, i.e. half the bore, got {}", clogged / clean);
+        let half_clogged = filter.effective_diameter_m(&FilterFaults { clog: 0.5 });
+        assert!((half_clogged / clean - 0.5f64.sqrt()).abs() < 1e-12, "clog 0.5 leaves half the area, i.e. 1/sqrt(2) of the bore, got {}", half_clogged / clean);
         assert_eq!(filter.bypass_open_fraction(0.0), 0.0);
         assert_eq!(filter.bypass_open_fraction(filter.bypass_cracking_pa + 100.0 * PSI_PA), 1.0);
         let mid = filter.bypass_open_fraction(filter.bypass_cracking_pa);

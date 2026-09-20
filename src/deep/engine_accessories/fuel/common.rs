@@ -12,21 +12,43 @@ pub const FUEL_DENSITY_KG_M3: f64 = 800.0;
 /// Properties).
 pub const FUEL_CP_J_KGK: f64 = 2010.0;
 
-/// Kinematic viscosity, cSt, vs temperature: a simple Arrhenius-type fit
-/// anchored on two commonly-cited Jet A-1 figures -- the DEF STAN 91-091
-/// specification ceiling of 8 mm^2/s at -20 C, and a typical ~1.3 mm^2/s at
-/// 20 C (CRC Handbook of Aviation Fuel Properties) -- rather than a
-/// temperature-independent constant. **GENERIC** fit, not measured data:
-/// real Jet A-1 viscosity-temperature curves are mildly non-Arrhenius, but
-/// this captures the right order of magnitude and the right sign (colder
-/// fuel is far more viscous) for the filter/pump models that use it.
+/// Kinematic viscosity, mm^2/s (= cSt), vs temperature, by the Walther
+/// relation (ASTM D341, the standard viscosity-temperature relation for
+/// petroleum liquids):
+///
+///   `log10(log10(nu + 0.7)) = A - B * log10(T_kelvin)`
+///
+/// anchored on the two published Jet A-1 figures this model has to sit
+/// between:
+///
+/// - **8.0 mm^2/s at -20 C** (253.15 K) -- the DEF STAN 91-091 / ASTM D1655
+///   specification ceiling, the coldest viscosity the specification pins
+///   down;
+/// - **1.25 mm^2/s at 40 C** (313.15 K) -- the typical Jet A-1 figure (CRC
+///   *Handbook of Aviation Fuel Properties*, Report No. 635).
+///
+/// `A` and `B` are solved from those two points by hand, not fitted:
+///
+///   `Z  = log10(log10(nu + 0.7))`
+///   `Z1 = log10(log10(8.70)) = -0.0270943`,  `log10(253.15) = 2.4033779`
+///   `Z2 = log10(log10(1.95)) = -0.5375502`,  `log10(313.15) = 2.4957524`
+///   `B  = (Z1 - Z2)/(log10 T2 - log10 T1) = 0.5104559/0.0923745 = 5.5259400`
+///   `A  = Z1 + B*log10 T1 = -0.0270943 + 13.2809222 = 13.2538279`
+///
+/// The Walther form replaces an earlier single-exponential (Arrhenius) fit
+/// which, besides mis-deriving its own constant, cannot hold both anchors
+/// *and* the curvature between them: fitted to these two points, a plain
+/// exponential runs about a third low through the middle of the range,
+/// which is exactly where the filter and pump models operate. Off the
+/// anchors this fit reads ~1.9 mm^2/s at 20 C, on the viscous side of the
+/// ~1.7 mm^2/s a typical batch shows -- the expected, and conservative,
+/// consequence of anchoring the cold end on the specification *ceiling*
+/// rather than on a typical batch.
 pub fn viscosity_cst(temp_k: f64) -> f64 {
-    const T_REF_K: f64 = 293.15;
-    const V_REF_CST: f64 = 1.3;
-    // Solved from the two anchor points above: k = ln(8.0/1.3) / 60.0 K.
-    const K_PER_K: f64 = 0.030_295;
+    const WALTHER_A: f64 = 13.253_827_9;
+    const WALTHER_B: f64 = 5.525_940_0;
     let t = temp_k.clamp(200.0, 400.0);
-    V_REF_CST * (-K_PER_K * (t - T_REF_K)).exp()
+    10f64.powf(10f64.powf(WALTHER_A - WALTHER_B * t.log10())) - 0.7
 }
 
 /// Fuel vapour pressure, Pa, vs temperature. Jet A-1's Reid vapour pressure
@@ -50,8 +72,10 @@ mod tests {
 
     #[test]
     fn viscosity_matches_its_two_anchor_points() {
-        assert!((viscosity_cst(253.15) - 8.0).abs() < 0.05);
-        assert!((viscosity_cst(293.15) - 1.3).abs() < 0.01);
+        // DEF STAN 91-091 / ASTM D1655 ceiling at -20 C ...
+        assert!((viscosity_cst(253.15) - 8.0).abs() < 0.01, "{}", viscosity_cst(253.15));
+        // ... and the typical CRC figure at 40 C.
+        assert!((viscosity_cst(313.15) - 1.25).abs() < 0.01, "{}", viscosity_cst(313.15));
     }
 
     #[test]

@@ -37,8 +37,17 @@
 //! ## Resolver drift and damage
 //! A resolver's excitation/output windings can develop a slowly growing
 //! zero-offset error with wear (electromechanical degradation) -- modelled
-//! as a bias that random-walks at a rate scaled by the fault fraction
-//! (GENERIC: no published resolver drift-rate spec for this component).
+//! as a bias that *ramps* at a rate scaled by the fault fraction (GENERIC:
+//! no published resolver drift-rate spec for this component). The mechanism
+//! is degradation, not noise: bearing/winding wear shifts the electrical
+//! null one way and it stays shifted, so the bias integrates as
+//! `rate * wear * t` and grows without bound while the wear persists. Which
+//! way it shifts depends on which winding/bearing degraded, so the sign is
+//! drawn once per unit at construction and then held. A small zero-mean
+//! random walk rides on top for the electrical jitter of a worn resolver,
+//! but it is deliberately an order of magnitude below the systematic ramp:
+//! a pure random walk would have zero expected drift, which is not what a
+//! worn resolver does.
 //! Physical damage (bird strike, ground handling) is modelled as a fixed
 //! bias proportional to the fault fraction, up to a GENERIC maximum bend
 //! angle.
@@ -63,9 +72,13 @@ const WATER_CP_J_KGK: f64 = 4186.0;
 /// chosen so the heat duty is of the same order as the rated heater power in
 /// representative icing/TAS conditions.
 const CONVECTIVE_COEFF: f64 = 6.0;
-/// Resolver drift-rate scale at fault magnitude 1.0, degrees per hour.
-/// GENERIC.
+/// Resolver drift-rate scale at fault magnitude 1.0, degrees per hour of
+/// systematic (one-way) zero-offset shift. GENERIC.
 const RESOLVER_DRIFT_DEG_PER_HR: f64 = 2.0;
+/// Electrical jitter of a worn resolver, degrees per sqrt(hour) of
+/// zero-mean random walk at fault magnitude 1.0. GENERIC, deliberately 10%
+/// of the systematic rate so the wear signature is the ramp, not the noise.
+const RESOLVER_JITTER_DEG_PER_SQRT_HR: f64 = 0.2;
 /// Maximum fixed bias a fully bent/damaged vane reads, degrees. GENERIC.
 const MAX_DAMAGE_BIAS_DEG: f64 = 8.0;
 
@@ -95,12 +108,23 @@ pub struct AoaVane {
     vane_angle_deg: f64,
     ice_kg: f64,
     resolver_bias_deg: f64,
+    /// +1 or -1: which way this individual resolver's null shifts as it
+    /// wears. Fixed for the life of the unit (see module docs).
+    resolver_drift_sign: f64,
     rng: Rng,
 }
 
 impl AoaVane {
     pub fn new(seed: u64, initial_aoa_deg: f64) -> Self {
-        Self { vane_angle_deg: initial_aoa_deg * UPWASH_FACTOR, ice_kg: 0.0, resolver_bias_deg: 0.0, rng: Rng::new(seed) }
+        let mut rng = Rng::new(seed);
+        let resolver_drift_sign = if rng.next_f64() < 0.5 { -1.0 } else { 1.0 };
+        Self {
+            vane_angle_deg: initial_aoa_deg * UPWASH_FACTOR,
+            ice_kg: 0.0,
+            resolver_bias_deg: 0.0,
+            resolver_drift_sign,
+            rng,
+        }
     }
 
     /// `true_aoa_deg`: free-stream angle of attack. `tas_ms`, `sat_c`,
@@ -143,10 +167,14 @@ impl AoaVane {
             self.vane_angle_deg = local_aoa_deg + (self.vane_angle_deg - local_aoa_deg) * k;
         }
 
-        // ---- Resolver drift: a slow random walk scaled by wear fraction.
+        // ---- Resolver drift: a systematic one-way zero-offset ramp scaled
+        // by the wear fraction, integrated with time (so it keeps growing
+        // while the wear is there), plus a much smaller zero-mean jitter.
         let wear = faults.resolver_wear.clamp(0.0, 1.0);
         if wear > 0.0 && dt > 0.0 {
-            let sigma_deg = RESOLVER_DRIFT_DEG_PER_HR * wear / 3600.0 * dt.sqrt();
+            let dt_hr = dt / 3600.0;
+            self.resolver_bias_deg += self.resolver_drift_sign * RESOLVER_DRIFT_DEG_PER_HR * wear * dt_hr;
+            let sigma_deg = RESOLVER_JITTER_DEG_PER_SQRT_HR * wear * dt_hr.sqrt();
             self.resolver_bias_deg += self.rng.gaussian() * sigma_deg;
         }
 
@@ -238,11 +266,28 @@ mod tests {
         let worn_faults = AoaVaneFaults { resolver_wear: 1.0, ..Default::default() };
         let mut worn_out = AoaVaneOutput::default();
         let mut healthy_out = AoaVaneOutput::default();
-        for _ in 0..7200 {
+        // One hour at wear 1.0.
+        for _ in 0..3600 {
             worn_out = worn.step(2.0, 150.0, 15.0, 0.0, true, &worn_faults, 1.0);
             healthy_out = healthy.step(2.0, 150.0, 15.0, 0.0, true, &AoaVaneFaults::default(), 1.0);
         }
-        assert!((worn_out.sensed_aoa_deg - healthy_out.sensed_aoa_deg).abs() > 0.01);
+        let after_1h = (worn_out.sensed_aoa_deg - healthy_out.sensed_aoa_deg).abs();
+        // A second hour.
+        for _ in 0..3600 {
+            worn_out = worn.step(2.0, 150.0, 15.0, 0.0, true, &worn_faults, 1.0);
+            healthy_out = healthy.step(2.0, 150.0, 15.0, 0.0, true, &AoaVaneFaults::default(), 1.0);
+        }
+        let after_2h = (worn_out.sensed_aoa_deg - healthy_out.sensed_aoa_deg).abs();
+        // Hand calculation: the systematic ramp is
+        // RESOLVER_DRIFT_DEG_PER_HR * wear * t, so 2.0 deg at 1 h and
+        // 4.0 deg at 2 h, with the zero-mean jitter adding a 1-sigma of
+        // RESOLVER_JITTER_DEG_PER_SQRT_HR * sqrt(t_hr) = 0.20 deg at 1 h
+        // and 0.28 deg at 2 h. A 3-sigma band is +-0.6 / +-0.85 deg.
+        assert!((after_1h - 2.0).abs() < 0.6, "1 h drift {after_1h}");
+        assert!((after_2h - 4.0).abs() < 0.85, "2 h drift {after_2h}");
+        // It integrates: the second hour adds as much again, it is not
+        // recomputed from scratch each step.
+        assert!(after_2h > after_1h * 1.5, "{after_1h} -> {after_2h}");
     }
 
     #[test]

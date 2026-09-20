@@ -26,7 +26,7 @@
 //! order proxy for the destabilising aerodynamic term real flutter analysis
 //! gets from unsteady/CFD data this crate does not have -- GENERIC).
 
-use super::actuator::{ActuatorFaults, ActuatorMode, PowerControlUnit};
+use super::actuator::{servo_rate_step, ActuatorFaults, ActuatorMode, PowerControlUnit, ServoLoad};
 use super::hinge_moment::{hinge_moment_nm, HingeMomentCoefficients};
 
 /// This tick's aerodynamic environment at the surface.
@@ -160,6 +160,12 @@ impl<const N: usize> ControlSurface<N> {
     /// chosen well inside that bound for the stiffest constant this crate
     /// uses (aileron standby spring vs. its own inertia, `omega` ~ 210
     /// rad/s), per the crate convention "sub-stepping where stiff".
+    ///
+    /// The actuators' *damping* terms are far stiffer still (the inner rate
+    /// loop alone is `c/I` ~ 3000 s^-1, which no affordable sub-step can
+    /// resolve explicitly) and are therefore not sub-stepped at all but
+    /// solved exactly by `actuator::servo_rate_step`; this bound only has
+    /// to cover the springs.
     const MAX_SUBSTEP_S: f64 = 0.0005;
 
     #[allow(clippy::too_many_arguments)]
@@ -196,6 +202,8 @@ impl<const N: usize> ControlSurface<N> {
     ) -> SurfaceOutput {
         let mut actuator_torque = 0.0;
         let mut actuator_capacity = 0.0;
+        let mut servo = ServoLoad::NONE;
+        let mut jam_damping = 0.0;
         let mut any_saturated = false;
         for i in 0..N {
             let out = self.pcus[i].step(
@@ -210,6 +218,10 @@ impl<const N: usize> ControlSurface<N> {
             any_saturated |= out.saturated;
             if !surface_faults.disconnected {
                 actuator_torque += out.torque_nm;
+                // A sheared linkage transmits no torque *law* either, so a
+                // disconnected surface's integrator must not see one.
+                servo.add(&out.servo);
+                jam_damping += out.jam_damping_nm_s_per_rad;
             }
         }
 
@@ -222,9 +234,19 @@ impl<const N: usize> ControlSurface<N> {
         let net_damping = self.damping.structural_nm_s_per_rad_s + flutter_damper - destabilizing;
         let damping_torque = -net_damping * self.rate_rad_s;
 
-        let net_torque = actuator_torque + hinge_m + damping_torque;
-        let accel = net_torque / self.inertia_kg_m2;
-        self.rate_rad_s += accel * dt;
+        // Everything except the actuators' own clamped servo law is
+        // ordinary linear load on the body; the servo law goes in whole, so
+        // its clamp is solved rather than stepped across (see
+        // `actuator::servo_rate_step`).
+        let other_torque = actuator_torque - servo.torque_at(self.rate_rad_s) + hinge_m + damping_torque;
+        self.rate_rad_s = servo_rate_step(
+            self.rate_rad_s,
+            &servo,
+            other_torque,
+            jam_damping + net_damping,
+            self.inertia_kg_m2,
+            dt,
+        );
         self.angle_rad += self.rate_rad_s * dt;
 
         let mut at_stop = false;
@@ -419,15 +441,30 @@ mod tests {
         let no_faults = [ActuatorFaults::default(); 2];
         let damper_lost = SurfaceFaults { flutter_damper_loss: 1.0, ..Default::default() };
 
-        // Kick both the same way, then let them run under damping-only PCUs
-        // (so the dedicated flutter damper is what has to keep them stable).
+        // Kick both the same way, then let them run with the PCUs' linkage
+        // sheared, which is the condition this module's doc comment names as
+        // the one the dedicated flutter damper exists for. It has to be that
+        // condition and not merely `Damping`-mode PCUs: a PCU in `Damping`
+        // is still a 24 kN*m*s/rad damper (`k_damping = max_torque /
+        // rated_rate` = 16575/0.682 for an aileron, times two units), five
+        // times the flutter damper's own 5 kN*m*s/rad, so with the PCUs
+        // attached the net damping stays hugely positive whether the flutter
+        // damper is there or not and nothing is being tested. Disconnected,
+        // the damping budget is exactly what the model claims it is:
+        //   healthy: 200 (structural) + 5000 (damper) - 0.02*15000 (the
+        //            destabilising aero term) = +4800 N*m*s/rad -> decays
+        //   faulty:  200 + 0 - 300 = -100 N*m*s/rad -> grows, at
+        //            exp(100/(2*77.1) * t) = exp(0.65 t) over 15 s
+        // i.e. the sign flip the module doc describes, from the damper alone.
+        let disconnected = SurfaceFaults { disconnected: true, ..Default::default() };
+        let disconnected_damper_lost = SurfaceFaults { disconnected: true, ..damper_lost };
         healthy.angle_rad = 0.05;
         faulty.angle_rad = 0.05;
         let mut healthy_peak = 0.0_f64;
         let mut faulty_peak = 0.0_f64;
         for _ in 0..3000 {
-            let ho = healthy.step(damping_only, 0.0, [1.0; 2], no_faults, &SurfaceFaults::default(), &aero, 0.005);
-            let fo = faulty.step(damping_only, 0.0, [1.0; 2], no_faults, &damper_lost, &aero, 0.005);
+            let ho = healthy.step(damping_only, 0.0, [1.0; 2], no_faults, &disconnected, &aero, 0.005);
+            let fo = faulty.step(damping_only, 0.0, [1.0; 2], no_faults, &disconnected_damper_lost, &aero, 0.005);
             healthy_peak = healthy_peak.max(ho.angle_rad.abs());
             faulty_peak = faulty_peak.max(fo.angle_rad.abs());
         }

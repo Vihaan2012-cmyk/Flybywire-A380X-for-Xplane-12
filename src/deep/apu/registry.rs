@@ -428,7 +428,12 @@ mod tests {
     fn registers_cleanly_with_no_validation_errors() {
         let mut r = Registry::default();
         register(&mut r);
-        let errors = r.validate();
+        // `validate_area`, not `validate`: this area contributes to the APU
+        // FIRE warning rather than owning it (the alert belongs to the
+        // fire-protection area), and a contribution only has something to
+        // resolve against once the areas are combined. `deep::tests` checks
+        // that whole registry.
+        let errors = r.validate_area();
         assert!(errors.is_empty(), "{errors:?}");
     }
 

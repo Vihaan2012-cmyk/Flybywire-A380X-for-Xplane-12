@@ -14,6 +14,19 @@
 //! accident, documents exactly this failure mode on a different aircraft's
 //! THS).
 //!
+//! The two motors do not drive the screw in parallel: like every Airbus
+//! THSA, they drive it through a **speed-summing differential gearbox**, so
+//! the screw turns at the *average* of the two motor speeds while each
+//! motor sees the same torque. That single gear arrangement is why the
+//! documented operational consequence of losing one hydraulic system on an
+//! Airbus THS is a halved trim *rate* with the *torque* capability intact:
+//! the unpowered motor is braked by its own valve block, its input to the
+//! differential is held at zero, and the surviving motor's speed is halved
+//! on the way to the screw while its torque is doubled. Modelled here by
+//! reflecting each motor through a gear ratio `2 / (number of motors with
+//! supply)`, which is exactly the differential's kinematics for the two
+//! cases that exist (both driving, or one driving against a braked input).
+//!
 //! Also here: the smaller electric rudder-trim actuator, which biases the
 //! SEC's rudder travel about its own screw the same way but at a much
 //! smaller scale and without an aerodynamic hinge moment big enough to
@@ -26,7 +39,7 @@
 //! crate, `hinge_moment.rs`) with room to spare.
 
 use super::actuator::{
-    ActuatorFaults, ActuatorMode, ElectricMotorPump, ElectricPumpFaults, PowerControlUnit,
+    servo_rate_step, ActuatorFaults, ActuatorMode, ElectricMotorPump, ElectricPumpFaults, PowerControlUnit, ServoLoad,
 };
 use super::high_lift::synthetic_rotary_geometry;
 use super::hinge_moment::{hinge_moment_nm, HingeMomentCoefficients};
@@ -156,23 +169,44 @@ impl TrimmableHorizontalStabilizer {
         aero: &AeroInputs,
         dt: f64,
     ) -> ThsOutput {
+        // Speed-summing differential (see module doc): a motor whose supply
+        // is gone is braked, its differential input is held, and the
+        // surviving motor's shaft must turn twice as fast per unit of screw
+        // rotation -- so it reaches its own rated speed at half the screw
+        // rate, while its torque is doubled on the way through the gear.
+        let supply = [
+            pressure_fraction[0].clamp(0.0, 1.0) * (1.0 - faults.motor_green.supply_loss.clamp(0.0, 1.0)),
+            pressure_fraction[1].clamp(0.0, 1.0) * (1.0 - faults.motor_yellow.supply_loss.clamp(0.0, 1.0)),
+        ];
+        let driving_motors = supply.iter().filter(|s| **s > 1e-3).count();
+        // 2 motors -> 1.0 (each motor shaft turns with the screw); 1 motor
+        // -> 2.0. With none left the ratio is irrelevant (no torque at all).
+        let gear = if driving_motors == 0 { 1.0 } else { 2.0 / driving_motors as f64 };
+
         let g = self.motor_green.step(
             modes[0],
-            commanded_angle_rad,
-            self.angle_rad,
-            self.rate_rad_s,
+            commanded_angle_rad * gear,
+            self.angle_rad * gear,
+            self.rate_rad_s * gear,
             pressure_fraction[0],
             &faults.motor_green,
         );
         let y = self.motor_yellow.step(
             modes[1],
-            commanded_angle_rad,
-            self.angle_rad,
-            self.rate_rad_s,
+            commanded_angle_rad * gear,
+            self.angle_rad * gear,
+            self.rate_rad_s * gear,
             pressure_fraction[1],
             &faults.motor_yellow,
         );
-        let motor_torque = g.torque_nm + y.torque_nm;
+        // Torque scales with the gear ratio, rate gradients with its square
+        // (the motor sees `gear * rate` and its torque is multiplied by
+        // `gear` again on the way back out); `ServoLoad::geared` does both.
+        let mut servo = g.servo.geared(gear);
+        servo.add(&y.servo.geared(gear));
+        let motor_torque = gear * (g.torque_nm + y.torque_nm);
+        let motor_jam_torque = gear * (g.jam_torque_nm + y.jam_torque_nm);
+        let motor_jam_damping = gear * gear * (g.jam_damping_nm_s_per_rad + y.jam_damping_nm_s_per_rad);
 
         // The no-back engages whenever neither motor is actively commanded
         // (a small residual damping torque from an idling motor does not
@@ -184,13 +218,17 @@ impl TrimmableHorizontalStabilizer {
             self.no_back_lock_angle = Some(self.angle_rad);
         }
         let no_back_capacity = self.no_back_holding_torque_nm * (1.0 - faults.no_back_failure.clamp(0.0, 1.0));
-        let no_back_torque = match self.no_back_lock_angle {
+        let (no_back_torque, no_back_damping) = match self.no_back_lock_angle {
             Some(lock) => {
                 let k = no_back_capacity * 50.0;
                 let c = no_back_capacity * 5.0;
-                (-k * (self.angle_rad - lock) - c * self.rate_rad_s).clamp(-no_back_capacity, no_back_capacity)
+                let raw = -k * (self.angle_rad - lock) - c * self.rate_rad_s;
+                let held = raw.clamp(-no_back_capacity, no_back_capacity);
+                // Once it is slipping at capacity the torque no longer
+                // responds to rate, so it contributes no gradient.
+                (held, if raw == held { c } else { 0.0 })
             }
-            None => 0.0,
+            None => (0.0, 0.0),
         };
 
         let jam = faults.ballscrew_jam.clamp(0.0, 1.0);
@@ -208,10 +246,17 @@ impl TrimmableHorizontalStabilizer {
 
         let hinge_m = hinge_moment_nm(&self.hinge, self.angle_rad, aero.alpha_rad, aero.dynamic_pressure_pa, aero.mach, aero.mach_crit);
 
-        let net_torque =
-            motor_torque + no_back_torque + jam_torque + hinge_m - self.structural_damping_nm_s_per_rad_s * self.rate_rad_s;
-        let accel = net_torque / self.inertia_kg_m2;
-        self.rate_rad_s += accel * dt;
+        // The motors' clamped servo law goes to the solver whole (so its
+        // clamp is solved, not stepped across); everything else is ordinary
+        // linear load on the screw.
+        let other_torque = motor_jam_torque + no_back_torque + jam_torque + hinge_m
+            - self.structural_damping_nm_s_per_rad_s * self.rate_rad_s;
+        let other_damping = motor_jam_damping
+            + no_back_damping
+            + self.jam_damp_nm_s_per_rad * jam
+            + self.structural_damping_nm_s_per_rad_s;
+        self.rate_rad_s =
+            servo_rate_step(self.rate_rad_s, &servo, other_torque, other_damping, self.inertia_kg_m2, dt);
         self.angle_rad += self.rate_rad_s * dt;
 
         let mut at_stop = false;
@@ -292,9 +337,16 @@ impl RudderTrimActuator {
             actuator_faults,
         );
         // Light structural damping, no aero load: this actuator only fights
-        // its own mechanism's friction.
-        let net = out.torque_nm - 5.0 * self.rate_rad_s;
-        self.rate_rad_s += net / self.inertia_kg_m2 * dt;
+        // its own mechanism's friction. The servo's own clamped rate law is
+        // solved exactly (`actuator::servo_rate_step`): at
+        // `k_torque_per_rate / inertia` ~ 3.2e4 s^-1 it is far too stiff for
+        // any explicit step, which is why this actuator needs no sub-stepping
+        // of its own -- nothing else here is stiff.
+        const MECHANISM_FRICTION_NM_S_PER_RAD: f64 = 5.0;
+        let other_torque = out.jam_torque_nm - MECHANISM_FRICTION_NM_S_PER_RAD * self.rate_rad_s;
+        let other_damping = out.jam_damping_nm_s_per_rad + MECHANISM_FRICTION_NM_S_PER_RAD;
+        self.rate_rad_s =
+            servo_rate_step(self.rate_rad_s, &out.servo, other_torque, other_damping, self.inertia_kg_m2, dt);
         self.angle_rad = (self.angle_rad + self.rate_rad_s * dt).clamp(-self.limit_rad, self.limit_rad);
         self.angle_rad
     }
@@ -341,12 +393,25 @@ mod tests {
         let dead = ThsFaults { motor_yellow: ActuatorFaults { supply_loss: 1.0, ..Default::default() }, ..Default::default() };
         let mut both_angle = 0.0;
         let mut one_angle = 0.0;
-        for _ in 0..2000 {
+        // The window has to end before the *faster* configuration arrives,
+        // or both have simply settled on the command and there is no rate
+        // left to compare. Both motors run the screw at 0.015 rad/s, so a
+        // 5 deg = 0.0873 rad trim takes 5.8 s; sample at 3 s, where the
+        // travel so far is the rate times the time:
+        //   both motors: 0.015  * 3 s = 0.045  rad
+        //   one motor:   0.0075 * 3 s = 0.0225 rad   (the differential
+        //                halves the screw rate, see the module doc)
+        // The spin-up is negligible against those: 160 kN*m on 2100 kg*m^2
+        // is 76 rad/s^2, so the rate limit is reached in under a
+        // millisecond.
+        for _ in 0..300 {
             both_angle = both.step(ACTIVE, target, [1.0, 1.0], &ThsFaults::default(), &calm_aero(), DT).angle_rad;
             one_angle = one.step(ACTIVE, target, [1.0, 1.0], &dead, &calm_aero(), DT).angle_rad;
         }
         assert!(one_angle > 0.0, "the surviving motor should still move it");
         assert!(one_angle < both_angle, "but slower than with both motors");
+        assert!((both_angle - 0.045).abs() < 1e-3, "both motors: 0.015 rad/s for 3 s, got {both_angle}");
+        assert!((one_angle - 0.0225).abs() < 1e-3, "one motor through the differential: half that, got {one_angle}");
     }
 
     #[test]

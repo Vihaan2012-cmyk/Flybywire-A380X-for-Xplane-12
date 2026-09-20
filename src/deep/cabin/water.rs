@@ -491,11 +491,40 @@ mod tests {
         inputs.bleed_available = false;
         inputs.compressor_commanded = false;
         inputs.galley_demand_l_s = 0.05;
+
+        // The tank is a pressure vessel, so losing its air source does not
+        // stop the taps at once: the trapped ullage air expands as water
+        // leaves and the pressure bleeds down along p*V = const.
+        // Hand calculation (isothermal, no air mass entering or leaving):
+        //   V_tank  = 800/(1 - 0.05)                     = 842.1 L
+        //   V_u0    = 842.1 - 800                        =  42.1 L
+        //   p_abs0  = 101 325 + 40 psi                   = 377 115 Pa
+        //   p*V     = 377 115 * 0.042105 m^3             = 15 878 Pa*m^3
+        // Flow stops when the gauge falls below 15% of target, i.e. at
+        //   p_abs = 101 325 + 0.15*275 790               = 142 694 Pa
+        //   V_u   = 15 878 / 142 694                     = 111.3 L
+        // so the tank has to give up 111.3 - 42.1 = 69.2 L of water first,
+        // leaving 730.8 L aboard. At 0.05 L/s that is well over half an
+        // hour, not the one minute this test used to allow.
         let mut out = WaterOutputs::default();
         for _ in 0..3600 {
             out = w.step(&inputs, &WaterFaults::default(), 1.0 / 60.0);
         }
-        assert_eq!(out.flow_fraction, 0.0);
+        assert!(out.flow_fraction > 0.9, "one minute in, the stored air is barely touched: {}", out.flow_fraction);
+
+        let mut failed_at_s = None;
+        let mut water_at_failure_l = 0.0;
+        for step in 0..14_400 {
+            out = w.step(&inputs, &WaterFaults::default(), 0.25);
+            if out.flow_fraction == 0.0 {
+                failed_at_s = Some((step + 1) as f64 * 0.25);
+                water_at_failure_l = w.water_l;
+                break;
+            }
+        }
+        assert!(failed_at_s.is_some(), "with no air source the taps must eventually die");
+        assert!((water_at_failure_l - 730.8).abs() < 1.0, "{water_at_failure_l} L left when flow failed");
+        assert!(out.gauge_pressure_pa < TARGET_GAUGE_PA * MIN_USEFUL_PRESSURE_FRACTION);
     }
 
     #[test]

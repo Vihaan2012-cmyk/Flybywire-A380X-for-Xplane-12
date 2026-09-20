@@ -97,14 +97,28 @@ mod tests {
 
     #[test]
     fn low_duty_cycle_can_keep_an_intermittent_arc_under_the_breakers_trip_threshold() {
-        // A vigorous arc (50 A) that only makes contact 4% of the time
-        // (vibration-driven intermittent chafe contact) on a 75 A-rated
-        // breaker with no other load: sqrt(0.04) = 0.2 -> RMS-equivalent
-        // 10 A, well under rated.
-        let ratio = thermal_breaker_sees_ratio(0.0, 50.0, 0.04, 75.0);
+        // A 115 V AC feeder with 1.7 ohm of wiring resistance between the bus
+        // and a chafe point, arcing at the 30 V arc drop:
+        //   I_arc = (115 - 30) / 1.7 = 85 / 1.7 = 50 A.
+        let i_arc = arc_current_a(115.0, 1.7, 30.0);
+        assert!((i_arc - 50.0).abs() < 1e-9);
+        // The feeder is protected by a 35 A breaker (a standard aviation
+        // rating) and carries its own 20 A of normal load.
+        //
+        // Intermittent chafe, contact only 4% of the time (vibration driven):
+        //   I_rms_equiv = 50 * sqrt(0.04) = 50 * 0.2 = 10 A
+        //   ratio       = (20 + 10) / 35 = 30/35 = 0.857
+        // -- under rated, so the I^2t element never accumulates a trip.
+        let ratio = thermal_breaker_sees_ratio(20.0, i_arc, 0.04, 35.0);
+        assert!((ratio - 30.0 / 35.0).abs() < 1e-9);
         assert!(ratio < 1.0, "ratio {ratio} should stay under 1.0 -- the documented thermal-breaker blind spot");
-        // The same arc continuous (duty 1.0) would trip it easily.
-        let continuous_ratio = thermal_breaker_sees_ratio(0.0, 50.0, 1.0, 75.0);
+        // The identical arc made continuous (duty 1.0) and nothing else
+        // changed:
+        //   ratio = (20 + 50) / 35 = 70/35 = 2.0
+        // -- twice rated, which the thermal element does integrate to a trip.
+        // Only the duty cycle separates the two cases.
+        let continuous_ratio = thermal_breaker_sees_ratio(20.0, i_arc, 1.0, 35.0);
+        assert!((continuous_ratio - 2.0).abs() < 1e-9);
         assert!(continuous_ratio > 1.0);
     }
 

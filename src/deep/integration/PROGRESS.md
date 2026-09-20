@@ -218,3 +218,15 @@ into the crate until the lead applies `docs/deep/integration.md`'s
    DETECTED" — noted here for whoever owns that alert; not this directory's
    component to add without overlapping `Area::Sensors`'/`Area::FireIce`'s
    own registrations.
+
+- [done] `contaminant_from_weather`'s wet/dry snow split moved from -15 C to
+  -5 C (`WET_SNOW_MIN_C`). Wet snow's cohesion comes from liquid water in the
+  snowpack, which only survives within a few degrees of melting (ICAO Doc
+  9981 / EASA RCAM define the two by cohesion); -15 C classified ordinary dry
+  continental snowfall as wet, the more optimistic of the two for braking
+  action. File: environment_events_adapter.rs.
+- [done] `normalized_aileron_or_elevator`'s round-trip test now covers the
+  conversion's actual domain. `flight_controls.rs` is `down_deg = 20 - 50*n`
+  over `n` in 0..1, i.e. -30 (30 up) .. +20 (20 down) deg; the test asked for
+  a round trip at +30 deg, which is past the travel stop and correctly
+  clamps. Both stops are now asserted explicitly. File: flight_control_surfaces.rs.

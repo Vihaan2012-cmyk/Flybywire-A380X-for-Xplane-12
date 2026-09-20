@@ -72,7 +72,7 @@ mod tests {
     fn every_registered_item_validates_clean() {
         let mut r = Registry::default();
         register(&mut r);
-        let errors = r.validate();
+        let errors = r.validate_area();
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(r.components.len(), 7, "weather feed + ice state + 5 gear legs");
         assert!(r.failures.is_empty(), "Integration originates no new injectable failures (module doc)");

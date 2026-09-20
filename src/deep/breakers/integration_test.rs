@@ -66,6 +66,58 @@ mod tests {
         assert!(unprotected.is_empty(), "deep::electrical loads with no breaker in this catalogue yet (new loads landed upstream, this catalogue needs a re-sync pass): {unprotected:?}");
     }
 
+    /// The reverse direction of the coverage check above, and the one that
+    /// is *not* satisfied today.
+    ///
+    /// This catalogue is deliberately larger than `deep::electrical`'s load
+    /// set: it carries real A380 breakers whose consumers that area does not
+    /// model yet (each fuel pump's own control channel, the engine ignition
+    /// exciters, the cargo door actuator controls, the APU ECU channels, the
+    /// crew oxygen shutoff, ...). Those entries honestly carry
+    /// `protected_load: None` rather than a fabricated load id -- see
+    /// `catalog::tests::group_2_equipment_has_no_fabricated_load_and_is_honestly_documented`.
+    ///
+    /// That is a real, known gap in the *electrical load model*, not a bug in
+    /// this catalogue, so it is named here instead of being asserted away.
+    /// Pinning the count per ATA chapter means the gap can only move
+    /// deliberately: modelling one of these consumers in
+    /// `deep::electrical::loads` and linking it to its breaker lowers a
+    /// number below, and adding a breaker with no modelled consumer raises
+    /// one. Either way this test says exactly which chapter moved.
+    #[test]
+    fn breakers_protecting_no_modelled_load_are_a_known_named_gap() {
+        // 128 of the catalogue's 399 breakers protect a consumer
+        // `deep::electrical` has not modelled yet, by ATA chapter:
+        const EXPECTED: [(u16, usize); 14] =
+            [(21, 8), (23, 6), (24, 6), (26, 6), (28, 60), (29, 3), (31, 3), (33, 3), (35, 4), (36, 4), (49, 5), (52, 4), (73, 8), (74, 8)];
+        let expected_total: usize = EXPECTED.iter().map(|(_, n)| n).sum();
+        assert_eq!(expected_total, 128, "the per-chapter table above must add up to the stated total");
+
+        let mut actual: std::collections::BTreeMap<u16, usize> = std::collections::BTreeMap::new();
+        let mut total = 0usize;
+        for def in catalog::all() {
+            if def.protected_load.is_none() {
+                *actual.entry(def.ata).or_insert(0) += 1;
+                total += 1;
+            }
+        }
+        let expected: std::collections::BTreeMap<u16, usize> = EXPECTED.iter().copied().collect();
+        assert_eq!(
+            actual, expected,
+            "the set of breakers protecting no modelled deep::electrical load has moved; if that was deliberate (a consumer was modelled, or a new unmodelled breaker was added) update the table in this test, chapter by chapter"
+        );
+        assert_eq!(total, expected_total);
+
+        // Every one of them must still be a real, described breaker -- an
+        // unmodelled consumer is allowed, an undocumented one is not.
+        for def in catalog::all() {
+            if def.protected_load.is_none() {
+                assert!(!def.consumer.is_empty(), "{} protects no modelled load and does not say what it does feed", def.id);
+                assert!(!def.basis.is_empty(), "{} protects no modelled load and cites no basis for its rating", def.id);
+            }
+        }
+    }
+
     #[test]
     fn every_protected_load_has_either_one_breaker_or_exactly_as_many_as_its_own_real_feed_count() {
         // A single-feed load has exactly one breaker claiming it; a real

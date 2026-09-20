@@ -553,6 +553,21 @@ impl Registry {
 
     /// Cross-checks once everything is registered: every failure's component
     /// exists, every alert's failures exist.
+    /// What one area can check on its own, before the areas are combined.
+    ///
+    /// An area's registry is deliberately not self-contained: a failure may
+    /// name a component another area owns, an alert may be raised by
+    /// another area's failures, and a contribution or component extension
+    /// only resolves once its owner has registered too. None of those are
+    /// errors in the area -- they are only errors in the combined registry,
+    /// where `validate` checks them. What an area is answerable for by
+    /// itself is that it registers nothing twice and that its failure ids
+    /// carry their own ATA, which is exactly what `errors` accumulates as
+    /// it registers.
+    pub fn validate_area(&self) -> Vec<String> {
+        self.errors.clone()
+    }
+
     pub fn validate(&self) -> Vec<String> {
         let mut e = self.errors.clone();
         for c in &self.contributions {

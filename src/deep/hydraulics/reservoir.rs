@@ -38,11 +38,22 @@ pub const LITER_M3: f64 = 1.0e-3;
 pub const GALLON_M3: f64 = 3.785_411_784e-3;
 
 /// FlyByWire's own A380 reservoir low air pressure caution thresholds
-/// (`PressureSwitch::new(Pressure::new::<psi>(25.), Pressure::new::<psi>(21.76), ...)`),
-/// a Schmitt trigger: warns below the low value, clears only above the high
-/// value, so the caution does not chatter right at the threshold.
-pub const LOW_PRESSURE_WARN_PSI: f64 = 25.0;
-pub const LOW_PRESSURE_CLEAR_PSI: f64 = 21.76;
+/// (`a380_systems/src/hydraulic/mod.rs:181` green, `:197` yellow:
+/// `PressureSwitch::new(Pressure::new::<psi>(25.), Pressure::new::<psi>(21.76),
+/// PressureSwitchType::Relative)`), a Schmitt trigger.
+///
+/// FBW's constructor takes `(high_threshold, low_threshold)` and its
+/// `update` (`fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs:184-188`)
+/// reads `if filtered <= low { not pressurised } else if filtered >= high {
+/// pressurised }`. So the *caution* latches on at or below **21.76 psi**
+/// and clears only once the air pressure has recovered to **25 psi** or
+/// above; between the two the switch holds whatever state it was already
+/// in. That band is the hysteresis, and it only exists when
+/// `WARN < CLEAR` -- with the two swapped the switch would instead flip
+/// state on every sample inside the band, i.e. chatter, which is exactly
+/// what a Schmitt trigger is there to prevent.
+pub const LOW_PRESSURE_WARN_PSI: f64 = 21.76;
+pub const LOW_PRESSURE_CLEAR_PSI: f64 = 25.0;
 
 /// GENERIC nominal regulated reservoir air (gauge) pressure while the
 /// bootstrap pressurisation source (system pressure through a reducing
@@ -139,12 +150,14 @@ impl Reservoir {
 
         let inlet_air_pressure_pa = self.boost_pa(pressurization_supply_fraction, faults);
         let low_psi = inlet_air_pressure_pa / PSI_PA;
-        if self.low_pressure_switch_on {
-            if low_psi > LOW_PRESSURE_CLEAR_PSI {
-                self.low_pressure_switch_on = false;
-            }
-        } else if low_psi < LOW_PRESSURE_WARN_PSI {
+        // Schmitt trigger, same comparison senses as FBW's own
+        // `PressureSwitch::update`: latch on at or below the warn
+        // threshold, clear only at or above the (higher) clear threshold,
+        // hold state in between.
+        if low_psi <= LOW_PRESSURE_WARN_PSI {
             self.low_pressure_switch_on = true;
+        } else if low_psi >= LOW_PRESSURE_CLEAR_PSI {
+            self.low_pressure_switch_on = false;
         }
 
         ReservoirOutputs {

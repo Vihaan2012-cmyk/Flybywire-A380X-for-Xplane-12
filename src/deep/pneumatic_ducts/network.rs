@@ -648,15 +648,61 @@ mod tests {
     fn the_hp_valve_opens_when_ip8_alone_cannot_hold_regulation() {
         let mut net = DuctNetwork::new();
         let mut inputs = base_inputs();
+        // Engine 1 on its own: shut every cross-connection off its duct --
+        // the three cross-bleed valves *and* both pack feeds, because pack
+        // 1's dual feed is itself a path from engine 1's duct to engine
+        // 2's. Without this, engine 1's three healthy neighbours simply
+        // hold its duct at their own regulated pressure, engine 1's
+        // regulators see no error, and the HP valve correctly has nothing
+        // to do -- which is what the original version of this test was
+        // actually measuring.
+        inputs.cross_bleed_valve_command = [0.0, 0.0, 0.0];
+        inputs.pack_valve_open = [[0.0, 0.0], [0.0, 0.0]];
         // IP8 below switch-over: the HP valve must take over.
         inputs.engines[0].ip_port_pressure_pa = 150_000.0;
         inputs.engines[0].hp_port_pressure_pa = 500_000.0;
         let mut out = NetworkOutputs::default();
+        let mut peak_hp_open = 0.0_f64;
         for _ in 0..300 {
             out = net.step(&inputs, &DuctNetworkFaults::default());
+            peak_hp_open = peak_hp_open.max(out.hp_valve_open[0]);
         }
-        assert!(out.hp_valve_open[0] > 0.1, "HP valve must open once IP8 is below the switch-over pressure, got {}", out.hp_valve_open[0]);
-        assert!(out.engine_duct_pressure_pa[0] > 101_325.0, "the engine must still pressurise its duct via the HP valve");
+        assert!(peak_hp_open > 0.1, "HP valve must open once IP8 is below the switch-over pressure, peak opening was {}", peak_hp_open);
+
+        // What the valve *ends* at is not the evidence, and the original
+        // version of this test asserting a steady-state opening was asking
+        // for the one thing this regulator cannot do. `hp_commanded` is a
+        // pure proportional term, `(REGULATION_TARGET_PA - transfer_pipe) *
+        // VALVE_GAIN_PER_PA`, so its steady-state command against zero
+        // error is zero by construction; and with the packs and the
+        // cross-bleeds shut there is no consumer anywhere downstream to
+        // keep an error alive. So the valve must open, do its work and
+        // close again -- which is precisely the assertion pair below.
+        assert!(out.hp_valve_open[0] < 0.05, "with the target made and nothing consuming air, the regulator must have closed again, got {}", out.hp_valve_open[0]);
+
+        // The evidence the HP valve did the work is the pressure it left
+        // behind, bracketed at both ends:
+        //  - the IP tap is a *passive* non-return valve
+        //    (`passive_valve_open_fraction`), so it can never lift the pipe
+        //    above its own 150 kPa port pressure. Reaching the 40 psi
+        //    (275.8 kPa) regulation target at all is only possible through
+        //    the HP valve.
+        //  - but the pipe must stay well below the 500 kPa HP port, or the
+        //    valve would not be regulating at all, just sitting open until
+        //    the pipe equalised with its source.
+        // The pipe settles a little *above* the target rather than on it:
+        // the loop (1 s actuator lag driving a 1 m^3 volume through a
+        // 0.006207 m^2 valve at gain 1/20 psi) is underdamped -- linearised
+        // about the target it is `u'' + u' + 5.81*u = 0`, i.e. zeta = 0.21
+        // and ~50% overshoot of the initial 126 kPa error -- and because
+        // the valve is one-way onto a volume with no consumer, the pipe
+        // simply latches at that first overshoot peak (~340 kPa) instead of
+        // oscillating back down. Hence `>= target`, not `== target`.
+        let hp_port_pa = inputs.engines[0].hp_port_pressure_pa;
+        assert!(out.transfer_pipe_pressure_pa[0] > 150_000.0, "the passive IP tap alone cannot lift the transfer pipe above its own 150 kPa port, got {} Pa", out.transfer_pipe_pressure_pa[0]);
+        assert!(out.transfer_pipe_pressure_pa[0] >= REGULATION_TARGET_PA, "the HP valve must carry the transfer pipe up to the {} Pa regulation target, got {} Pa", REGULATION_TARGET_PA, out.transfer_pipe_pressure_pa[0]);
+        assert!(out.transfer_pipe_pressure_pa[0] < 0.5 * (REGULATION_TARGET_PA + hp_port_pa), "the HP valve must regulate, not just equalise the pipe with its {} Pa source, got {} Pa", hp_port_pa, out.transfer_pipe_pressure_pa[0]);
+        assert!(out.engine_duct_pressure_pa[0] > 150_000.0, "the engine must still pressurise its own duct through the HP valve, got {} Pa", out.engine_duct_pressure_pa[0]);
     }
 
     #[test]
@@ -677,11 +723,47 @@ mod tests {
         let mut inputs = base_inputs();
         inputs.engines[1] = not_running_engine();
         inputs.cross_bleed_valve_command = [0.0, 0.0, 0.0];
+        // Pack 1 is fed from engine 1 *and* engine 2 (`pack_valve_open[0]
+        // = [from engine 1, from engine 2]`), and a pack valve is an
+        // ordinary two-way orifice, so with both of its feeds open the
+        // pack's own supply duct is a second, parallel bridge between
+        // engine 1's duct and engine 2's -- shutting the cross-bleed
+        // valves alone leaves engine 1 pressurising engine 2 straight
+        // through the pack, which is exactly what the model did (260 kPa,
+        // i.e. engine 1's own IP port pressure) and exactly what the real
+        // dual-feed pack supply would do too. Isolating engine 2's duct
+        // means shutting everything that touches it, so engine 2's own
+        // pack valve goes shut as well; engine 1 keeps feeding pack 1
+        // through its own valve, so the pack is still live.
+        inputs.pack_valve_open[0] = [1.0, 0.0];
         let mut out = NetworkOutputs::default();
-        for _ in 0..300 {
+        // 2000 s: long enough for the isolated duct's own gas to finish
+        // equilibrating thermally with its bay (see the hand solve below,
+        // tau = 275 s), so the assertion is on a settled state rather than
+        // halfway through a transient.
+        for _ in 0..2000 {
             out = net.step(&inputs, &DuctNetworkFaults::default());
         }
-        assert!((out.engine_duct_pressure_pa[1] - 101_325.0).abs() < 2000.0, "with cross-bleed shut, a non-running engine's duct must stay near its unpressurised start, got {} Pa", out.engine_duct_pressure_pa[1]);
+        assert!(out.pack_supply_pressure_pa[0] > 150_000.0, "pack 1 must still be fed by engine 1 -- this test isolates engine 2's duct, not the pack, got {} Pa", out.pack_supply_pressure_pa[0]);
+
+        // Isolated means *no mass crosses the duct boundary*, which is not
+        // the same as "the pressure does not move": the duct starts at
+        // START_K = 288.15 K but its pylon is at `zone_air_k` = 250 K, so
+        // its trapped charge cools through the lagging at constant volume
+        // and constant mass, and an isochoric cool-down takes the pressure
+        // down with the temperature (P = m*R*T/V, so P/P0 = T/T0).
+        //   tau = m*Cv/UA, m = P0*V/(R*T0)
+        //                    = 101325*2.5/(287.057*288.15) = 3.0625 kg
+        //                 Cv = 1005 - 287.057 = 717.94 J/(kg*K)
+        //                 UA = ENGINE_DUCT_UA_W_K = 8 W/K
+        //       -> tau = 3.0625*717.94/8 = 275 s
+        //   settled P = 101325 * 250/288.15 = 87 913 Pa
+        // (the old "within 2000 Pa of 101 325" expectation ignored this
+        // entirely and was being read at 300 s, one-third of the way down
+        // the cool-down.)
+        let settled_pa = 101_325.0 * 250.0 / DuctNetwork::START_K;
+        assert!((out.engine_duct_pressure_pa[1] - settled_pa).abs() < 100.0, "with every valve onto it shut, a non-running engine's duct keeps its own charge and just cools to its bay: expected {} Pa, got {} Pa", settled_pa, out.engine_duct_pressure_pa[1]);
+        assert!(out.engine_duct_pressure_pa[1] < 101_325.0, "nothing may add mass to an isolated duct, so it can never rise above its unpressurised start");
     }
 
     #[test]

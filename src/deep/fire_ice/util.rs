@@ -377,9 +377,45 @@ mod tests {
 
     #[test]
     fn messinger_gives_full_freezing_in_cold_still_air_and_no_freezing_when_hot() {
-        let cold = messinger_freezing_fraction(80.0, -20.0, -20.0, 5e-4, 0.5, 100.0, 80_000.0);
-        assert!(cold.freezing_fraction > 0.9, "{:?}", cold);
+        // Cold air and a *slow* airstream is the classic rime regime: the
+        // surface catches little water per second, while the convective,
+        // evaporative and droplet-warming terms that carry heat away barely
+        // depend on how much water arrives, so all of it freezes on
+        // contact. Hand balance at h = 80 W/m^2K, -20 C static and
+        // recovery, LWC 0.5 g/m^3, beta0 0.5, 25 m/s, 80 kPa, surface at
+        // 0 C (per m^2):
+        //   impingement = 0.5 * 5e-4 * 25            = 6.25e-3 kg/s
+        //   convection  = 80 * (0 - (-20))           = 1600.0 W
+        //   evaporation = (80/1005)*2.501e6*0.622/8e4
+        //                  * (610.8 - 124.6)         =  752.5 W
+        //   droplet warming = 6.25e-3 * 4186 * 20    =  523.3 W
+        //   droplet kinetic = 6.25e-3 * 0.5 * 25^2   =    2.0 W (a gain)
+        //   net heat out                             = 2873.8 W
+        //   latent heat if every drop froze
+        //                 = 6.25e-3 * 334 000        = 2087.5 W
+        // 2873.8 > 2087.5, so the balance can freeze everything that
+        // arrives and still has heat capacity to spare: freezing fraction
+        // clamps at 1. (The conditions this test used before -- 0.5 g/m^3
+        // at 100 m/s -- catch four times as much water, 8350 W of latent
+        // heat against the same ~4300 W of cooling, which is a *glaze*
+        // condition at a freezing fraction near 0.5. That is the right
+        // answer for those conditions, and well outside the CS-25
+        // Appendix C continuous-maximum envelope for -20 C besides; it was
+        // the expectation that was wrong, not the balance.)
+        let cold = messinger_freezing_fraction(80.0, -20.0, -20.0, 5e-4, 0.5, 25.0, 80_000.0);
+        assert_eq!(cold.freezing_fraction, 1.0, "{cold:?}");
         assert!(cold.impingement_kg_m2_s > 0.0);
+        assert!(cold.anti_ice_demand_w_m2 > 0.0);
+
+        // The same air an order of magnitude wetter and four times faster is
+        // the glaze regime: more water arrives than the same cooling can
+        // freeze, so part of it runs back as liquid.
+        let glaze = messinger_freezing_fraction(80.0, -20.0, -20.0, 5e-4, 0.5, 100.0, 80_000.0);
+        assert!(
+            glaze.freezing_fraction > 0.0 && glaze.freezing_fraction < 1.0,
+            "{glaze:?}"
+        );
+        assert!(glaze.freezing_fraction < cold.freezing_fraction);
 
         let hot = messinger_freezing_fraction(80.0, 20.0, 20.0, 5e-4, 0.5, 100.0, 101_325.0);
         assert_eq!(hot.freezing_fraction, 0.0);

@@ -98,6 +98,7 @@ pub fn calibrate() -> Calibration {
         surge_margin_design_frac: params::CORE_SURGE_MARGIN_DESIGN_FRAC,
         surge_line_flatness: params::CORE_SURGE_LINE_FLATNESS,
         choke_flow_multiple: params::CORE_CHOKE_FLOW_MULTIPLE,
+        erosion_efficiency_loss: 0.0,
     };
     let turbine_spec = turbine_flow::Spec {
         eta_design: params::TURBINE_EFFICIENCY_DESIGN,
@@ -267,7 +268,22 @@ impl PowerSection {
         let t1 = inputs.ambient_temperature_k.max(1.0);
 
         let core_spec = self.calibration.core_spec.degraded(faults.compressor_efficiency_loss);
-        let requested_corrected = params::CORE_MDOT_DESIGN_KG_S * n_frac;
+        // Erosion costs the compressor *flow capacity* as well as
+        // efficiency: worn blading has lost chord and gained tip clearance,
+        // so at the same corrected speed its throat passes less corrected
+        // flow. Gas-path-analysis practice treats the two as running
+        // together for erosion -- roughly one for one, a percent of
+        // isentropic efficiency per percent of flow capacity (Kurz, R. &
+        // Brun, K., "Degradation in Gas Turbine Systems", J. Eng. Gas
+        // Turbines Power 123 (2001), 70-77, which tabulates exactly this
+        // pairing for compressor fouling and erosion). This is the term that
+        // makes an eroded core run *hotter* on the same metered fuel: less
+        // air through the same combustor is a richer mixture, a higher
+        // turbine-inlet temperature and a higher EGT. The efficiency loss on
+        // its own cannot do that -- Euler work, and with it compressor-exit
+        // temperature, is set by blade speed, not by efficiency.
+        let flow_capacity_frac = (1.0 - faults.compressor_efficiency_loss.clamp(0.0, 1.0)).max(0.3);
+        let requested_corrected = params::CORE_MDOT_DESIGN_KG_S * n_frac * flow_capacity_frac;
         let compressor = compressor_map::evaluate(&core_spec, t1, p1, n_frac, requested_corrected);
 
         let combustion = combustor::burn(
