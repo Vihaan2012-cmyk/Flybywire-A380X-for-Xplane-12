@@ -274,3 +274,58 @@ own PROGRESS.md flagged):
   items once re-started.
 - Did not re-verify `COUNTS.md`'s panel/type tables against the 397-entry
   catalogue (see above).
+
+## Gap-closing pass (dedicated task, after session 3)
+
+Task: close the "128 breakers protect no modelled load" gap named by
+`integration_test::breakers_protecting_no_modelled_load_are_a_known_named_gap`.
+Worked jointly across `deep::breakers` (this directory) and
+`deep::electrical` (both in scope for this task).
+
+- [done] Added 125 new loads to `deep::electrical::loads.rs` (6 functions
+  for group-2 equipment + `position_indication_supplies` for all 77
+  group-3 excitation circuits), each reusing the exact id/bus/wattage/pf
+  `catalog.rs` had already derived for that breaker, then flipped this
+  catalogue's own matching `push_extra` calls to `push_electrical` (399
+  breakers unchanged, only `protected_load` values). — files:
+  `electrical/loads.rs`, `breakers/catalog.rs` — notes: only ATA24's
+  BATTERY 1/2 and APU BATTERY (3 of the original 128) stay unmodelled; a
+  battery's own output breaker protects a `Source`'s output, not a
+  `Load`'s demand, and there is no consumer for this pass to add.
+- [done] Updated `integration_test.rs`'s `EXPECTED` table to `[(24, 3)]`
+  (was 14 chapters summing to 128) and `catalog.rs`'s own
+  `position_indication_entries_...`/`group_2_equipment_...` tests to match
+  the new `Some(id)` reality. — files: `breakers/integration_test.rs`,
+  `breakers/catalog.rs`.
+- [done] Gave the new loads real behaviour, not just `commanded_on: true`:
+  ignition exciters, fire-bottle squibs, the APU start contactor and the
+  cargo door actuator controls are transit-only/one-shot with no `Truth`
+  field yet to drive them for real (`electrical::live::
+  TRANSIT_ONLY_NO_TRUTH_INPUT`, the same honest gap
+  `TRANSIT_ONLY_ACTUATORS` already documented); the RAT deploy solenoid
+  *does* have a real signal (`ElectricalLive`'s own emergency/
+  `rat_deployed` state) and is gated on that instead. — file:
+  `electrical/live.rs`.
+- [done] Converted `sources::Wiring::build`'s own generator/APU-gen/TR/
+  static-inverter/battery protection breakers from `add_breaker` to
+  `add_feeder_breaker` so each carries its bus's real current (the second
+  named gap in the task) — file: `electrical/sources.rs`.
+- [done] Tests: `electrical::loads::tests::every_closed_gap_id_is_a_real_load`
+  (all 125 ids resolve, the 3 battery ids do not), `electrical::live::tests::
+  a_representative_sample_of_the_new_gap_closing_loads_goes_dead_when_its_own_breaker_is_pulled`,
+  `transit_only_loads_with_no_truth_input_stay_dead_on_a_steady_state_aircraft`,
+  `the_rat_deploy_solenoid_only_draws_while_an_emergency_is_commanding_the_rat_out`,
+  `source_protection_breakers_now_carry_their_buss_real_current`, and
+  `breakers::live::tests::exactly_the_known_gap_of_units_has_no_current_source`
+  updated to assert exactly `["bat-1","bat-2","bat-apu"]`.
+- [done] Frame-cost measured before/after with
+  `breakers::live::cost::per_tick_cost` (release, `--ignored`) — see this
+  task's own final report for the two numbers; not duplicated here.
+
+### Not started
+
+- The three battery-output breakers remain a genuine architectural gap
+  (see above) -- closing it for real would need a network abstraction for
+  "a breaker in series with a source's own output", which
+  `deep::electrical::network` does not have today (`Load`/`Source` are
+  the only two node types). Out of scope for this pass.

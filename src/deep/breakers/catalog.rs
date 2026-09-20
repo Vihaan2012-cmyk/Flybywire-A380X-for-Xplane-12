@@ -2,13 +2,21 @@
 //! defines (same id, name, ATA, bus, wattage/power-factor -- read in full
 //! this session and transcribed 1:1, group by group, matching its own
 //! `ata21`/`ata26`/.../`ata36_bleed` structure exactly) plus the A380's
-//! other real, publicly-known breaker-protected equipment by ATA chapter
-//! that has no load model anywhere in this codebase yet (batteries,
-//! recorders, oxygen, the APU controller, engine FADEC/ignition, fire
-//! bottle squibs, ...) -- each of those honestly carries `protected_load:
-//! None` rather than a fabricated gate, the same "real named breaker, no
-//! modelled consumer" convention `src/breakers.rs`'s own `gates_none`
-//! already established as precedent in this codebase.
+//! other real, publicly-known breaker-protected equipment by ATA chapter.
+//!
+//! A gap-closing pass gave 125 of the 128 group-2/group-3 entries below
+//! (batteries' own charge-limiter/contactor-control circuits, recorders,
+//! oxygen, the APU controller, engine FADEC/ignition, fire bottle squibs,
+//! every position-indication/excitation circuit, ...) a matching load in
+//! `deep::electrical::loads.rs`, so they now carry `protected_load:
+//! Some(id)` like every group-1 entry. Only three -- BATTERY 1/2 and APU
+//! BATTERY (`ata24_power_sources`) -- still honestly carry `protected_load:
+//! None`: a battery's own output breaker protects a *source's* output, not
+//! a consumer's demand, and there is no `Load` to point at without
+//! double-counting against that battery's own `Source` branch (see that
+//! function's own comment). That remaining trio is the same "real named
+//! breaker, no modelled consumer" convention `src/breakers.rs`'s own
+//! `gates_none` already established as precedent in this codebase.
 //!
 //! Self-contained per `docs/deep/BRIEF.md` hard rule 2: `Bus` here is this
 //! module's own re-derivation (the 14 A380 bus names this catalogue's own
@@ -652,9 +660,12 @@ fn ata36_bleed(v: &mut Vec<BreakerDef>) {
 }
 
 // =======================================================================
-// Group 2: other real A380 breaker-protected equipment by ATA chapter,
-// with no load model anywhere in this codebase yet -- `protected_load:
-// None`, honestly documented rather than a fabricated gate.
+// Group 2: other real A380 breaker-protected equipment by ATA chapter.
+// Gap-closing pass: all but the three battery-output breakers in
+// `ata24_power_sources` now have a matching `deep::electrical::loads.rs`
+// load (`push_electrical`, `protected_load: Some(id)`); the battery trio
+// stays `push_extra`/`protected_load: None`, honestly documented rather
+// than a fabricated gate, for the reason given in that function's comment.
 // =======================================================================
 
 fn ata24_power_sources(v: &mut Vec<BreakerDef>) {
@@ -663,40 +674,63 @@ fn ata24_power_sources(v: &mut Vec<BreakerDef>) {
     // class); GENERIC 150 A continuous-discharge breaker/current-limiter
     // class figure (no public per-battery A380 figure), each on its own
     // DC hot bus.
+    //
+    // These three deliberately stay `push_extra`/`protected_load: None`
+    // (deep::electrical session re-sync, gap-closing pass): a battery's own
+    // output/current-limiter breaker protects a *source's* output current,
+    // not a consumer's demand, and `deep::electrical::network::Load` (the
+    // only thing a `protected_load` id can point at) models demand only.
+    // `deep::electrical::sources::Wiring::build` already gives each battery
+    // its own `Source` under this same "bat-N" id family, in a different
+    // list (`Network::sources`, not `Network::loads`); pointing this
+    // breaker at a fabricated `Load` of the same id would double-count that
+    // current against the battery's own `Source` branch, not model a real,
+    // separate consumer. See `deep::electrical::loads.rs`'s own header
+    // comment on this section for the same reasoning from the other side.
     push_extra(v, "bat-1", "BATTERY 1", 24, Bus::DcHot1, 150.0 * 28.0, 1.0, "main battery 1 output", "GENERIC: typical large-transport main aircraft battery continuous-discharge current-limiter class (150 A), no public A380 per-battery figure");
     push_extra(v, "bat-2", "BATTERY 2", 24, Bus::DcHot2, 150.0 * 28.0, 1.0, "main battery 2 output", "GENERIC: same class as BATTERY 1");
     push_extra(v, "bat-apu", "APU BATTERY", 24, Bus::DcApu, 100.0 * 28.0, 1.0, "APU battery output", "GENERIC: a smaller dedicated APU-start battery, same current-limiter class scaled down");
-    push_extra(v, "ext-pwr-contactor", "EXTERNAL POWER CONTACTOR CONTROL", 24, Bus::DcHot1, 20.0, 1.0, "external power contactor control coil", "GENERIC: typical small contactor-coil control circuit, real A380 external power system, no public per-part figure");
-    push_extra(v, "bat-charge-limiter-1", "BATTERY 1 CHARGE LIMITER", 24, Bus::DcEss, 20.0, 1.0, "battery 1 charge-limiter control circuit", "GENERIC: typical small charge-controller LRU control circuit");
-    push_extra(v, "bat-charge-limiter-2", "BATTERY 2 CHARGE LIMITER", 24, Bus::DcEss, 20.0, 1.0, "battery 2 charge-limiter control circuit", "GENERIC: typical small charge-controller LRU control circuit");
+    // The remaining three in this group are real, small control circuits
+    // (not a source's own output) and now have a matching load in
+    // `deep::electrical::loads.rs::ata24_power_sources_extra`.
+    push_electrical(v, "ext-pwr-contactor", "EXTERNAL POWER CONTACTOR CONTROL", 24, Bus::DcHot1, 20.0, 1.0, "external power contactor control coil", "GENERIC: typical small contactor-coil control circuit, real A380 external power system, no public per-part figure");
+    push_electrical(v, "bat-charge-limiter-1", "BATTERY 1 CHARGE LIMITER", 24, Bus::DcEss, 20.0, 1.0, "battery 1 charge-limiter control circuit", "GENERIC: typical small charge-controller LRU control circuit");
+    push_electrical(v, "bat-charge-limiter-2", "BATTERY 2 CHARGE LIMITER", 24, Bus::DcEss, 20.0, 1.0, "battery 2 charge-limiter control circuit", "GENERIC: typical small charge-controller LRU control circuit");
 }
 
+// The six functions below (ATA23/31/35/49/7x/26/29/52/33) now all have a
+// matching `deep::electrical::loads.rs` load, one function each, added in
+// this pass -- `push_electrical` rather than `push_extra`, same id/bus/
+// watts/pf/basis as before.
 fn ata23_comms(v: &mut Vec<BreakerDef>) {
-    push_extra(v, "satcom", "SATCOM", 23, Bus::DcEss, 100.0, avionics_pf(Bus::DcEss), "satellite communication transceiver", "GENERIC: typical wide-body SATCOM transceiver LRU, real A380 equipment class, no public per-box figure");
-    push_extra(v, "hf-1", "HF 1", 23, Bus::Dc1, 100.0, avionics_pf(Bus::Dc1), "HF radio transceiver 1", "GENERIC: typical HF transceiver LRU");
-    push_extra(v, "hf-2", "HF 2", 23, Bus::Dc2, 100.0, avionics_pf(Bus::Dc2), "HF radio transceiver 2", "GENERIC: typical HF transceiver LRU");
-    push_extra(v, "acars-mu", "ACARS MU", 23, Bus::DcEss, 50.0, avionics_pf(Bus::DcEss), "ACARS management unit", "GENERIC: typical avionics LRU class figure");
-    push_extra(v, "pa-amplifier", "PA AMPLIFIER", 23, Bus::Ac1, 200.0, 0.9, "cabin passenger address amplifier", "GENERIC: typical wide-body PA amplifier power stage");
-    push_extra(v, "interphone", "INTERPHONE", 23, Bus::DcEss, 50.0, avionics_pf(Bus::DcEss), "crew interphone system", "GENERIC: typical avionics LRU class figure");
+    push_electrical(v, "satcom", "SATCOM", 23, Bus::DcEss, 100.0, avionics_pf(Bus::DcEss), "satellite communication transceiver", "GENERIC: typical wide-body SATCOM transceiver LRU, real A380 equipment class, no public per-box figure");
+    push_electrical(v, "hf-1", "HF 1", 23, Bus::Dc1, 100.0, avionics_pf(Bus::Dc1), "HF radio transceiver 1", "GENERIC: typical HF transceiver LRU");
+    push_electrical(v, "hf-2", "HF 2", 23, Bus::Dc2, 100.0, avionics_pf(Bus::Dc2), "HF radio transceiver 2", "GENERIC: typical HF transceiver LRU");
+    push_electrical(v, "acars-mu", "ACARS MU", 23, Bus::DcEss, 50.0, avionics_pf(Bus::DcEss), "ACARS management unit", "GENERIC: typical avionics LRU class figure");
+    push_electrical(v, "pa-amplifier", "PA AMPLIFIER", 23, Bus::Ac1, 200.0, 0.9, "cabin passenger address amplifier", "GENERIC: typical wide-body PA amplifier power stage");
+    push_electrical(v, "interphone", "INTERPHONE", 23, Bus::DcEss, 50.0, avionics_pf(Bus::DcEss), "crew interphone system", "GENERIC: typical avionics LRU class figure");
 }
 
 fn ata31_recorders(v: &mut Vec<BreakerDef>) {
-    push_extra(v, "dfdr", "DFDR", 31, Bus::DcEss, 50.0, avionics_pf(Bus::DcEss), "Digital Flight Data Recorder", "GENERIC: typical avionics LRU class figure, real mandatory A380 equipment");
-    push_extra(v, "cvr", "CVR", 31, Bus::DcEss, 50.0, avionics_pf(Bus::DcEss), "Cockpit Voice Recorder", "GENERIC: typical avionics LRU class figure, real mandatory A380 equipment");
-    push_extra(v, "qar", "QAR", 31, Bus::Dc2, 30.0, avionics_pf(Bus::Dc2), "Quick Access Recorder", "GENERIC: typical small avionics LRU class figure");
+    push_electrical(v, "dfdr", "DFDR", 31, Bus::DcEss, 50.0, avionics_pf(Bus::DcEss), "Digital Flight Data Recorder", "GENERIC: typical avionics LRU class figure, real mandatory A380 equipment");
+    push_electrical(v, "cvr", "CVR", 31, Bus::DcEss, 50.0, avionics_pf(Bus::DcEss), "Cockpit Voice Recorder", "GENERIC: typical avionics LRU class figure, real mandatory A380 equipment");
+    push_electrical(v, "qar", "QAR", 31, Bus::Dc2, 30.0, avionics_pf(Bus::Dc2), "Quick Access Recorder", "GENERIC: typical small avionics LRU class figure");
 }
 
 fn ata35_oxygen(v: &mut Vec<BreakerDef>) {
-    push_extra(v, "crew-o2-shutoff", "CREW OXYGEN SHUTOFF VALVE", 35, Bus::Dc1, 50.0, 0.8, "crew oxygen supply shutoff valve actuator", "GENERIC: typical motor/solenoid-operated shutoff valve actuator, real A380 crew oxygen system");
-    push_extra(v, "pax-o2-gen-ctl", "PAX OXYGEN GENERATOR CONTROL", 35, Bus::DcEss, 30.0, avionics_pf(Bus::DcEss), "passenger chemical oxygen generator deployment/control circuit", "GENERIC: typical small control-circuit LRU figure");
-    push_extra(v, "o2-pressure-xducer", "OXYGEN PRESSURE TRANSDUCER", 35, Bus::DcEss, 5.0, avionics_pf(Bus::DcEss), "crew oxygen bottle pressure transducer", "GENERIC: typical small pressure-transducer power draw");
+    push_electrical(v, "crew-o2-shutoff", "CREW OXYGEN SHUTOFF VALVE", 35, Bus::Dc1, 50.0, 0.8, "crew oxygen supply shutoff valve actuator", "GENERIC: typical motor/solenoid-operated shutoff valve actuator, real A380 crew oxygen system");
+    push_electrical(v, "pax-o2-gen-ctl", "PAX OXYGEN GENERATOR CONTROL", 35, Bus::DcEss, 30.0, avionics_pf(Bus::DcEss), "passenger chemical oxygen generator deployment/control circuit", "GENERIC: typical small control-circuit LRU figure");
+    push_electrical(v, "o2-pressure-xducer", "OXYGEN PRESSURE TRANSDUCER", 35, Bus::DcEss, 5.0, avionics_pf(Bus::DcEss), "crew oxygen bottle pressure transducer", "GENERIC: typical small pressure-transducer power draw");
 }
 
 fn ata49_apu(v: &mut Vec<BreakerDef>) {
-    push_extra(v, "apu-ecu-a", "APU ECU CHANNEL A", 49, Bus::DcApu, 60.0, avionics_pf(Bus::DcApu), "APU electronic control unit channel A", "GENERIC: typical dual-channel engine/APU controller LRU class figure (real PW980 APU has its own FADEC-class controller)");
-    push_extra(v, "apu-ecu-b", "APU ECU CHANNEL B", 49, Bus::DcEss, 60.0, avionics_pf(Bus::DcEss), "APU electronic control unit channel B", "GENERIC: same class as channel A, redundant bus feed");
-    push_extra(v, "apu-fuel-shutoff-valve", "APU FUEL SHUTOFF VALVE", 49, Bus::Dc1, 50.0, 0.8, "APU fuel shutoff valve actuator", "GENERIC: typical motor/solenoid-operated shutoff valve actuator");
-    push_extra(v, "apu-start-contactor", "APU START CONTACTOR", 49, Bus::Dc1, 20.0, 1.0, "APU starter-generator start contactor control coil", "GENERIC: typical contactor-coil control circuit");
+    push_electrical(v, "apu-ecu-a", "APU ECU CHANNEL A", 49, Bus::DcApu, 60.0, avionics_pf(Bus::DcApu), "APU electronic control unit channel A", "GENERIC: typical dual-channel engine/APU controller LRU class figure (real PW980 APU has its own FADEC-class controller)");
+    push_electrical(v, "apu-ecu-b", "APU ECU CHANNEL B", 49, Bus::DcEss, 60.0, avionics_pf(Bus::DcEss), "APU electronic control unit channel B", "GENERIC: same class as channel A, redundant bus feed");
+    push_electrical(v, "apu-fuel-shutoff-valve", "APU FUEL SHUTOFF VALVE", 49, Bus::Dc1, 50.0, 0.8, "APU fuel shutoff valve actuator", "GENERIC: typical motor/solenoid-operated shutoff valve actuator");
+    // Transit-only (only energised through the APU's own start sequence):
+    // still a real, modelled load, `deep::electrical::live` is what gates
+    // its `commanded_on`, not this catalogue.
+    push_electrical(v, "apu-start-contactor", "APU START CONTACTOR", 49, Bus::Dc1, 20.0, 1.0, "APU starter-generator start contactor control coil", "GENERIC: typical contactor-coil control circuit");
 }
 
 fn ata7x_engine(v: &mut Vec<BreakerDef>) {
@@ -708,23 +742,26 @@ fn ata7x_engine(v: &mut Vec<BreakerDef>) {
         let bus_b = if n <= 2 { Bus::Dc2 } else { Bus::DcEss };
         let id_a: &'static str = Box::leak(format!("fadec-{n}a").into_boxed_str());
         let name_a: &'static str = Box::leak(format!("FADEC {n} CHANNEL A").into_boxed_str());
-        push_extra(v, id_a, name_a, 73, bus_a, 80.0, avionics_pf(bus_a), "engine FADEC channel A", "GENERIC: typical dual-lane FADEC-class controller channel, real Trent 972B-84 architecture, no public per-channel electrical figure");
+        push_electrical(v, id_a, name_a, 73, bus_a, 80.0, avionics_pf(bus_a), "engine FADEC channel A", "GENERIC: typical dual-lane FADEC-class controller channel, real Trent 972B-84 architecture, no public per-channel electrical figure");
         let id_b: &'static str = Box::leak(format!("fadec-{n}b").into_boxed_str());
         let name_b: &'static str = Box::leak(format!("FADEC {n} CHANNEL B").into_boxed_str());
-        push_extra(v, id_b, name_b, 73, bus_b, 80.0, avionics_pf(bus_b), "engine FADEC channel B", "GENERIC: same class as channel A, redundant bus feed");
+        push_electrical(v, id_b, name_b, 73, bus_b, 80.0, avionics_pf(bus_b), "engine FADEC channel B", "GENERIC: same class as channel A, redundant bus feed");
     }
     // Ignition exciters A/B per engine (ATA74): a real high-energy ignition
     // exciter draws on the order of a couple hundred watts pulsed, GENERIC
-    // (no public per-part figure for this engine).
+    // (no public per-part figure for this engine). Transit-only (a real
+    // exciter only fires during engine start / continuous ignition, not
+    // throughout the flight) -- still a real, modelled load,
+    // `deep::electrical::live` is what gates its `commanded_on`.
     for n in 1..=4u32 {
         let bus_a = if n % 2 == 1 { Bus::Dc1 } else { Bus::Dc2 };
         let bus_b = if n % 2 == 1 { Bus::Dc2 } else { Bus::Dc1 };
         let id_a: &'static str = Box::leak(format!("ignition-{n}a").into_boxed_str());
         let name_a: &'static str = Box::leak(format!("IGNITION {n} EXCITER A").into_boxed_str());
-        push_extra(v, id_a, name_a, 74, bus_a, 250.0, 0.9, "engine ignition exciter A", "GENERIC: typical high-energy ignition exciter unit pulsed power class (~250 W), no public per-part figure");
+        push_electrical(v, id_a, name_a, 74, bus_a, 250.0, 0.9, "engine ignition exciter A", "GENERIC: typical high-energy ignition exciter unit pulsed power class (~250 W), no public per-part figure");
         let id_b: &'static str = Box::leak(format!("ignition-{n}b").into_boxed_str());
         let name_b: &'static str = Box::leak(format!("IGNITION {n} EXCITER B").into_boxed_str());
-        push_extra(v, id_b, name_b, 74, bus_b, 250.0, 0.9, "engine ignition exciter B", "GENERIC: same class as exciter A, redundant lane on the opposite DC bus");
+        push_electrical(v, id_b, name_b, 74, bus_b, 250.0, 0.9, "engine ignition exciter B", "GENERIC: same class as exciter A, redundant lane on the opposite DC bus");
     }
 }
 
@@ -733,36 +770,44 @@ fn ata26_extinguishing(v: &mut Vec<BreakerDef>) {
     // (cross-feed capable to any of the 4 engines on a real wide-body fire
     // extinguishing system), plus one APU bottle -- real A380 architecture
     // class, GENERIC per-squib pulse power (a real pyrotechnic squib firing
-    // circuit is a low-energy one-shot, small breaker).
+    // circuit is a low-energy one-shot, small breaker). One-shot/transit-
+    // only -- still a real, modelled load, `deep::electrical::live` is what
+    // gates its `commanded_on`.
     for bottle in 1..=2u32 {
         for squib in 1..=2u32 {
             let bus = if bottle == 1 { Bus::Dc1 } else { Bus::Dc2 };
             let id: &'static str = Box::leak(format!("eng-fire-bottle-{bottle}-squib-{squib}").into_boxed_str());
             let name: &'static str = Box::leak(format!("ENG FIRE BOTTLE {bottle} SQUIB {squib}").into_boxed_str());
-            push_extra(v, id, name, 26, bus, 20.0, 1.0, "engine fire-extinguisher bottle pyrotechnic squib", "GENERIC: typical one-shot pyrotechnic squib firing circuit, real wide-body cross-feed fire-extinguishing architecture");
+            push_electrical(v, id, name, 26, bus, 20.0, 1.0, "engine fire-extinguisher bottle pyrotechnic squib", "GENERIC: typical one-shot pyrotechnic squib firing circuit, real wide-body cross-feed fire-extinguishing architecture");
         }
     }
     for squib in 1..=2u32 {
         let id: &'static str = Box::leak(format!("apu-fire-bottle-squib-{squib}").into_boxed_str());
         let name: &'static str = Box::leak(format!("APU FIRE BOTTLE SQUIB {squib}").into_boxed_str());
-        push_extra(v, id, name, 26, Bus::DcApu, 20.0, 1.0, "APU fire-extinguisher bottle pyrotechnic squib", "GENERIC: same class as the engine bottle squibs");
+        push_electrical(v, id, name, 26, Bus::DcApu, 20.0, 1.0, "APU fire-extinguisher bottle pyrotechnic squib", "GENERIC: same class as the engine bottle squibs");
     }
 }
 
 fn ata29_hydraulics_extra(v: &mut Vec<BreakerDef>) {
-    push_extra(v, "rat-deploy-solenoid", "RAT DEPLOY SOLENOID", 29, Bus::DcHot2, 100.0, 1.0, "Ram Air Turbine deployment solenoid", "GENERIC: typical deployment solenoid, hot-bus fed so it works with both engines/APU/main batteries down (real RAT deployment logic requirement)");
-    push_extra(v, "ptu-control-valve", "PTU CONTROL VALVE", 29, Bus::DcEss, 50.0, 0.8, "Power Transfer Unit control valve actuator", "GENERIC: typical motor/solenoid-operated valve actuator, real green/yellow hydraulic power-transfer-unit architecture");
+    // Transit-only, but unlike the ignition/squib set above
+    // `deep::electrical::live` has a real signal for this one (its own
+    // emergency-config/`rat_deployed` state) rather than a permanent off.
+    push_electrical(v, "rat-deploy-solenoid", "RAT DEPLOY SOLENOID", 29, Bus::DcHot2, 100.0, 1.0, "Ram Air Turbine deployment solenoid", "GENERIC: typical deployment solenoid, hot-bus fed so it works with both engines/APU/main batteries down (real RAT deployment logic requirement)");
+    push_electrical(v, "ptu-control-valve", "PTU CONTROL VALVE", 29, Bus::DcEss, 50.0, 0.8, "Power Transfer Unit control valve actuator", "GENERIC: typical motor/solenoid-operated valve actuator, real green/yellow hydraulic power-transfer-unit architecture");
 }
 
 fn ata52_doors(v: &mut Vec<BreakerDef>) {
-    push_extra(v, "cargo-door-fwd-actuator-ctl", "FWD CARGO DOOR ACTUATOR CONTROL", 52, Bus::Dc1, 100.0, 0.8, "forward cargo door electric actuator control", "GENERIC: typical powered cargo door actuator control circuit");
-    push_extra(v, "cargo-door-aft-actuator-ctl", "AFT CARGO DOOR ACTUATOR CONTROL", 52, Bus::Dc2, 100.0, 0.8, "aft cargo door electric actuator control", "GENERIC: same class as the forward cargo door");
+    // Transit-only (draws only while the door is actually moving) -- still
+    // a real, modelled load, `deep::electrical::live` is what gates its
+    // `commanded_on`.
+    push_electrical(v, "cargo-door-fwd-actuator-ctl", "FWD CARGO DOOR ACTUATOR CONTROL", 52, Bus::Dc1, 100.0, 0.8, "forward cargo door electric actuator control", "GENERIC: typical powered cargo door actuator control circuit");
+    push_electrical(v, "cargo-door-aft-actuator-ctl", "AFT CARGO DOOR ACTUATOR CONTROL", 52, Bus::Dc2, 100.0, 0.8, "aft cargo door electric actuator control", "GENERIC: same class as the forward cargo door");
 }
 
 fn ata33_emergency_lighting(v: &mut Vec<BreakerDef>) {
-    push_extra(v, "emer-lighting-charger-1", "EMER LIGHTING BATTERY CHARGER 1", 33, Bus::DcHot1, 100.0, 1.0, "emergency lighting battery pack charger", "GENERIC: typical NiCd/Li-ion emergency-lighting pack charger circuit");
-    push_extra(v, "emer-lighting-charger-2", "EMER LIGHTING BATTERY CHARGER 2", 33, Bus::DcHot2, 100.0, 1.0, "emergency lighting battery pack charger", "GENERIC: same class as charger 1");
-    push_extra(v, "ext-service-lighting", "EXTERIOR SERVICE LIGHTING", 33, Bus::AcGndFltSvc, 100.0, 1.0, "exterior ground-service lighting circuit", "GENERIC: typical ground-service floodlight circuit");
+    push_electrical(v, "emer-lighting-charger-1", "EMER LIGHTING BATTERY CHARGER 1", 33, Bus::DcHot1, 100.0, 1.0, "emergency lighting battery pack charger", "GENERIC: typical NiCd/Li-ion emergency-lighting pack charger circuit");
+    push_electrical(v, "emer-lighting-charger-2", "EMER LIGHTING BATTERY CHARGER 2", 33, Bus::DcHot2, 100.0, 1.0, "emergency lighting battery pack charger", "GENERIC: same class as charger 1");
+    push_electrical(v, "ext-service-lighting", "EXTERIOR SERVICE LIGHTING", 33, Bus::AcGndFltSvc, 100.0, 1.0, "exterior ground-service lighting circuit", "GENERIC: typical ground-service floodlight circuit");
 }
 
 // =======================================================================
@@ -778,19 +823,22 @@ fn ata33_emergency_lighting(v: &mut Vec<BreakerDef>) {
 // existing valve-actuator entries (`ata21`, `ata28_fuel`, `ata29_hydraulics
 // _extra`, `ata35_oxygen`, `ata36_bleed`, `ata49_apu`, `ata52_doors`) did
 // not yet split out. Every entry here pairs with exactly one of those
-// existing breakers by id (`<parent-id>-pos-ind`) and is `protected_load:
-// None` -- `deep::electrical::loads.rs` models the valve's *actuator*
-// power draw as its one `Load`, not a separate position-sensing tap, so
-// there is no matching load id to point at yet; promote to `Some(...)`
-// if/when that catalogue splits its own valve loads into an actuator/
-// excitation pair the same way (`PROGRESS.md` tracks this).
+// existing breakers by id (`<parent-id>-pos-ind`). Gap-closing pass:
+// `deep::electrical::loads.rs::position_indication_supplies` now gives
+// each of these 77 its own small (5 W) excitation-circuit `Load`, separate
+// from its parent valve's own actuator `Load` -- a real position-indication
+// microswitch/LVDT genuinely is its own circuit, not a second tap on the
+// actuator's demand -- so every entry here is `protected_load: Some(id)`.
 // =======================================================================
 
 fn push_position_excitation(v: &mut Vec<BreakerDef>, parent_id: &'static str, parent_name: &'static str, ata: u16, bus: Bus, basis_suffix: &'static str) {
     let id: &'static str = Box::leak(format!("{parent_id}-pos-ind").into_boxed_str());
     let name: &'static str = Box::leak(format!("{parent_name} POSITION IND").into_boxed_str());
     let basis: &'static str = Box::leak(format!("GENERIC: typical position-indication microswitch/LVDT excitation circuit for a motor-operated valve, separate small CB from its own actuator power circuit (real large-transport fuel/pneumatic-system practice); {basis_suffix}").into_boxed_str());
-    push_extra(v, id, name, ata, bus, 5.0, 1.0, "position-indication microswitch/LVDT excitation circuit", basis);
+    // Gap-closing pass: every one of these 77 now has a matching load in
+    // `deep::electrical::loads.rs::position_indication_supplies`, same id,
+    // same 5 W/unity-pf figure this function has always used.
+    push_electrical(v, id, name, ata, bus, 5.0, 1.0, "position-indication microswitch/LVDT excitation circuit", basis);
 }
 
 fn ata_control_excitation_supplies(v: &mut Vec<BreakerDef>) {
@@ -844,7 +892,7 @@ fn build_catalog() -> Vec<BreakerDef> {
     ata44_ife(&mut v);
     avionics_misc(&mut v);
     ata36_bleed(&mut v);
-    // Group 2: other real A380 equipment with no load model yet.
+    // Group 2: other real A380 equipment (mostly gap-closed, see above).
     ata24_power_sources(&mut v);
     ata23_comms(&mut v);
     ata31_recorders(&mut v);
@@ -888,14 +936,19 @@ mod tests {
     }
 
     #[test]
-    fn position_indication_entries_pair_with_a_real_parent_breaker_and_carry_no_load() {
+    fn position_indication_entries_pair_with_a_real_parent_breaker_and_now_carry_their_own_load() {
+        // Gap-closing pass: these 77 used to honestly carry no modelled
+        // load; `deep::electrical::loads.rs::position_indication_supplies`
+        // now gives every one of them a real 5 W excitation-circuit load,
+        // same id, so `protected_load` must now be `Some(that same id)`,
+        // not `None`.
         let ids: std::collections::HashSet<&str> = all().iter().map(|d| d.id).collect();
         let mut found_any = false;
         for def in all() {
             if let Some(parent_id) = def.id.strip_suffix("-pos-ind") {
                 found_any = true;
                 assert!(ids.contains(parent_id), "{} has no parent breaker {parent_id}", def.id);
-                assert!(def.protected_load.is_none(), "{} should honestly carry no modelled load", def.id);
+                assert_eq!(def.protected_load, Some(def.id), "{} should now protect its own matching load", def.id);
                 assert!(def.basis.contains("GENERIC"), "{} should cite GENERIC", def.id);
             }
         }
@@ -992,10 +1045,20 @@ mod tests {
     }
 
     #[test]
-    fn group_2_equipment_has_no_fabricated_load_and_is_honestly_documented() {
-        let group_2_ids = ["bat-1", "satcom", "dfdr", "crew-o2-shutoff", "apu-ecu-a", "fadec-1a", "eng-fire-bottle-1-squib-1", "rat-deploy-solenoid", "cargo-door-fwd-actuator-ctl", "emer-lighting-charger-1"];
+    fn the_three_battery_output_breakers_have_no_fabricated_load_and_are_honestly_documented() {
+        // Gap-closing pass: every other group-2/group-3 id this test used to
+        // sample (satcom, dfdr, crew-o2-shutoff, apu-ecu-a, fadec-1a,
+        // eng-fire-bottle-1-squib-1, rat-deploy-solenoid,
+        // cargo-door-fwd-actuator-ctl, emer-lighting-charger-1) now has a
+        // real load in `deep::electrical::loads.rs` and is asserted
+        // `protected_load: Some(..)` elsewhere (see
+        // `breakers_protecting_no_modelled_load_are_a_known_named_gap` and
+        // `deep::electrical::loads::tests::every_closed_gap_id_is_a_real_load`).
+        // Only the three battery-output breakers remain a genuine,
+        // architectural gap (see `ata24_power_sources`'s own comment).
+        let unmodelled_ids = ["bat-1", "bat-2", "bat-apu"];
         for def in all() {
-            if group_2_ids.contains(&def.id) {
+            if unmodelled_ids.contains(&def.id) {
                 assert!(def.protected_load.is_none(), "{} should honestly carry no modelled load", def.id);
                 assert!(def.basis.contains("GENERIC"), "{} should cite GENERIC since it has no real per-part figure", def.id);
             }

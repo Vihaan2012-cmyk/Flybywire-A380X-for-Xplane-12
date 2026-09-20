@@ -86,12 +86,17 @@ mod tests {
     /// one. Either way this test says exactly which chapter moved.
     #[test]
     fn breakers_protecting_no_modelled_load_are_a_known_named_gap() {
-        // 128 of the catalogue's 399 breakers protect a consumer
-        // `deep::electrical` has not modelled yet, by ATA chapter:
-        const EXPECTED: [(u16, usize); 14] =
-            [(21, 8), (23, 6), (24, 6), (26, 6), (28, 60), (29, 3), (31, 3), (33, 3), (35, 4), (36, 4), (49, 5), (52, 4), (73, 8), (74, 8)];
+        // Gap-closing pass: 125 of the original 128 now have a real load in
+        // `deep::electrical::loads.rs` (`deep::electrical::loads::tests::
+        // every_closed_gap_id_is_a_real_load` pins the id list). Only ATA24's
+        // three battery-output breakers (BATTERY 1, BATTERY 2, APU BATTERY)
+        // remain: a battery's own output breaker protects a *source's*
+        // output current, not a consumer's demand, and `network::Load`
+        // models demand only -- see `catalog::ata24_power_sources`'s own
+        // comment for why that is an architectural fact, not a shortcut.
+        const EXPECTED: [(u16, usize); 1] = [(24, 3)];
         let expected_total: usize = EXPECTED.iter().map(|(_, n)| n).sum();
-        assert_eq!(expected_total, 128, "the per-chapter table above must add up to the stated total");
+        assert_eq!(expected_total, 3, "the per-chapter table above must add up to the stated total");
 
         let mut actual: std::collections::BTreeMap<u16, usize> = std::collections::BTreeMap::new();
         let mut total = 0usize;

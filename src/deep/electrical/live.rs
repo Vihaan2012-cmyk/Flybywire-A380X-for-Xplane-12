@@ -148,6 +148,40 @@ fn source_rating_a(bus: BusId) -> f64 {
 const TRANSIT_ONLY_ACTUATORS: [&str; 6] =
     ["gear-actuator-nose", "gear-actuator-left", "gear-actuator-right", "gear-door-actuator-nose", "gear-door-actuator-left", "gear-door-actuator-right"];
 
+/// The gap-closing pass's own transit-only/one-shot loads that this layer
+/// has no real `Truth` field to drive for real: an engine ignition exciter
+/// only fires during a start sequence or with continuous ignition
+/// selected, a fire-bottle squib fires once on a real discharge command, an
+/// APU start contactor is only energised through the APU's own start
+/// sequence, and a cargo door actuator draws only while the door is
+/// actually moving. None of "engine ignition selected", "APU starting",
+/// "fire bottle discharge commanded" or "cargo door commanded" exist on
+/// [`Truth`] yet, so -- exactly the same honest choice
+/// [`TRANSIT_ONLY_ACTUATORS`] above already makes, for the same reason --
+/// the only state this layer can assert is "not presently commanded",
+/// rather than inventing one of those inputs. See this area's report for
+/// the `Truth` fields that would let a future pass drive each of these for
+/// real instead of holding them permanently off.
+const TRANSIT_ONLY_NO_TRUTH_INPUT: [&str; 17] = [
+    "ignition-1a",
+    "ignition-1b",
+    "ignition-2a",
+    "ignition-2b",
+    "ignition-3a",
+    "ignition-3b",
+    "ignition-4a",
+    "ignition-4b",
+    "eng-fire-bottle-1-squib-1",
+    "eng-fire-bottle-1-squib-2",
+    "eng-fire-bottle-2-squib-1",
+    "eng-fire-bottle-2-squib-2",
+    "apu-fire-bottle-squib-1",
+    "apu-fire-bottle-squib-2",
+    "apu-start-contactor",
+    "cargo-door-fwd-actuator-ctl",
+    "cargo-door-aft-actuator-ctl",
+];
+
 /// Power-budget hysteresis: the galley shed relay is commanded once the
 /// budget goes negative and released only once the margin has recovered
 /// past 10% of available capacity. A plain Schmitt band -- without it a
@@ -543,6 +577,10 @@ pub struct ElectricalLive {
     total_demand_w: f64,
     capacity_w: f64,
     rat_deployed: bool,
+    /// Whether the RAT deploy solenoid is presently commanded -- see
+    /// `command_contactors`'s own note: true for exactly the tick the RAT
+    /// transitions from stowed to deployed, never held on afterward.
+    rat_solenoid_on: bool,
 
     // Measured feedback for the next frame's source models.
     measured_gen_load_w: [f64; 4],
@@ -619,8 +657,14 @@ impl ElectricalLive {
         let ac_gnd_svc_feed = tie("ac-gnd-svc-feed", ContactorKind::Feeder, BusId::Ac1, BusId::AcGndFltSvc, GND_SVC_FEEDER_OHM);
         let dc_gnd_svc_feed = tie("dc-gnd-svc-feed", ContactorKind::Feeder, BusId::Dc2, BusId::DcGndFltSvc, GND_SVC_FEEDER_OHM);
 
-        // Transit-only actuators are dead unless something is driving them.
-        for id in TRANSIT_ONLY_ACTUATORS {
+        // Transit-only actuators are dead unless something is driving them
+        // (the gear/gear-door set, plus the gap-closing pass's own
+        // ignition/squib/APU-start-contactor/cargo-door set -- see
+        // `TRANSIT_ONLY_NO_TRUTH_INPUT`'s own doc). The RAT deploy solenoid
+        // is also transit-only but is handled per-tick in `tick` instead,
+        // against the real emergency/`rat_deployed` state this layer
+        // already computes.
+        for id in TRANSIT_ONLY_ACTUATORS.iter().copied().chain(TRANSIT_ONLY_NO_TRUTH_INPUT.iter().copied()) {
             if let Some(i) = net.load_index(id) {
                 net.loads[i].commanded_on = false;
             }
@@ -732,6 +776,7 @@ impl ElectricalLive {
             total_demand_w: 0.0,
             capacity_w: 0.0,
             rat_deployed: false,
+            rat_solenoid_on: false,
             measured_gen_load_w: [0.0; 4],
             measured_apu_gen_load_w: [0.0; 2],
             measured_tr_load_w: [0.0; 4],
@@ -935,10 +980,22 @@ impl ElectricalLive {
         self.emergency_config = emergency;
 
         // The RAT deploys on a total loss of main AC generation in flight.
+        // `Rat::deploy` is instantaneous in this model (a stowed/deployed
+        // bool, not a multi-second extension), so the one tick it flips
+        // `false` to `true` is the *only* tick a real deploy solenoid would
+        // be doing anything -- captured here, before the call, as the one
+        // real signal `rat-deploy-solenoid`'s `commanded_on` is gated on
+        // below, instead of the permanent "no Truth input" off every other
+        // transit-only load in this pass gets.
+        let was_rat_deployed = self.wiring.rat.deployed();
         if emergency && !truth.on_ground {
             self.wiring.rat.deploy();
         }
         self.rat_deployed = self.wiring.rat.deployed();
+        self.rat_solenoid_on = emergency && !was_rat_deployed;
+        if let Some(i) = self.net.load_index("rat-deploy-solenoid") {
+            self.net.loads[i].commanded_on = self.rat_solenoid_on;
+        }
 
         // The static inverter and the RAT feed the emergency AC bus, and
         // that bus backs the ESS bus up, only once each is actually
@@ -1279,6 +1336,23 @@ mod tests {
         assert!(routed.len() > 1_000, "expected the real catalogue, got {}", routed.len());
     }
 
+    /// `sources::Wiring::build`'s own generator/TR/battery/static-inverter
+    /// protection breakers now register with `Network::add_feeder_breaker`
+    /// instead of a plain `add_breaker`, so each carries its bus's real
+    /// demand instead of a permanent 0 A -- the second gap this pass closed
+    /// alongside the 125 catalogue loads.
+    #[test]
+    fn source_protection_breakers_now_carry_their_buss_real_current() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let published = run(&mut live, &flying_truth(), &Faults::default(), 20);
+        for id in ["gen-1-bkr", "gen-2-bkr", "tr-1-bkr", "tr-ess-bkr"] {
+            let v = published[&format!("ELEC_BKR_{id}_CURRENT_A")];
+            assert!(v > 0.0, "{id} should now carry its bus's real demand current, got {v} A");
+        }
+        board::clear();
+    }
+
     #[test]
     fn four_running_engines_energise_every_main_ac_bus_and_the_dc_buses_behind_them() {
         board::clear();
@@ -1392,6 +1466,103 @@ mod tests {
         let closed = run(&mut live, &truth, &Faults::default(), 5);
         assert_eq!(closed["ELEC_BKR_cab-fan-1_CLOSED"], 1.0);
         assert_eq!(closed["ELEC_LOAD_cab-fan-1_POWERED"], 1.0);
+        board::clear();
+    }
+
+    /// Representative sample of the 125 loads this pass added to close
+    /// `deep::breakers::catalog`'s "128 breakers protect no modelled load"
+    /// gap (one continuous avionics LRU, one continuous small excitation
+    /// circuit, and one valve actuator, spread across three different
+    /// buses) -- each must actually be drawing (so its own breaker carries
+    /// real current, the whole point of closing the gap) and must actually
+    /// go dead when that breaker is pulled, exactly like every pre-existing
+    /// catalogue entry.
+    #[test]
+    fn a_representative_sample_of_the_new_gap_closing_loads_goes_dead_when_its_own_breaker_is_pulled() {
+        board::clear();
+        let truth = flying_truth();
+        for id in ["satcom", "dfdr", "fadec-1a", "crew-o2-shutoff", "fuel-valve-0-pos-ind"] {
+            let mut live = ElectricalLive::new();
+            let healthy = run(&mut live, &truth, &Faults::default(), 20);
+            let power_var = format!("ELEC_LOAD_{id}_POWERED");
+            let current_var = format!("ELEC_BKR_{id}_CURRENT_A");
+            assert_eq!(healthy[&power_var], 1.0, "{id} should be powered and drawing on a healthy aircraft");
+            assert!(healthy[&current_var] > 0.0, "{id}'s own breaker should carry real current now it protects a modelled load, got {}", healthy[&current_var]);
+
+            let idx = topology().breaker_index[id];
+            board::with_board_mut(|b| {
+                b.breaker_open_cmd = vec![0.0; topology().breaker_count];
+                b.breaker_open_cmd[idx] = 1.0;
+            });
+            let opened = run(&mut live, &truth, &Faults::default(), 5);
+            assert_eq!(opened[&power_var], 0.0, "{id} must go dead once its own breaker is pulled");
+            assert_eq!(opened[&current_var], 0.0);
+            board::clear();
+        }
+    }
+
+    /// The transit-only/one-shot loads this pass added (ignition exciters,
+    /// fire-bottle squibs, the APU start contactor, cargo door actuator
+    /// control) must be dead on an otherwise healthy, steady-state aircraft
+    /// -- `loads.rs` defaults every entry `commanded_on: true`, so this is
+    /// what proves `ElectricalLive::new`'s own override actually took, not
+    /// just that the raw catalogue looks right.
+    #[test]
+    fn transit_only_loads_with_no_truth_input_stay_dead_on_a_steady_state_aircraft() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let published = run(&mut live, &flying_truth(), &Faults::default(), 20);
+        for id in ["ignition-1a", "ignition-4b", "eng-fire-bottle-1-squib-1", "apu-fire-bottle-squib-2", "apu-start-contactor", "cargo-door-fwd-actuator-ctl", "cargo-door-aft-actuator-ctl"] {
+            assert_eq!(published[&format!("ELEC_LOAD_{id}_POWERED")], 0.0, "{id} has no Truth input yet and must stay dead, not silently on");
+        }
+        board::clear();
+    }
+
+    /// The RAT deploy solenoid is the one transit-only load this layer
+    /// *does* have a real signal for: dead in normal flight, and drawing
+    /// for exactly the tick an all-generation-lost emergency configuration
+    /// commands the RAT out (`sources::Rat::deploy` is instantaneous in
+    /// this model, not a multi-second extension, so that real signal is
+    /// itself only ever true for one tick -- see this layer's own gating
+    /// of the load next to where `deploy()` is called).
+    #[test]
+    fn the_rat_deploy_solenoid_only_draws_while_an_emergency_is_commanding_the_rat_out() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let normal = run(&mut live, &flying_truth(), &Faults::default(), 20);
+        assert_eq!(normal["ELEC_LOAD_rat-deploy-solenoid_POWERED"], 0.0, "no emergency: the solenoid must not be drawing");
+
+        let dead_truth = Truth {
+            dt_s: 1.0 / 30.0,
+            on_ground: false,
+            engine_n1_frac: [0.0; 4],
+            engine_running: [false; 4],
+            environment: crate::deep::integration::weather_truth::EnvironmentTruth { tas_ms: 150.0, ..Truth::default().environment },
+            ..Truth::default()
+        };
+
+        // The bus voltages take a few frames to actually collapse from
+        // their initial nominal value, so find the tick emergency
+        // configuration is first detected rather than assuming it is the
+        // very first one.
+        let mut saw_solenoid_on = false;
+        let mut published = BTreeMap::new();
+        for _ in 0..60 {
+            live.tick(&dead_truth, &Faults::default());
+            published.clear();
+            live.publish(&mut |n, v| {
+                published.insert(n.to_string(), v);
+            });
+            if published["ELEC_LOAD_rat-deploy-solenoid_POWERED"] == 1.0 {
+                saw_solenoid_on = true;
+                assert_eq!(published["ELEC_EMER_CONFIG_ACTIVE"], 1.0, "the solenoid must only draw while an emergency is actually commanding the RAT out");
+                break;
+            }
+        }
+        assert!(saw_solenoid_on, "the RAT deploy solenoid never drew any current across a full emergency-configuration transition");
+
+        let after = run(&mut live, &dead_truth, &Faults::default(), 10);
+        assert_eq!(after["ELEC_LOAD_rat-deploy-solenoid_POWERED"], 0.0, "once the RAT is deployed the solenoid has nothing left to do and must go dead again");
         board::clear();
     }
 

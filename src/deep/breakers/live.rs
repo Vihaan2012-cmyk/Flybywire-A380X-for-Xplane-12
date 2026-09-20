@@ -32,14 +32,22 @@
 //! nominal rating, an arcing fault's current signature, a bay running hot,
 //! and a circuit that has already tripped three times in five minutes.
 //!
-//! ## The 128 breakers that protect nothing modelled
+//! ## The 3 breakers that still protect nothing modelled
 //!
+//! A gap-closing pass gave 125 of the original 128 "protects nothing
+//! modelled" breakers a real load in `deep::electrical::loads.rs`, so they
+//! now see the current their own protected circuit genuinely draws like
+//! every group-1 breaker. Only ATA24's three battery-output breakers
+//! (BATTERY 1, BATTERY 2, APU BATTERY) remain: a battery's own output
+//! breaker protects a *source's* output current, not a consumer's demand,
+//! and `network::Load` (the only thing this area's current comes from)
+//! models demand only -- see `catalog::ata24_power_sources`'s own comment.
 //! `integration_test::breakers_protecting_no_modelled_load_are_a_known_named_gap`
-//! pins them per chapter. Those units are constructed and stepped here like
-//! every other, but the current they see is genuinely zero, because no
-//! model in this crate draws through them. Their two failures are therefore
-//! registered and armable but cannot produce an effect -- honestly inert
-//! rather than fed a fabricated current.
+//! pins the remaining three. Those three units are constructed and stepped
+//! here like every other, but the current they see is genuinely zero,
+//! because no model in this crate draws through them. Their two failures
+//! are therefore registered and armable but cannot produce an effect --
+//! honestly inert rather than fed a fabricated current.
 
 use std::collections::HashMap;
 
@@ -78,7 +86,7 @@ struct Unit {
     def: &'static BreakerDef,
     breaker: Breaker,
     /// This breaker's index in `deep::electrical`'s solved network, when it
-    /// protects a load that area actually models; `None` for the 128 that
+    /// protects a load that area actually models; `None` for the 3 that
     /// protect real equipment with no load model in this crate.
     net_index: Option<usize>,
     drift: f64,
@@ -226,7 +234,7 @@ impl Area for BreakersLive {
                 u.current_a = match u.net_index {
                     Some(i) if i < b.breaker_current_a.len() => b.breaker_current_a[i],
                     // Either the frame before `deep::electrical` has ever
-                    // published, or one of the 128 breakers whose consumer
+                    // published, or one of the 3 breakers whose consumer
                     // this crate does not model: no current exists to read,
                     // and inventing one would be a fabricated input.
                     _ => 0.0,
@@ -304,9 +312,12 @@ mod tests {
     #[test]
     fn exactly_the_known_gap_of_units_has_no_current_source() {
         let live = BreakersLive::new();
-        let without = live.units.iter().filter(|u| u.net_index.is_none()).count();
-        assert_eq!(without, 128, "the known named gap: breakers whose consumer deep::electrical does not model");
-        assert_eq!(live.unprotected_count, 128.0);
+        let without: Vec<&str> = live.units.iter().filter(|u| u.net_index.is_none()).map(|u| u.def.id).collect();
+        assert_eq!(without.len(), 3, "the known named gap: breakers whose consumer deep::electrical does not model, got {without:?}");
+        let mut sorted = without.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted.as_slice(), ["bat-1", "bat-2", "bat-apu"], "the gap must be exactly the three battery-output breakers, nothing else");
+        assert_eq!(live.unprotected_count, 3.0);
     }
 
     #[test]

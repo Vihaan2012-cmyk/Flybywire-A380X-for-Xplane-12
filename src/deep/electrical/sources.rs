@@ -656,6 +656,23 @@ impl Wiring {
     /// protection breaker onto `net`, at their real bus (matching
     /// `breakers.rs::ata24`'s own bus assignment one-for-one), and returns
     /// the assembled `Wiring` orchestrator.
+    ///
+    /// Every one of these protection breakers is registered with
+    /// `Network::add_feeder_breaker`, not the plain `add_breaker` this
+    /// function used before: a source's own breaker sits in series with
+    /// that source's bus, so (exactly like `ElectricalLive::new`'s own
+    /// `feeder-<BUS>` breakers) it has to carry the *whole bus's* demand to
+    /// see any current at all -- no single `Load` ever names a source's own
+    /// protection breaker as its feed. A plain `add_breaker` left every one
+    /// of these at a permanent 0 A (the gap `deep::breakers`'s own
+    /// integration test's report named): `deep::electrical` never drew a
+    /// consumer through a source's own protection device, only through a
+    /// load's. It is a duplicate measurement of the same bus current the
+    /// primary `feeder-<BUS>` breaker also carries (the real ELMS
+    /// architecture has both a generator/TR/battery breaker and a separate
+    /// downstream bus-tie/feeder breaker in series, so this is not a
+    /// double-count of current, only of the *measurement* two real,
+    /// distinct devices both make of it).
     pub fn build(net: &mut Network, ambient_c: f64) -> Self {
         let gen_buses = [BusId::Ac1, BusId::Ac2, BusId::Ac3, BusId::Ac4];
         let mut gen = [0usize; 4];
@@ -664,7 +681,7 @@ impl Wiring {
             gen[i] = net.add_source(Source::new(id));
             let contactor_id: &'static str = Box::leak(format!("gen-{}-line", i + 1).into_boxed_str());
             net.add_contactor(Contactor::new(contactor_id, ContactorKind::GeneratorLine, FeedSource::Source(gen[i]), bus, MIN_RESISTANCE_OHM));
-            net.add_breaker(super::network::Breaker::new(Box::leak(format!("gen-{}-bkr", i + 1).into_boxed_str()), generator_rated_a(), bus));
+            net.add_feeder_breaker(super::network::Breaker::new(Box::leak(format!("gen-{}-bkr", i + 1).into_boxed_str()), generator_rated_a(), bus), bus);
         }
 
         let apu_gen_bus = BusId::Ac3; // APU generator feeds whichever AC tie is available; documented approximation (its real bus depends on the priority table, out of this module's scope).
@@ -674,7 +691,7 @@ impl Wiring {
             apu_gen[i] = net.add_source(Source::new(id));
             let contactor_id: &'static str = Box::leak(format!("apu-gen-{}-line", i + 1).into_boxed_str());
             net.add_contactor(Contactor::new(contactor_id, ContactorKind::GeneratorLine, FeedSource::Source(apu_gen[i]), apu_gen_bus, MIN_RESISTANCE_OHM));
-            net.add_breaker(super::network::Breaker::new(Box::leak(format!("apu-gen-{}-bkr", i + 1).into_boxed_str()), apu_generator_rated_a(), apu_gen_bus));
+            net.add_feeder_breaker(super::network::Breaker::new(Box::leak(format!("apu-gen-{}-bkr", i + 1).into_boxed_str()), apu_generator_rated_a(), apu_gen_bus), apu_gen_bus);
         }
 
         let tr_names = ["tr-1", "tr-2", "tr-ess", "tr-apu"];
@@ -684,12 +701,12 @@ impl Wiring {
             tr[i] = net.add_source(Source::new(tr_names[i]));
             let contactor_id: &'static str = Box::leak(format!("{}-line", tr_names[i]).into_boxed_str());
             net.add_contactor(Contactor::new(contactor_id, ContactorKind::Feeder, FeedSource::Source(tr[i]), tr_buses[i], MIN_RESISTANCE_OHM));
-            net.add_breaker(super::network::Breaker::new(Box::leak(format!("{}-bkr", tr_names[i]).into_boxed_str()), TRU_RATED_A, tr_buses[i]));
+            net.add_feeder_breaker(super::network::Breaker::new(Box::leak(format!("{}-bkr", tr_names[i]).into_boxed_str()), TRU_RATED_A, tr_buses[i]), tr_buses[i]);
         }
 
         let static_inv = net.add_source(Source::new("static-inv"));
         net.add_contactor(Contactor::new("static-inv-line", ContactorKind::Feeder, FeedSource::Source(static_inv), BusId::AcEmer, MIN_RESISTANCE_OHM));
-        net.add_breaker(super::network::Breaker::new("static-inv-bkr", static_inverter_rated_a(), BusId::AcEmer));
+        net.add_feeder_breaker(super::network::Breaker::new("static-inv-bkr", static_inverter_rated_a(), BusId::AcEmer), BusId::AcEmer);
 
         let mut battery = [0usize; 2];
         let battery_buses = [BusId::DcBat, BusId::DcHot1];
@@ -698,7 +715,7 @@ impl Wiring {
             battery[i] = net.add_source(Source::new(id));
             let contactor_id: &'static str = Box::leak(format!("bat-{}-direct", i + 1).into_boxed_str());
             net.add_contactor(Contactor::new(contactor_id, ContactorKind::BatteryDirect, FeedSource::Source(battery[i]), battery_buses[i], MIN_RESISTANCE_OHM));
-            net.add_breaker(super::network::Breaker::new(Box::leak(format!("bat-{}-bkr", i + 1).into_boxed_str()), Battery::RATED_CAPACITY_AH * 4.0, battery_buses[i]));
+            net.add_feeder_breaker(super::network::Breaker::new(Box::leak(format!("bat-{}-bkr", i + 1).into_boxed_str()), Battery::RATED_CAPACITY_AH * 4.0, battery_buses[i]), battery_buses[i]);
         }
 
         // A real A380-style hot-bus isolation diode: DC_HOT2 is cross-fed

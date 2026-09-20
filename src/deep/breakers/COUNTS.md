@@ -91,6 +91,36 @@ after 3 trips within a rolling 5-minute window (GENERIC thresholds, real
 documented SSPC application-literature behaviour) until a separate
 ground-maintenance action clears it.
 
+## Gap-closing pass (after session 3)
+
+125 of the 128 breakers that used to carry `protected_load: None` (group-2
+"other real equipment" and all 77 group-3 position-indication/excitation
+circuits) now have a matching `Load` in `deep::electrical::loads.rs`, added
+with the exact id/bus/wattage/power-factor `catalog.rs` had already derived
+and cited for that breaker -- see that file's own new gap-closing section
+for the full list and each one's basis. `deep::breakers::integration_test`'s
+`breakers_protecting_no_modelled_load_are_a_known_named_gap` now pins a
+table of one entry, `(24, 3)`, not the old 14-chapter/128-breaker table.
+
+Only ATA24's three battery-output breakers (BATTERY 1, BATTERY 2, APU
+BATTERY) remain unmodelled: a battery's own output/current-limiter breaker
+protects a *source's* output current, not a consumer's demand, and
+`deep::electrical::network::Load` models demand only -- there is no
+consumer for a future pass to add here, only a different network
+abstraction this crate does not have (see `catalog::ata24_power_sources`'s
+own comment). The total breaker count is unchanged at 399 (no breaker was
+added or removed, only `protected_load` field values).
+
+Separately, `deep::electrical::sources::Wiring::build`'s own generator/APU-
+generator/TR/static-inverter/battery protection breakers (`gen-N-bkr`,
+`apu-gen-N-bkr`, `tr-*-bkr`, `static-inv-bkr`, `bat-N-bkr` -- outside this
+catalogue entirely, internal to `deep::electrical`'s own network) were
+converted from `Network::add_breaker` to `Network::add_feeder_breaker`, so
+each now carries its own bus's real demand current instead of a permanent
+0 A. See `deep::electrical::sources.rs`'s own comment on `Wiring::build` and
+`deep::electrical::live.rs`'s new
+`source_protection_breakers_now_carry_their_buss_real_current` test.
+
 ## Growth log
 
 - Session 1: 296 (245 electrical-load matches + 51 other real equipment).

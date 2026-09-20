@@ -632,6 +632,280 @@ fn ata36_bleed(net: &mut Network, cat: &mut Catalog) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Closing `deep::breakers::catalog`'s own "128 breakers protect no
+// modelled load" gap
+// (`breakers_protecting_no_modelled_load_are_a_known_named_gap`). Every
+// function below gives a real `Load` to a consumer that catalogue's own
+// group-2 ("other real A380 equipment, no load model yet") or group-3
+// ("control/excitation supplies paired with an existing actuator breaker")
+// entries already named and rated -- using the **exact same id, bus,
+// wattage and power factor** that catalogue entry already derived and
+// cited, not a second, independently guessed figure. Reusing an
+// already-justified number for both the breaker's rating and the load's
+// demand is what "derived, not guessed" means here: the two describe the
+// same physical circuit, so a second, independent derivation could only
+// create a place for them to drift apart, never a more real number. Every
+// basis string below names the exact `breakers.rs` function its own figure
+// came from; where that catalogue's own figure was itself `GENERIC`
+// (typical-class, no public A380 part number), this one says so too --
+// see this pass's report for the full unsourced list.
+//
+// Three of `ata24_power_sources`'s six catalogued breakers -- BATTERY 1,
+// BATTERY 2, APU BATTERY -- deliberately stay unmodelled here and
+// `protected_load: None` in `catalog.rs`: a battery's own output/current-
+// limiter breaker protects a *source's* output current, not a consumer's
+// demand, and `network::Load` (this file's whole vocabulary) models demand
+// only. `sources::Wiring::build` already gives each battery its own
+// `network::Source` (`bat-1`/`bat-2`, a different id family and a
+// different `Network` list -- `net.sources`, not `net.loads`) whose
+// branch current is exactly what that breaker would be measuring. Adding a
+// `Load` under the same id would double-count that current against the
+// same battery's own `Source` branch, not model a second, real consumer --
+// there is no consumer here for this pass to close.
+
+/// ATA24 -- the two source-protection *control* circuits `ata24_power_
+/// sources` catalogues a real load for (the battery output breakers
+/// themselves stay unmodelled; see this section's own header comment).
+fn ata24_power_sources_extra(net: &mut Network, cat: &mut Catalog) {
+    let spec = avionics_spec(
+        "ext-pwr-contactor",
+        "EXTERNAL POWER CONTACTOR CONTROL",
+        24,
+        BusId::DcHot1,
+        20.0,
+        "breakers.rs::ata24_power_sources EXTERNAL POWER CONTACTOR CONTROL (GENERIC: typical small contactor-coil control circuit, real A380 external power system, no public per-part figure; same figure that catalogue's own breaker already cites)",
+    );
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+    for n in 1..=2u32 {
+        let id: &'static str = Box::leak(format!("bat-charge-limiter-{n}").into_boxed_str());
+        let name: &'static str = Box::leak(format!("BATTERY {n} CHARGE LIMITER").into_boxed_str());
+        let basis: &'static str = Box::leak(format!("breakers.rs::ata24_power_sources BATTERY {n} CHARGE LIMITER (GENERIC: typical small charge-controller LRU control circuit; same figure that catalogue's own breaker already cites)").into_boxed_str());
+        let spec = avionics_spec(id, name, 24, BusId::DcEss, 20.0, basis);
+        add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+    }
+}
+
+/// ATA23 -- communications LRUs `ata23_comms` catalogues (VHF 1/2 already
+/// have their own load in [`avionics_misc`]; this is the rest of that
+/// breaker function's group).
+fn ata23_comms(net: &mut Network, cat: &mut Catalog) {
+    let spec = avionics_spec("satcom", "SATCOM", 23, BusId::DcEss, 100.0, "breakers.rs::ata23_comms SATCOM (GENERIC: typical wide-body SATCOM transceiver LRU, real A380 equipment class, no public per-box figure; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("hf-1", "HF 1", 23, BusId::Dc1, 100.0, "breakers.rs::ata23_comms HF 1 (GENERIC: typical HF transceiver LRU; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("hf-2", "HF 2", 23, BusId::Dc2, 100.0, "breakers.rs::ata23_comms HF 2 (same class as HF 1)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("acars-mu", "ACARS MU", 23, BusId::DcEss, 50.0, "breakers.rs::ata23_comms ACARS MU (GENERIC: typical avionics LRU class figure; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+    // The one AC-bus, non-avionics-pf entry in this group: a PA amplifier's
+    // output stage is a real audio power amplifier, not a switching supply,
+    // so it keeps the catalogue's own 0.9 power factor rather than
+    // `avionics_spec`'s DC-LRU default.
+    let spec = motor_spec("pa-amplifier", "PA AMPLIFIER", 23, BusId::Ac1, 200.0, 0.9, 1.3, 0.2, "breakers.rs::ata23_comms PA AMPLIFIER (GENERIC: typical wide-body PA amplifier power stage; same figure/power factor that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("interphone", "INTERPHONE", 23, BusId::DcEss, 50.0, "breakers.rs::ata23_comms INTERPHONE (GENERIC: typical avionics LRU class figure; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+}
+
+/// ATA31 -- mandatory flight recorders (`ata31_recorders`).
+fn ata31_recorders(net: &mut Network, cat: &mut Catalog) {
+    let spec = avionics_spec("dfdr", "DFDR", 31, BusId::DcEss, 50.0, "breakers.rs::ata31_recorders DFDR (GENERIC: typical avionics LRU class figure, real mandatory A380 equipment; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("cvr", "CVR", 31, BusId::DcEss, 50.0, "breakers.rs::ata31_recorders CVR (same class as DFDR, real mandatory A380 equipment)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    // The QAR is a maintenance-data recorder, not flight-safety mandatory
+    // equipment like the DFDR/CVR pair above, so it is kept `Other` rather
+    // than `Essential`.
+    let spec = avionics_spec("qar", "QAR", 31, BusId::Dc2, 30.0, "breakers.rs::ata31_recorders QAR (GENERIC: typical small avionics LRU class figure; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+}
+
+/// ATA35 -- crew/passenger oxygen system consumers `ata35_oxygen`
+/// catalogues (the shutoff valve's own position-indication circuit is
+/// handled with the rest of [`position_indication_supplies`]).
+fn ata35_oxygen_extra(net: &mut Network, cat: &mut Catalog) {
+    let spec = motor_spec("crew-o2-shutoff", "CREW OXYGEN SHUTOFF VALVE", 35, BusId::Dc1, 50.0, 0.8, 2.0, 0.3, "breakers.rs::ata35_oxygen CREW OXYGEN SHUTOFF VALVE (GENERIC: typical motor/solenoid-operated shutoff valve actuator, real A380 crew oxygen system; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("pax-o2-gen-ctl", "PAX OXYGEN GENERATOR CONTROL", 35, BusId::DcEss, 30.0, "breakers.rs::ata35_oxygen PAX OXYGEN GENERATOR CONTROL (GENERIC: typical small control-circuit LRU figure; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("o2-pressure-xducer", "OXYGEN PRESSURE TRANSDUCER", 35, BusId::DcEss, 5.0, "breakers.rs::ata35_oxygen OXYGEN PRESSURE TRANSDUCER (GENERIC: typical small pressure-transducer power draw; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+}
+
+/// ATA49 -- APU controller/start consumers `ata49_apu` catalogues (the fuel
+/// shutoff valve's own position-indication circuit is handled with the
+/// rest of [`position_indication_supplies`]).
+fn ata49_apu_extra(net: &mut Network, cat: &mut Catalog) {
+    let spec = avionics_spec("apu-ecu-a", "APU ECU CHANNEL A", 49, BusId::DcApu, 60.0, "breakers.rs::ata49_apu APU ECU CHANNEL A (GENERIC: typical dual-channel engine/APU controller LRU class figure, real PW980 APU has its own FADEC-class controller; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("apu-ecu-b", "APU ECU CHANNEL B", 49, BusId::DcEss, 60.0, "breakers.rs::ata49_apu APU ECU CHANNEL B (same class as channel A, redundant bus feed)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = motor_spec("apu-fuel-shutoff-valve", "APU FUEL SHUTOFF VALVE", 49, BusId::Dc1, 50.0, 0.8, 2.0, 0.3, "breakers.rs::ata49_apu APU FUEL SHUTOFF VALVE (GENERIC: typical motor/solenoid-operated shutoff valve actuator; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    // Transit-only: a start contactor is only energised through the APU's
+    // own start sequence (motoring the starter-generator), not once it is
+    // self-sustaining -- `electrical::live`'s `TRANSIT_ONLY_NO_TRUTH_INPUT`
+    // holds it off by default, the same honest "no Truth field for this
+    // yet" choice already made for the gear actuators.
+    let spec = avionics_spec("apu-start-contactor", "APU START CONTACTOR", 49, BusId::Dc1, 20.0, "breakers.rs::ata49_apu APU START CONTACTOR (GENERIC: typical contactor-coil control circuit; same figure that catalogue's own breaker already cites; transit-only, see electrical::live::TRANSIT_ONLY_NO_TRUTH_INPUT)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+}
+
+/// ATA73/74 -- engine FADEC channels and ignition exciters `ata7x_engine`
+/// catalogues. FADEC channels are continuous avionics LRUs (a real FADEC is
+/// powered from the aircraft DC bus for monitoring even engine-off); the
+/// ignition exciters are not -- a real exciter only fires during an engine
+/// start or while continuous ignition is selected, so
+/// `electrical::live::TRANSIT_ONLY_NO_TRUTH_INPUT` holds them off by
+/// default absent a `Truth` field for either condition.
+fn ata73_74_engine(net: &mut Network, cat: &mut Catalog) {
+    for n in 1..=4u32 {
+        let bus_a = if n <= 2 { BusId::DcEss } else { BusId::Dc1 };
+        let bus_b = if n <= 2 { BusId::Dc2 } else { BusId::DcEss };
+        let id_a: &'static str = Box::leak(format!("fadec-{n}a").into_boxed_str());
+        let name_a: &'static str = Box::leak(format!("FADEC {n} CHANNEL A").into_boxed_str());
+        let basis_a: &'static str = Box::leak(format!("breakers.rs::ata7x_engine FADEC {n} CHANNEL A (GENERIC: typical dual-lane FADEC-class controller channel, real Trent 972B-84 architecture, no public per-channel electrical figure; same figure that catalogue's own breaker already cites)").into_boxed_str());
+        let spec = avionics_spec(id_a, name_a, 73, bus_a, 80.0, basis_a);
+        add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+        let id_b: &'static str = Box::leak(format!("fadec-{n}b").into_boxed_str());
+        let name_b: &'static str = Box::leak(format!("FADEC {n} CHANNEL B").into_boxed_str());
+        let basis_b: &'static str = Box::leak(format!("breakers.rs::ata7x_engine FADEC {n} CHANNEL B (same class as channel A, redundant bus feed)").into_boxed_str());
+        let spec = avionics_spec(id_b, name_b, 73, bus_b, 80.0, basis_b);
+        add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    }
+    for n in 1..=4u32 {
+        let bus_a = if n % 2 == 1 { BusId::Dc1 } else { BusId::Dc2 };
+        let bus_b = if n % 2 == 1 { BusId::Dc2 } else { BusId::Dc1 };
+        let id_a: &'static str = Box::leak(format!("ignition-{n}a").into_boxed_str());
+        let name_a: &'static str = Box::leak(format!("IGNITION {n} EXCITER A").into_boxed_str());
+        let basis_a: &'static str = Box::leak(format!("breakers.rs::ata7x_engine IGNITION {n} EXCITER A (GENERIC: typical high-energy ignition exciter unit pulsed power class (~250 W), no public per-part figure; same figure/power factor that catalogue's own breaker already cites; transit-only, see electrical::live::TRANSIT_ONLY_NO_TRUTH_INPUT)").into_boxed_str());
+        let spec = motor_spec(id_a, name_a, 74, bus_a, 250.0, 0.9, 2.0, 0.5, basis_a);
+        add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+        let id_b: &'static str = Box::leak(format!("ignition-{n}b").into_boxed_str());
+        let name_b: &'static str = Box::leak(format!("IGNITION {n} EXCITER B").into_boxed_str());
+        let basis_b: &'static str = Box::leak(format!("breakers.rs::ata7x_engine IGNITION {n} EXCITER B (same class as exciter A, redundant lane on the opposite DC bus)").into_boxed_str());
+        let spec = motor_spec(id_b, name_b, 74, bus_b, 250.0, 0.9, 2.0, 0.5, basis_b);
+        add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    }
+}
+
+/// ATA26 -- engine/APU fire-extinguisher bottle squibs `ata26_extinguishing`
+/// catalogues. A pyrotechnic squib is a one-shot device: it fires once on
+/// a real discharge command and is otherwise dead, so (like the ignition
+/// exciters above) it is held off by
+/// `electrical::live::TRANSIT_ONLY_NO_TRUTH_INPUT` absent a `Truth` field
+/// for "bottle discharge commanded".
+fn ata26_extinguishing(net: &mut Network, cat: &mut Catalog) {
+    for bottle in 1..=2u32 {
+        for squib in 1..=2u32 {
+            let bus = if bottle == 1 { BusId::Dc1 } else { BusId::Dc2 };
+            let id: &'static str = Box::leak(format!("eng-fire-bottle-{bottle}-squib-{squib}").into_boxed_str());
+            let name: &'static str = Box::leak(format!("ENG FIRE BOTTLE {bottle} SQUIB {squib}").into_boxed_str());
+            let basis: &'static str = Box::leak(format!("breakers.rs::ata26_extinguishing ENG FIRE BOTTLE {bottle} SQUIB {squib} (GENERIC: typical one-shot pyrotechnic squib firing circuit, real wide-body cross-feed fire-extinguishing architecture; same figure that catalogue's own breaker already cites; transit-only/one-shot, see electrical::live::TRANSIT_ONLY_NO_TRUTH_INPUT)").into_boxed_str());
+            let spec = avionics_spec(id, name, 26, bus, 20.0, basis);
+            add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+        }
+    }
+    for squib in 1..=2u32 {
+        let id: &'static str = Box::leak(format!("apu-fire-bottle-squib-{squib}").into_boxed_str());
+        let name: &'static str = Box::leak(format!("APU FIRE BOTTLE SQUIB {squib}").into_boxed_str());
+        let basis: &'static str = Box::leak(format!("breakers.rs::ata26_extinguishing APU FIRE BOTTLE SQUIB {squib} (same class as the engine bottle squibs; transit-only/one-shot)").into_boxed_str());
+        let spec = avionics_spec(id, name, 26, BusId::DcApu, 20.0, basis);
+        add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    }
+}
+
+/// ATA29 -- the RAT deploy solenoid and PTU control valve
+/// `ata29_hydraulics_extra` catalogues. The PTU valve is modelled
+/// continuous, the same convention every other valve actuator in this
+/// catalogue uses; the RAT solenoid is genuinely transit-only, and unlike
+/// the ignition/squib/cargo-door set above this layer *does* have a real
+/// signal for it (`ElectricalLive`'s own `emergency_config`/`rat_deployed`
+/// state, the same state that already drives `sources::Rat::deploy`) --
+/// see `electrical::live::ElectricalLive::tick`'s own gating of this load,
+/// not a permanent off.
+fn ata29_hydraulics_extra(net: &mut Network, cat: &mut Catalog) {
+    let spec = avionics_spec("rat-deploy-solenoid", "RAT DEPLOY SOLENOID", 29, BusId::DcHot2, 100.0, "breakers.rs::ata29_hydraulics_extra RAT DEPLOY SOLENOID (GENERIC: typical deployment solenoid, hot-bus fed so it works with both engines/APU/main batteries down; same figure that catalogue's own breaker already cites; transit-only, gated in electrical::live against the real emergency/rat_deployed state)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = motor_spec("ptu-control-valve", "PTU CONTROL VALVE", 29, BusId::DcEss, 50.0, 0.8, 2.0, 0.3, "breakers.rs::ata29_hydraulics_extra PTU CONTROL VALVE (GENERIC: typical motor/solenoid-operated valve actuator, real green/yellow hydraulic power-transfer-unit architecture; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+}
+
+/// ATA52 -- cargo door actuator control circuits `ata52_doors` catalogues.
+/// Transit-only like the landing-gear actuators (a cargo door actuator
+/// draws only while the door is actually moving), held off by
+/// `electrical::live::TRANSIT_ONLY_NO_TRUTH_INPUT` absent a `Truth` field
+/// for "door commanded".
+fn ata52_doors(net: &mut Network, cat: &mut Catalog) {
+    let spec = motor_spec("cargo-door-fwd-actuator-ctl", "FWD CARGO DOOR ACTUATOR CONTROL", 52, BusId::Dc1, 100.0, 0.8, 2.0, 0.3, "breakers.rs::ata52_doors FWD CARGO DOOR ACTUATOR CONTROL (GENERIC: typical powered cargo door actuator control circuit; same figure that catalogue's own breaker already cites; transit-only, see electrical::live::TRANSIT_ONLY_NO_TRUTH_INPUT)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+    let spec = motor_spec("cargo-door-aft-actuator-ctl", "AFT CARGO DOOR ACTUATOR CONTROL", 52, BusId::Dc2, 100.0, 0.8, 2.0, 0.3, "breakers.rs::ata52_doors AFT CARGO DOOR ACTUATOR CONTROL (same class as the forward cargo door; transit-only)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+}
+
+/// ATA33 -- emergency-lighting battery chargers and exterior service
+/// lighting `ata33_emergency_lighting` catalogues.
+fn ata33_emergency_lighting(net: &mut Network, cat: &mut Catalog) {
+    let spec = avionics_spec("emer-lighting-charger-1", "EMER LIGHTING BATTERY CHARGER 1", 33, BusId::DcHot1, 100.0, "breakers.rs::ata33_emergency_lighting EMER LIGHTING BATTERY CHARGER 1 (GENERIC: typical NiCd/Li-ion emergency-lighting pack charger circuit; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("emer-lighting-charger-2", "EMER LIGHTING BATTERY CHARGER 2", 33, BusId::DcHot2, 100.0, "breakers.rs::ata33_emergency_lighting EMER LIGHTING BATTERY CHARGER 2 (same class as charger 1)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+    let spec = resistive_spec("ext-service-lighting", "EXTERIOR SERVICE LIGHTING", 33, BusId::AcGndFltSvc, 100.0, "breakers.rs::ata33_emergency_lighting EXTERIOR SERVICE LIGHTING (GENERIC: typical ground-service floodlight circuit; same figure that catalogue's own breaker already cites)");
+    add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
+}
+
+/// A position-indication microswitch/LVDT excitation supply: 5 W, unity
+/// power factor regardless of an AC or DC parent bus (a small rectified
+/// excitation circuit, not a line-frequency load) and negligible inrush (a
+/// sensor excitation supply, not a motor) -- matching
+/// `breakers.rs::push_position_excitation` exactly, id for id.
+fn position_indication_spec(id: &'static str, name: &'static str, ata: u16, bus: BusId, basis: &'static str) -> LoadSpec {
+    LoadSpec { id, name, ata, bus, rated_power_w: 5.0, power_factor: 1.0, min_operating_voltage: min_operating_voltage(bus), inrush_multiple: 1.0, inrush_duration_s: 0.0, wiring_resistance_ohm: wiring_resistance_ohm(bus), rated_frequency_hz: 0.0, basis }
+}
+
+fn position_indication_load(net: &mut Network, cat: &mut Catalog, parent_id: &'static str, parent_name: &'static str, ata: u16, bus: BusId, basis_suffix: &'static str) {
+    let id: &'static str = Box::leak(format!("{parent_id}-pos-ind").into_boxed_str());
+    let name: &'static str = Box::leak(format!("{parent_name} POSITION IND").into_boxed_str());
+    let basis: &'static str = Box::leak(format!("breakers.rs::ata_control_excitation_supplies position-indication microswitch/LVDT excitation circuit (GENERIC 5 W, same figure that catalogue's own breaker already cites); {basis_suffix}").into_boxed_str());
+    let spec = position_indication_spec(id, name, ata, bus, basis);
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+}
+
+/// The 77 position-indication/excitation circuits `breakers.rs::ata_
+/// control_excitation_supplies` pairs with an existing actuator breaker
+/// above, one for one, same ATA/bus as their own parent actuator.
+fn position_indication_supplies(net: &mut Network, cat: &mut Catalog) {
+    let valve_buses = [BusId::Dc1, BusId::Dc2, BusId::DcEss, BusId::DcBat];
+    for i in 0..60usize {
+        let parent_id: &'static str = Box::leak(format!("fuel-valve-{i}").into_boxed_str());
+        let parent_name: &'static str = Box::leak(format!("FUEL VALVE {i}").into_boxed_str());
+        position_indication_load(net, cat, parent_id, parent_name, 28, valve_buses[i % valve_buses.len()], "pairs with this catalogue's own FUEL VALVE actuator breaker");
+    }
+    position_indication_load(net, cat, "hotair-1", "HOT AIR VALVE 1", 21, BusId::AcEss, "pairs with HOT AIR VALVE 1's own actuator breaker");
+    position_indication_load(net, cat, "hotair-2", "HOT AIR VALVE 2", 21, BusId::AcEss, "pairs with HOT AIR VALVE 2's own actuator breaker");
+    position_indication_load(net, cat, "fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, BusId::Dc2, "pairs with FWD CARGO ISOL VALVE's own actuator breaker");
+    position_indication_load(net, cat, "bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, BusId::DcEss, "pairs with BULK CARGO ISOL VALVE's own actuator breaker");
+    for pack in 1..=2u32 {
+        for side in 1..=2u32 {
+            let parent_id: &'static str = Box::leak(format!("pack-{pack}-flow-valve-{side}").into_boxed_str());
+            let parent_name: &'static str = Box::leak(format!("PACK {pack} FLOW VALVE {side}").into_boxed_str());
+            position_indication_load(net, cat, parent_id, parent_name, 21, BusId::DcEss, "pairs with its own PACK FLOW VALVE actuator breaker");
+        }
+    }
+    for n in 1..=4u32 {
+        let bus = if n <= 2 { BusId::Dc1 } else { BusId::Dc2 };
+        let parent_id: &'static str = Box::leak(format!("bleed-eng-{n}").into_boxed_str());
+        let parent_name: &'static str = Box::leak(format!("BLEED ENG {n} VALVES").into_boxed_str());
+        position_indication_load(net, cat, parent_id, parent_name, 36, bus, "pairs with the shared BLEED ENG valve-set actuator breaker");
+    }
+    position_indication_load(net, cat, "ptu-control-valve", "PTU CONTROL VALVE", 29, BusId::DcEss, "pairs with PTU CONTROL VALVE's own actuator breaker");
+    position_indication_load(net, cat, "apu-fuel-shutoff-valve", "APU FUEL SHUTOFF VALVE", 49, BusId::Dc1, "pairs with APU FUEL SHUTOFF VALVE's own actuator breaker");
+    position_indication_load(net, cat, "crew-o2-shutoff", "CREW OXYGEN SHUTOFF VALVE", 35, BusId::Dc1, "pairs with CREW OXYGEN SHUTOFF VALVE's own actuator breaker");
+    position_indication_load(net, cat, "cargo-door-fwd-actuator-ctl", "FWD CARGO DOOR", 52, BusId::Dc1, "pairs with the forward cargo door's own actuator-control breaker");
+    position_indication_load(net, cat, "cargo-door-aft-actuator-ctl", "AFT CARGO DOOR", 52, BusId::Dc2, "pairs with the aft cargo door's own actuator-control breaker");
+}
+
 /// Build the whole catalogue onto `net`, returning the category index for
 /// `shedding.rs`.
 pub fn build(net: &mut Network) -> Catalog {
@@ -648,6 +922,20 @@ pub fn build(net: &mut Network) -> Catalog {
     ata44_ife(net, &mut cat);
     avionics_misc(net, &mut cat);
     ata36_bleed(net, &mut cat);
+    // Closing `deep::breakers::catalog`'s own named gap (see this file's own
+    // section above): each function below adds exactly the load a
+    // group-2/group-3 breaker in that catalogue already names and rates.
+    ata24_power_sources_extra(net, &mut cat);
+    ata23_comms(net, &mut cat);
+    ata31_recorders(net, &mut cat);
+    ata35_oxygen_extra(net, &mut cat);
+    ata49_apu_extra(net, &mut cat);
+    ata73_74_engine(net, &mut cat);
+    ata26_extinguishing(net, &mut cat);
+    ata29_hydraulics_extra(net, &mut cat);
+    ata52_doors(net, &mut cat);
+    ata33_emergency_lighting(net, &mut cat);
+    position_indication_supplies(net, &mut cat);
     cat
 }
 
@@ -704,8 +992,107 @@ mod tests {
         let mut net = Network::new();
         build(&mut net);
         let pumps = net.loads.iter().filter(|l| l.spec.id.starts_with("fuel-pump-")).count();
-        let valves = net.loads.iter().filter(|l| l.spec.id.starts_with("fuel-valve-")).count();
+        // `starts_with("fuel-valve-")` also matches the 60
+        // `fuel-valve-N-pos-ind` position-indication loads this pass added
+        // (a real, separate circuit from the valve's own actuator, see
+        // `position_indication_supplies`), so this counts the actuator
+        // loads specifically by excluding that suffix.
+        let valves = net.loads.iter().filter(|l| l.spec.id.starts_with("fuel-valve-") && !l.spec.id.ends_with("-pos-ind")).count();
+        let valve_pos_ind = net.loads.iter().filter(|l| l.spec.id.starts_with("fuel-valve-") && l.spec.id.ends_with("-pos-ind")).count();
         assert_eq!(pumps, 25);
         assert_eq!(valves, 60);
+        assert_eq!(valve_pos_ind, 60);
+    }
+
+    /// The 125 ids `deep::breakers::catalog`'s group-2/group-3 entries name
+    /// (128 minus the three battery-output breakers this file's own header
+    /// comment explains cannot be a `Load`) must all resolve to a real load
+    /// here, one for one -- this is what actually closes the gap, not just
+    /// what the breaker catalogue's own text claims.
+    #[test]
+    fn every_closed_gap_id_is_a_real_load() {
+        let mut net = Network::new();
+        build(&mut net);
+        let ids: std::collections::HashSet<&str> = net.loads.iter().map(|l| l.spec.id).collect();
+        let mut expected: Vec<String> = vec![
+            "ext-pwr-contactor".into(),
+            "bat-charge-limiter-1".into(),
+            "bat-charge-limiter-2".into(),
+            "satcom".into(),
+            "hf-1".into(),
+            "hf-2".into(),
+            "acars-mu".into(),
+            "pa-amplifier".into(),
+            "interphone".into(),
+            "dfdr".into(),
+            "cvr".into(),
+            "qar".into(),
+            "crew-o2-shutoff".into(),
+            "pax-o2-gen-ctl".into(),
+            "o2-pressure-xducer".into(),
+            "apu-ecu-a".into(),
+            "apu-ecu-b".into(),
+            "apu-fuel-shutoff-valve".into(),
+            "apu-start-contactor".into(),
+            "rat-deploy-solenoid".into(),
+            "ptu-control-valve".into(),
+            "cargo-door-fwd-actuator-ctl".into(),
+            "cargo-door-aft-actuator-ctl".into(),
+            "emer-lighting-charger-1".into(),
+            "emer-lighting-charger-2".into(),
+            "ext-service-lighting".into(),
+        ];
+        for n in 1..=4 {
+            expected.push(format!("fadec-{n}a"));
+            expected.push(format!("fadec-{n}b"));
+            expected.push(format!("ignition-{n}a"));
+            expected.push(format!("ignition-{n}b"));
+        }
+        for bottle in 1..=2 {
+            for squib in 1..=2 {
+                expected.push(format!("eng-fire-bottle-{bottle}-squib-{squib}"));
+            }
+        }
+        expected.push("apu-fire-bottle-squib-1".into());
+        expected.push("apu-fire-bottle-squib-2".into());
+        for i in 0..60 {
+            expected.push(format!("fuel-valve-{i}-pos-ind"));
+        }
+        for parent in ["hotair-1", "hotair-2", "fwd-isol-valve", "bulk-isol-valve", "ptu-control-valve", "apu-fuel-shutoff-valve", "crew-o2-shutoff", "cargo-door-fwd-actuator-ctl", "cargo-door-aft-actuator-ctl"] {
+            expected.push(format!("{parent}-pos-ind"));
+        }
+        for pack in 1..=2 {
+            for side in 1..=2 {
+                expected.push(format!("pack-{pack}-flow-valve-{side}-pos-ind"));
+            }
+        }
+        for n in 1..=4 {
+            expected.push(format!("bleed-eng-{n}-pos-ind"));
+        }
+        assert_eq!(expected.len(), 125, "the expected list itself must total 125 (128 minus the 3 battery-output breakers)");
+        let mut missing: Vec<&String> = expected.iter().filter(|id| !ids.contains(id.as_str())).collect();
+        missing.sort();
+        assert!(missing.is_empty(), "gap-closing ids with no real load: {missing:?}");
+
+        // And the three battery-output breakers must NOT have grown a
+        // fabricated load -- see this file's own header comment for why.
+        for id in ["bat-1", "bat-2", "bat-apu"] {
+            assert!(!ids.contains(id), "{id} is a source's own output breaker, not a consumer -- it must not have a Load");
+        }
+    }
+
+    /// The new transit-only/one-shot loads must actually be dead by
+    /// default (`commanded_on: true` is `Load::new`'s own default) --
+    /// `electrical::live::ElectricalLive::new` is what turns that off, so
+    /// this only checks the raw catalogue is honestly "on" here; the live
+    /// behaviour is asserted in `electrical::live`'s own tests.
+    #[test]
+    fn every_gap_closing_load_defaults_on_like_every_other_catalogue_entry() {
+        let mut net = Network::new();
+        build(&mut net);
+        for id in ["ignition-1a", "eng-fire-bottle-1-squib-1", "apu-start-contactor", "cargo-door-fwd-actuator-ctl", "rat-deploy-solenoid"] {
+            let idx = net.load_index(id).unwrap_or_else(|| panic!("{id} missing"));
+            assert!(net.loads[idx].commanded_on, "{id} should default on in the raw catalogue; live.rs is what gates it");
+        }
     }
 }
