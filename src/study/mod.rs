@@ -10,6 +10,13 @@
 //! Every figure comes from the running simulation. Nothing is invented.
 
 mod canvas;
+/// The static-only build-time catalogue export (`docs/catalogue-export.md`):
+/// no live state, safe to run without X-Plane. Reached only from this
+/// module's own `#[cfg(test)]` (`cargo test --lib`, no plugin build ever
+/// calls it), so `dead_code` is allowed here rather than on the plugin
+/// build as a whole.
+#[allow(dead_code)]
+mod catalogue;
 mod depth;
 mod elec;
 mod engine;
