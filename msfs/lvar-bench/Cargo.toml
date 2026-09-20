@@ -1,0 +1,37 @@
+# Standalone. Deliberately NOT a member of D:\fbw-xp-systems\Cargo.toml: this
+# crate targets wasm32-wasip1 and links against the proprietary MSFS SDK, and
+# must never be pulled into the X-Plane plugin build. The empty [workspace]
+# table below makes that structural rather than a matter of discipline --
+# cargo stops walking up the directory tree here.
+[workspace]
+
+[package]
+name = "lvar_bench"
+version = "0.1.0"
+edition = "2021"
+description = "Measures what an MSFS LVar write costs, per operation and per frame"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+
+[features]
+default = ["fs-probe"]
+# The filesystem probe pulls `path_open`, `fd_prestat_get` and friends into the
+# module's WASI imports. If MSFS's runtime does not implement those, the module
+# could fail to *instantiate*, which would cost the whole benchmark run rather
+# than just the probe. Building without this feature produces a variant whose
+# imports are exactly those the first successful run already proved MSFS
+# provides -- a fallback that cannot be worse than the build that worked.
+fs-probe = []
+
+[dependencies]
+# FlyByWire's own fork of the MSFS bindings -- the same git dependency their
+# shipping a380_systems_wasm uses (fbw-a380x/src/wasm/systems/a380_systems_wasm/Cargo.toml).
+msfs = { git = "https://github.com/flybywiresim/msfs-rs", branch = "main" }
+
+[profile.release]
+# Same shape as FlyByWire's workspace release profile.
+lto = true
+strip = true
