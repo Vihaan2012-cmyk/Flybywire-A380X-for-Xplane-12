@@ -50,14 +50,53 @@
 
 use super::rng::Rng;
 
-/// User Equivalent Range Error, 1-sigma, metres. GENERIC (see module docs).
+/// User Equivalent Range Error, 1-sigma, metres.
+///
+/// **Sourced**: the US Government's GPS Standard Positioning Service
+/// Performance Standard commits to broadcasting the signal in space with a
+/// global average user range error of "<=7.8 m ... with 95% probability",
+/// stated in the same document as the signal-in-space range accuracy
+/// commitment of **4 metres RMS** (GPS.gov, "GPS Accuracy", quoting the SPS
+/// Performance Standard; the 4 m rms / 7.8 m 95% pair replaced an earlier
+/// 6 m rms commitment). 4 m RMS about a zero mean is 4 m 1-sigma, which is
+/// this constant.
+///
+/// Honest caveat, unchanged by the citation: 4 m RMS is the **signal in
+/// space** URE alone. A receiver's total UERE also carries ionospheric and
+/// tropospheric delay residuals, multipath and receiver noise, so using the
+/// SIS figure as the whole UERE is the optimistic direction -- a real
+/// airborne single-frequency UERE runs larger. It is used anyway because it
+/// is the only part of the budget with a published, committed number; the
+/// user-equipment contribution is exactly what would otherwise have to be
+/// invented. Actual on-orbit performance is far better than the commitment
+/// (GPS.gov reports global average URE under 1 m), so the committed figure
+/// is a conservative stand-in for the whole budget rather than a bare
+/// underestimate of it.
 const UERE_M: f64 = 4.0;
 /// Minimum satellites for any 3D+clock fix. Not GENERIC -- a basic GPS
 /// requirement.
 const MIN_SATELLITES_FOR_FIX: u32 = 4;
 /// HDOP proxy reference: at this many satellites visible, HDOP is
-/// approximately its typical open-sky value. GENERIC monotonic proxy (see
-/// module docs) -- not a real geometry computation.
+/// approximately its typical open-sky value.
+///
+/// **Now derived rather than picked.** 8 is the mean number of satellites a
+/// 5-degree-mask receiver sees from the GPS *baseline* constellation -- the
+/// 24 slots the SPS Performance Standard is written against, of which the
+/// spherical-cap visibility fraction above a 5-degree mask is 0.338568, so
+/// `24 * 0.338568 = 8.13`. The full geometry, with all its inputs and their
+/// sources, is written out at `sensors::live`'s
+/// `NOMINAL_SATELLITES_VISIBLE`, which applies the identical calculation to
+/// the 31-satellite constellation actually flown and gets 10. The two
+/// constants are therefore the same derivation at the standard's
+/// constellation and at the real one, which is why a receiver at the
+/// nominal 10 satellites sits a little *better* than this reference HDOP:
+/// that is the real, and correct, benefit of the over-populated
+/// constellation.
+///
+/// Still an approximation in what it does with that number: mapping
+/// satellite count to HDOP is a monotonic proxy, not a geometry
+/// computation (no almanac, no azimuth/elevation), so which satellites are
+/// lost does not matter here, only how many. See the module docs.
 const REFERENCE_SATELLITES: f64 = 8.0;
 const REFERENCE_HDOP: f64 = 1.2;
 /// Maximum rate a spoofing "walk-off" can move the reported position without

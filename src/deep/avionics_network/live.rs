@@ -297,15 +297,28 @@ impl LiveAvionicsNetwork {
                     .filter(|(_, es)| es.bay == name)
                     .map(|(i, _)| i)
                     .collect(),
-                // GENERIC, see the module docs: a bay's two fans are fed
-                // from two different AC buses, so no single bus loss can
-                // take a bay's cooling out.
+                // **GENERIC allocation of a real design property.** That a
+                // bay's two fans come off two different AC buses -- so no
+                // single bus loss can take a bay's cooling out -- is the
+                // segregation principle CS 25.1309 and CS 25.1360's
+                // separation requirements force on any such installation,
+                // and it is what this model has to reproduce. *Which* bus
+                // feeds which fan is not public. Searched: A380 ATA 21/24
+                // training material, FlyByWire's own
+                // `avionics_data_communication_network.rs` (it carries the
+                // switch/CPIOM/IOM topology this model already takes from
+                // it, but models no electrical supply for them at all) and
+                // their `electrical` module (no CPIOM or fan loads). Nobody
+                // publishes the allocation, so a deterministic round-robin
+                // that *guarantees* the segregation stands in for it.
                 fan_bus: [(2 * b) % 4, (2 * b + 1) % 4],
             })
             .collect();
 
-        // GENERIC, see the module docs: modules alternate between the two
-        // DC buses so neither bus carries a whole bay.
+        // Same status, same search: modules alternate between the two DC
+        // buses so neither bus carries a whole bay. The property (no single
+        // bus loss empties a bay) is real; this particular assignment is
+        // GENERIC.
         let module_bus = (0..topology.end_systems.len()).map(|i| i % 2).collect();
 
         let trips = vec![OverheatTrip::default(); topology.end_systems.len()];

@@ -271,7 +271,16 @@ fn register_gear_door_failures(r: &mut Registry) {
 // ---------------------------------------------------------------------------
 
 fn register_pneumatic_and_apu_failures(r: &mut Registry) {
-    const PYLON_BLEED_LEAK_MAX_HEAT_W: f64 = 40_000.0; // GENERIC, same order of magnitude as physics::bays.rs's own engine bleed-duct leak sizing (a fraction of the ~200 C/44 psi bleed source's enthalpy flow through a small crack)
+    // The pylon leak is no longer a reference wattage at all: it is a crack
+    // area (2% of the duct's own 4 in bore), whose choked mass flow and
+    // enthalpy above the bay are computed every tick from the engine's real
+    // bleed port condition. `live::pylon_bleed_leak_heat_w` carries the full
+    // derivation. The old `40_000.0 W` fixed figure was both 2.7x larger
+    // than the 200 C/44 psi source it claimed to come from and unbounded by
+    // that source, so it could drive a bay hotter than the air leaking into
+    // it.
+    const PYLON_BLEED_LEAK_AREA_FRACTION_OF_BORE: f64 = 0.02;
+    const PYLON_BLEED_DUCT_BORE_M: f64 = 0.1016;
     for engine in 1..=4u16 {
         let field = format!("pylon[{}]", engine - 1);
         let component_id = format!("36_thermal.pylon_{engine}_bleed_duct");
@@ -289,8 +298,16 @@ fn register_pneumatic_and_apu_failures(r: &mut Registry) {
             ata: 36,
             name: format!("Pylon {engine} bleed duct leak"),
             component: component_id,
-            model_field: format!("thermal_zones::network::Zone.injected_heat_w (via ThermalNetwork::inject_heat_w(zones.{field}, magnitude*{PYLON_BLEED_LEAK_MAX_HEAT_W}))"),
-            magnitude: format!("0..1, fraction of the reference {PYLON_BLEED_LEAK_MAX_HEAT_W:.0} W full-severity leak"),
+            model_field: format!(
+                "thermal_zones::network::Zone.injected_heat_w (via ThermalNetwork::inject_heat_w(zones.{field}, live::pylon_bleed_leak_heat_w(magnitude, truth.engine_bleed_pressure_pa[{}], truth.engine_bleed_temp_k[{}], bay air, ambient)))",
+                engine - 1,
+                engine - 1
+            ),
+            magnitude: format!(
+                "0..1, fraction of the full-severity crack area {:.0}% of the duct's {:.4} m bore; the heat delivered is that crack's own choked mass flow at the engine's real bleed port condition times its enthalpy above the bay, so it is zero with the engine shut down and ~52 kW at take-off port conditions",
+                PYLON_BLEED_LEAK_AREA_FRACTION_OF_BORE * 100.0,
+                PYLON_BLEED_DUCT_BORE_M
+            ),
             effect: format!("PylonEngine{engine} runs hot, conducting into NacelleCowl{engine} and WingTe{} through the real structure links.", if engine <= 2 { "Left" } else { "Right" }),
         });
     }

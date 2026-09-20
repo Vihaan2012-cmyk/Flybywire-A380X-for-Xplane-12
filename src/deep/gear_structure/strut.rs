@@ -33,22 +33,55 @@
 //! the same functional form used throughout this crate's other quadratic
 //! flow-damping paths. The coefficient `k_damp` is GENERIC, sized (not
 //! calibrated by search/bisection, just algebra) so the damping force at the
-//! CS-25.473(a) limit sink speed is a fixed, documented multiple
+//! A380 special-condition limit sink speed is a fixed, documented multiple
 //! (`ALPHA_DAMPING`) of the static reaction -- see `Strut::new`.
 //!
 //! # Limit and ultimate loads
-//! CS-25.473(a) requires two design descent velocities: 10 fps (3.05 m/s) at
-//! design landing weight and 6 fps (1.83 m/s) at design take-off weight
-//! (the "reserve energy" case); CS-25.723/25.727 establish these by an
-//! actual drop test. This module reproduces that certification method
-//! directly: it runs this same strut model (healthy, at rest, `x=0`) from
-//! each required touchdown condition and reads off the peak reaction force,
-//! rather than asserting a load factor from elsewhere -- the limit load is
-//! whichever of the two cases is worse, matching how the real drop test
-//! envelope is built. Ultimate load is `limit * 1.5` (CS 25.303's factor of
-//! safety, "unless otherwise specified... the factor of safety is 1.5").
+//! The descent velocities here are **the A380's own**, not the generic
+//! CS-25 minima: the FAA's special conditions for this aircraft's five-leg
+//! gear state them explicitly. "Special Conditions: Airbus Model A380-800
+//! Airplane, Loading Conditions for Multi-Leg Landing Gear", Docket No.
+//! NM341, Federal Register 28 March 2006 (document 06-2973), special
+//! condition A.2 "Symmetric landing load conditions", requires the gear and
+//! airframe to be designed
+//!   - "with a limit descent velocity of 3.05 m/sec (10 fps) at the design
+//!     landing weight (the maximum weight for landing conditions at maximum
+//!     descent velocity)", and
+//!   - "with a limit descent velocity of 1.83 m/sec (6 fps) at the design
+//!     takeoff weight (the maximum weight for landing conditions at a
+//!     reduced descent velocity)".
+//!
+//! Both of those are *limit* load conditions. An earlier revision of this
+//! file labelled the 6 fps / MTOW case the "reserve energy" case; that was
+//! a mis-citation. The reserve-energy condition is a **third**, separate
+//! requirement that governs the gear alone: 14 CFR / CS 25.723(b), "the
+//! landing gear may not fail in a test, demonstrating its reserve energy
+//! absorption capacity, simulating a descent velocity of 12 f.p.s. at
+//! design landing weight, assuming airplane lift not greater than airplane
+//! weight acting during the landing impact". 12 fps is 3.66 m/s, and that
+//! no-lift assumption is exactly this module's own simplification (below),
+//! so the reserve-energy drop is reproduced here literally. Because it is a
+//! *must-not-fail* requirement, the leg's ultimate capability is the larger
+//! of the 1.5-factored limit load and the reserve-energy peak -- see
+//! `Strut::new`, which takes that maximum rather than assuming which case
+//! wins.
+//!
+//! This module reproduces the certification method directly: it runs this
+//! same strut model (healthy, at rest, `x=0`) from each required touchdown
+//! condition and reads off the peak reaction force, rather than asserting a
+//! load factor from elsewhere -- the limit load is whichever of the two
+//! limit cases is worse, matching how the real drop test envelope is built.
+//! The 1.5 factor is CS 25.303's factor of safety ("unless otherwise
+//! specified... the factor of safety is 1.5").
 //! Side loads are checked against `0.8` times the vertical limit (CS
 //! 25.485's limit side load factor).
+//!
+//! The per-leg **load share** stays GENERIC (wheel-count proportional, see
+//! `LegKind::static_fraction`): the same special conditions say only that
+//! "load sharing between landing gear must be determined in a rational
+//! manner considering the flexibility of the airplane" -- they mandate a
+//! method, not a number, and Airbus's own five-leg distribution is not
+//! public.
 //!
 //! Aircraft weights: MLW 386,000 kg / MTOW 510,000 kg, Airbus "A380 Aircraft
 //! Characteristics - Airport and Maintenance Planning" (WV000 variant),
@@ -89,19 +122,30 @@ const N_POLY: f64 = 1.25;
 /// Static compression as a fraction of total stroke at the leg's own design
 /// static load (GENERIC, typical oleo-strut design practice).
 const Y_STATIC: f64 = 0.30;
-/// Damping force at the CS-25.473(a) limit sink speed, as a multiple of the
+/// Damping force at the A380 special-condition limit sink speed (3.05 m/s
+/// at MLW), as a multiple of the
 /// leg's static reaction (GENERIC dimensionless sizing factor; the
 /// resulting dynamic/static peak ratio is checked by this file's own test
 /// against the widely cited 2-3x "reaction load factor" order of magnitude
 /// for transport-category main gear).
 const ALPHA_DAMPING: f64 = 1.8;
 
-/// CS-25.473(a): descent velocity not less than 10 fps at design landing
-/// weight.
-const SINK_SPEED_LIMIT_MS: f64 = 3.05;
-/// CS-25.473(a): descent velocity not less than 6 fps at design take-off
-/// weight (the reserve-energy case, CS-25.727's methodology).
-const SINK_SPEED_RESERVE_MS: f64 = 1.83;
+/// A380-800 special conditions (Docket NM341, FR 28 Mar 2006, cond. A.2):
+/// "a limit descent velocity of 3.05 m/sec (10 fps) at the design landing
+/// weight". The A380's own figure, quoted in metres per second by the
+/// special condition itself -- not the generic CS-25.473(a)(1) minimum it
+/// happens to coincide with.
+const SINK_SPEED_LIMIT_MLW_MS: f64 = 3.05;
+/// Same special condition A.2: "a limit descent velocity of 1.83 m/sec
+/// (6 fps) at the design takeoff weight". A *limit* condition, not the
+/// reserve-energy one (see module doc).
+const SINK_SPEED_LIMIT_MTOW_MS: f64 = 1.83;
+/// 14 CFR / CS 25.723(b) reserve energy absorption: "a descent velocity of
+/// 12 f.p.s. at design landing weight, assuming airplane lift not greater
+/// than airplane weight acting during the landing impact". 12 ft/s x
+/// 0.3048 m/ft = 3.6576 m/s. The gear may not *fail* here, so this case
+/// sets a floor under the leg's ultimate capability.
+const SINK_SPEED_RESERVE_ENERGY_MS: f64 = 12.0 * 0.3048;
 /// CS 25.303: factor of safety of 1.5 on limit loads to obtain ultimate,
 /// unless otherwise specified.
 const ULTIMATE_FACTOR: f64 = 1.5;
@@ -327,15 +371,27 @@ impl Strut {
         let f_ref_n = kind.nominal_static_load_n();
         let stroke_m = kind.stroke_m();
         let unsprung_kg = kind.unsprung_kg();
-        let k_damp = ALPHA_DAMPING * f_ref_n / (SINK_SPEED_LIMIT_MS * SINK_SPEED_LIMIT_MS);
+        let k_damp = ALPHA_DAMPING * f_ref_n / (SINK_SPEED_LIMIT_MLW_MS * SINK_SPEED_LIMIT_MLW_MS);
 
-        // The two required CS-25.473(a) drop-test conditions; the worse one
+        // The two A380 special-condition A.2 limit drop cases; the worse one
         // governs (matches how a real certification envelope is built).
-        let peak_mlw = peak_force_for_drop(f_ref_n, f_ref_n, SINK_SPEED_LIMIT_MS, k_damp, stroke_m, unsprung_kg);
+        let peak_mlw = peak_force_for_drop(f_ref_n, f_ref_n, SINK_SPEED_LIMIT_MLW_MS, k_damp, stroke_m, unsprung_kg);
         let w_mtow = kind.static_fraction() * MTOW_KG * G_MS2;
-        let peak_mtow = peak_force_for_drop(f_ref_n, w_mtow, SINK_SPEED_RESERVE_MS, k_damp, stroke_m, unsprung_kg);
+        let peak_mtow = peak_force_for_drop(f_ref_n, w_mtow, SINK_SPEED_LIMIT_MTOW_MS, k_damp, stroke_m, unsprung_kg);
         let limit_load_n = peak_mlw.max(peak_mtow);
-        let ultimate_load_n = limit_load_n * ULTIMATE_FACTOR;
+
+        // CS 25.723(b) reserve energy: 12 fps at design landing weight, no
+        // lift credit -- which is this model's own standing assumption, so
+        // the same drop routine reproduces the required test directly. The
+        // gear may not fail here, so ultimate is the larger of the
+        // 1.5-factored limit load and this peak. Whether the factor or the
+        // reserve-energy case governs is left to the arithmetic rather than
+        // assumed: at ALPHA_DAMPING = 1.8 the drop is damping-dominated at
+        // touchdown, so the peak goes roughly as v^2 and (12/10)^2 = 1.44
+        // would beat 1.5 only if the (v-independent) gas-spring share of the
+        // peak were small enough -- it is not, so 1.5x limit currently wins.
+        let peak_reserve_energy = peak_force_for_drop(f_ref_n, f_ref_n, SINK_SPEED_RESERVE_ENERGY_MS, k_damp, stroke_m, unsprung_kg);
+        let ultimate_load_n = (limit_load_n * ULTIMATE_FACTOR).max(peak_reserve_energy);
         let lateral_limit_n = limit_load_n * SIDE_LOAD_FACTOR;
 
         let x0 = equilibrium_y(f_ref_n, f_ref_n, 1.0) * stroke_m;
@@ -551,9 +607,64 @@ mod tests {
     }
 
     #[test]
-    fn ultimate_is_exactly_one_and_a_half_times_limit() {
-        let s = Strut::new(LegKind::Wing);
-        assert!((s.ultimate_load_n / s.limit_load_n - 1.5).abs() < 1e-9);
+    fn ultimate_is_the_larger_of_the_factored_limit_and_the_reserve_energy_case() {
+        // `Strut::new` takes `max(1.5 * limit, reserve-energy peak)`. Both
+        // branches are real requirements, so the test checks the max
+        // relation itself and then which branch governs, rather than
+        // hard-coding one of them.
+        for kind in [LegKind::Nose, LegKind::Wing, LegKind::Body] {
+            let s = Strut::new(kind);
+            assert!(
+                s.ultimate_load_n >= s.limit_load_n * ULTIMATE_FACTOR - 1e-6,
+                "{kind:?}: ultimate must never fall below CS 25.303's 1.5 x limit"
+            );
+            let reserve = peak_force_for_drop(s.f_ref_n, s.f_ref_n, SINK_SPEED_RESERVE_ENERGY_MS, s.k_damp, s.stroke_m, s.unsprung_kg);
+            assert!(
+                s.ultimate_load_n >= reserve - 1e-6,
+                "{kind:?}: ultimate must never fall below the CS 25.723(b) reserve-energy peak"
+            );
+            assert!((s.ultimate_load_n - (s.limit_load_n * ULTIMATE_FACTOR).max(reserve)).abs() < 1e-6);
+
+            // Which branch wins, and why. At touchdown the drop is
+            // damping-dominated (v = v_sink, x = 0), so the peak is
+            //   F = F_gas(0) + k*v^2,   k = ALPHA * F_ref / v_limit^2.
+            // With F_gas(0) = F_ref*(1-Y_STATIC)^N_POLY = F_ref*0.7^1.25
+            // = 0.6403*F_ref and ALPHA_DAMPING = 1.8:
+            //   F(10 fps) = (0.6403 + 1.8) * F_ref             = 2.440 * F_ref
+            //   F(12 fps) = (0.6403 + 1.8*(3.6576/3.05)^2)*F_ref
+            //             = (0.6403 + 1.8*1.4378) * F_ref      = 3.228 * F_ref
+            // so reserve/limit = 3.228/2.440 = 1.323 < 1.5. The gas spring's
+            // v-independent share is what keeps the ratio below (12/10)^2 =
+            // 1.44 and hence below the 1.5 factor: the factored limit load
+            // governs, by a margin of about 13%.
+            let reserve_over_limit = reserve / s.limit_load_n;
+            assert!(
+                reserve_over_limit < ULTIMATE_FACTOR,
+                "{kind:?}: reserve/limit {reserve_over_limit} -- if this ever reaches 1.5 the \
+                 reserve-energy case governs ultimate and the comment above needs redoing"
+            );
+            assert!(
+                reserve_over_limit > 1.0,
+                "{kind:?}: a 12 fps drop must be worse than the 10 fps limit drop"
+            );
+            assert!((s.ultimate_load_n / s.limit_load_n - ULTIMATE_FACTOR).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn the_reserve_energy_drop_does_not_fail_the_leg() {
+        // CS 25.723(b): the landing gear "may not fail" in the 12 fps
+        // reserve-energy test at design landing weight. This is the
+        // requirement, run as a real touchdown rather than as arithmetic on
+        // `ultimate_load_n`.
+        for kind in [LegKind::Nose, LegKind::Wing, LegKind::Body] {
+            let mut s = Strut::new(kind);
+            let (out, saw_overload) = land(&mut s, SINK_SPEED_RESERVE_ENERGY_MS, 3_000);
+            assert!(!out.collapsed, "{kind:?}: the CS 25.723(b) reserve-energy drop must not fail the leg");
+            // It is past limit load, though: 12 fps is a reserve-energy
+            // condition, not a limit one, so the seals take overload damage.
+            assert!(saw_overload, "{kind:?}: a 12 fps drop is past limit load and must register as an overload");
+        }
     }
 
     #[test]
@@ -583,7 +694,7 @@ mod tests {
     #[test]
     fn a_touchdown_at_exactly_the_limit_condition_does_not_collapse() {
         let mut s = Strut::new(LegKind::Wing);
-        let (out, _) = land(&mut s, SINK_SPEED_LIMIT_MS, 3_000);
+        let (out, _) = land(&mut s, SINK_SPEED_LIMIT_MLW_MS, 3_000);
         assert!(!out.collapsed, "the certification limit condition must not itself collapse the leg");
         assert!(out.life_fraction_consumed >= 0.0);
     }
@@ -596,7 +707,7 @@ mod tests {
         // spring's rising polytropic force curve is included; 2.2x the limit
         // sink speed is ~4.8x the energy and is unambiguously past ultimate.
         let mut s = Strut::new(LegKind::Wing);
-        let (out, _) = land(&mut s, SINK_SPEED_LIMIT_MS * 2.2, 3_000);
+        let (out, _) = land(&mut s, SINK_SPEED_LIMIT_MLW_MS * 2.2, 3_000);
         assert!(out.collapsed, "a sink speed well past the limit condition must exceed ultimate and collapse the leg");
     }
 
@@ -635,7 +746,7 @@ mod tests {
         // limit (collapse) cases above: an overload without a collapse. 1.35x
         // the limit sink speed is ~1.8x the kinetic energy of the limit drop,
         // enough to pass limit but short of the 1.5x factor of safety.
-        let (_, saw_overload) = land(&mut s, SINK_SPEED_LIMIT_MS * 1.35, 3_000);
+        let (_, saw_overload) = land(&mut s, SINK_SPEED_LIMIT_MLW_MS * 1.35, 3_000);
         assert!(saw_overload, "a sink speed above the limit condition (but well under 2.2x) should overload without collapsing");
         assert!(!s.collapsed);
         assert!(s.seal_damage > 0.0, "an overload event must leave lasting seal damage");
@@ -646,8 +757,8 @@ mod tests {
         let mut gentle = Strut::new(LegKind::Wing);
         let mut hard = Strut::new(LegKind::Wing);
         let faults = healthy();
-        land(&mut gentle, SINK_SPEED_LIMIT_MS * 0.3, 3_000);
-        land(&mut hard, SINK_SPEED_LIMIT_MS * 0.95, 3_000);
+        land(&mut gentle, SINK_SPEED_LIMIT_MLW_MS * 0.3, 3_000);
+        land(&mut hard, SINK_SPEED_LIMIT_MLW_MS * 0.95, 3_000);
         // Liftoff: return both to airborne so their in-progress cycle closes
         // out and contributes its Miner's-rule increment.
         let air = StrutInputs { on_ground: false, sink_speed_ms: 0.0, load_n: 0.0, side_load_n: 0.0, locked_down: true, dt_s: 0.05 };

@@ -105,3 +105,148 @@ once wired in.
   CrownArea's structure (highest `sun_exposure_fraction` of any zone) more than no sun, and a
   unit check that a below-horizon sun never produces a nonzero/negative flux. Cloud attenuation
   is not modelled (no optical-depth input exists on `Truth`) -- this is a clear-sky figure only.
+
+
+## 2026-09-20 — pylon bleed duct leak vs. `pneumatic_ducts` ODLS: which constant was wrong
+
+**Reported symptom.** A full-severity pylon bleed duct leak (this area's ATA 36/1-4) could not
+trip `pneumatic_ducts`' own overheat detection loop for the same pylon: 40 kW into a 0.5 kg/s
+ram-vented bay settles ~75 K above ambient, short of that area's 100 K
+`THRESHOLD_ABOVE_AMBIENT_K` confirm margin. Four candidates were put up: the leak magnitude
+being too small, the ventilation being too generous, the confirm margin being wrong, or the
+bay's thermal path being wrong.
+
+**Finding: the leak magnitude was wrong — but in the opposite direction, and the value was the
+smaller of its two errors.**
+
+`PYLON_BLEED_LEAK_MAX_HEAT_W = 40_000.0` was, per `registry.rs`'s own note, meant to be "a
+fraction of the ~200 C/44 psi bleed source's enthalpy flow through a small crack". Nobody had
+done that arithmetic. Doing it:
+
+- Duct bore 4 in (0.1016 m) -> bore area `pi/4 * 0.1016^2 = 8.107e-3 m^2` (FBW's own
+  `a380_systems/pneumatic.rs` bleed pipework diameter, the same figure
+  `pneumatic_ducts::network::ENGINE_DUCT_DIAMETER_M` cites).
+- A full-severity *leak* (a cracked weld / partly-let-go V-band coupling, an order of magnitude
+  below a severance) at 2% of bore = `1.621e-4 m^2`, a 14 mm equivalent hole. `pneumatic_ducts::
+  leak::LEAK_AREA_FRACTION_OF_BORE` derives the same 2% independently; the agreement is
+  deliberate so one physical fault is one size on both sides.
+- At 200 C / 44 psig (473 K, 405 kPa abs) the crack is choked (`p_amb/p0 = 0.25 < 0.528`):
+  `mdot = 0.65 * 1.621e-4 * 404694/sqrt(287.06*473.15) * 0.6847 = 0.0792 kg/s`.
+- Its sensible enthalpy above a 15 C bay is `0.0792 * 1005 * 185 = 14.7 kW`.
+
+So 40 kW overstated its own stated source by **2.7x**. That is the value error.
+
+The form error is worse. A fixed wattage is not bounded by the duct it comes from, so it keeps
+heating a bay that is already hotter than the air leaking into it. This is not hypothetical:
+the sibling constant `WING_DUCT_LEAK_MAX_HEAT_W = 30_000.0` settles `WingLeLeft` at **853 C**
+(measured, 4000 s run at rest) from a duct whose air is at 200 C. The wing leading-edge case
+that was used as the *proof the chain works end to end* only trips because of that: an
+unventilated compartment fed an unbounded wattage runs away past any threshold. See the
+recommendation below.
+
+**Fix (this area).** `PYLON_BLEED_LEAK_MAX_HEAT_W` is gone. `live::pylon_bleed_leak_heat_w`
+computes the leak the way the physics does: choked-orifice mass flow through the crack at the
+engine's *real* bleed port condition — `Truth::engine_bleed_pressure_pa`/`_temp_k`, which
+`deep::live` documents as "bleed air available **at the pylon**", i.e. exactly the duct run the
+`PylonEngine<n>` zone contains — times its sensible enthalpy above the bay's current air
+temperature. Consequences, all measured:
+
+| duct condition | mdot | heat into a 15 C bay |
+| --- | --- | --- |
+| engine shut down (ambient) | 0 | **0 W** (was 40 kW) |
+| 200 C / 44 psig (old stated basis) | 0.0792 kg/s | 14.73 kW |
+| Trent 972 IP8 at take-off, 9.7 bar / 590 K | 0.170 kg/s | 51.60 kW |
+
+(The take-off IP8 condition is derived in the function's doc comment: fan hub PR ~1.75 through
+an IPC PR ~5.5 is ~9.6x ambient, and the same ratio through a ~0.90 polytropic efficiency gives
+`288 * 9.6^(0.2857/0.90) = 590 K`.) The heat is now larger than 40 kW at take-off power and
+zero on a cold aircraft, which is the behaviour a fixed number could not have either way.
+
+**It still does not trip, and that is the honest answer.** At take-off port conditions
+`PylonEngine1` settles at 88.5 C against an unaffected sibling at 15.6 C — a real, substantial
+**73 K** rise — and `DEEP_PNEU_ODLS_PylonEngine1_TRIP` stays 0. The bay's steady rise is set
+almost entirely by its ventilation (0.5 kg/s = 502 W/K, against ~25 W/K through structure):
+
+    mdot_leak*cp*(T_duct - T_bay) = mdot_vent*cp*(T_bay - T_out)
+
+To reach 100 K above ambient from a 590 K duct you need
+`mdot_leak = mdot_vent * 100/202 = 0.248 kg/s` — **half the bay's entire ventilation flow**,
+from a 17 mm crack instead of a 14 mm one. Choosing 17 mm would be picking the number that
+makes the detector fire. It was not taken.
+
+**The other two candidates are clear.** The 0.5 kg/s pylon vent is not too generous: it is one
+air change every 12 s in a 5 m^3 bay, and a designated fire zone (CS/FAR 25.1187) is ventilated
+at least that hard — if anything the real figure is larger, making the bay cooler still. The
+thermal path cannot move it either: heat capacity sets only the time constant, and ventilation
+is 95% of the steady-state conductance, so the structure terms cannot change the answer.
+
+### Recommendation for `pneumatic_ducts` (not edited — that area's constants)
+
+`odls::OverheatDetectionLoop::THRESHOLD_ABOVE_AMBIENT_K = 100.0` is wrong in two ways.
+
+1. **Wrong form: the threshold should be absolute, not a margin above ambient.** A real
+   bleed-leak/overheat loop (continuous eutectic-salt sensing element) alarms at a fixed
+   temperature chosen for *that compartment's* own structural and wiring limit. `odls.rs`'s own
+   doc comment states exactly that rationale ("2000-series aluminium begins losing temper above
+   roughly 150 C, so a detector is conventionally set with margin below that") and then
+   implements a relative rule, which only agrees with it at ISA sea level. The same rule trips
+   at 115 C at 15 C ambient, at 145 C on a 45 C ramp (above the stated margin to the structural
+   limit), and at +45 C at cruise with SAT -55 C — the last being *below* what a pylon bay sits
+   at in normal operation from engine proximity alone, i.e. a nuisance trip. Suggested
+   replacement: a per-zone absolute set point, with the two compartment classes this network
+   already distinguishes kept apart — roughly **124 C for the wing/fuselage leading-edge duct
+   runs** and **~200 C for the pylon/strut runs**, the strut figure being higher precisely
+   because that bay is hot in normal operation. (Both are representative continuous-loop alarm
+   temperatures for those two compartment classes; no A380-specific figure is public, so they
+   would be GENERIC, but the *form* is right where the current one is not.)
+
+2. **Wrong quantity: the loop should not be reading bulk bay air.** `live::zone_air_k` reads
+   `THERMAL_ZONE_<NAME>_TEMPERATURE_C`, which is this area's well-mixed **air node** for the
+   whole compartment. A real detection loop is routed *along the duct inside its shroud*, so it
+   senses the escaping plume. This matters because bulk bay air is bounded above by the duct
+   gas: a 200 C (or even a 320 C) duct leaking into a ram-ventilated 5 m^3 pylon cannot put the
+   bulk air more than ~73 K above ambient for any crack size that is still a leak. There is no
+   absolute threshold that is simultaneously *below* the duct temperature and *above* normal
+   bay temperature for bulk pylon air — so with fix (1) alone the pylon still would not trip.
+   Closing the chain needs a local duct-run temperature, not the zone air node. This area can
+   publish one (`THERMAL_ZONE_<NAME>_BLEED_DUCT_HOTSPOT_C`) if `pneumatic_ducts` wants to read
+   it, but it was **not** added in this pass: the plume temperature at the sensing element
+   depends on the entrainment ratio at the element's standoff from the crack, and no public
+   figure exists for A380 pylon duct/loop routing. At 2 duct-diameters standoff it is 229 C and
+   trips a 200 C set point; at 5 it is 179 C and does not. That standoff is the number that
+   would decide the answer, and inventing it is exactly the thing this push forbids. It needs a
+   sourced routing figure, or an explicit GENERIC decision taken jointly, before either area
+   builds on it.
+
+### Follow-up owed by this area (not done in this pass)
+
+`WING_DUCT_LEAK_MAX_HEAT_W` (30 kW), `NACELLE_DUCT_LEAK_MAX_HEAT_W` (20 kW) and
+`APU_DUCT_LEAK_MAX_HEAT_W` (25 kW) still have the unbounded fixed-wattage form, and the wing one
+demonstrably produces an impossible 853 C bay. They should get the same treatment as the pylon
+constant. They were left alone deliberately in this pass because:
+
+- `pneumatic_ducts::live::tests::a_thermal_areas_own_wing_duct_leak_heats_the_bay_enough_to_trip_
+  this_areas_odls` asserts `THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C > 150.0` as its *setup*, and
+  that setup asserts a thermodynamic impossibility: it needs the bay hotter than 150 C from a
+  200 C duct, which requires `mdot_leak*cp` to beat the bay's ~31 W/K loss path by 2.7:1, i.e.
+  `mdot_leak >= 0.083 kg/s` — a 15 mm hole in a 50 mm WAI duct, 8.7% of its bore, a rupture not
+  a leak. Honest physics gives ~0.012 kg/s and a ~68 C bay. Fixing the wing constant therefore
+  breaks that test, and the test is in the other area, which this agent must not edit.
+- `Truth` has no APU bleed *temperature* (only `apu_bleed_pressure_pa`), so the tail-cone APU
+  duct leak cannot be derived the same way without inventing one. That is a `truth-requests.md`
+  item: **`apu_bleed_temp_k`, the PW980 load-compressor discharge temperature**, which
+  `pneumatic_ducts::live` already derives internally from the APU's published pressure ratio and
+  which this area would use directly.
+
+- [done] pylon bleed duct leak derived from real duct conditions — `live.rs`
+  (`pylon_bleed_leak_heat_w`, `orifice_mass_flow_kg_s`, `PYLON_BLEED_DUCT_BORE_M`,
+  `PYLON_BLEED_LEAK_AREA_FRACTION_OF_BORE`, `BLEED_LEAK_DISCHARGE_COEFFICIENT`), `registry.rs`
+  (`model_field`/`magnitude` now describe the crack and the port condition, not a reference
+  wattage) — replaces `PYLON_BLEED_LEAK_MAX_HEAT_W = 40_000.0`. 4 new tests: the derivation's
+  two point values (51.60 kW at take-off IP8, 14.73 kW at the old constant's own claimed
+  200 C/44 psig basis) plus linearity in crack area; a shut-down engine's leak warming its pylon
+  by nothing at all; the bay never exceeding the duct feeding it (the conservation property the
+  fixed-wattage form lacks); and an end-to-end run with `pneumatic_ducts` in the frame showing
+  the leak heats its own bay ~73 K and only its own bay, staying under the 100 K ODLS margin —
+  asserted on the physics rather than that area's trip flag, so it stays true when the
+  recommendation above is acted on. Full `deep::thermal_zones` suite green (49 tests).

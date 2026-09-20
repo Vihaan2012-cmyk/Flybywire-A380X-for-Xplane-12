@@ -117,3 +117,4 @@ forward declarations for whoever wires this model into `fuel.rs`/
   renumbering in `registry.rs` fails loudly instead of silently unhooking a
   failure. Inputs `Truth` does not carry yet are collected in one documented
   `...Commands` struct per area rather than invented.
+- [done] sourced-constants pass — jettison.rs — Withdrew the claim that 2,000 kg/min per side is "the published A380 rate": it is not published, and the figures that circulate (3,300 / 2,500 kg/min total, 2,200 lb/min) disagree with it and each other. Documented the CS 25.1001(b) 15-minute frame as the certification context, added `REFERENCE_JETTISON_RATE_PER_SIDE_KG_S`, and replaced the "matches the published rate" test with a bracket against the publicly quoted band. Fuel transfer still moves no mass: no real transfer rate found.

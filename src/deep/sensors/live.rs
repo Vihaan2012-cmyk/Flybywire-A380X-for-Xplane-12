@@ -108,12 +108,56 @@ const AC_BUS_ALIVE_V: f64 = 90.0;
 /// fully open element is ambiguous.
 const HEATER_FAILED_FRACTION: f64 = 0.5;
 
-/// GENERIC: a GPS receiver with an unobstructed sky view tracks most of
-/// the satellites above its mask angle, typically around ten of the 24+
-/// satellite constellation. `Truth` carries no constellation geometry (it
-/// would need the receiver's position and the time of day), so this
-/// nominal count stands in for it. It is the *only* number in this file
-/// that is not a real input or a model constant, it is what
+/// Satellites an unobstructed airborne GPS antenna has in view. **Derived
+/// from published constellation geometry, not picked.**
+///
+/// A satellite at orbital radius `r` is above a user's mask elevation `eps`
+/// exactly when its Earth-central angle from the user is at most
+///
+///   `psi = arccos(R_e * cos(eps) / r) - eps`
+///
+/// (standard spherical Earth/satellite visibility geometry, e.g. Wertz,
+/// *Space Mission Analysis and Design*). The spherical cap that subtends is
+/// `(1 - cos psi)/2` of the whole sphere, and a constellation designed for
+/// uniform global coverage puts that same fraction of its satellites there
+/// on average.
+///
+/// Numbers, all public:
+/// - `R_e = 6371 km` (mean Earth radius, IUGG).
+/// - `r = 26_560 km`: GPS semi-major axis, from the 20_180 km nominal
+///   orbital altitude in the GPS Space Segment / Navstar GPS Space Segment
+///   Navigation User Interfaces (IS-GPS-200) and the GPS Standard
+///   Positioning Service Performance Standard.
+/// - `eps = 5 deg`: the mask angle GNSS avionics standards work to (RTCA
+///   DO-229, WAAS MOPS, states its accuracy and availability against a
+///   5-degree mask; ARINC 743A GNSS sensor units use the same).
+///
+///   `R_e cos(5 deg) / r = 6371 * 0.996195 / 26_560 = 0.238957`
+///   `arccos(0.238957) = 76.177 deg`,  `psi = 71.177 deg`
+///   `(1 - cos 71.177 deg)/2 = (1 - 0.322865)/2 = 0.338568`
+///
+/// Applied to the constellation the SPS Performance Standard commits to
+/// (at least 24 operational satellites for 95% of the time, the baseline
+/// 24-slot constellation), that is `24 * 0.338568 = 8.13` in view -- which
+/// is also, independently, exactly where `gps::REFERENCE_SATELLITES = 8`
+/// sits, so the two constants are consistent rather than separately
+/// invented. Against the constellation actually flown (31 operational
+/// satellites, the long-running figure the US Space Force publishes for
+/// the on-orbit GPS constellation), it is `31 * 0.338568 = 10.50`.
+///
+/// This model takes the flown constellation, floored to a whole satellite:
+/// **10**. That is the same value an earlier revision of this file carried
+/// as a GENERIC "typically around ten"; what has changed is that it is now
+/// derived from published orbital geometry and a published constellation
+/// size, so it can be checked and so its sensitivity is explicit -- a
+/// 24-satellite constellation would give 8, and a 5-degree change in mask
+/// angle moves it by about one satellite.
+///
+/// Still an approximation in one respect, honestly: GPS satellites sit in
+/// six inclined planes rather than uniformly on the sphere, so the true
+/// count at a given place and time oscillates about this mean (roughly 8
+/// to 13 at mid latitudes). `Truth` carries no receiver position or time of
+/// day, so the mean is what this file can offer; it is what
 /// `Truth::gps_satellites_visible` should replace, and nothing but the GPS
 /// noise magnitude and the jamming threshold depends on it.
 const NOMINAL_SATELLITES_VISIBLE: u32 = 10;

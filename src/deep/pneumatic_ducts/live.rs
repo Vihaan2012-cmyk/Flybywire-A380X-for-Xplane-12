@@ -66,7 +66,7 @@ use super::network::{ApuBleedInput, DuctNetwork, DuctNetworkFaults, EngineBleedI
 use super::odls::OdlsFaults;
 use super::precooler::PrecoolerFaults;
 use crate::deep::api::{failure_id, Area as RegArea};
-use crate::deep::live::{Faults, Truth};
+use crate::deep::live::{DerivedFailure, Faults, Truth};
 
 /// Ratio of specific heats for air, standard.
 const GAMMA_AIR: f64 = 1.4;
@@ -100,6 +100,76 @@ const APU_LOAD_COMPRESSOR_POLYTROPIC_EFFICIENCY: f64 = 0.8;
 
 fn f(ata: u16, n: u16) -> u64 {
     failure_id(RegArea::PneumaticDucts, ata, n)
+}
+
+// ---------------------------------------------------------------------
+// Authority: this area's level-2 couplings into FlyByWire's own failures
+// (`docs/deep/authority.md`).
+//
+// This is the overlap `authority.md` calls the most delicate of the three,
+// and it turns out to be the narrowest. FlyByWire's A380 pneumatic system
+// models eight bleed valves this model also has -- each engine's HP valve
+// and its pressure-regulating (shut-off) valve -- and takes a *continuous*
+// seizure input for each, `PNEU_VALVE_FAILED:n` (`a380_systems/src/
+// pneumatic.rs:53-90`'s `ValveSeizure`: "a seized valve loses that fraction
+// of its authority, measured from where it stood when it seized"). That is
+// the same physical fault this model's own `upstream[n].hp_valve_stuck`/
+// `pr_valve_stuck` is, with the same meaning and the same 0..1 scale, so
+// the verdict passes across unrounded -- the one place in these three
+// systems where level 2 keeps the deep model's own granularity.
+//
+// Everything else in this area is level 1. FlyByWire has no duct, no leak,
+// no rupture, no insulation, no precooler, no overheat-detection loop and
+// no bay temperature, so nothing competes with what this area publishes.
+// The one genuine gap is in the other direction and is recorded in
+// `authority.md`: when this area's ODLS trips and latches an engine's
+// bleed isolated, there is no FlyByWire input that *shuts* a valve --
+// seizure freezes a valve where it stands, which for an open valve would
+// leave FlyByWire bleeding from an engine this model has isolated. Seizing
+// it would not be the same statement, so it is not made.
+
+/// The extra catalogue's "Engine n HP bleed valve stuck"
+/// (`crate::failures::extra`, `PNEUMATIC_VALVES` valves 1-4).
+const FBW_HP_VALVE: [u64; 4] = [36_008, 36_009, 36_010, 36_011];
+/// "Engine n bleed valve stuck" -- the pressure regulating/shut-off valve
+/// (`PNEUMATIC_VALVES` valves 5-8).
+const FBW_PR_VALVE: [u64; 4] = [36_012, 36_013, 36_014, 36_015];
+
+/// The registry component behind all eight. `registry.rs` catalogues one
+/// id per distinct fault mechanism on a component *class* (its own module
+/// doc: "x4 engines"), so the four engines share one component and one
+/// deep failure id each for the HP and the PR valve -- which is why arming
+/// either seizes that valve on all four engines, here and on FlyByWire's
+/// side alike. Per-instance arming needs per-instance ids; the same gap
+/// `apply_faults` already records.
+const UPSTREAM_VALVE_COMPONENT: &str = "36_pneu.engine_upstream_valve_stage";
+
+/// Why, per engine, for each half of the table.
+const HP_VALVE_REASON: [&str; 4] = [
+    "engine 1 HP bleed valve seized at its last position",
+    "engine 2 HP bleed valve seized at its last position",
+    "engine 3 HP bleed valve seized at its last position",
+    "engine 4 HP bleed valve seized at its last position",
+];
+const PR_VALVE_REASON: [&str; 4] = [
+    "engine 1 bleed PR/shutoff valve seized at its last position",
+    "engine 2 bleed PR/shutoff valve seized at its last position",
+    "engine 3 bleed PR/shutoff valve seized at its last position",
+    "engine 4 bleed PR/shutoff valve seized at its last position",
+];
+
+/// Every level-2 coupling this area owns, as `(FlyByWire failure id, deep
+/// component)`, in the order [`PneumaticDuctsLive::each_coupling`] emits
+/// them.
+fn coupling_table() -> Vec<(u64, &'static str)> {
+    let mut v: Vec<(u64, &'static str)> = Vec::new();
+    for i in 0..4 {
+        v.push((FBW_HP_VALVE[i], UPSTREAM_VALVE_COMPONENT));
+    }
+    for i in 0..4 {
+        v.push((FBW_PR_VALVE[i], UPSTREAM_VALVE_COMPONENT));
+    }
+    v
 }
 
 /// Every variable name this area publishes, built once (the `Area` trait
@@ -166,6 +236,8 @@ pub struct PneumaticDuctsLive {
     faults: DuctNetworkFaults,
     out: NetworkOutputs,
     names: VarNames,
+    /// One published name per entry of [`coupling_table`], in that order.
+    derived_names: Vec<String>,
 }
 
 impl Default for PneumaticDuctsLive {
@@ -184,7 +256,13 @@ fn on(b: bool) -> f64 {
 
 impl PneumaticDuctsLive {
     pub fn new() -> Self {
-        Self { network: DuctNetwork::new(), faults: DuctNetworkFaults::default(), out: NetworkOutputs::default(), names: VarNames::new() }
+        Self {
+            network: DuctNetwork::new(),
+            faults: DuctNetworkFaults::default(),
+            out: NetworkOutputs::default(),
+            names: VarNames::new(),
+            derived_names: coupling_table().into_iter().map(|(id, _)| format!("DEEP_DERIVED_FBW_FAILURE_{id}")).collect(),
+        }
     }
 
     /// The last tick's outputs, for anything that wants the model's state
@@ -389,6 +467,33 @@ impl PneumaticDuctsLive {
             self.faults.odls[z] = odls;
         }
     }
+
+    /// This area's whole level-2 coupling table, with this frame's verdict
+    /// on each entry (`docs/deep/authority.md`).
+    ///
+    /// The magnitude is passed across **unrounded**: FlyByWire's
+    /// `ValveSeizure` takes the same 0..1 loss of valve authority this
+    /// model's own `hp_valve_stuck`/`pr_valve_stuck` is, so a half-seized
+    /// valve is half-seized on both sides. This is the one coupling of the
+    /// three systems where level 2 does not have to round to a trip.
+    fn each_coupling(&self, out: &mut dyn FnMut(DerivedFailure)) {
+        for i in 0..4 {
+            out(DerivedFailure {
+                fbw_id: FBW_HP_VALVE[i],
+                magnitude: self.faults.upstream[i].hp_valve_stuck.clamp(0.0, 1.0),
+                deep_component: UPSTREAM_VALVE_COMPONENT,
+                reason: HP_VALVE_REASON[i],
+            });
+        }
+        for i in 0..4 {
+            out(DerivedFailure {
+                fbw_id: FBW_PR_VALVE[i],
+                magnitude: self.faults.upstream[i].pr_valve_stuck.clamp(0.0, 1.0),
+                deep_component: UPSTREAM_VALVE_COMPONENT,
+                reason: PR_VALVE_REASON[i],
+            });
+        }
+    }
 }
 
 impl crate::deep::live::Area for PneumaticDuctsLive {
@@ -440,6 +545,20 @@ impl crate::deep::live::Area for PneumaticDuctsLive {
         for i in 0..3 {
             out(&n.cross_bleed_open[i], o.cross_bleed_valve_open[i]);
         }
+
+        // The level-2 couplings, so a derived failure is never silent
+        // (`docs/deep/authority.md`).
+        let mut k = 0usize;
+        self.each_coupling(&mut |d| {
+            if let Some(name) = self.derived_names.get(k) {
+                out(name, d.magnitude);
+            }
+            k += 1;
+        });
+    }
+
+    fn derived_failures(&self, out: &mut dyn FnMut(DerivedFailure)) {
+        self.each_coupling(out);
     }
 }
 
@@ -777,6 +896,157 @@ mod tests {
     /// per `network.rs`'s own module doc.
     fn f_thermal(ata: u16, n: u16) -> u64 {
         crate::deep::api::failure_id(RegArea::ThermalZones, ata, n)
+    }
+
+    // -----------------------------------------------------------------
+    // Authority (docs/deep/authority.md): the level-2 couplings.
+
+    fn derived(area: &PneumaticDuctsLive) -> BTreeMap<u64, f64> {
+        let mut out = BTreeMap::new();
+        crate::deep::live::Area::derived_failures(area, &mut |d| {
+            out.insert(d.fbw_id, d.magnitude);
+        });
+        out
+    }
+
+    #[test]
+    fn the_coupling_table_matches_what_the_area_actually_emits() {
+        let area = PneumaticDuctsLive::new();
+        let table = coupling_table();
+        let mut emitted: Vec<(u64, &'static str)> = Vec::new();
+        area.each_coupling(&mut |d| emitted.push((d.fbw_id, d.deep_component)));
+        assert_eq!(emitted, table);
+        assert_eq!(area.derived_names.len(), table.len());
+        assert_eq!(table.len(), 8, "four HP valves and four PR valves -- all FlyByWire models of this area's components");
+
+        // These are the extra catalogue's ids, the ones
+        // `extra::write_pneumatic_valves` turns into `PNEU_VALVE_FAILED:n`
+        // every tick. The valve numbers must be FlyByWire's own: 1-4 the
+        // HP valves, 5-8 the PR valves (`a380_systems/src/pneumatic.rs`).
+        let valves: std::collections::BTreeMap<u64, usize> = crate::failures::extra::PNEUMATIC_VALVES.iter().copied().collect();
+        for (i, id) in FBW_HP_VALVE.iter().enumerate() {
+            assert_eq!(valves.get(id), Some(&(i + 1)), "{id} must be FlyByWire's HP valve {}", i + 1);
+        }
+        for (i, id) in FBW_PR_VALVE.iter().enumerate() {
+            assert_eq!(valves.get(id), Some(&(i + 5)), "{id} must be FlyByWire's PR valve {}", i + 5);
+        }
+        let catalogue: std::collections::BTreeSet<u64> = crate::failures::extra::extra_failures().into_iter().map(|x| x.id).collect();
+        for (id, _) in &table {
+            assert!(catalogue.contains(id), "{id} is in no catalogue this plugin drives");
+        }
+    }
+
+    #[test]
+    fn a_healthy_network_tells_flybywire_nothing_at_all() {
+        let mut area = PneumaticDuctsLive::new();
+        crate::deep::live::Area::tick(&mut area, &cruise_truth(), &Faults::default());
+        assert!(derived(&area).values().all(|&m| m == 0.0), "{:?}", derived(&area));
+    }
+
+    #[test]
+    fn a_seized_bleed_valve_reaches_flybywires_own_valve_at_the_same_severity() {
+        // `authority.md`'s one unrounded coupling: FlyByWire's
+        // `ValveSeizure` takes the same 0..1 loss of authority this model's
+        // own `pr_valve_stuck` is, so a 40%-seized valve crosses as 0.4 and
+        // not as a trip.
+        let mut area = PneumaticDuctsLive::new();
+        crate::deep::live::Area::tick(&mut area, &cruise_truth(), &Faults::from_pairs([(f(36, 16), 0.4)]));
+        let d = derived(&area);
+        for id in FBW_PR_VALVE {
+            assert!((d[&id] - 0.4).abs() < 1e-9, "PR valve {id} should cross at 0.4, got {}", d[&id]);
+        }
+        for id in FBW_HP_VALVE {
+            assert_eq!(d[&id], 0.0, "the HP valves are a different valve and must be untouched");
+        }
+        assert!((published(&area)["DEEP_DERIVED_FBW_FAILURE_36012"] - 0.4).abs() < 1e-9, "and it must be visible");
+
+        // And the HP valve's own id, the other way round.
+        let mut hp = PneumaticDuctsLive::new();
+        crate::deep::live::Area::tick(&mut hp, &cruise_truth(), &Faults::from_pairs([(f(36, 15), 1.0)]));
+        let d = derived(&hp);
+        for id in FBW_HP_VALVE {
+            assert_eq!(d[&id], 1.0);
+        }
+        for id in FBW_PR_VALVE {
+            assert_eq!(d[&id], 0.0);
+        }
+    }
+
+    /// End to end: the deep model's verdict, through the same
+    /// `PNEU_VALVE_FAILED:n` variable `extra::write_pneumatic_valves`
+    /// writes, freezes FlyByWire's own valve.
+    ///
+    /// The global `crate::failures` registry is deliberately not touched
+    /// (it is process-wide and shared with every other test): the
+    /// magnitude is written straight into the variable, which is what
+    /// `write_pneumatic_valves` does with it every tick.
+    #[test]
+    fn a_derived_valve_seizure_changes_flybywires_own_solve() {
+        use crate::aspects::test_vars::TestVars;
+        use std::time::Duration;
+        use systems::simulation::{Simulation, StartState, VariableRegistry};
+
+        let mut area = PneumaticDuctsLive::new();
+        crate::deep::live::Area::tick(&mut area, &cruise_truth(), &Faults::from_pairs([(f(36, 16), 1.0)]));
+        let verdict = derived(&area);
+        assert_eq!(verdict[&36_012], 1.0, "setup: the deep model must have concluded engine 1's PR valve is seized");
+
+        let run = |seized: bool| -> f64 {
+            let mut vars = TestVars::default();
+            let mut sim = Simulation::new(StartState::Cruise, a380_systems::A380::new, &mut vars);
+            // A bare test bed reads every unset variable as zero: every
+            // pushbutton off, every engine stopped, no generator on line
+            // and so no power for the bleed control. Four running engines
+            // (`TrentEngine`'s own variables), the batteries in AUTO and
+            // the ENG n BLEED pushbuttons in AUTO are what an A380 in the
+            // cruise actually has, and are what FlyByWire's own pneumatic
+            // system needs before any valve moves at all. The IP8 port
+            // condition is the `ENGINE_IP_PORT_*` pair `deep::plugin`
+            // publishes from this crate's engine model every frame.
+            for n in 1..=4 {
+                vars.set(&format!("TURB ENG CORRECTED N1:{n}"), 85.0);
+                vars.set(&format!("TURB ENG CORRECTED N2:{n}"), 90.0);
+                vars.set(&format!("A32NX_ENGINE_N2:{n}"), 90.0);
+                vars.set(&format!("A32NX_ENGINE_N3:{n}"), 90.0);
+                vars.set(&format!("A32NX_ENGINE_STATE:{n}"), 1.0);
+                vars.set(&format!("A32NX_OVHD_PNEU_ENG_{n}_BLEED_PB_IS_AUTO"), 1.0);
+                vars.set(&format!("A32NX_OVHD_ELEC_ENG_GEN_{n}_PB_IS_ON"), 1.0);
+                vars.set(&format!("A32NX_ENGINE_IP_PORT_PRESSURE_PA:{n}"), 300_000.0);
+                vars.set(&format!("A32NX_ENGINE_IP_PORT_TEMP_K:{n}"), 500.0);
+            }
+            for bat in ["BAT_1", "BAT_2", "BAT_ESS", "BAT_APU"] {
+                vars.set(&format!("A32NX_OVHD_ELEC_{bat}_PB_IS_AUTO"), 1.0);
+            }
+            // A real atmosphere: a gas model handed a vacuum divides by
+            // zero, and the whole pneumatic solve comes back NaN.
+            // `UpdateContext` reads these in MSFS's own units
+            // (`update_context.rs`: ambient pressure in inHg, temperature
+            // in C, density in slug/ft^3).
+            vars.set("AMBIENT TEMPERATURE", 15.0);
+            vars.set("AMBIENT PRESSURE", 29.92);
+            vars.set("AMBIENT DENSITY", 0.002_377);
+            vars.set("PRESSURE ALTITUDE", 0.0);
+            vars.set("SIM ON GROUND", 1.0);
+            vars.set("TOTAL WEIGHT", 1_200_000.0);
+            if seized {
+                // Exactly what `extra::write_pneumatic_valves` does with a
+                // magnitude, for the four PR valves this verdict covers.
+                // Written before the first tick, so FlyByWire's own valves
+                // seize where they start -- shut -- and never open.
+                for n in 5..=8 {
+                    let id = vars.get(format!("PNEU_VALVE_FAILED:{n}"));
+                    systems::simulation::SimulatorReaderWriter::write(&mut vars, &id, 1.0);
+                }
+            }
+            for i in 0..60 {
+                sim.tick(Duration::from_millis(50), 100.0 + i as f64 * 0.05, &mut vars);
+            }
+            vars.value("A32NX_PNEU_ENG_1_PR_VALVE_OPEN")
+        };
+        let free = run(false);
+        let frozen = run(true);
+        assert!(free > 0.0, "setup: FlyByWire's own PR valve opens in the cruise with the bleed running, got {free}");
+        assert_eq!(frozen, 0.0, "seized where it stood, it must stay shut -- the deep model's verdict, in FlyByWire's own solve");
     }
 
     #[test]

@@ -52,7 +52,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::deep::api::Registry;
-use crate::deep::live::{Area, Faults, Truth};
+use crate::deep::live::{Area, DerivedFailure, Faults, Truth};
 
 use super::loads::{self, Catalog};
 use super::network::{BusId, Contactor, ContactorKind, FeedSource, Network, NetworkReport, ALL_BUS_IDS};
@@ -540,6 +540,159 @@ fn bus_tag(bus: BusId) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------
+// Authority: this area's level-2 couplings into FlyByWire's own failures.
+//
+// `docs/deep/authority.md`: the deep model is authoritative, and expresses
+// its authority through the coarsest FlyByWire input that can carry the
+// verdict. For everything below FlyByWire's resolution -- every load's
+// current, every breaker's I^2t state, every contactor, every battery,
+// the RAT, ground power -- there is nothing to couple: `a380_systems` has
+// no concept of them, so the published variables above stand alone. What
+// follows is the rest: the components FlyByWire models too, and the exact
+// condition in this model that says one of them has failed.
+//
+// Ids are `crate::failures::a380_failures()`'s own, in that function's
+// order; the FlyByWire type each one activates is named beside it.
+
+/// `FailureType::Generator(1..4)` -- `engine_generator.rs`'s own failure,
+/// which stops the machine providing any potential at all.
+const FBW_GENERATOR: [u64; 4] = [24_020, 24_021, 24_022, 24_023];
+/// `FailureType::ApuGenerator(1..2)` (`pw980.rs`).
+const FBW_APU_GENERATOR: [u64; 2] = [24_030, 24_031];
+/// `FailureType::TransformerRectifier(1..4)`. FlyByWire's A380 numbers
+/// them TR1, TR2, TR ESS, TR APU (`a380_systems/src/electrical/
+/// direct_current.rs:96-110` builds BCRUs 1/2/3 as tr_1/tr_2/tr_ess and
+/// `alternating_current.rs:67` builds number 4 as tr_apu) -- exactly this
+/// area's own `src_tr` order.
+const FBW_TR: [u64; 4] = [24_000, 24_001, 24_002, 24_003];
+/// `FailureType::StaticInverter` (`static_inverter.rs`).
+const FBW_STATIC_INVERTER: u64 = 24_004;
+
+/// The registry component id behind each of those, so a derived failure
+/// can always say which deep component concluded it.
+const VFG_COMPONENT: [&str; 4] = ["24_elec.vfg-1", "24_elec.vfg-2", "24_elec.vfg-3", "24_elec.vfg-4"];
+const APU_GEN_COMPONENT: [&str; 2] = ["24_elec.apu-gen-1", "24_elec.apu-gen-2"];
+const TR_COMPONENT: [&str; 4] = ["24_elec.tr-1", "24_elec.tr-2", "24_elec.tr-ess", "24_elec.tr-apu"];
+const STATIC_INVERTER_COMPONENT: &str = "24_elec.static-inv";
+/// `registry.rs`'s own bus component ids, in [`ALL_BUS_IDS`] order.
+const BUS_COMPONENT: [&str; 17] = [
+    "24_elec.bus.AC1",
+    "24_elec.bus.AC2",
+    "24_elec.bus.AC3",
+    "24_elec.bus.AC4",
+    "24_elec.bus.AC_ESS",
+    "24_elec.bus.AC_ESS_SHED",
+    "24_elec.bus.AC_EMER",
+    "24_elec.bus.AC_GND_FLT_SVC",
+    "24_elec.bus.DC1",
+    "24_elec.bus.DC2",
+    "24_elec.bus.DC_ESS",
+    "24_elec.bus.DC_ESS_SHED",
+    "24_elec.bus.DC_BAT",
+    "24_elec.bus.DC_HOT1",
+    "24_elec.bus.DC_HOT2",
+    "24_elec.bus.DC_APU",
+    "24_elec.bus.DC_GND_FLT_SVC",
+];
+
+/// The `FailureType::ElectricalBus` id for a deep bus, where FlyByWire
+/// models the same busbar. A failed `ElectricalBus` is non-conductive
+/// (`electrical/mod.rs:145-157`'s `is_conductive`), which is exactly what
+/// a bus isolated behind its own tripped feeder breaker is.
+///
+/// Four of the seventeen have no FlyByWire counterpart and stay level 1:
+///
+/// * `AcEssShed`/`DcEssShed` -- FlyByWire's A380 has no separate shed
+///   busbar. It reuses `AlternatingCurrentEssentialShed` for the *AC ESS*
+///   bus itself (400XP) and `AlternatingCurrentEssential` for AC EMER
+///   (491XP), both with a `// TODO` saying so at
+///   `alternating_current.rs:46-56`; its DC ESS sub-bus (`108PH`) is not
+///   in the registered failure catalogue at all. Mapping a shed bus onto
+///   either of those would fail the bus it sheds *from*.
+/// * `DcBat` -- the A380 has no DC BAT busbar in FlyByWire's model; each
+///   battery sits on its own hot bus, which is coupled below.
+/// * The `AcGndFltSvc`/`DcGndFltSvc` pair *is* coupled; it is the ESS
+///   shed pair and DC BAT that are not.
+fn fbw_bus_failure(bus: BusId) -> Option<u64> {
+    Some(match bus {
+        BusId::Ac1 => 24_100,
+        BusId::Ac2 => 24_101,
+        BusId::Ac3 => 24_102,
+        BusId::Ac4 => 24_103,
+        // FlyByWire's `AlternatingCurrentEssentialShed` *is* its AC ESS
+        // bus, and `AlternatingCurrentEssential` its AC EMER bus -- see
+        // this function's own doc, and `crate::failures::failure_name`,
+        // which names 24_104 "AC EMER" and 24_105 "AC ESS" for exactly
+        // that reason.
+        BusId::AcEss => 24_105,
+        BusId::AcEmer => 24_104,
+        BusId::AcGndFltSvc => 24_107,
+        BusId::Dc1 => 24_108,
+        BusId::Dc2 => 24_109,
+        BusId::DcEss => 24_110,
+        BusId::DcHot1 => 24_113,
+        BusId::DcHot2 => 24_114,
+        // `DirectCurrentNamed("309PP")`, the APU battery bus, is what
+        // FlyByWire's TR APU feeds (`direct_current.rs:204-207`) -- the
+        // same busbar this model calls `DcApu`.
+        BusId::DcApu => 24_112,
+        BusId::DcGndFltSvc => 24_117,
+        BusId::AcEssShed | BusId::DcEssShed | BusId::DcBat => return None,
+    })
+}
+
+/// How far a continuously degraded machine has to be gone before the
+/// verdict "this machine has failed" is worth sending to FlyByWire, whose
+/// own generator/TR/inverter failures are binary.
+///
+/// **GENERIC**, and unavoidably so: `authority.md`'s stated granularity
+/// limit is that a partly degraded component either rounds to a trip or
+/// stays invisible at level 2. Half is the rounding point at which the
+/// machine has lost more of its health parameter's range than it has left;
+/// below it the deep model keeps the real degradation (a stator that sags
+/// harder under load is still a real, published, ELEC-page-visible thing)
+/// and FlyByWire is told nothing.
+const DEGRADED_BEYOND_HALF: f64 = 0.5;
+
+/// Why a machine-level verdict was reached, as the Study page shows it.
+/// One of a fixed set, chosen in `tick`, so that a derived failure always
+/// names its own cause rather than a disjunction of everything it could
+/// have been.
+const REASON_OVERLOAD_TRIPPED: &str = "its own I^2t overload element ran to the trip and took it off line";
+const REASON_REGULATOR_OUT_OF_BAND: &str = "driven and excited, but regulating outside MIL-STD-704F's 108-118 V band";
+const REASON_WINDING_DEGRADED: &str = "stator/winding degraded past half its range: it can no longer hold rated voltage under load";
+const REASON_TRU_DEGRADED: &str = "rectifier winding degraded past half its range toward its own degraded internal resistance";
+const REASON_INVERTER_DEGRADED: &str = "conversion efficiency degraded past half its range toward its own floor";
+const REASON_FEEDER_OPEN: &str = "the feeder breaker protecting this bus has tripped open";
+/// The healthy case still has to carry a string; nothing reads it, because
+/// a zero-magnitude coupling never leaves `Deep::tick`.
+const REASON_HEALTHY: &str = "healthy";
+
+/// Every level-2 coupling this area owns, as `(FlyByWire failure id, deep
+/// component)`, in the order [`ElectricalLive::each_coupling`] emits them.
+/// `new` turns it into the published variable names once, and a unit test
+/// holds the two orders together.
+fn coupling_table() -> Vec<(u64, &'static str)> {
+    let mut v: Vec<(u64, &'static str)> = Vec::new();
+    for i in 0..4 {
+        v.push((FBW_GENERATOR[i], VFG_COMPONENT[i]));
+    }
+    for i in 0..2 {
+        v.push((FBW_APU_GENERATOR[i], APU_GEN_COMPONENT[i]));
+    }
+    for i in 0..4 {
+        v.push((FBW_TR[i], TR_COMPONENT[i]));
+    }
+    v.push((FBW_STATIC_INVERTER, STATIC_INVERTER_COMPONENT));
+    for (bi, &bus) in ALL_BUS_IDS.iter().enumerate() {
+        if let Some(id) = fbw_bus_failure(bus) {
+            v.push((id, BUS_COMPONENT[bi]));
+        }
+    }
+    v
+}
+
 /// Pre-built variable names: `publish` runs every frame and must never
 /// format a string.
 struct Names {
@@ -554,6 +707,12 @@ struct Names {
     breaker_current: Vec<String>,
     breaker_closed: Vec<String>,
     load_powered: Vec<String>,
+    /// One per entry of [`coupling_table`], in that order: the magnitude
+    /// this area is presently asserting on FlyByWire's own failure of that
+    /// id. Published so that a derived failure is never invisible -- the
+    /// Study page reads these beside the crew's armed failures, which is
+    /// `authority.md`'s "every level-2 coupling must be visible".
+    derived: Vec<String>,
 }
 
 pub struct ElectricalLive {
@@ -608,6 +767,18 @@ pub struct ElectricalLive {
     gen_fault: [bool; 4],
     apu_gen_fault: [bool; 2],
     tr_fault: [bool; 4],
+    /// This frame's level-2 verdicts and the reason behind each
+    /// (`docs/deep/authority.md`, [`ElectricalLive::each_coupling`]).
+    /// Deliberately *not* the `*_fault` annunciations above: those are
+    /// what the crew is shown and include bus-caused undervoltage, which
+    /// is a symptom the machine may have no part in. A verdict handed to
+    /// FlyByWire has to be about the machine itself, or a bus fault would
+    /// leave a healthy generator failed on FlyByWire's side long after the
+    /// bus recovered.
+    gen_verdict: [Option<&'static str>; 4],
+    apu_gen_verdict: [Option<&'static str>; 2],
+    tr_verdict: [Option<&'static str>; 4],
+    static_inv_verdict: Option<&'static str>,
     bat_fault: [bool; 2],
     bat_charge: [f64; 2],
     galley_shed: bool,
@@ -797,6 +968,7 @@ impl ElectricalLive {
             breaker_current: net.breakers.iter().map(|b| format!("ELEC_BKR_{}_CURRENT_A", b.id)).collect(),
             breaker_closed: net.breakers.iter().map(|b| format!("ELEC_BKR_{}_CLOSED", b.id)).collect(),
             load_powered: net.loads.iter().map(|l| format!("ELEC_LOAD_{}_POWERED", l.spec.id)).collect(),
+            derived: coupling_table().into_iter().map(|(id, _)| format!("DEEP_DERIVED_FBW_FAILURE_{id}")).collect(),
         };
 
         let n_breakers = net.breakers.len();
@@ -829,6 +1001,10 @@ impl ElectricalLive {
             gen_fault: [false; 4],
             apu_gen_fault: [false; 2],
             tr_fault: [false; 4],
+            gen_verdict: [None; 4],
+            apu_gen_verdict: [None; 2],
+            tr_verdict: [None; 4],
+            static_inv_verdict: None,
             bat_fault: [false; 2],
             bat_charge: [1.0; 2],
             galley_shed: false,
@@ -1249,6 +1425,55 @@ impl ElectricalLive {
         }
         i * self.net.bus(self.net.contactors[contactor].to).voltage
     }
+
+    /// This area's whole level-2 coupling table, with this frame's verdict
+    /// on each entry (`docs/deep/authority.md`). Emitted in
+    /// [`coupling_table`]'s order, healthy entries included at magnitude
+    /// `0.0`, so that both `publish` and `derived_failures` walk one list
+    /// and the set is a level rather than an event.
+    ///
+    /// Every verdict here is a *machine*-level one -- the machine's own
+    /// overload element, its own regulated terminal, its own health
+    /// parameter, or, for a bus, its own feeder breaker. None of them is a
+    /// bus voltage: this area's published `ELEC_*_FAULT` annunciations do
+    /// include bus-caused undervoltage, because that is what the crew is
+    /// shown, but a verdict handed to FlyByWire must not, or a bus fault
+    /// would leave a healthy generator failed on FlyByWire's side after
+    /// the bus recovered.
+    fn each_coupling(&self, out: &mut dyn FnMut(DerivedFailure)) {
+        let verdict = |v: Option<&'static str>| (if v.is_some() { 1.0 } else { 0.0 }, v.unwrap_or(REASON_HEALTHY));
+        for i in 0..4 {
+            let (magnitude, reason) = verdict(self.gen_verdict[i]);
+            out(DerivedFailure { fbw_id: FBW_GENERATOR[i], magnitude, deep_component: VFG_COMPONENT[i], reason });
+        }
+        for i in 0..2 {
+            let (magnitude, reason) = verdict(self.apu_gen_verdict[i]);
+            out(DerivedFailure { fbw_id: FBW_APU_GENERATOR[i], magnitude, deep_component: APU_GEN_COMPONENT[i], reason });
+        }
+        for i in 0..4 {
+            let (magnitude, reason) = verdict(self.tr_verdict[i]);
+            out(DerivedFailure { fbw_id: FBW_TR[i], magnitude, deep_component: TR_COMPONENT[i], reason });
+        }
+        let (magnitude, reason) = verdict(self.static_inv_verdict);
+        out(DerivedFailure { fbw_id: FBW_STATIC_INVERTER, magnitude, deep_component: STATIC_INVERTER_COMPONENT, reason });
+        for (bi, &bus) in ALL_BUS_IDS.iter().enumerate() {
+            let Some(id) = fbw_bus_failure(bus) else { continue };
+            // A feeder breaker is in series with everything that can feed
+            // its bus, so a bus behind an open one is isolated no matter
+            // what is running -- which is precisely what a failed
+            // `ElectricalBus` is on FlyByWire's side. A bus that is merely
+            // *unpowered* is not derived: FlyByWire works that out for
+            // itself, and claiming it here would keep the bus dead after
+            // its own source came back.
+            let isolated = !self.net.breakers[self.feeder_breaker[bi]].closed;
+            out(DerivedFailure {
+                fbw_id: id,
+                magnitude: if isolated { 1.0 } else { 0.0 },
+                deep_component: BUS_COMPONENT[bi],
+                reason: if isolated { REASON_FEEDER_OPEN } else { REASON_HEALTHY },
+            });
+        }
+    }
 }
 
 /// The source-side fault magnitudes, which `sources::Wiring` takes as
@@ -1387,6 +1612,42 @@ impl Area for ElectricalLive {
             self.bat_fault[i] = self.net.contactors[self.contactor.bat_direct[i]].closed && v < dc_trip;
             self.bat_charge[i] = self.wiring.battery[i].charge_fraction(sf.battery[i]);
         }
+        // 6. The level-2 verdicts (`docs/deep/authority.md`): which of the
+        //    machines FlyByWire *also* models this model says have failed.
+        //    Each is read off the machine alone -- its own overload
+        //    element, its own regulated terminal, its own health parameter
+        //    -- never off a bus voltage, which another component's fault
+        //    can drag down just as easily.
+        for i in 0..4 {
+            let driven = truth.engine_running[i] && self.net.sources[self.src_gen[i]].open_circuit_v > 0.0;
+            let terminal = self.net.sources[self.src_gen[i]].open_circuit_v;
+            self.gen_verdict[i] = if self.wiring.vfg[i].overload_heat() >= 1.0 {
+                Some(REASON_OVERLOAD_TRIPPED)
+            } else if driven && (terminal < AC_UNDERVOLTAGE_TRIP_V || terminal > AC_OVERVOLTAGE_TRIP_V) {
+                Some(REASON_REGULATOR_OUT_OF_BAND)
+            } else if sf.vfg[i].winding_degradation >= DEGRADED_BEYOND_HALF {
+                Some(REASON_WINDING_DEGRADED)
+            } else {
+                None
+            };
+        }
+        for i in 0..2 {
+            let driven = truth.apu_running && self.net.sources[self.src_apu_gen[i]].open_circuit_v > 0.0;
+            let terminal = self.net.sources[self.src_apu_gen[i]].open_circuit_v;
+            self.apu_gen_verdict[i] = if self.wiring.apu_gen[i].overload_heat() >= 1.0 {
+                Some(REASON_OVERLOAD_TRIPPED)
+            } else if driven && (terminal < AC_UNDERVOLTAGE_TRIP_V || terminal > AC_OVERVOLTAGE_TRIP_V) {
+                Some(REASON_REGULATOR_OUT_OF_BAND)
+            } else if sf.apu_gen[i].winding_degradation >= DEGRADED_BEYOND_HALF {
+                Some(REASON_WINDING_DEGRADED)
+            } else {
+                None
+            };
+        }
+        for i in 0..4 {
+            self.tr_verdict[i] = (sf.tru[i].winding_degradation >= DEGRADED_BEYOND_HALF).then_some(REASON_TRU_DEGRADED);
+        }
+        self.static_inv_verdict = (sf.static_inverter.efficiency_loss >= DEGRADED_BEYOND_HALF).then_some(REASON_INVERTER_DEGRADED);
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -1422,6 +1683,16 @@ impl Area for ElectricalLive {
             out(&self.names.load_powered[i], if l.powered { 1.0 } else { 0.0 });
         }
 
+        // The level-2 couplings, so a derived failure is always visible
+        // beside the failure it derived from (`docs/deep/authority.md`).
+        let mut k = 0usize;
+        self.each_coupling(&mut |d| {
+            if let Some(name) = self.names.derived.get(k) {
+                out(name, d.magnitude);
+            }
+            k += 1;
+        });
+
         // The typed side of the same data, for the two areas that read it
         // back next frame (see this module's doc comment).
         board::with_board_mut(|board| {
@@ -1436,6 +1707,10 @@ impl Area for ElectricalLive {
                 board.bus_voltage[i] = bus.voltage;
             }
         });
+    }
+
+    fn derived_failures(&self, out: &mut dyn FnMut(DerivedFailure)) {
+        self.each_coupling(out);
     }
 }
 
@@ -1902,5 +2177,217 @@ mod tests {
         for (name, v) in &published {
             assert!(v.is_finite(), "{name} is {v}");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Authority (docs/deep/authority.md): the level-2 couplings.
+
+    fn derived(live: &ElectricalLive) -> BTreeMap<u64, f64> {
+        let mut out = BTreeMap::new();
+        live.derived_failures(&mut |d| {
+            out.insert(d.fbw_id, d.magnitude);
+        });
+        out
+    }
+
+    #[test]
+    fn the_coupling_table_matches_what_the_area_actually_emits() {
+        // `publish` pairs each coupling with a pre-built name by position,
+        // so the table and the emission order are one thing and must not
+        // drift. Every id must also be one FlyByWire really registers,
+        // since `Failures::apply` silently ignores anything else.
+        board::clear();
+        let live = ElectricalLive::new();
+        let table = coupling_table();
+        let mut emitted: Vec<(u64, &'static str)> = Vec::new();
+        live.each_coupling(&mut |d| emitted.push((d.fbw_id, d.deep_component)));
+        assert_eq!(emitted, table, "coupling_table() and each_coupling() must walk the same list in the same order");
+        assert_eq!(live.names.derived.len(), table.len());
+
+        let catalogue: std::collections::BTreeSet<u64> = crate::failures::a380_failures().into_iter().map(|(id, _)| id).collect();
+        for (id, component) in &table {
+            assert!(catalogue.contains(id), "{component} derives {id}, which FlyByWire does not register");
+        }
+        let mut ids: Vec<u64> = table.iter().map(|(id, _)| *id).collect();
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "two deep components must not claim the same FlyByWire failure");
+        // 4 generators + 2 APU generators + 4 TRs + the static inverter +
+        // the 14 buses FlyByWire also models.
+        assert_eq!(table.len(), 25);
+    }
+
+    #[test]
+    fn a_healthy_aircraft_tells_flybywire_nothing_at_all() {
+        // The derived set is a level, and on a working aircraft it is
+        // empty: no coupling may fire on a healthy cold start or in the
+        // cruise, or the crew would be handed failures nobody caused.
+        board::clear();
+        let mut live = ElectricalLive::new();
+        run(&mut live, &flying_truth(), &Faults::default(), 60);
+        assert!(derived(&live).values().all(|&m| m == 0.0), "cruise: {:?}", derived(&live));
+
+        board::clear();
+        let mut cold = ElectricalLive::new();
+        run(&mut cold, &Truth::default(), &Faults::default(), 60);
+        assert!(
+            derived(&cold).values().all(|&m| m == 0.0),
+            "a cold dark aircraft has dead buses, but a dead bus is not a failed one: {:?}",
+            derived(&cold)
+        );
+    }
+
+    /// The bus short from `arming_an_ac_1_bus_short_...` above, followed
+    /// through to FlyByWire: once the feeder breaker has cleared it, AC1 is
+    /// isolated, and that is a verdict `a380_systems` can act on.
+    #[test]
+    fn a_cleared_bus_short_tells_flybywire_that_bus_is_failed() {
+        board::clear();
+        let truth = flying_truth();
+        let id = {
+            let mut reg = Registry::default();
+            super::super::registry::register(&mut reg);
+            reg.failures.iter().find(|f| f.component == "24_elec.bus.AC1").expect("the AC1 bus short must be registered").id
+        };
+        let mut live = ElectricalLive::new();
+        let slow = Truth { dt_s: 0.05, ..truth };
+        let published = run(&mut live, &slow, &Faults::from_pairs([(id, 1.0)]), 400);
+
+        assert_eq!(published["ELEC_BKR_feeder-AC1_CLOSED"], 0.0, "setup: the feeder must have tripped");
+        // 24_100 is `FailureType::ElectricalBus(AlternatingCurrent(1))`.
+        assert_eq!(derived(&live).get(&24_100), Some(&1.0), "AC1 behind an open feeder must reach FlyByWire as a failed bus");
+        assert_eq!(derived(&live).get(&24_101), Some(&0.0), "and no other bus may be blamed for it");
+        assert_eq!(published["DEEP_DERIVED_FBW_FAILURE_24100"], 1.0, "and it must be visible, not silent");
+    }
+
+    /// A bus fault is the bus's, not the machine's. FlyByWire keeps a
+    /// failed generator failed until it is told otherwise, so blaming
+    /// generator 2 for a short on its bus would leave a perfectly healthy
+    /// machine dead on FlyByWire's side long after the feeder cleared it.
+    #[test]
+    fn a_bus_short_is_never_blamed_on_the_generator_feeding_that_bus() {
+        board::clear();
+        let truth = flying_truth();
+        let id = {
+            let mut reg = Registry::default();
+            super::super::registry::register(&mut reg);
+            reg.failures.iter().find(|f| f.component == "24_elec.bus.AC2").expect("the AC2 bus short must be registered").id
+        };
+        let mut live = ElectricalLive::new();
+        let slow = Truth { dt_s: 0.05, ..truth };
+        run(&mut live, &slow, &Faults::from_pairs([(id, 1.0)]), 400);
+        let d = derived(&live);
+        assert_eq!(d.get(&24_101), Some(&1.0), "AC2 is isolated behind its own feeder, and that is the verdict");
+        for gen in FBW_GENERATOR {
+            assert_eq!(d.get(&gen), Some(&0.0), "no generator may be blamed for a busbar fault ({gen})");
+        }
+    }
+
+    /// A machine degraded past half its own range: FlyByWire's generator
+    /// failure is binary, so `DEGRADED_BEYOND_HALF` is where the deep
+    /// model's continuous stator degradation rounds to a trip.
+    #[test]
+    fn a_stator_degraded_past_half_reaches_flybywire_as_a_failed_generator() {
+        board::clear();
+        let truth = flying_truth();
+        let id = {
+            let mut reg = Registry::default();
+            super::super::registry::register(&mut reg);
+            reg.failures
+                .iter()
+                .find(|f| f.component == "24_elec.vfg-1" && f.model_field.ends_with("winding_degradation"))
+                .expect("GEN 1 winding degradation must be registered")
+                .id
+        };
+
+        let mut mild = ElectricalLive::new();
+        run(&mut mild, &truth, &Faults::from_pairs([(id, 0.3)]), 30);
+        assert_eq!(derived(&mild).get(&24_020), Some(&0.0), "a third-degraded stator still holds its bus; FlyByWire is told nothing");
+
+        board::clear();
+        let mut gone = ElectricalLive::new();
+        run(&mut gone, &truth, &Faults::from_pairs([(id, 1.0)]), 30);
+        assert_eq!(derived(&gone).get(&24_020), Some(&1.0), "a fully degraded stator is a failed generator");
+        assert_eq!(derived(&gone).get(&24_021), Some(&0.0), "and only that one");
+    }
+
+    #[test]
+    fn a_degraded_transformer_rectifier_reaches_flybywires_own_tr() {
+        board::clear();
+        let truth = flying_truth();
+        // `route_failures` maps `24_elec.tr-ess` to index 2, which is
+        // `FailureType::TransformerRectifier(3)` -- FlyByWire's TR ESS.
+        let id = {
+            let mut reg = Registry::default();
+            super::super::registry::register(&mut reg);
+            reg.failures.iter().find(|f| f.component == "24_elec.tr-ess").expect("the TR ESS failure must be registered").id
+        };
+        let mut live = ElectricalLive::new();
+        run(&mut live, &truth, &Faults::from_pairs([(id, 1.0)]), 30);
+        let d = derived(&live);
+        assert_eq!(d.get(&24_002), Some(&1.0), "TR ESS is FlyByWire's TransformerRectifier(3)");
+        assert_eq!(d.get(&24_000), Some(&0.0));
+        assert_eq!(d.get(&24_001), Some(&0.0));
+        assert_eq!(d.get(&24_003), Some(&0.0));
+    }
+
+    /// End to end, with FlyByWire's real A380 systems on the other side:
+    /// the deep model's verdict, through the same `FailureType` the crew's
+    /// own armed failure would take, changes the coarse solve.
+    ///
+    /// The global `crate::failures` registry is deliberately not touched
+    /// here (it is process-wide and shared with every other test); the id
+    /// is mapped to its `FailureType` through `a380_failures()`, which is
+    /// exactly what `Failures::apply` does with it.
+    #[test]
+    fn a_derived_bus_failure_changes_flybywires_own_solve() {
+        use crate::aspects::test_vars::TestVars;
+        use std::time::Duration;
+        use systems::simulation::{Simulation, StartState};
+
+        // The DC hot bus, because a bare test bed can genuinely power it:
+        // its battery needs nothing but its own pushbutton, where every AC
+        // bus would need a running engine's generator, and this test is
+        // about the coupling rather than about FlyByWire's start state.
+        board::clear();
+        let id = {
+            let mut reg = Registry::default();
+            super::super::registry::register(&mut reg);
+            reg.failures.iter().find(|f| f.component == "24_elec.bus.DC_HOT1").expect("the DC HOT 1 bus short must be registered").id
+        };
+        let mut live = ElectricalLive::new();
+        // A busbar-to-structure short on a 28 V bus behind a 92 A feeder
+        // is several hundred amps; its I^2t element takes seconds.
+        let slow = Truth { dt_s: 0.05, ..Truth::default() };
+        run(&mut live, &slow, &Faults::from_pairs([(id, 1.0)]), 600);
+        let verdict = derived(&live);
+        assert_eq!(verdict.get(&24_113), Some(&1.0), "setup: the deep model must have concluded DC HOT 1 is isolated");
+
+        let mut vars = TestVars::default();
+        let mut sim = Simulation::new(StartState::Apron, a380_systems::A380::new, &mut vars);
+        for bat in ["BAT_1", "BAT_2", "BAT_ESS", "BAT_APU"] {
+            vars.set(&format!("A32NX_OVHD_ELEC_{bat}_PB_IS_AUTO"), 1.0);
+        }
+        let tick = |sim: &mut Simulation<a380_systems::A380>, vars: &mut TestVars, n: usize| {
+            for i in 0..n {
+                sim.tick(Duration::from_millis(50), 100.0 + i as f64 * 0.05, vars);
+            }
+        };
+        tick(&mut sim, &mut vars, 20);
+        assert_eq!(vars.value("A32NX_ELEC_DC_HOT_1_BUS_IS_POWERED"), 1.0, "setup: FlyByWire's own hot bus is alive on its battery");
+
+        // Exactly what the plugin patch in `docs/deep/authority.md` does
+        // with `Deep::derived_magnitudes()`.
+        let types: Vec<systems::failures::FailureType> =
+            crate::failures::a380_failures().into_iter().filter(|(fid, _)| verdict.get(fid).copied().unwrap_or(0.0) > 0.0).map(|(_, t)| t).collect();
+        assert!(!types.is_empty());
+        sim.update_active_failures(types.into_iter().collect());
+        tick(&mut sim, &mut vars, 20);
+        assert_eq!(
+            vars.value("A32NX_ELEC_DC_HOT_1_BUS_IS_POWERED"),
+            0.0,
+            "the deep model's verdict must change FlyByWire's own solve, not just a display"
+        );
     }
 }

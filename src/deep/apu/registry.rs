@@ -377,7 +377,7 @@ pub fn register(r: &mut Registry) {
     // ---- ECAM alerts -----------------------------------------------------
 
     r.alert(
-        EcamAlert::new("APU_EGT_OVER_LIMIT", ATA, "APU EGT OVER LIMIT", Level::Warning, var("APU_EGT").gt(950.0))
+        EcamAlert::new("APU_EGT_OVER_LIMIT", ATA, "APU EGT OVER LIMIT", Level::Warning, var("APU_EGT").gt(crate::deep::apu::params::EGT_TRIP_C))
             .confirm(1.0)
             .inhibit(&[Phase::LiftOff, Phase::Above80Kt])
             .step(line("APU MASTER SW", "OFF").done(var("OVHD_APU_MASTER_SW_PB_IS_ON").off()))

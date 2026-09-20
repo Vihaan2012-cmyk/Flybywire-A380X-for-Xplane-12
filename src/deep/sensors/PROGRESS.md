@@ -254,3 +254,4 @@ module's own doc comment for why two exist):
   109 of 508 registered failures are consumed; the rest are the discrete instrumentation and the engine sensors
   `Truth` has no quantity for yet — listed in `live.rs`'s module doc together with the `Truth` fields needed
   (true AoA, cabin pressure, radio height, satellite visibility, engine N2/N3/TGT/fuel flow/vibration).
+- [done] sourced-constants pass — gps.rs, live.rs — `UERE_M` 4.0 is now cited to the GPS SPS Performance Standard's 4 m RMS / 7.8 m 95% SIS URE commitment (with the honest caveat that it is the SIS term only). `NOMINAL_SATELLITES_VISIBLE` (10) and `REFERENCE_SATELLITES` (8) are now one derivation rather than two guesses: spherical-cap visibility above a 5-degree mask (DO-229) at the GPS orbital radius gives 0.3386 of the sphere, x24 baseline slots = 8.13, x31 operational = 10.5.

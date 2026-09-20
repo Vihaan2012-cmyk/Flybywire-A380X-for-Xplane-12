@@ -29,6 +29,38 @@
 use super::actuator::{servo_rate_step, ActuatorFaults, ActuatorMode, PowerControlUnit, ServoLoad};
 use super::hinge_moment::{hinge_moment_nm, HingeMomentCoefficients};
 
+/// Default critical Mach number for an A380 lifting surface, derived from
+/// the aircraft's own published MMO rather than picked.
+///
+/// MMO = M 0.89 (FlyByWire's own `fbw-a380x/src/systems/shared/src/
+/// PerformanceConstants.ts:2`, `export const Mmo = 0.89`, matching the
+/// figure in EASA TCDS A.110's operating limitations).
+///
+/// An aircraft is not certified to a maximum operating Mach that sits
+/// inside its own transonic drag rise, so the wing's drag-divergence Mach
+/// `M_dd` must be at least MMO. W. H. Mason, *Transonic Aerodynamics of
+/// Airfoils and Wings* (Configuration Aerodynamics notes, Virginia Tech,
+/// section 7), equates Lock's empirical drag rise `C_D = 20 (M - M_crit)^4`
+/// with the standard `dC_D/dM = 0.1` definition of drag divergence and gets
+///
+///   M_crit = M_dd - (0.1/80)^(1/3)
+///
+/// with `(0.1/80)^(1/3) = 0.00125^(1/3) = 0.107722`. Taking the binding
+/// case `M_dd = MMO`:
+///
+///   M_crit >= 0.89 - 0.107722 = 0.782278
+///
+/// so 0.7823 is a **lower bound** on the wing's critical Mach implied by
+/// the A380's own MMO, not a measured section figure -- Airbus publishes
+/// neither the A380's t/c distribution nor its `M_crit`, so the Korn
+/// equation cannot be closed for this wing. It replaces an earlier
+/// unsourced 0.75, which would have put `M_dd` at 0.858, i.e. *below* MMO
+/// and below the published M 0.85 long-range cruise Mach -- self-evidently
+/// wrong for this aircraft. Using the bound is the conservative direction:
+/// compressibility keeps building to a slightly higher Mach than a lower
+/// value would allow, and no surface sees an invented early fall-off.
+pub const DEFAULT_MACH_CRIT: f64 = 0.7823;
+
 /// This tick's aerodynamic environment at the surface.
 #[derive(Clone, Copy, Debug)]
 pub struct AeroInputs {
@@ -40,7 +72,7 @@ pub struct AeroInputs {
 
 impl Default for AeroInputs {
     fn default() -> Self {
-        Self { dynamic_pressure_pa: 0.0, alpha_rad: 0.0, mach: 0.0, mach_crit: 0.75 }
+        Self { dynamic_pressure_pa: 0.0, alpha_rad: 0.0, mach: 0.0, mach_crit: DEFAULT_MACH_CRIT }
     }
 }
 
@@ -380,7 +412,7 @@ mod tests {
                 [1.0; 2],
                 [faults; 2],
                 &SurfaceFaults::default(),
-                &AeroInputs { dynamic_pressure_pa: 20000.0, alpha_rad: 0.05, mach: 0.6, mach_crit: 0.75 },
+                &AeroInputs { dynamic_pressure_pa: 20000.0, alpha_rad: 0.05, mach: 0.6, mach_crit: DEFAULT_MACH_CRIT },
                 0.01,
             );
         }
@@ -400,7 +432,7 @@ mod tests {
                 [1.0; 2],
                 [ActuatorFaults::default(); 2],
                 &faults,
-                &AeroInputs { dynamic_pressure_pa: 5000.0, alpha_rad: 0.02, mach: 0.4, mach_crit: 0.75 },
+                &AeroInputs { dynamic_pressure_pa: 5000.0, alpha_rad: 0.02, mach: 0.4, mach_crit: DEFAULT_MACH_CRIT },
                 0.01,
             );
         }
@@ -436,7 +468,7 @@ mod tests {
         let mut healthy = aileron_surface();
         let mut faulty = aileron_surface();
         let q = 15000.0; // within this test's tuned instability threshold
-        let aero = AeroInputs { dynamic_pressure_pa: q, alpha_rad: 0.0, mach: 0.5, mach_crit: 0.75 };
+        let aero = AeroInputs { dynamic_pressure_pa: q, alpha_rad: 0.0, mach: 0.5, mach_crit: DEFAULT_MACH_CRIT };
         let damping_only = [ActuatorMode::Damping; 2];
         let no_faults = [ActuatorFaults::default(); 2];
         let damper_lost = SurfaceFaults { flutter_damper_loss: 1.0, ..Default::default() };

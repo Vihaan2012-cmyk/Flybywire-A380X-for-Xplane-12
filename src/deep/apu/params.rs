@@ -185,19 +185,94 @@ pub fn turbine_pressure_ratio_design() -> f64 {
 /// to command literally unbounded fuel.
 pub const MAX_FUEL_FLOW_MARGIN: f64 = 1.6;
 
-// ---- GENERIC: EGT limits ------------------------------------------------
+// ---- EGT limits: mostly sourced to FlyByWire's own PW980A model --------
+//
+// These were written as a "generic ATA 49 family of figures". They are not
+// generic: FlyByWire model this exact APU and carry A380-specific values,
+// which this section now cites and matches. Note the distinction the real
+// ECB makes and this file now makes too:
+//   * a *control* limit -- what the fuel schedule holds EGT below, so the
+//     APU never normally annunciates at all;
+//   * a *warning/caution* temperature -- what the ECAM/SD APU page draws
+//     its red line and amber band at;
+//   * a *protective trip* -- what shuts the APU down.
+// Conflating them is how a model ends up annunciating in normal operation.
 
-/// Transient start EGT limit, ATA 49 generic convention (matches the
-/// 900/982 degC family of figures generic to this class of small APU,
-/// independently chosen here rather than read from any one source).
+/// Transient start EGT limit the fuel schedule holds to while starting,
+/// deg C. **Sourced**: FlyByWire's PW980A physics uses exactly this as its
+/// own start fuel-limit anchor -- `const START_EGT_LIMIT_K: f64 = 1173.15;
+/// // 900 deg C` (fbw-common/src/wasm/systems/systems/src/apu/
+/// pw980_physics.rs:547), commented there as following the ECB's own
+/// `calculate_egt_warning_temperature`.
 pub const EGT_START_LIMIT_C: f64 = 900.0;
-/// Continuous running EGT limit -- lower than the transient start limit, the
-/// generic convention for small gas turbines/APUs (typical continuous
-/// redlines run 100-250 degC below the transient start limit).
+/// Continuous running EGT *control* limit, deg C: what the governor's fuel
+/// schedule holds EGT below once self-sustaining.
+///
+/// **GENERIC, and deliberately well below the 900 deg C running warning**
+/// ([`EGT_RUNNING_WARNING_C`]): a control limit set at the warning would
+/// let the APU sit on its own red line in normal operation. No published
+/// PW980A continuous EGT control limit exists (FlyByWire model the warning,
+/// not the control schedule), so the margin below the warning -- 150 deg C
+/// here -- is the generic part. Searched: FlyByWire's `pw980.rs` /
+/// `pw980_physics.rs` / `electronic_control_box.rs`, and public A380 ATA 49
+/// material.
 pub const EGT_RUNNING_LIMIT_C: f64 = 750.0;
-/// Hard over-temperature protective trip, above even the transient start
-/// limit (ATA-generic convention, matching the ~950 degC family of figures).
+/// Hard over-temperature protective trip, deg C: the ECB shuts the APU
+/// down above this. **Sourced**: FlyByWire's PW980A physics trips at
+/// exactly this temperature -- `if self.egt.get::<degree_celsius>() >
+/// 950.0` (fbw-common/src/wasm/systems/systems/src/apu/pw980_physics.rs:664).
 pub const EGT_TRIP_C: f64 = 950.0;
+
+/// Running EGT **warning** (red) temperature for the PW980A, deg C.
+/// **Sourced, and A380-specific**: FlyByWire's `Pw980Constants` sets
+/// `const RUNNING_WARNING_EGT: f64 = 900.; // Deg C`
+/// (fbw-common/src/wasm/systems/systems/src/apu/pw980.rs:32). Worth noting
+/// how aircraft-specific this is: the same trait on the A320's APS3200 sets
+/// it to 682 deg C (aps3200.rs:28), so it is not a family figure that could
+/// have been guessed.
+pub const EGT_RUNNING_WARNING_C: f64 = 900.0;
+/// Starting EGT warning temperature below FL250, deg C. **Sourced**:
+/// `const STARTING_WARNING_EGT_BELOW_25000_FEET: f64 = 900.;`
+/// (fbw-common/.../apu/electronic_control_box.rs:276).
+pub const EGT_START_WARNING_BELOW_FL250_C: f64 = 900.0;
+/// Starting EGT warning temperature at or above FL250, deg C -- the ECB
+/// raises the start warning with altitude because thinner air cools the
+/// turbine less. **Sourced**: `const
+/// STARTING_WARNING_EGT_AT_OR_ABOVE_25000_FEET: f64 = 982.;`
+/// (fbw-common/.../apu/electronic_control_box.rs:277).
+pub const EGT_START_WARNING_AT_OR_ABOVE_FL250_C: f64 = 982.0;
+/// How far below the warning the **caution** (amber) temperature sits,
+/// deg C. **Sourced**: `const WARNING_TO_CAUTION_DIFFERENCE: f64 = 33.;`
+/// in `ElectronicControlBox::egt_caution_temperature`
+/// (fbw-common/.../apu/electronic_control_box.rs:341-344).
+pub const EGT_WARNING_TO_CAUTION_DIFFERENCE_C: f64 = 33.0;
+
+/// Pressure altitude at which the ECB switches between the two start
+/// warning temperatures, ft. FlyByWire express the same switch as an inlet
+/// pressure threshold of 5.45 psi ("fl250_isa_pressure",
+/// electronic_control_box.rs:279), i.e. ISA pressure at FL250.
+pub const EGT_START_WARNING_ALTITUDE_SWITCH_FT: f64 = 25_000.0;
+
+/// The EGT warning (red) temperature the ECAM/SD APU page should show,
+/// given whether the APU is still starting and the current pressure
+/// altitude. Follows `ElectronicControlBox::calculate_egt_warning_temperature`
+/// (fbw-common/.../apu/electronic_control_box.rs:267-292): the altitude
+/// split applies only while starting; shutdown, running and stopping all
+/// use the running warning.
+pub fn egt_warning_c(starting: bool, pressure_altitude_ft: f64) -> f64 {
+    if starting && pressure_altitude_ft >= EGT_START_WARNING_ALTITUDE_SWITCH_FT {
+        EGT_START_WARNING_AT_OR_ABOVE_FL250_C
+    } else if starting {
+        EGT_START_WARNING_BELOW_FL250_C
+    } else {
+        EGT_RUNNING_WARNING_C
+    }
+}
+
+/// The EGT caution (amber) temperature that goes with [`egt_warning_c`].
+pub fn egt_caution_c(starting: bool, pressure_altitude_ft: f64) -> f64 {
+    egt_warning_c(starting, pressure_altitude_ft) - EGT_WARNING_TO_CAUTION_DIFFERENCE_C
+}
 
 // ---- GENERIC: oil system ------------------------------------------------
 
@@ -472,5 +547,59 @@ mod tests {
         let omega_rated = N_DESIGN_RPM * std::f64::consts::TAU / 60.0;
         let torque_at_rated_power = RATED_SHAFT_POWER_W / omega_rated;
         assert!(torque_at_rated_power > 10.0 && torque_at_rated_power < 5000.0);
+    }
+}
+
+#[cfg(test)]
+mod egt_limit_tests {
+    use super::*;
+
+    #[test]
+    fn the_three_kinds_of_egt_limit_are_ordered_the_way_the_ecb_orders_them() {
+        // Control limit < caution < warning < protective trip. If this
+        // ordering is ever broken the APU annunciates (or shuts down) in
+        // normal operation, which is the exact failure mode these constants
+        // were split apart to prevent.
+        //   750 (control) < 867 (caution = 900 - 33) < 900 (warning) < 950 (trip)
+        assert!(EGT_RUNNING_LIMIT_C < egt_caution_c(false, 0.0));
+        assert!(egt_caution_c(false, 0.0) < EGT_RUNNING_WARNING_C);
+        assert!(EGT_RUNNING_WARNING_C < EGT_TRIP_C);
+        // The start schedule's own control limit likewise stays at or below
+        // the start warning it is derived from, and under the trip.
+        assert!(EGT_START_LIMIT_C <= EGT_START_WARNING_BELOW_FL250_C);
+        assert!(EGT_START_LIMIT_C < EGT_TRIP_C);
+    }
+
+    #[test]
+    fn the_start_warning_rises_above_fl250_and_only_while_starting() {
+        // ECB behaviour (electronic_control_box.rs:267-292): the altitude
+        // split applies to the Starting state only.
+        assert_eq!(egt_warning_c(true, 0.0), EGT_START_WARNING_BELOW_FL250_C);
+        assert_eq!(egt_warning_c(true, 24_999.0), EGT_START_WARNING_BELOW_FL250_C);
+        assert_eq!(egt_warning_c(true, 25_000.0), EGT_START_WARNING_AT_OR_ABOVE_FL250_C);
+        assert_eq!(egt_warning_c(true, 39_000.0), EGT_START_WARNING_AT_OR_ABOVE_FL250_C);
+        // Not starting: the running warning regardless of altitude.
+        assert_eq!(egt_warning_c(false, 0.0), EGT_RUNNING_WARNING_C);
+        assert_eq!(egt_warning_c(false, 39_000.0), EGT_RUNNING_WARNING_C);
+    }
+
+    #[test]
+    fn caution_tracks_warning_by_the_ecbs_own_fixed_difference() {
+        for &(starting, alt) in &[(true, 0.0), (true, 30_000.0), (false, 0.0), (false, 30_000.0)] {
+            let gap = egt_warning_c(starting, alt) - egt_caution_c(starting, alt);
+            assert!((gap - EGT_WARNING_TO_CAUTION_DIFFERENCE_C).abs() < 1e-12);
+        }
+        // The one arithmetic result worth pinning: 900 - 33 = 867.
+        assert!((egt_caution_c(false, 0.0) - 867.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_pw980a_running_warning_is_not_the_a320_figure() {
+        // A guard against someone "generalising" this back to a family
+        // value: FlyByWire's APS3200 (A320) sets RUNNING_WARNING_EGT to
+        // 682 deg C against the PW980A's 900, so the two are not
+        // interchangeable and neither could have been guessed from the
+        // other.
+        assert!(EGT_RUNNING_WARNING_C > 682.0 + 100.0);
     }
 }

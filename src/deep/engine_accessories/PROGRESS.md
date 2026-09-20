@@ -32,3 +32,4 @@
   renumbering in `registry.rs` fails loudly instead of silently unhooking a
   failure. Inputs `Truth` does not carry yet are collected in one documented
   `...Commands` struct per area rather than invented.
+- [done] sourced-constants pass — fuel/common.rs — `viscosity_cst` relabelled as an explicit specification-*worst-case* curve rather than a typical batch: its cold anchor is DEF STAN 91-091 / ASTM D1655's -20 C ceiling of 8.0 mm^2/s, which is why it reads ~1.92 mm^2/s at 20 C against a typical batch's ~1.7. Searched CGSB 3.23, ASTM D1655, DEF STAN 91-091, CRC Report 635 and supplier data sheets for a citable *typical* cold-end figure: every public source pins only the maximum, so no re-anchor is possible. Left as is deliberately -- high viscosity is the demanding direction for the filter and pump models.

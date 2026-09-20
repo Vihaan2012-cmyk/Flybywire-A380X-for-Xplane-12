@@ -39,11 +39,25 @@ pub const FUEL_CP_J_KGK: f64 = 2010.0;
 /// which, besides mis-deriving its own constant, cannot hold both anchors
 /// *and* the curvature between them: fitted to these two points, a plain
 /// exponential runs about a third low through the middle of the range,
-/// which is exactly where the filter and pump models operate. Off the
-/// anchors this fit reads ~1.9 mm^2/s at 20 C, on the viscous side of the
-/// ~1.7 mm^2/s a typical batch shows -- the expected, and conservative,
-/// consequence of anchoring the cold end on the specification *ceiling*
-/// rather than on a typical batch.
+/// which is exactly where the filter and pump models operate.
+///
+/// **This is therefore a specification-worst-case curve, not a typical
+/// batch.** Its cold anchor is the number a batch is allowed to be no
+/// worse than, so off the anchors it reads about 1.92 mm^2/s at 20 C,
+/// against roughly 1.7 mm^2/s often quoted for a typical batch -- about
+/// 13% viscous. Searched for a citable *typical* (as opposed to limiting)
+/// Jet A-1 kinematic viscosity at a cold anchor -- CGSB 3.23 / ASTM D1655 /
+/// DEF STAN 91-091 tables, CRC Report 635, and fuel suppliers' own data
+/// sheets: every public source pins only the -20 C maximum of 8.0 mm^2/s,
+/// so no typical cold-end figure is available to re-anchor on. The ~1.7
+/// mm^2/s at 20 C used as the comparison above is likewise a commonly
+/// repeated figure rather than a cited one.
+///
+/// Anchoring on the ceiling is left in place deliberately: for the filter
+/// (`filter.rs` scales its element drop by the viscosity ratio) and for the
+/// pumps, a high viscosity is the demanding direction, so the error runs
+/// toward predicting filter differential pressure and pump load a little
+/// early rather than a little late.
 pub fn viscosity_cst(temp_k: f64) -> f64 {
     const WALTHER_A: f64 = 13.253_827_9;
     const WALTHER_B: f64 = 5.525_940_0;

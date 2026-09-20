@@ -29,9 +29,11 @@
 //! capacity), and, when clamped, a genuine, physically caused skid: the
 //! wheel decelerates or fails to spin up because the available friction
 //! could not keep pace with the commanded brake torque, not because
-//! anything told it to skid. `mu` (`MU_TIRE_GROUND`), the wheel's inertia
-//! and radius are GENERIC (no public A380 wheel/tyre data), sized to
-//! representative large-transport figures. Off the ground (`on_ground =
+//! anything told it to skid. `mu` (`MU_TIRE_GROUND`) and the wheel's
+//! inertia are GENERIC (no public A380 figure for either), sized to
+//! representative large-transport values; the wheel *radius* is not -- it
+//! is derived from the A380's own published 1400x530R23 main tyre, see
+//! `WHEEL_RADIUS_M`. Off the ground (`on_ground =
 //! false`, `normal_load_n` irrelevant since the friction limit is zero
 //! either way), only a small residual bearing/aerodynamic drag acts, so a
 //! wheel keeps spinning for a while after liftoff, as real ones do.
@@ -48,11 +50,12 @@
 //! owning the wheel's real rotational state, the same first-principles
 //! kinetic-energy-to-heat idea `physics::damage.rs`'s own (coarser,
 //! whole-aircraft) `update_brake_energy` already uses. `F_max` (this
-//! module's total per-wheel maximum brake force) is derived, not assumed:
-//! transport aircraft are commonly designed for on the order of 0.3g
-//! maximum braking deceleration on a dry runway (a widely cited aviation
-//! performance figure, not a specific Airbus number), so `F_max_total =
-//! MLW * 0.3g`, split evenly over the 16 braked wheels. The carbon heat
+//! module's total per-wheel maximum brake force) is derived, not assumed,
+//! and now from an A380-specific figure: FlyByWire's own Brake-To-Vacate
+//! scheduler plans against a maximum dry-runway deceleration of 2.8 m/s^2
+//! (`MAX_DECEL_DRY_MS2`, autobrakes.rs:850), so `F_max_total = MLW * 2.8
+//! m/s^2`, split evenly over the 16 braked wheels. See
+//! `MAX_BRAKING_DECEL_MS2`. The carbon heat
 //! sink's specific heat (~1650 J/(kg K)) is a representative published
 //! figure for aircraft carbon-carbon brake material (materials handbooks /
 //! brake literature general range 1400-2000 J/(kg K), not a specific
@@ -88,18 +91,35 @@
 
 /// Aircraft MLW, matching `super`'s citation (Airbus AC doc).
 use super::MLW_KG;
-use super::G_MS2;
 
-/// Representative dry-runway maximum braking deceleration for a transport
-/// aircraft (GENERIC, widely cited order-of-magnitude aviation performance
-/// figure, not Airbus-specific), used only to derive a per-wheel maximum
-/// brake force from first principles.
-const MAX_BRAKING_DECEL_G: f64 = 0.3;
+/// Maximum dry-runway braking deceleration the wheel brakes alone deliver,
+/// m/s^2, used only to derive a per-wheel maximum brake force from first
+/// principles.
+///
+/// **Sourced, and A380-specific**: FlyByWire's A380 Brake-To-Vacate
+/// scheduler plans its stop against
+/// `const MAX_DECEL_DRY_MS2: f64 = -2.8;` (with `MAX_DECEL_WET_MS2 = -1.8`)
+/// in fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/autobrakes.rs:850-851.
+/// BTV computes a real stopping distance from that figure, so it is the
+/// deceleration this aircraft's brakes are taken to actually achieve on a
+/// dry runway -- exactly what a per-wheel brake force ceiling has to
+/// reproduce. It replaces a GENERIC 0.3 g (2.94 m/s^2); the two agree to
+/// within 5%, which is a useful check that the generic figure was at least
+/// in the right place.
+///
+/// Note what this is *not*: the RTO autobrake's demand, which the same file
+/// sets to -6.0 m/s^2 (`RTO_MODE_DECEL_TARGET_MS2`, line 236). That is a
+/// "brake as hard as possible" target the aircraft does not reach on the
+/// brakes alone, not a capability.
+const MAX_BRAKING_DECEL_MS2: f64 = 2.8;
+/// Braked wheels on the A380: the four wheels of each wing gear (8) plus
+/// the forward four of each six-wheel body gear (8). The two nose wheels
+/// and the aft body-gear axles are unbraked.
 const BRAKED_WHEEL_COUNT: f64 = 16.0;
-/// Per-wheel maximum brake force, N (derived: `MLW * MAX_BRAKING_DECEL_G *
-/// G_MS2 / BRAKED_WHEEL_COUNT`).
+/// Per-wheel maximum brake force, N (derived: `MLW * MAX_BRAKING_DECEL_MS2
+/// / BRAKED_WHEEL_COUNT`).
 fn max_brake_force_n() -> f64 {
-    MLW_KG * MAX_BRAKING_DECEL_G * G_MS2 / BRAKED_WHEEL_COUNT
+    MLW_KG * MAX_BRAKING_DECEL_MS2 / BRAKED_WHEEL_COUNT
 }
 
 /// Carbon-carbon composite specific heat, J/(kg K) (representative published
@@ -142,9 +162,43 @@ const SKID_SLIP_THRESHOLD: f64 = 0.15;
 /// How fast antiskid releases/reapplies pressure, fraction/s (GENERIC).
 const ANTISKID_RATE_PER_S: f64 = 4.0;
 
-/// Rolling radius, m (GENERIC order-of-magnitude for a large transport main
-/// wheel; no public A380 figure).
-const WHEEL_RADIUS_M: f64 = 0.6;
+/// Rolling radius of a braked main wheel, m. **Derived from the A380's own
+/// published tyre size**, no longer a round-number guess.
+///
+/// The A380 main gear runs **1400x530R23** radials (nose gear 1270x455R22)
+/// -- the size published in Airbus's "A380 Aircraft Characteristics -
+/// Airport and Maintenance Planning" and carried in the tyre makers' own
+/// public application charts (Michelin, Goodyear "Application Charts",
+/// section 5). The designation gives the geometry directly:
+///
+///   free (unloaded) radius   `R_f = 1400 mm / 2                = 700.0 mm`
+///   rim radius               `R_r = 23 in / 2 = 11.5 x 25.4    = 292.1 mm`
+///   section height           `h   = 700.0 - 292.1              = 407.9 mm`
+///
+/// Aircraft tyres are designed to a **32% deflection at rated load**
+/// ("standard deflection for aircraft tires is 32% +3/-4, except H type and
+/// tires rated below 160 mph, which use 35%" -- the aircraft-tyre design
+/// convention Michelin's *Aircraft Tire Engineering Data* and the Tire and
+/// Rim Association work to), so
+///
+///   deflection at rated load `d   = 0.32 x 407.9               = 130.5 mm`
+///   static loaded radius     `SLR = 700.0 - 130.5              = 569.5 mm`
+///
+/// A rolling tyre stands taller than a static one, and the standard
+/// approximation puts the rolling radius two thirds of the way from the
+/// static loaded radius back to free:
+///
+///   `R_roll = R_f - (2/3) d = 700.0 - 87.0 = 613.0 mm = 0.613 m`
+///
+/// Caveat, stated rather than buried: radial aircraft tyres are specified
+/// to a static loaded radius directly rather than to a percent deflection
+/// (that is the bias-tyre rule), and Michelin's own SLR table entry for
+/// this size could not be extracted from a public copy. So the 32% figure
+/// is the design convention the SLR derives from, not this tyre's measured
+/// SLR. The result lands within 2% of the 0.6 m that was previously here as
+/// a pure guess, so nothing downstream moves much -- what changes is that
+/// the number can now be checked.
+const WHEEL_RADIUS_M: f64 = 0.613;
 /// Wheel + tyre + brake rotor rotational inertia about its axle, kg*m^2
 /// (GENERIC, order-of-magnitude for a large transport wheel assembly).
 const WHEEL_INERTIA_KG_M2: f64 = 25.0;
@@ -365,6 +419,47 @@ impl Default for ParkingBrakeAccumulator {
 
 #[cfg(test)]
 mod tests {
+    /// The 1400x530R23 geometry `WHEEL_RADIUS_M` claims, re-done from the
+    /// tyre designation so the constant cannot drift from its own stated
+    /// derivation (and so a future editor sees the arithmetic, not a
+    /// number).
+    #[test]
+    fn the_wheel_radius_follows_from_the_published_tyre_size() {
+        const MM_PER_IN: f64 = 25.4;
+        // 1400x530R23: outside diameter 1400 mm, rim diameter 23 in.
+        let free_radius_mm = 1400.0 / 2.0;
+        let rim_radius_mm = 23.0 * MM_PER_IN / 2.0;
+        let section_height_mm = free_radius_mm - rim_radius_mm;
+        // Aircraft-tyre standard deflection at rated load.
+        const STANDARD_DEFLECTION: f64 = 0.32;
+        let deflection_mm = STANDARD_DEFLECTION * section_height_mm;
+        // Static loaded radius, then rolling radius two thirds of the way
+        // back toward free.
+        let slr_mm = free_radius_mm - deflection_mm;
+        let rolling_mm = free_radius_mm - (2.0 / 3.0) * deflection_mm;
+
+        assert!((section_height_mm - 407.9).abs() < 0.1, "{section_height_mm}");
+        assert!((slr_mm - 569.5).abs() < 0.2, "{slr_mm}");
+        assert!((rolling_mm / 1000.0 - WHEEL_RADIUS_M).abs() < 1e-3, "{rolling_mm} mm vs {WHEEL_RADIUS_M} m");
+        // A rolling tyre must stand between its loaded and free radii.
+        assert!(slr_mm < rolling_mm && rolling_mm < free_radius_mm);
+    }
+
+    /// The per-wheel brake force ceiling is the BTV dry-runway deceleration
+    /// shared over the braked wheels, and nothing else. If either input
+    /// moves this catches it.
+    #[test]
+    fn the_per_wheel_brake_force_is_the_btv_dry_deceleration_shared_out() {
+        // 386_000 kg x 2.8 m/s^2 / 16 wheels = 67_550 N per wheel.
+        let expected = MLW_KG * MAX_BRAKING_DECEL_MS2 / BRAKED_WHEEL_COUNT;
+        assert!((max_brake_force_n() - expected).abs() < 1e-6);
+        assert!((max_brake_force_n() - 67_550.0).abs() < 50.0, "{}", max_brake_force_n());
+        // All 16 braked wheels together must be able to produce exactly the
+        // deceleration the figure came from -- the round trip.
+        let total_n = max_brake_force_n() * BRAKED_WHEEL_COUNT;
+        assert!((total_n / MLW_KG - MAX_BRAKING_DECEL_MS2).abs() < 1e-9);
+    }
+
     use super::*;
 
     fn healthy() -> BrakeFaults {

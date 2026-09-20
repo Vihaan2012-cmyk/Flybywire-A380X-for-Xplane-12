@@ -64,7 +64,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::deep::live::{Area as LiveArea, Faults, Truth};
+use crate::deep::live::{Area as LiveArea, DerivedFailure, Faults, Truth};
 
 use super::accumulator::AccumulatorFaults;
 use super::network::{CheckValveFaults, PSI_PA};
@@ -218,6 +218,103 @@ impl CircuitFailureIds {
 const MAX_LEAK_AREA_M2: f64 = 20.0e-6;
 
 // ---------------------------------------------------------------------------
+// Authority: this area's level-2 couplings into FlyByWire's own failures
+// (`docs/deep/authority.md`).
+//
+// FlyByWire's A380 hydraulic system models the same eight engine-driven
+// pumps, the same four electric pumps and the same two reservoirs this one
+// does, and its failure catalogue has an id for each. Everything finer --
+// the compensator curve, case drain, cavitation, the accumulator, the
+// priority and relief valves, the return filter, the five consumer branch
+// line leaks, fluid temperature -- is below its resolution and is published
+// and nothing else (level 1).
+//
+// Ids are `crate::failures::a380_failures()`'s own.
+
+/// `FailureType::EnginePumpOverheat(Edp1a..Edp4b)`, in that function's own
+/// order: engine 1 pump a, 1b, 2a, 2b, 3a, 3b, 4a, 4b. Green drives
+/// engines 1 and 2, yellow 3 and 4, which is exactly this area's own
+/// `GREEN_PUMP_ENGINE_INDEX`/`YELLOW_PUMP_ENGINE_INDEX` split, so the first
+/// four are green's four pumps and the last four yellow's.
+const FBW_ENGINE_PUMP: [u64; 8] = [29_010, 29_011, 29_012, 29_013, 29_014, 29_015, 29_016, 29_017];
+/// `FailureType::ElecPumpOverheat(GreenA, GreenB, YellowA, YellowB)`.
+const FBW_ELECTRIC_PUMP: [u64; 4] = [29_006, 29_007, 29_008, 29_009];
+/// `FailureType::ReservoirLeak(Green, Yellow)`: FlyByWire drains its own
+/// reservoir, which drives its `HYD_<colour>_RESERVOIR_LEVEL_IS_LOW` and
+/// everything downstream of it.
+const FBW_RESERVOIR_LEAK: [u64; 2] = [29_000, 29_001];
+/// `FailureType::ReservoirAirLeak(Green, Yellow)` -- FlyByWire keeps the
+/// reservoir's *pressurisation* in its pneumatic system
+/// (`fbw-common .../pneumatic/mod.rs:692`), which is where that failure
+/// empties the bootstrap air.
+const FBW_RESERVOIR_AIR_LEAK: [u64; 2] = [29_002, 29_003];
+
+/// How much of its rated displacement a pump must have lost before the
+/// verdict "this pump has failed" is worth sending to FlyByWire, whose own
+/// pump failure is binary.
+///
+/// **GENERIC**, and unavoidably so: `authority.md`'s stated granularity
+/// limit is that a continuously degraded component either rounds to a trip
+/// or stays invisible at level 2. Half is the rounding point at which a
+/// pump has lost more capability than it has left; below it the deep model
+/// keeps the remaining fraction and FlyByWire is told nothing, which is the
+/// honest half of the same limit.
+const PUMP_LOST_CAPABILITY: f64 = 0.5;
+
+/// How much of the reservoir's regulated bootstrap air supply has to be
+/// available before a low reservoir air pressure is the *reservoir's* fault
+/// rather than the absence of a supply. A cold, dark aircraft has no bleed
+/// and no packs, so its reservoirs genuinely sit unpressurised; blaming the
+/// reservoir for that would hand the crew a failure on every cold start.
+/// **GENERIC**: half the regulator's setting, the same rounding logic as
+/// [`PUMP_LOST_CAPABILITY`], chosen so that a partial supply still has to
+/// be able to do most of the job before the reservoir is blamed.
+const PRESSURISATION_SUPPLY_PRESENT: f64 = 0.5;
+
+/// What fraction of its rated displacement a pump can still deliver, from
+/// the two faults that take displacement away. `wear` is deliberately not
+/// in here: it is a persisted health parameter that raises case drain
+/// rather than a failure, and `circuit_faults` holds it at zero.
+fn pump_capability(f: &PumpFaults) -> f64 {
+    ((1.0 - f.seizure.clamp(0.0, 1.0)) * (1.0 - f.displacement_loss.clamp(0.0, 1.0))).clamp(0.0, 1.0)
+}
+
+/// The deep component behind each engine-driven pump coupling, in
+/// [`FBW_ENGINE_PUMP`]'s order (`registry.rs`'s own component ids).
+const EDP_COMPONENT: [&str; 8] = [
+    "29_hyd.green_edp_1a",
+    "29_hyd.green_edp_1b",
+    "29_hyd.green_edp_2a",
+    "29_hyd.green_edp_2b",
+    "29_hyd.yellow_edp_3a",
+    "29_hyd.yellow_edp_3b",
+    "29_hyd.yellow_edp_4a",
+    "29_hyd.yellow_edp_4b",
+];
+const ELECTRIC_PUMP_COMPONENT: [&str; 4] =
+    ["29_hyd.green_electric_pump_a", "29_hyd.green_electric_pump_b", "29_hyd.yellow_electric_pump_a", "29_hyd.yellow_electric_pump_b"];
+const RESERVOIR_COMPONENT: [&str; 2] = ["29_hyd.green_reservoir", "29_hyd.yellow_reservoir"];
+
+/// Every level-2 coupling this area owns, as `(FlyByWire failure id, deep
+/// component)`, in the order [`HydraulicsLive::each_coupling`] emits them.
+fn coupling_table() -> Vec<(u64, &'static str)> {
+    let mut v: Vec<(u64, &'static str)> = Vec::new();
+    for i in 0..8 {
+        v.push((FBW_ENGINE_PUMP[i], EDP_COMPONENT[i]));
+    }
+    for i in 0..4 {
+        v.push((FBW_ELECTRIC_PUMP[i], ELECTRIC_PUMP_COMPONENT[i]));
+    }
+    for i in 0..2 {
+        v.push((FBW_RESERVOIR_LEAK[i], RESERVOIR_COMPONENT[i]));
+    }
+    for i in 0..2 {
+        v.push((FBW_RESERVOIR_AIR_LEAK[i], RESERVOIR_COMPONENT[i]));
+    }
+    v
+}
+
+// ---------------------------------------------------------------------------
 // The live system.
 // ---------------------------------------------------------------------------
 
@@ -237,6 +334,18 @@ pub struct HydraulicsLive {
     electric_pump_ids: [[u64; 2]; 4],
     green_out: CircuitOutputs,
     yellow_out: CircuitOutputs,
+
+    /// This frame's level-2 verdicts (`docs/deep/authority.md`), kept from
+    /// `tick` because `derived_failures`/`publish` take `&self`. Eight
+    /// engine-driven pumps in [`FBW_ENGINE_PUMP`]'s order, four electric
+    /// pumps in [`FBW_ELECTRIC_PUMP`]'s, then the two reservoirs' fluid and
+    /// air verdicts, green then yellow.
+    edp_failed: [bool; 8],
+    electric_pump_failed: [bool; 4],
+    reservoir_fluid_lost: [bool; 2],
+    reservoir_air_lost: [bool; 2],
+    /// One published name per coupling, in [`coupling_table`]'s order.
+    derived_names: Vec<String>,
 
     /// Engine feed fuel temperature into the heat exchangers, K. Still not
     /// on `Truth` (see module doc); kept at the same interim cold-aircraft
@@ -268,6 +377,11 @@ impl HydraulicsLive {
             electric_pump_ids,
             green_out: CircuitOutputs::default(),
             yellow_out: CircuitOutputs::default(),
+            edp_failed: [false; 8],
+            electric_pump_failed: [false; 4],
+            reservoir_fluid_lost: [false; 2],
+            reservoir_air_lost: [false; 2],
+            derived_names: coupling_table().into_iter().map(|(id, _)| format!("DEEP_DERIVED_FBW_FAILURE_{id}")).collect(),
             fuel_temp_k: 288.15,
         }
     }
@@ -374,6 +488,46 @@ impl HydraulicsLive {
             air_ingestion: faults.get(ids.air_ingestion),
         }
     }
+
+    /// This area's whole level-2 coupling table, with this frame's verdict
+    /// on each entry (`docs/deep/authority.md`). Emitted in
+    /// [`coupling_table`]'s order, healthy entries at magnitude `0.0`, so
+    /// `publish` and `derived_failures` walk one list.
+    fn each_coupling(&self, out: &mut dyn FnMut(DerivedFailure)) {
+        let m = |b: bool| if b { 1.0 } else { 0.0 };
+        for i in 0..8 {
+            out(DerivedFailure {
+                fbw_id: FBW_ENGINE_PUMP[i],
+                magnitude: m(self.edp_failed[i]),
+                deep_component: EDP_COMPONENT[i],
+                reason: "seized, or below half its rated displacement",
+            });
+        }
+        for i in 0..4 {
+            out(DerivedFailure {
+                fbw_id: FBW_ELECTRIC_PUMP[i],
+                magnitude: m(self.electric_pump_failed[i]),
+                deep_component: ELECTRIC_PUMP_COMPONENT[i],
+                reason: "seized, or below half its rated displacement",
+            });
+        }
+        for i in 0..2 {
+            out(DerivedFailure {
+                fbw_id: FBW_RESERVOIR_LEAK[i],
+                magnitude: m(self.reservoir_fluid_lost[i]),
+                deep_component: RESERVOIR_COMPONENT[i],
+                reason: "fluid quantity has fallen to the low-level switch",
+            });
+        }
+        for i in 0..2 {
+            out(DerivedFailure {
+                fbw_id: FBW_RESERVOIR_AIR_LEAK[i],
+                magnitude: m(self.reservoir_air_lost[i]),
+                deep_component: RESERVOIR_COMPONENT[i],
+                reason: "bootstrap air supply present, reservoir still below its pressure switch",
+            });
+        }
+    }
 }
 
 /// Circuit-level published variables, per colour.
@@ -461,11 +615,47 @@ impl LiveArea for HydraulicsLive {
 
         self.green_out = self.hyd.green.step(&green_inputs, &green_faults, dt);
         self.yellow_out = self.hyd.yellow.step(&yellow_inputs, &yellow_faults, dt);
+
+        // Level 2 (`docs/deep/authority.md`): the verdicts on the twelve
+        // pumps and two reservoirs FlyByWire also models. A pump's verdict
+        // is about the *machine*, not about its operating point -- a pump
+        // shut down by a pulled fire handle, destroked by its own
+        // compensator or starved of bus power is not a failed pump, and
+        // none of those touch `pump_capability`.
+        for i in 0..4 {
+            self.edp_failed[i] = pump_capability(&green_faults.edp[i].pump) < PUMP_LOST_CAPABILITY;
+            self.edp_failed[4 + i] = pump_capability(&yellow_faults.edp[i].pump) < PUMP_LOST_CAPABILITY;
+        }
+        for i in 0..2 {
+            self.electric_pump_failed[i] = pump_capability(&green_faults.electric_pump[i]) < PUMP_LOST_CAPABILITY;
+            self.electric_pump_failed[2 + i] = pump_capability(&yellow_faults.electric_pump[i]) < PUMP_LOST_CAPABILITY;
+        }
+        let supply_present = pressurization >= PRESSURISATION_SUPPLY_PRESENT;
+        for (i, c) in [&self.green_out, &self.yellow_out].into_iter().enumerate() {
+            self.reservoir_fluid_lost[i] = c.reservoir_low_level_warning;
+            // Only the reservoir's own fault: with no bootstrap air supply
+            // at all (a cold, dark aircraft) an unpressurised reservoir is
+            // the absence of a supply, not a leak.
+            self.reservoir_air_lost[i] = supply_present && c.reservoir_low_pressure_warning;
+        }
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
         publish_circuit(out, "GREEN", &self.green_out, ["1A", "1B", "2A", "2B"]);
         publish_circuit(out, "YELLOW", &self.yellow_out, ["3A", "3B", "4A", "4B"]);
+        // The level-2 couplings, so a derived failure is never silent
+        // (`docs/deep/authority.md`).
+        let mut k = 0usize;
+        self.each_coupling(&mut |d| {
+            if let Some(name) = self.derived_names.get(k) {
+                out(name, d.magnitude);
+            }
+            k += 1;
+        });
+    }
+
+    fn derived_failures(&self, out: &mut dyn FnMut(DerivedFailure)) {
+        self.each_coupling(out);
     }
 }
 
@@ -808,6 +998,167 @@ mod tests {
             }
         });
         assert!(ok);
+    }
+
+    // -----------------------------------------------------------------
+    // Authority (docs/deep/authority.md): the level-2 couplings.
+
+    fn derived(live: &HydraulicsLive) -> BTreeMap<u64, f64> {
+        let mut out = BTreeMap::new();
+        live.derived_failures(&mut |d| {
+            // Two couplings share the reservoir component (fluid and air),
+            // so key by the FlyByWire id, which is unique.
+            out.insert(d.fbw_id, d.magnitude);
+        });
+        out
+    }
+
+    #[test]
+    fn the_coupling_table_matches_what_the_area_actually_emits() {
+        let live = HydraulicsLive::new();
+        let table = coupling_table();
+        let mut emitted: Vec<(u64, &'static str)> = Vec::new();
+        live.each_coupling(&mut |d| emitted.push((d.fbw_id, d.deep_component)));
+        assert_eq!(emitted, table, "coupling_table() and each_coupling() must walk the same list in the same order");
+        assert_eq!(live.derived_names.len(), table.len());
+        assert_eq!(table.len(), 16, "8 engine-driven pumps, 4 electric pumps, 2 reservoirs x (fluid, air)");
+
+        let catalogue: std::collections::BTreeSet<u64> = crate::failures::a380_failures().into_iter().map(|(id, _)| id).collect();
+        for (id, component) in &table {
+            assert!(catalogue.contains(id), "{component} derives {id}, which FlyByWire does not register");
+        }
+        let mut ids: Vec<u64> = table.iter().map(|(id, _)| *id).collect();
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "two deep components must not claim the same FlyByWire failure");
+
+        // Every registered component named here really exists in this
+        // area's registry, so a rename cannot leave the crew looking at a
+        // component that is not there.
+        let map = registered_failures();
+        for (_, component) in &table {
+            assert!(map.contains_key(*component), "{component} is not a registered hydraulics component");
+        }
+    }
+
+    #[test]
+    fn a_healthy_aircraft_tells_flybywire_nothing_at_all() {
+        let mut running = HydraulicsLive::new();
+        run(&mut running, &running_truth(), &Faults::default(), 60.0);
+        assert!(derived(&running).values().all(|&m| m == 0.0), "running: {:?}", derived(&running));
+
+        // A cold, dark aircraft has unpressurised reservoirs because there
+        // is no bleed and no pack running, not because they leak.
+        let mut cold = HydraulicsLive::new();
+        run(&mut cold, &Truth { dt_s: 0.02, ..Truth::default() }, &Faults::default(), 60.0);
+        assert!(derived(&cold).values().all(|&m| m == 0.0), "cold and dark: {:?}", derived(&cold));
+    }
+
+    #[test]
+    fn a_seized_engine_driven_pump_reaches_flybywire_as_that_exact_pump() {
+        // Green EDP 1a is `AirbusEngineDrivenPumpId::Edp1a`, id 29_010.
+        let id = HydraulicsLive::new().green_ids.edp[0].seizure;
+        let mut live = HydraulicsLive::new();
+        run(&mut live, &running_truth(), &Faults::from_pairs([(id, 1.0)]), 10.0);
+        let d = derived(&live);
+        assert_eq!(d.get(&29_010), Some(&1.0), "the seized pump must reach FlyByWire");
+        for other in [29_011, 29_012, 29_013, 29_014, 29_015, 29_016, 29_017] {
+            assert_eq!(d.get(&other), Some(&0.0), "no other pump may be blamed ({other})");
+        }
+    }
+
+    #[test]
+    fn a_partly_destroked_pump_stays_below_flybywires_resolution() {
+        // `authority.md`'s granularity limit, tested rather than assumed:
+        // a pump that has lost a third of its displacement is still doing
+        // most of its job, and FlyByWire's binary pump failure has no way
+        // to say "two thirds of a pump". The deep model keeps the two
+        // thirds; FlyByWire is told nothing.
+        let ids = HydraulicsLive::new().green_ids.edp[0];
+        let mut mild = HydraulicsLive::new();
+        run(&mut mild, &running_truth(), &Faults::from_pairs([(ids.displacement_loss, 0.33)]), 10.0);
+        assert_eq!(derived(&mild).get(&29_010), Some(&0.0), "a third of a pump is not a failed pump");
+
+        let mut severe = HydraulicsLive::new();
+        run(&mut severe, &running_truth(), &Faults::from_pairs([(ids.displacement_loss, 0.9)]), 10.0);
+        assert_eq!(derived(&severe).get(&29_010), Some(&1.0), "a pump down to a tenth of its displacement has failed");
+    }
+
+    #[test]
+    fn a_pulled_fire_handle_is_not_a_failed_pump() {
+        // The pump delivers nothing, and is in perfect health: the fire
+        // shutoff valve FlyByWire models itself is what shut it. Blaming
+        // the pump would leave it failed after the handle was pushed back
+        // in.
+        let mut truth = running_truth();
+        truth.controls.fire_pb_released[0] = true;
+        let mut live = HydraulicsLive::new();
+        run(&mut live, &truth, &Faults::default(), 30.0);
+        assert!(derived(&live).values().all(|&m| m == 0.0), "{:?}", derived(&live));
+    }
+
+    #[test]
+    fn a_reservoir_drained_to_its_low_level_switch_reaches_flybywire_as_a_leak() {
+        // The same failure `a_reservoir_leak_drains_the_published_level...`
+        // above exercises, followed through to FlyByWire: its coarse model
+        // has a green reservoir too, and `ReservoirLeak(Green)` is the
+        // coarsest input that carries "this circuit is losing its fluid".
+        let id = HydraulicsLive::new().green_ids.reservoir_leak;
+        let mut live = HydraulicsLive::new();
+        let published = run(&mut live, &running_truth(), &Faults::from_pairs([(id, 1.0)]), 120.0);
+        assert_eq!(published["HYD_GREEN_RESERVOIR_LEVEL_IS_LOW"], 1.0, "setup");
+        let d = derived(&live);
+        assert_eq!(d.get(&29_000), Some(&1.0), "green reservoir leak must reach FlyByWire");
+        assert_eq!(d.get(&29_001), Some(&0.0), "yellow is a separate reservoir");
+        assert_eq!(published["DEEP_DERIVED_FBW_FAILURE_29000"], 1.0, "and it must be visible");
+    }
+
+    #[test]
+    fn losing_reservoir_pressurisation_with_a_supply_present_reaches_flybywire() {
+        let id = HydraulicsLive::new().yellow_ids.reservoir_pressurization_loss;
+        let mut live = HydraulicsLive::new();
+        let published = run(&mut live, &running_truth(), &Faults::from_pairs([(id, 1.0)]), 60.0);
+        assert_eq!(published["HYD_YELLOW_RESERVOIR_AIR_PRESSURE_IS_LOW"], 1.0, "setup");
+        let d = derived(&live);
+        assert_eq!(d.get(&29_003), Some(&1.0), "yellow reservoir air leak must reach FlyByWire");
+        assert_eq!(d.get(&29_002), Some(&0.0));
+    }
+
+    /// End to end, with FlyByWire's own A380 systems on the other side.
+    /// The global `crate::failures` registry is not touched (it is
+    /// process-wide); the id is mapped to its `FailureType` exactly as
+    /// `Failures::apply` does.
+    #[test]
+    fn a_derived_reservoir_leak_changes_flybywires_own_solve() {
+        use crate::aspects::test_vars::TestVars;
+        use std::time::Duration;
+        use systems::simulation::{Simulation, StartState};
+
+        let id = HydraulicsLive::new().green_ids.reservoir_leak;
+        let mut live = HydraulicsLive::new();
+        run(&mut live, &running_truth(), &Faults::from_pairs([(id, 1.0)]), 120.0);
+        let verdict = derived(&live);
+        assert_eq!(verdict.get(&29_000), Some(&1.0), "setup: the deep reservoir must have run down to its switch");
+
+        let mut vars = TestVars::default();
+        let mut sim = Simulation::new(StartState::Cruise, a380_systems::A380::new, &mut vars);
+        let tick = |sim: &mut Simulation<a380_systems::A380>, vars: &mut TestVars, n: usize| {
+            for i in 0..n {
+                sim.tick(Duration::from_millis(50), 100.0 + i as f64 * 0.05, vars);
+            }
+        };
+        tick(&mut sim, &mut vars, 20);
+        let before: f64 = vars.value("A32NX_HYD_GREEN_RESERVOIR_LEVEL");
+        assert!(before > 0.0, "setup: FlyByWire's own green reservoir has fluid in it");
+
+        let types: Vec<systems::failures::FailureType> =
+            crate::failures::a380_failures().into_iter().filter(|(fid, _)| verdict.get(fid).copied().unwrap_or(0.0) > 0.0).map(|(_, t)| t).collect();
+        assert!(!types.is_empty());
+        sim.update_active_failures(types.into_iter().collect());
+        tick(&mut sim, &mut vars, 200);
+        let after: f64 = vars.value("A32NX_HYD_GREEN_RESERVOIR_LEVEL");
+        assert!(after < before, "the deep model's verdict must drain FlyByWire's own reservoir too: {before} -> {after}");
     }
 
     #[test]

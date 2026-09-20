@@ -22,10 +22,37 @@
 //!   0..1, so an area asks for a number, not for whether something is
 //!   "broken".
 //! * [`Area`] -- what an area's live system implements: step yourself
-//!   forward, then publish what the rest of the aircraft can see.
+//!   forward, then publish what the rest of the aircraft can see, and say
+//!   which of FlyByWire's own failures the area has concluded are real
+//!   ([`Area::derived_failures`]).
 //!
 //! [`Deep`] owns one live system per area and is what `Plugin::tick`
 //! actually calls.
+//!
+//! ## Authority
+//!
+//! Three systems -- electrical, hydraulic, pneumatic -- are modelled twice:
+//! once coarsely and completely by FlyByWire's ported `a380_systems`, once
+//! finely and partially under `deep/`. `docs/deep/authority.md` is the
+//! design for which of the two is the aircraft; the short version is that
+//! **the deep model is authoritative, and expresses its authority through
+//! the coarsest FlyByWire input that can carry the verdict**.
+//!
+//! That input is FlyByWire's own failure system, which `crate::failures`
+//! already drives. When a deep area concludes that a component FlyByWire
+//! *also* models has failed -- a generator, a TR, a bus, an engine-driven
+//! pump, a bleed valve -- it does not argue with FlyByWire about voltages
+//! or pressures: it reports a [`DerivedFailure`], [`Deep::tick`] collects
+//! it, and the plugin hands it to `crate::failures` next to the failures
+//! the crew armed from the EFB. FlyByWire then re-solves, its pages show
+//! it, and every consumer inside `a380_systems` sees it -- one aircraft,
+//! one answer.
+//!
+//! Everything below FlyByWire's resolution (per-load current, per-feeder
+//! breaker state, I^2t heating, arc energy) needs none of this: nothing
+//! competes with it, so the area simply publishes it. Everything above the
+//! deep model stays FlyByWire's, and the areas keep reading it from
+//! [`Truth`].
 //!
 //! ## Publishing
 //!
@@ -112,12 +139,20 @@ pub struct Truth {
     /// APU: running, and its bleed available at the valve.
     pub apu_running: bool,
     pub apu_bleed_pressure_pa: f64,
-    /// Bus voltages FlyByWire's own electrical system publishes, so the
-    /// areas that consume power agree with what the crew sees on the ELEC
-    /// page rather than running a second, disagreeing electrical model.
+    /// Bus voltages FlyByWire's own electrical system published last
+    /// frame, so the areas that consume power agree with what the crew
+    /// sees on the ELEC page rather than running a second, disagreeing
+    /// electrical model.
+    ///
+    /// These are **not** the truth the deep areas defer to. Since
+    /// `docs/deep/authority.md` they are FlyByWire's answer *after* it has
+    /// been told what the deep electrical model concluded (see
+    /// [`Area::derived_failures`]); the areas read them to stay consistent
+    /// with the coarse solve, not because the coarse solve outranks them.
     pub ac_bus_volts: [f64; 4],
     pub dc_bus_volts: [f64; 2],
-    /// Hydraulic system pressures, green and yellow, Pa.
+    /// Hydraulic system pressures, green and yellow, Pa -- FlyByWire's own,
+    /// with the same standing as `ac_bus_volts` above.
     pub hydraulic_pressure_pa: [f64; 2],
     /// Per engine, 1-4: intermediate-pressure (N2) and high-pressure (N3)
     /// spool speed, each as a fraction of that spool's own design speed --
@@ -435,6 +470,41 @@ impl Faults {
     }
 }
 
+/// One of FlyByWire's own failures, as a deep area's verdict on a
+/// component the two models share.
+///
+/// This is level 2 of `docs/deep/authority.md`: the deep area has
+/// concluded that a physical component `a380_systems` also models is no
+/// longer working, and says so in the only vocabulary `a380_systems`
+/// accepts -- its own failure ids, the ones `crate::failures`'
+/// `a380_failures()`/`extra::extra_failures()` catalogue. The plugin feeds
+/// these into `crate::failures` beside the ones the crew armed, so a
+/// derived failure and an armed one reach `a380_systems` by the same path.
+///
+/// Every field but `magnitude` is fixed at build time, because a derived
+/// failure the crew cannot clear is only tolerable if the crew can see
+/// *why*: [`deep_component`](Self::deep_component) and
+/// [`reason`](Self::reason) are what the Study page shows next to it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DerivedFailure {
+    /// The id in `crate::failures`' catalogue -- FlyByWire's own
+    /// (`a380_failures()`) or this port's extra one, both of which
+    /// `failures::set_magnitude` accepts.
+    pub fbw_id: u64,
+    /// How far gone, 0 healthy .. 1 fully failed. An area emits every
+    /// coupling it owns every frame, healthy ones at `0.0`; [`Deep::tick`]
+    /// keeps only those above zero. Ids whose FlyByWire side is binary
+    /// (most of them) get `1.0` or `0.0` and nothing in between -- the
+    /// granularity limit `authority.md` names.
+    pub magnitude: f64,
+    /// The deep component that concluded it, by its registry id, e.g.
+    /// `"24_elec.vfg-1"`.
+    pub deep_component: &'static str,
+    /// Why, in one phrase a pilot can read: "own overload element tripped
+    /// it off line", "feeder breaker open".
+    pub reason: &'static str,
+}
+
 /// One area's live system.
 pub trait Area {
     /// A short name for diagnostics and the frame-time breakdown.
@@ -448,6 +518,20 @@ pub trait Area {
     /// area's `registry.rs` names in its ECAM triggers, plus anything the
     /// EFB's Study pages read. Called after every area has ticked.
     fn publish(&self, out: &mut dyn FnMut(&str, f64));
+
+    /// Every FlyByWire failure this area is authoritative over, with this
+    /// frame's verdict on it (see [`DerivedFailure`] and
+    /// `docs/deep/authority.md`).
+    ///
+    /// An area emits its whole coupling table every frame, healthy
+    /// couplings at magnitude `0.0`, so that the set is a *level* and not
+    /// an event: nothing has to remember to clear a derived failure when
+    /// the component recovers.
+    ///
+    /// The default is empty, which is the right answer for every area that
+    /// models something FlyByWire does not model at all -- level 1 of
+    /// `authority.md`, where publishing is the whole of the job.
+    fn derived_failures(&self, _out: &mut dyn FnMut(DerivedFailure)) {}
 }
 
 /// Every area's live system, owned in one place.
@@ -462,12 +546,16 @@ pub struct Deep {
     /// What the areas published last frame, handed back to them as
     /// `Truth::published` on the next one.
     last_published: PublishedFrame,
+    /// Every FlyByWire failure the areas concluded was real on the last
+    /// tick, in area order. Only magnitudes above zero are kept, so this is
+    /// empty on a healthy aircraft and the plugin pays nothing for it.
+    derived: Vec<DerivedFailure>,
 }
 
 impl Deep {
     /// Every area that has a live system, constructed cold.
     pub fn new() -> Self {
-        Self { areas: Vec::new(), truth: Truth::default(), last_published: PublishedFrame::default() }
+        Self { areas: Vec::new(), truth: Truth::default(), last_published: PublishedFrame::default(), derived: Vec::new() }
     }
 
     pub fn with_area(mut self, area: Box<dyn Area>) -> Self {
@@ -495,6 +583,20 @@ impl Deep {
         for area in &mut self.areas {
             area.tick(&self.truth, faults);
         }
+        // The areas' verdicts on FlyByWire's own components, collected
+        // after every area has ticked and before any has published, so a
+        // verdict is this frame's and not half of one. See
+        // `docs/deep/authority.md`.
+        let mut derived = std::mem::take(&mut self.derived);
+        derived.clear();
+        for area in &self.areas {
+            area.derived_failures(&mut |d| {
+                if d.magnitude > 0.0 {
+                    derived.push(d);
+                }
+            });
+        }
+        self.derived = derived;
         let mut published = std::mem::take(&mut self.truth.published);
         published.0.clear();
         for area in &self.areas {
@@ -508,6 +610,28 @@ impl Deep {
 
     pub fn area_names(&self) -> Vec<&'static str> {
         self.areas.iter().map(|a| a.name()).collect()
+    }
+
+    /// Every FlyByWire failure the areas concluded was real on the last
+    /// [`tick`](Self::tick), with the deep component and reason behind each
+    /// one. The plugin hands these to `crate::failures` beside the crew's
+    /// own armed failures; see `docs/deep/authority.md` for the exact
+    /// plugin-side patch.
+    pub fn derived_failures(&self) -> &[DerivedFailure] {
+        &self.derived
+    }
+
+    /// The same set as a magnitude per FlyByWire failure id, worst verdict
+    /// winning where two areas name the same id (none do today; taking the
+    /// max rather than the last means the order areas were added in can
+    /// never change the answer).
+    pub fn derived_magnitudes(&self) -> BTreeMap<u64, f64> {
+        let mut out: BTreeMap<u64, f64> = BTreeMap::new();
+        for d in &self.derived {
+            let slot = out.entry(d.fbw_id).or_insert(0.0);
+            *slot = slot.max(d.magnitude.clamp(0.0, 1.0));
+        }
+        out
     }
 
     /// Every variable name the areas publish, without stepping anything.
@@ -701,6 +825,86 @@ mod tests {
         assert_eq!(frame.get("NOBODY_PUBLISHES_THIS"), None);
         assert_eq!(frame.get_or("NOBODY_PUBLISHES_THIS", 288.15), 288.15);
         assert!(frame.is_empty());
+    }
+
+    /// An area with a level-2 coupling: it emits its whole table every
+    /// frame, healthy entries at zero, and the verdict follows a fault the
+    /// crew armed against its own deep id.
+    #[derive(Default)]
+    struct Coupled {
+        verdict: f64,
+    }
+
+    impl Area for Coupled {
+        fn name(&self) -> &'static str {
+            "coupled"
+        }
+        fn tick(&mut self, _truth: &Truth, faults: &Faults) {
+            self.verdict = faults.get(11_021_001);
+        }
+        fn publish(&self, _out: &mut dyn FnMut(&str, f64)) {}
+        fn derived_failures(&self, out: &mut dyn FnMut(DerivedFailure)) {
+            out(DerivedFailure { fbw_id: 24_020, magnitude: if self.verdict > 0.0 { 1.0 } else { 0.0 }, deep_component: "test.gen-1", reason: "test" });
+            // A healthy coupling, emitted every frame at zero so that the
+            // set is a level and not an event.
+            out(DerivedFailure { fbw_id: 24_021, magnitude: 0.0, deep_component: "test.gen-2", reason: "test" });
+        }
+    }
+
+    #[test]
+    fn a_healthy_aircraft_derives_no_flybywire_failures_at_all() {
+        let mut deep = Deep::new().with_area(Box::new(Coupled::default())).with_area(Box::new(Counter::default()));
+        deep.tick(Truth::default(), &Faults::default(), &mut |_, _| {});
+        assert!(deep.derived_failures().is_empty(), "a zero-magnitude coupling must not reach FlyByWire: {:?}", deep.derived_failures());
+        assert!(deep.derived_magnitudes().is_empty());
+    }
+
+    #[test]
+    fn an_areas_verdict_on_a_flybywire_component_reaches_the_plugin_and_clears_again() {
+        let mut deep = Deep::new().with_area(Box::new(Coupled::default()));
+        deep.tick(Truth::default(), &Faults::from_pairs([(11_021_001, 1.0)]), &mut |_, _| {});
+        assert_eq!(deep.derived_failures().len(), 1);
+        let d = deep.derived_failures()[0];
+        assert_eq!(d.fbw_id, 24_020);
+        assert_eq!(d.magnitude, 1.0);
+        assert_eq!(d.deep_component, "test.gen-1");
+        assert_eq!(deep.derived_magnitudes().get(&24_020), Some(&1.0));
+
+        // The set is a level: the verdict going away takes the derived
+        // failure with it, with nothing to remember to clear.
+        deep.tick(Truth::default(), &Faults::default(), &mut |_, _| {});
+        assert!(deep.derived_failures().is_empty());
+    }
+
+    #[test]
+    fn an_area_with_nothing_flybywire_models_derives_nothing() {
+        // The trait's default: level 1 of `authority.md`, where an area
+        // publishes and nothing competes with it.
+        let mut deep = Deep::new().with_area(Box::new(Counter::default()));
+        deep.tick(Truth::default(), &Faults::from_pairs([(11_021_001, 1.0)]), &mut |_, _| {});
+        assert!(deep.derived_failures().is_empty());
+    }
+
+    #[test]
+    fn every_derived_failure_names_a_real_flybywire_failure_id_and_says_why() {
+        // The whole point of level 2 is that the id means something to
+        // `a380_systems`: an id outside `crate::failures`' catalogue would
+        // be silently ignored by `Failures::apply`, and a coupling with no
+        // reason would be a derived failure the crew cannot explain.
+        let known: std::collections::BTreeSet<u64> = crate::failures::all_ids().into_iter().collect();
+        let mut deep = all_areas();
+        deep.tick(Truth::default(), &Faults::default(), &mut |_, _| {});
+        let mut seen = 0usize;
+        for area in &deep.areas {
+            area.derived_failures(&mut |d| {
+                seen += 1;
+                assert!(known.contains(&d.fbw_id), "{} derives failure {}, which is in no catalogue", area.name(), d.fbw_id);
+                assert!(!d.deep_component.is_empty(), "{} derives {} with no component", area.name(), d.fbw_id);
+                assert!(!d.reason.is_empty(), "{} derives {} with no reason", area.name(), d.fbw_id);
+                assert!((0.0..=1.0).contains(&d.magnitude), "{} derives {} at magnitude {}", area.name(), d.fbw_id, d.magnitude);
+            });
+        }
+        assert!(seen >= 40, "the three coupled areas should carry their whole coupling table, got {seen}");
     }
 
     #[test]

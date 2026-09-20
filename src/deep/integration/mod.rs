@@ -54,3 +54,5 @@ pub mod environment_events_adapter;
 pub mod xp_consequences;
 
 pub mod registry;
+
+pub mod failure_audit;

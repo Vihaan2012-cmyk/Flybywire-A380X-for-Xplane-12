@@ -17,6 +17,7 @@
 //! documented general behaviour of a transport's ground spoiler system.
 
 use super::hinge_moment::{compressibility, HingeMomentCoefficients};
+use super::surface::DEFAULT_MACH_CRIT;
 
 /// Blowdown: the largest deflection this surface's actuator(s) can actually
 /// hold against the aerodynamic hinge moment at the given flight condition,
@@ -209,7 +210,7 @@ mod tests {
         // out-power the real actuator), this test uses a deliberately
         // smaller GENERIC test actuator with the same crank arm.
         let geometry = ActuatorGeometry::new(0.017, 0.0, 0.02, 0.1908);
-        let aero = AeroInputs { dynamic_pressure_pa: 10_000.0, alpha_rad: 0.0, mach: 0.5, mach_crit: 0.75 };
+        let aero = AeroInputs { dynamic_pressure_pa: 10_000.0, alpha_rad: 0.0, mach: 0.5, mach_crit: DEFAULT_MACH_CRIT };
         let max_torque = geometry.max_torque_nm(super::super::actuator::HYDRAULIC_SUPPLY_PA);
         let predicted = max_sustainable_deflection_rad(&hinge, max_torque, aero.alpha_rad, aero.dynamic_pressure_pa, aero.mach, aero.mach_crit);
         assert!(predicted.is_finite() && predicted < 50.0_f64.to_radians(), "test setup should land in the linear regime, got {predicted}");

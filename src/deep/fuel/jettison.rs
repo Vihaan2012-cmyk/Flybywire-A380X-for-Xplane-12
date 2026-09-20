@@ -133,21 +133,55 @@ pub fn jettison_mass_flow_kg_s(
     orifice_flow_m3_s(cda_m2, delta_p, density_kg_m3) * density_kg_m3.max(0.0)
 }
 
-/// Nominal `Cd*A` of one jettison nozzle, m^2. Sized from the published
-/// A380 jettison rate of about 2,000 kg/min per side (~33.3 kg/s, i.e.
-/// 0.0417 m^3/s of 800 kg/m^3 fuel) with the jettison pumps running at
+/// Nominal `Cd*A` of one jettison nozzle, m^2. Sized from a reference
+/// jettison rate of about 2,000 kg/min per side (~33.3 kg/s, i.e. 0.0417
+/// m^3/s of 800 kg/m^3 fuel) with the jettison pumps running at
 /// [`NOMINAL_JETTISON_PUMP_RISE_PA`] and a nearly full tank:
 ///   v = sqrt(2 * (50 000 + 800*9.81*2.0) / 800) = 12.9 m/s
 ///   Cd*A = 0.0417 / 12.9 = 3.2e-3 m^2
 /// (a ~70 mm effective throat with Cd ~ 0.8, the right order for a nozzle
-/// fed by a 3-inch jettison line). GENERIC in the sense that only the rate,
-/// not the hardware dimension, is published.
+/// fed by a 3-inch jettison line).
+///
+/// **GENERIC, and more so than an earlier revision of this file claimed.**
+/// That revision called 2,000 kg/min per side "the published A380 rate".
+/// It is not published. Airbus does not state an A380 jettison rate in any
+/// public document found, and the figures that circulate disagree badly
+/// with each other and with this one:
+///   - ~3,300 kg/min total (A380 ATA 28 training-material summaries),
+///   - ~2,500 kg/min total (from the widely repeated "about 50 t in about
+///     20 minutes" datum),
+///   - 2,200 lb/min (~1,000 kg/min) in one set of type notes,
+/// against the 4,000 kg/min *total* this constant implies. Searched for an
+/// A380 FCOM/AMM jettison rate, an Airbus published figure and FlyByWire's
+/// own model (their A380X jettison is documented as "not available ... yet"
+/// and their source carries no rate): none found. So both the rate and,
+/// downstream of it, this area are unsourced.
+///
+/// What *is* citable is the certification frame the rate has to satisfy:
+/// 14 CFR / CS 25.1001(b), "if a fuel jettisoning system is required it
+/// must be capable of jettisoning enough fuel within 15 minutes ... to
+/// enable the airplane to meet the climb requirements of 25.119 and
+/// 25.121(d)". That is a floor on the rate, not a value for it -- the
+/// weight to be shed depends on the landing-climb weight for the day -- so
+/// it cannot pin this constant, but it does say which direction an error
+/// here is unsafe, and this file's own test checks the modelled rate
+/// against it.
+///
+/// The split between this area and [`NOMINAL_JETTISON_PUMP_RISE_PA`] was
+/// already, and remains, arbitrary: only their product through the orifice
+/// law is constrained, and even that is constrained by an unsourced rate.
 pub const NOMINAL_NOZZLE_CDA_M2: f64 = 3.2e-3;
 /// Pressure rise of a jettison/transfer pump at its jettison flow, Pa.
 /// GENERIC: aircraft fuel boost pumps are quoted in the 5-15 psi class;
 /// 50 kPa = 7.3 psi sits in that band and is the figure the nozzle above is
-/// sized against, so the two are consistent by construction.
+/// sized against, so the two are consistent by construction. Searched for
+/// an A380 fuel pump delivery pressure (AMM ATA 28 level figures): not
+/// public.
 pub const NOMINAL_JETTISON_PUMP_RISE_PA: f64 = 50_000.0;
+
+/// Reference jettison rate per side this file's nozzle area is sized
+/// against, kg/s. See [`NOMINAL_NOZZLE_CDA_M2`] for why this is GENERIC.
+pub const REFERENCE_JETTISON_RATE_PER_SIDE_KG_S: f64 = 2_000.0 / 60.0;
 
 #[cfg(test)]
 mod tests {
@@ -265,8 +299,12 @@ mod tests {
     #[test]
     fn the_nominal_nozzle_dumps_about_two_thousand_kg_per_minute_per_side() {
         // The sizing anchor for NOMINAL_NOZZLE_CDA_M2: a nearly full tank
-        // (2 m of head) with the jettison pumps running should dump at the
-        // published A380 rate of roughly 2,000 kg/min per side.
+        // (2 m of head) with the jettison pumps running dumps at the
+        // reference rate of roughly 2,000 kg/min per side. That rate is
+        // GENERIC, not published -- see NOMINAL_NOZZLE_CDA_M2 -- so this
+        // test only checks that the constant and its own stated derivation
+        // still agree, which is what stops one being edited without the
+        // other.
         let kg_s = jettison_mass_flow_kg_s(
             NOMINAL_NOZZLE_CDA_M2,
             2.0,
@@ -276,6 +314,43 @@ mod tests {
             RHO,
         );
         let kg_min = kg_s * 60.0;
-        assert!((kg_min - 2000.0).abs() < 100.0, "{kg_min} kg/min");
+        assert!((kg_min - REFERENCE_JETTISON_RATE_PER_SIDE_KG_S * 60.0).abs() < 100.0, "{kg_min} kg/min");
+    }
+
+    #[test]
+    fn the_modelled_rate_sits_inside_the_band_of_publicly_quoted_figures() {
+        // The publicly circulating A380 jettison figures (none of them an
+        // Airbus publication -- see NOMINAL_NOZZLE_CDA_M2) run from about
+        // 1,000 kg/min total to about 3,300 kg/min total. This model's two
+        // nozzles together give 4,000 kg/min at a nearly full tank, which
+        // is above all of them -- but those are quoted as *average* or
+        // *achieved* rates over a whole jettison, and this is the
+        // instantaneous rate at maximum head, which the orifice law makes
+        // the fastest moment of the whole evolution (flow goes as
+        // sqrt(pump + rho*g*h), so it decays as the tank drains).
+        //
+        // So the honest check is a bracket, not a match: the peak rate must
+        // exceed the highest quoted sustained figure (or the model could
+        // never average it) and must not be wildly above it either. Both
+        // bounds are wide on purpose, because the target itself is not
+        // sourced; this test exists to catch a nozzle area edited by an
+        // order of magnitude, not to calibrate one.
+        let per_side_kg_min = jettison_mass_flow_kg_s(
+            NOMINAL_NOZZLE_CDA_M2,
+            2.0,
+            NOMINAL_JETTISON_PUMP_RISE_PA,
+            SEA_LEVEL_PA,
+            SEA_LEVEL_PA,
+            RHO,
+        ) * 60.0;
+        let both_sides_kg_min = 2.0 * per_side_kg_min;
+        assert!(
+            both_sides_kg_min > 3_300.0,
+            "peak total jettison {both_sides_kg_min} kg/min cannot average the highest quoted figure"
+        );
+        assert!(
+            both_sides_kg_min < 2.0 * 3_300.0,
+            "peak total jettison {both_sides_kg_min} kg/min is more than twice the highest quoted figure"
+        );
     }
 }

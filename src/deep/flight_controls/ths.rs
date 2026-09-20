@@ -14,18 +14,49 @@
 //! accident, documents exactly this failure mode on a different aircraft's
 //! THS).
 //!
-//! The two motors do not drive the screw in parallel: like every Airbus
-//! THSA, they drive it through a **speed-summing differential gearbox**, so
-//! the screw turns at the *average* of the two motor speeds while each
-//! motor sees the same torque. That single gear arrangement is why the
-//! documented operational consequence of losing one hydraulic system on an
-//! Airbus THS is a halved trim *rate* with the *torque* capability intact:
-//! the unpowered motor is braked by its own valve block, its input to the
-//! differential is held at zero, and the surviving motor's speed is halved
-//! on the way to the screw while its torque is doubled. Modelled here by
-//! reflecting each motor through a gear ratio `2 / (number of motors with
-//! supply)`, which is exactly the differential's kinematics for the two
-//! cases that exist (both driving, or one driving against a braked input).
+//! # The two motors: a speed-summing differential
+//! The two motors do not drive the screw on a common shaft: they drive it
+//! through a **speed-summing differential gearbox**, so the screw turns at
+//! the *average* of the two motor speeds while each motor sees the same
+//! torque. Losing one hydraulic system therefore halves the trim *rate*
+//! while leaving the torque capability intact: the unpowered motor is
+//! braked by its own valve block, its input to the differential is held at
+//! zero, and the surviving motor reaches its own rated speed at half the
+//! screw rate, its torque doubled on the way through the gear. Modelled
+//! here by reflecting each motor through a gear ratio `2 / (number of
+//! motors with supply)`.
+//!
+//! **What is sourced and what is inferred, precisely:**
+//! - *Half rate on one system* is corroborated by FlyByWire's own model.
+//!   `TrimmableHorizontalStabilizerActuator::update_speed`
+//!   (fbw-common/src/wasm/systems/systems/src/hydraulic/
+//!   trimmable_horizontal_stabilizer.rs:767-773) accumulates
+//!   `sum_of_speeds += motor.speed() * motor_to_ths_gearing_ratio` over
+//!   both `hydraulic_motors`, so with one motor's supply gone the screw
+//!   runs at half speed. Their A380 instantiation
+//!   (fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/mod.rs:2131-2138)
+//!   uses two such motors at 5000 rpm / 5000 psi.
+//! - *That the arrangement must be a differential* is a kinematic
+//!   deduction, not a citation, but it is a forced one: a common
+//!   torque-summing shaft cannot produce that behaviour at all. A motor
+//!   braked by its own valve block on a shared shaft holds the shaft, and
+//!   the screw would not move. Half rate with one motor stopped is only
+//!   possible if the stopped motor's input is a *differential* input. (FBW
+//!   get the same number by summing speeds arithmetically without modelling
+//!   the mechanical constraint; the differential is what makes their result
+//!   physical.)
+//! - *That torque is retained* then follows from the differential's own
+//!   kinematics (speed halved through the gear <=> torque doubled) rather
+//!   than from a document. Searched for an A380 FCOM trim-rate figure for
+//!   one hydraulic system versus two, which would pin this directly: not
+//!   public.
+//!
+//! The absolute trim rate remains GENERIC (0.015 rad/s ~ 0.86 deg/s per
+//! motor, see `new_generic`). FBW's own figures imply about 1.5 deg/s per
+//! motor and 3.0 deg/s combined (5000 rpm x their 0.00005 gearing), but
+//! they did not source their gearing or displacement -- the displacement
+//! carries their own comment "This value is just copied from the A320s THS.
+//! No idea about the real value" -- so it is not adopted here.
 //!
 //! Also here: the smaller electric rudder-trim actuator, which biases the
 //! SEC's rudder travel about its own screw the same way but at a much
@@ -43,7 +74,7 @@ use super::actuator::{
 };
 use super::high_lift::synthetic_rotary_geometry;
 use super::hinge_moment::{hinge_moment_nm, HingeMomentCoefficients};
-use super::surface::{inertia_uniform_plate_kg_m2, AeroInputs, SurfaceLimits};
+use super::surface::{inertia_uniform_plate_kg_m2, AeroInputs, SurfaceLimits, DEFAULT_MACH_CRIT};
 
 /// Faults for the THS drive.
 #[derive(Clone, Copy, Debug, Default)]
@@ -425,7 +456,7 @@ mod tests {
         let held_angle = ths.angle_rad();
         // Now the motors idle (no new trim command) under a significant
         // dynamic pressure trying to blow the surface back.
-        let aero = AeroInputs { dynamic_pressure_pa: 15000.0, alpha_rad: 0.02, mach: 0.5, mach_crit: 0.75 };
+        let aero = AeroInputs { dynamic_pressure_pa: 15000.0, alpha_rad: 0.02, mach: 0.5, mach_crit: DEFAULT_MACH_CRIT };
         let mut out = ThsOutput::default();
         for _ in 0..5000 {
             out = ths.step(IDLE, held_angle, [1.0, 1.0], &ThsFaults::default(), &aero, DT);
@@ -447,7 +478,7 @@ mod tests {
         let held = healthy.angle_rad();
         // Both motors idling (genuinely "between trim inputs"), a large
         // aero load, and a failed no-back on one of the two systems.
-        let aero = AeroInputs { dynamic_pressure_pa: 25000.0, alpha_rad: 0.05, mach: 0.6, mach_crit: 0.75 };
+        let aero = AeroInputs { dynamic_pressure_pa: 25000.0, alpha_rad: 0.05, mach: 0.6, mach_crit: DEFAULT_MACH_CRIT };
         let no_back_failed = ThsFaults { no_back_failure: 1.0, ..Default::default() };
         let mut healthy_drift = 0.0_f64;
         let mut failed_drift = 0.0_f64;

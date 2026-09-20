@@ -152,3 +152,4 @@ plus aircraft position, to prove the whole chain composes.
   renumbering in `registry.rs` fails loudly instead of silently unhooking a
   failure. Inputs `Truth` does not carry yet are collected in one documented
   `...Commands` struct per area rather than invented.
+- [done] sourced-constants pass — runway_contamination.rs — Replaced the GENERIC per-RWYCC mu band with FAA AC 25-31 Table 2's published wheel braking coefficients (compacted snow <=-15C 0.20; snow/slippery-wet band 0.16; ice 0.08; deep water/slush 50% of the 25.109(c) value capped at 0.16, then 0.05 at/above 85% of Vp). Hydroplaning residual 0.05 and the 85% onset are now the AC's own; the 70-85% ramp is ours and is documented as the conservative smoothing of the AC's step. Snow no longer hydroplanes (the AC applies that clause to water and slush >3 mm only). Only the conditions the AC hands to 25.109(c) stay GENERIC -- its tables are CFR graphics and could not be transcribed. 4 new tests.

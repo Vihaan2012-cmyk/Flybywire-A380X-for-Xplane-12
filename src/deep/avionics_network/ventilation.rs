@@ -139,12 +139,32 @@ impl Bay {
 /// enough, and un-trips the same way once it cools — this is the number
 /// handed to `faults::ModuleFaults::overheat_trip_frac`.
 ///
-/// Trip threshold: DO-160-category commercial avionics is commonly
-/// qualified to continuous ambient temperatures up to roughly 55-70 C
-/// (public environmental-qualification practice, category-dependent);
-/// 70 C is taken as a representative upper bound. GENERIC.
+/// Trip threshold, K: where the thermal supervisor is fully tripped.
+///
+/// The ramp's **lower end** is now sourced. The A380's avionics bays are
+/// pressurised, temperature-controlled locations, which is RTCA DO-160
+/// **Temperature and Altitude Category A1**: "equipment intended for
+/// installation in a controlled temperature and pressurized location"
+/// whose pressures are "normally no lower than the altitude equivalent of
+/// 15,000 ft", qualified over an operating range of **-15 C to +55 C**
+/// (DO-160 section 4, category A1). +55 C is thus the highest ambient the
+/// equipment is qualified to run at indefinitely, and is exactly where this
+/// model starts degrading the module: `TRIP_TEMP_K - TRIP_SPAN_K = 70 - 15
+/// = 55 C`.
+///
+/// The ramp's **upper end**, 70 C, is where the supervisor is taken to have
+/// tripped completely. That is the commonly quoted short-time / survival
+/// ceiling for the same category, but DO-160G's Table 4-1 text could not be
+/// obtained from any public source to confirm it against category A1's own
+/// short-time operating high temperature, so it stays **GENERIC**.
+/// Searched: DO-160G section 4 category tables, test-house summaries of
+/// them, FAA AC 21-16G. Only the -15/+55 operating pair is reproduced
+/// publicly.
 pub const TRIP_TEMP_K: f64 = 273.15 + 70.0;
-/// Span over which the trip ramps 0..1 rather than snapping, K (GENERIC).
+/// Span over which the trip ramps 0..1 rather than snapping, K. No longer a
+/// free parameter: it is set so the ramp *begins* at DO-160 category A1's
+/// +55 C operating high temperature (see [`TRIP_TEMP_K`]) -- the module
+/// starts to be affected exactly where it stops being qualified.
 const TRIP_SPAN_K: f64 = 15.0;
 /// Thermal-supervisor response time constant, s (GENERIC: fast enough to
 /// protect the electronics without chattering on a brief transient).
