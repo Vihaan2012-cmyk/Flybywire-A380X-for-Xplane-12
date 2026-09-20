@@ -95,6 +95,57 @@ ECAM/ECL bridge and the EFB pages become ordinary TypeScript work in
 their repo, and persistence is a question for whatever hosts our
 catalogue, not for the sandbox.
 
+## 0b. The authority couplings need no LVars at all
+
+Checked directly, and it shrinks the boundary again.
+
+`docs/deep/authority.md` expresses all 49 couplings as a FlyByWire
+`FailureType` plus a numeric id -- `24_elec.vfg-1` drives
+`Generator(1)` at `24_020`, the AC buses drive
+`ElectricalBus(AlternatingCurrent(1..4))` at `24_100..24_103`, and so on.
+
+Those ids are **FlyByWire's own**, not a parallel numbering. From
+`fbw-a380x/src/wasm/systems/a380_systems_wasm/src/lib.rs:148`:
+
+```
+(24_020, FailureType::Generator(1)),
+(24_021, FailureType::Generator(2)),
+(24_022, FailureType::Generator(3)),
+(24_023, FailureType::Generator(4)),
+(24_030, FailureType::ApuGenerator(1)),
+```
+
+and `systems_wasm/src/failures.rs` takes exactly that map through
+`.with_failures(...)`, then accepts a **JSON array of ids** at runtime via
+`Failures::handle_failure_update`, which `MsfsHandler` applies each frame
+through `simulation.update_active_failures`.
+
+So the couplings do not cross as 49 LVars. They cross as **one array of
+integers**, on a channel that already exists, carrying ids we already use.
+That is the cheapest possible shape and it needs no new mechanism.
+
+**The real problem on this path is ownership, not cost.** That channel is
+already written by FlyByWire's own front end -- the EFB failures page is
+how a user arms a failure today. Two writers on one channel means the last
+write wins and the crew's armed failures and our derived verdicts erase
+each other every frame. Three ways out, in order of preference:
+
+1. **Send the union.** Our module reads the current active set, adds its
+   derived ids, writes back. Needs a read path on that channel, which has
+   not been confirmed to exist -- `get_updated_active_failures` is
+   consumed by the handler, not exposed.
+2. **A channel of our own**, with a small patch to their handler to merge
+   two sources. This is the one place a change to FlyByWire's code would
+   genuinely be warranted, and it is a few lines, not a fork.
+3. **Drive their failures through LVars instead** where a failure has an
+   equivalent variable, keeping the id channel untouched. Falls back to
+   the per-variable cost the benchmark measures, but only for the subset
+   that needs it.
+
+Settle this before writing the coupling layer. It is the one genuine
+architectural decision left on the boundary, and unlike the throughput
+question it will not resolve itself by being measured.
+
 ## 0. Method
 
 Every count in this document was produced by one of:
