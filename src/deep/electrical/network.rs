@@ -1154,9 +1154,54 @@ impl Network {
             c.resolve(tick);
         }
 
+        // Which buses a live source can actually reach, by pure topology.
+        // A bus outside that set is not "a bus the relaxation will settle
+        // at zero": it is a bus with no source at all, and it has to be
+        // *held* at zero, because the relaxation on its own cannot get it
+        // there.
+        //
+        // `relax` treats a closed bus-to-bus tie as a Thevenin branch whose
+        // open-circuit voltage is the *neighbour's own trial voltage* --
+        // right for a tie, which really is bidirectional, but it means a
+        // ring of closed ties with no source anywhere on it is a set of
+        // buses each supplying the next out of the trial vector. The seed
+        // below then hands that ring something to circulate: a bus sitting
+        // at exactly 0 V is seeded at its own nominal, which is a sane
+        // starting guess for a bus a source *does* reach and converges
+        // away within a few sweeps. On a source-free ring nothing
+        // converges it away -- the ring holds its own seed up, slumping
+        // under whatever load hangs off it and re-seeding at nominal
+        // whenever it reaches zero.
+        //
+        // That is a bus back-feeding itself through a tie, the same class
+        // of defect as the emergency inverter that back-fed a tie and the
+        // diode that back-fed its own bus, and it was doing real damage.
+        // With ground power connected -- which closes every AC tie through
+        // `electrical::live`'s `need_tie` -- but feeding only the
+        // ground-service bus, the four main AC buses formed exactly such a
+        // ring and sat at 95-98 V of pure numerical phantom. That is above
+        // the 90 V at which `sources::Wiring::pre_step` decides a TR has an
+        // AC input, so the TRs rectified the phantom into DC1, DC2 and the
+        // essential DC bus, and the whole cockpit read a live electrical
+        // network that had no source anywhere on it. As the ring slumped
+        // under load and re-seeded it crossed that 90 V threshold both
+        // ways, toggling the TRs and the essential DC bus behind them, at
+        // frame rate.
+        //
+        // The test is topological, so it cannot itself chatter: it depends
+        // only on which contactors are closed and which sources are
+        // producing, never on a voltage this sweep is still trying to
+        // compute.
+        let energised = self.energised_buses();
         let mut voltage = [0.0f64; NUM_BUSES];
         for (i, b) in self.buses.iter().enumerate() {
-            voltage[i] = if b.voltage > 0.0 { b.voltage } else { b.id.nominal_voltage() };
+            voltage[i] = if !energised[i] {
+                0.0
+            } else if b.voltage > 0.0 {
+                b.voltage
+            } else {
+                b.id.nominal_voltage()
+            };
         }
 
         // Frequency depends only on which sources reach which buses through
@@ -1168,6 +1213,11 @@ impl Network {
 
         for _ in 0..ITERATIONS {
             voltage = self.relax(&voltage, &frequency, dt, tick);
+            for i in 0..NUM_BUSES {
+                if !energised[i] {
+                    voltage[i] = 0.0;
+                }
+            }
         }
 
         for i in 0..NUM_BUSES {
@@ -1339,6 +1389,74 @@ impl Network {
     /// (`Network::relax`'s own call). Deliberately not a real synchronising-
     /// before-paralleling model (that logic lives upstream, in whichever
     /// generator-control model owns the contactor's own close command).
+    /// Which buses a *producing* source can reach through closed
+    /// contactors and forward-biased diodes -- pure topology, the same kind
+    /// of reachability sweep [`Network::resolve_frequency`] already does,
+    /// and for the same reason: it depends on no bus's voltage, so it can
+    /// (and must) be settled before the voltage relaxation rather than
+    /// inside it.
+    ///
+    /// Every other bus is open-circuit. It has no source, so it has no
+    /// voltage, and [`Network::step`] holds it at zero rather than letting
+    /// the sweeps' own trial values circulate around a source-free ring of
+    /// ties for ever -- see the note there.
+    ///
+    /// A diode is a one-way link here, exactly as it is in the solve: it
+    /// can carry its upstream bus's energisation forward, never backward.
+    /// A contactor is two-way, because a real tie bar is.
+    fn energised_buses(&self) -> [bool; NUM_BUSES] {
+        let mut live = [false; NUM_BUSES];
+        // At most NUM_BUSES - 1 hops can be needed to cross the network, so
+        // this many passes always reaches the fixed point; it stops early
+        // on the pass that changes nothing.
+        for _ in 0..NUM_BUSES {
+            let mut changed = false;
+            let mark = |i: usize, live: &mut [bool; NUM_BUSES], changed: &mut bool| {
+                if !live[i] {
+                    live[i] = true;
+                    *changed = true;
+                }
+            };
+            for c in &self.contactors {
+                if !c.closed {
+                    continue;
+                }
+                match c.from {
+                    FeedSource::Source(i) => {
+                        if self.sources.get(i).is_some_and(|s| s.open_circuit_v > 0.0) {
+                            mark(c.to.index(), &mut live, &mut changed);
+                        }
+                    }
+                    FeedSource::Bus(a) => {
+                        let (ai, bi) = (a.index(), c.to.index());
+                        if live[ai] {
+                            mark(bi, &mut live, &mut changed);
+                        }
+                        if live[bi] {
+                            mark(ai, &mut live, &mut changed);
+                        }
+                    }
+                }
+            }
+            for d in &self.diodes {
+                if d.open_fault(self.tick) {
+                    continue;
+                }
+                let upstream_live = match d.from {
+                    FeedSource::Source(i) => self.sources.get(i).is_some_and(|s| s.open_circuit_v > d.forward_drop_v),
+                    FeedSource::Bus(b) => live[b.index()],
+                };
+                if upstream_live {
+                    mark(d.to.index(), &mut live, &mut changed);
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        live
+    }
+
     fn resolve_frequency(&self) -> [f64; NUM_BUSES] {
         let mut freq = [0.0f64; NUM_BUSES];
         for _ in 0..FREQUENCY_PASSES {
@@ -1759,5 +1877,73 @@ mod tests {
             voltage = net.relax(&voltage, &frequency, 1.0 / 60.0, 999);
         }
         assert!((voltage[BusId::DcEss.index()] - v).abs() < 0.1, "extra sweeps should not move the answer much: {} vs {}", voltage[BusId::DcEss.index()], v);
+    }
+
+    /// A ring of closed bus ties with no source anywhere on it is at 0 V,
+    /// and stays there.
+    ///
+    /// [`Network::relax`] treats a tie as a Thevenin branch whose
+    /// open-circuit voltage is the neighbour's own trial voltage, and
+    /// [`Network::step`] seeds a bus that is at 0 V with its own nominal
+    /// voltage -- a sane first guess for a bus a source does reach. Put
+    /// those together on a ring with no source and the ring circulates its
+    /// own seed for ever: the four main AC buses, tied together but fed by
+    /// nothing, settled at 95-98 V of pure numerical phantom. That is
+    /// above the 90 V at which `sources::Wiring::pre_step` decides a TR
+    /// has an AC input, so the TRs rectified it onto the DC network and
+    /// the whole cockpit read a live aircraft powered by nothing at all.
+    ///
+    /// The ring here is loaded, because an unloaded one is the easy case:
+    /// the load is what makes the phantom slump and re-seed rather than
+    /// sit still, and it is the slumping that crossed the TR threshold
+    /// both ways at frame rate.
+    #[test]
+    fn a_tie_ring_with_no_source_on_it_holds_no_voltage() {
+        let mut net = Network::new();
+        // AC1 -- AC2 -- AC3 -- AC4, every tie closed, nothing feeding any
+        // of them: exactly the ring `electrical::live`'s own `need_tie`
+        // closes when something is anchoring the network elsewhere.
+        for (id, from, to) in [("t12", BusId::Ac1, BusId::Ac2), ("t23", BusId::Ac2, BusId::Ac3), ("t34", BusId::Ac3, BusId::Ac4)] {
+            let c = net.add_contactor(Contactor::new(id, ContactorKind::BusTie, FeedSource::Bus(from), to, 0.02));
+            net.contactors[c].commanded_closed = true;
+        }
+        for (id, bus) in [("l1", BusId::Ac1), ("l2", BusId::Ac2), ("l3", BusId::Ac3), ("l4", BusId::Ac4)] {
+            let bkr = net.add_breaker(Breaker::new(id, 50.0, bus));
+            let spec = LoadSpec {
+                id,
+                name: id,
+                ata: 24,
+                bus,
+                rated_power_w: 300.0,
+                power_factor: 1.0,
+                min_operating_voltage: 0.0,
+                inrush_multiple: 1.0,
+                inrush_duration_s: 0.0,
+                wiring_resistance_ohm: 0.05,
+                rated_frequency_hz: 0.0,
+                basis: "test",
+            };
+            net.add_load(spec, bkr);
+        }
+        for frame in 0..200 {
+            let report = net.step(1.0 / 60.0);
+            for bus in [BusId::Ac1, BusId::Ac2, BusId::Ac3, BusId::Ac4] {
+                let v = net.bus(bus).voltage;
+                assert_eq!(v, 0.0, "{} is fed by nothing but sits at {v} V on frame {frame}", bus.label());
+                assert!(!report.bus_powered[bus.index()], "{} reads powered with no source anywhere on its ring", bus.label());
+            }
+        }
+        // ... and the moment a real source arrives on one bus of the ring,
+        // every bus on it comes up for real. The clamp must hold a
+        // source-free ring at zero without also blocking a genuine one.
+        let src = net.add_source(Source { id: "src", open_circuit_v: 115.0, resistance_ohm: 0.01, frequency_hz: 400.0 });
+        let line = net.add_contactor(Contactor::new("line", ContactorKind::GeneratorLine, FeedSource::Source(src), BusId::Ac1, 0.01));
+        net.contactors[line].commanded_closed = true;
+        for _ in 0..30 {
+            net.step(1.0 / 60.0);
+        }
+        for bus in [BusId::Ac1, BusId::Ac2, BusId::Ac3, BusId::Ac4] {
+            assert!(net.bus(bus).voltage > 100.0, "{} should be carried through the tie ring by the one real source: {} V", bus.label(), net.bus(bus).voltage);
+        }
     }
 }

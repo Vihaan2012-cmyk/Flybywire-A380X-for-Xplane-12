@@ -72,8 +72,13 @@ const GEN_RATED_TRUE_POWER_W: f64 = 150_000.0;
 /// `Pw980ApuGenerator::MAXIMUM_LOAD_WATT`).
 const APU_GEN_RATED_TRUE_POWER_W: f64 = 120_000.0;
 /// `sources::GroundPower::RATED_APPARENT_POWER_VA` * its own `POWER_FACTOR`
-/// (both real, FBW-sourced: `external_power_source.rs`).
+/// (both real, FBW-sourced: `external_power_source.rs`), **per receptacle**.
+/// The A380 has four, each on its own main AC bus (FlyByWire's own
+/// `ext_pwrs: [ExternalPowerSource; 4]`), and this port connects and
+/// disconnects the set together -- see `sources::Wiring::build`.
 const GPU_RATED_TRUE_POWER_W: f64 = 90_000.0 * 0.8;
+/// External power receptacles, one per main AC bus.
+const GPU_RECEPTACLES: usize = 4;
 
 /// MIL-STD-704F steady-state 115 V AC utilisation limits (public standard):
 /// 108 V to 118 V. A generator control unit trips its generator off line
@@ -140,7 +145,12 @@ fn source_rating_a(bus: BusId) -> f64 {
         // `sources::Rat::MAX_POWER_W` at 115 V -- the largest source that
         // can ever feed the emergency bus.
         BusId::AcEmer => 70_000.0 / 115.0,
-        // `sources::GroundPower::RATED_APPARENT_POWER_VA` at 115 V.
+        // `sources::GroundPower::RATED_APPARENT_POWER_VA` at 115 V. The
+        // external power contactors themselves land on the four main AC
+        // buses (see `sources::Wiring::build`), but this bus is fed from
+        // AC1 through `ac-gnd-svc-feed` whenever the cart is what is
+        // holding AC1 up, so one receptacle's rating is still the floor
+        // its own feeder has to be able to carry.
         BusId::AcGndFltSvc => 90_000.0 / 115.0,
         _ => 0.0,
     }
@@ -835,7 +845,7 @@ struct ContactorIndices {
     tr_line: [usize; 4],
     static_inv_line: usize,
     bat_direct: [usize; 2],
-    gpu_line: usize,
+    gpu_line: [usize; 4],
     rat_line: usize,
     ac_tie: [usize; 3],
     ac_ess_feed_1: usize,
@@ -954,7 +964,7 @@ impl ElectricalLive {
             tr_line: [find_c(&net, "tr-1-line"), find_c(&net, "tr-2-line"), find_c(&net, "tr-ess-line"), find_c(&net, "tr-apu-line")],
             static_inv_line: find_c(&net, "static-inv-line"),
             bat_direct: [find_c(&net, "bat-1-direct"), find_c(&net, "bat-2-direct")],
-            gpu_line: find_c(&net, "gpu-line"),
+            gpu_line: [1, 2, 3, 4].map(|n| find_c(&net, &format!("gpu-{n}-line"))),
             rat_line: find_c(&net, "rat-line"),
             ac_tie,
             ac_ess_feed_1,
@@ -1409,12 +1419,22 @@ impl ElectricalLive {
             self.net.contactors[self.contactor.bat_direct[i]].commanded_closed = truth.controls.bat_pb_auto[i];
         }
 
+        // The four external power contactors, one per main AC bus (see
+        // `sources::Wiring::build`). Each closes on the same condition a
+        // real EPC does: the cart is connected and actually producing.
+        // Nothing here reads a bus voltage, so there is no configuration
+        // in which ground power has to find the network already alive
+        // before it may energise it.
+        let gpu_live = gpu_plugged_in && producing(&self.net, self.src_gpu);
+        for &idx in &self.contactor.gpu_line {
+            self.net.contactors[idx].commanded_closed = gpu_live;
+        }
+
         // The ground/flight service buses carry cargo handling, service
         // lighting and the cabin-servicing outlets; they are energised on
-        // the ground (from the cart, or from AC1 once a generator is
-        // running) and dead in flight, which is what makes them *ground*
-        // service buses.
-        self.net.contactors[self.contactor.gpu_line].commanded_closed = gpu_plugged_in && producing(&self.net, self.src_gpu);
+        // the ground from AC1 (whether AC1 is carried by a generator, the
+        // APU or the cart) and dead in flight, which is what makes them
+        // *ground* service buses.
         self.net.contactors[self.contactor.ac_gnd_svc_feed].commanded_closed = truth.on_ground && ac1_live;
         self.net.contactors[self.contactor.dc_gnd_svc_feed].commanded_closed = truth.on_ground && tr_live[1];
 
@@ -1560,7 +1580,11 @@ impl ElectricalLive {
             }
         }
         if gpu_plugged_in {
-            cap += GPU_RATED_TRUE_POWER_W;
+            // The whole connected receptacle set, not one cart: each of
+            // the four external power contactors feeds its own main AC bus
+            // (`sources::Wiring::build`), so the capacity on line is four
+            // receptacles' worth.
+            cap += GPU_RATED_TRUE_POWER_W * GPU_RECEPTACLES as f64;
         }
         cap
     }
@@ -2683,6 +2707,57 @@ mod tests {
             FRAMES - SETTLE
         );
         assert!(ac_ess_changes <= 2, "AC ESS changed powered state {ac_ess_changes} times in {} settled frames", FRAMES - SETTLE);
+        board::clear();
+    }
+
+    /// Ground power exists to replace the generators: connected, it has to
+    /// energise the **main** AC network, which is what every display,
+    /// every avionics LRU and every `ELEC_AC_n_BUS_IS_POWERED` consumer in
+    /// the cockpit reads.
+    ///
+    /// It could not. `sources::Wiring::build` wired the cart onto
+    /// `AC_GND_FLT_SVC` alone, and the only route from there to the main
+    /// network is `ac-gnd-svc-feed`, commanded by `on_ground && ac1_live`
+    /// -- so AC1 had to already be live before the tie that would have
+    /// made it live could close.
+    ///
+    /// **The cart is connected here after the aircraft has gone dark, and
+    /// that is the whole point of the test.** `Network::new` starts every
+    /// bus at its own nominal voltage, so an aircraft built with
+    /// `gpu_plugged_in` already true finds AC1 above
+    /// `AC_UNDERVOLTAGE_TRIP_V` on its very first frame, closes that tie
+    /// on the initial condition and stays closed ever after: the circular
+    /// gate latches the right way round by accident and nothing looks
+    /// wrong. A real crew connects the cart from the EFB minutes into a
+    /// cold and dark aircraft, by which time AC1 is at 0 V and the tie can
+    /// never close at all. Any test that energises from frame zero misses
+    /// this entirely.
+    #[test]
+    fn ground_power_connected_to_an_already_dark_aircraft_energises_the_main_ac_network() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let cold = Truth { on_ground: true, ..Truth::default() };
+        let dark = run(&mut live, &cold, &Faults::default(), 60);
+        assert_eq!(dark["ELEC_AC_1_BUS_IS_POWERED"], 0.0, "setup: the aircraft must really be dark before the cart arrives, or this test proves nothing");
+        assert_eq!(dark["ELEC_AC_1_BUS_POTENTIAL"], 0.0, "setup: and dark means 0 V, not a tie ring holding its own seed up");
+
+        let plugged_in = Truth { gpu_plugged_in: true, ..cold };
+        let published = run(&mut live, &plugged_in, &Faults::default(), 60);
+        for n in 1..=4 {
+            assert_eq!(
+                published[&format!("ELEC_AC_{n}_BUS_IS_POWERED")],
+                1.0,
+                "ground power must carry the main AC network: AC{n} sits at {} V",
+                published[&format!("ELEC_AC_{n}_BUS_POTENTIAL")]
+            );
+            assert!(
+                published[&format!("ELEC_AC_{n}_BUS_POTENTIAL")] >= AC_UNDERVOLTAGE_TRIP_V,
+                "AC{n} must be inside MIL-STD-704F's own utilisation band on ground power, not merely above zero: {} V",
+                published[&format!("ELEC_AC_{n}_BUS_POTENTIAL")]
+            );
+        }
+        assert_eq!(published["ELEC_AC_GND_FLT_SVC_BUS_IS_POWERED"], 1.0, "and the service bus the cart used to be the only source of");
+        assert_eq!(published["ELEC_DC_1_BUS_IS_POWERED"], 1.0, "the TRs behind the main AC buses come up with them");
         board::clear();
     }
 }

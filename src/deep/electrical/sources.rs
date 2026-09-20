@@ -727,8 +727,45 @@ impl Wiring {
         // silicon power rectifier), no A380-specific figure public.
         net.add_diode(Diode::new("bat-cross-feed-diode", FeedSource::Bus(BusId::DcBat), BusId::DcHot2, 1.0, MIN_RESISTANCE_OHM));
 
+        // External power feeds the **four main AC buses**, one receptacle
+        // and one external power contactor per bus. That is FlyByWire's
+        // own A380 topology rather than an approximation:
+        // `a380_systems/src/electrical/alternating_current.rs` carries
+        // `ext_pwrs: &[ExternalPowerSource; 4]` and
+        // `ext_pwr_contactors: [Contactor; 4]`, and its `power_ac_buses`
+        // does `electricity.flow(&self.ext_pwr_contactors[i], bus)` for
+        // each `i`. Its own `POWER_SOURCE_PRIORITIES` table states the
+        // order outright: "1. Engine generator of same bus, 2. External
+        // power of same bus, 3. APU gen on same side, ...".
+        //
+        // This used to feed `AcGndFltSvc` alone, and the only path from
+        // there back to the main network is `electrical::live`'s own
+        // `ac-gnd-svc-feed` (AC1 <-> AC GND FLT SVC), commanded by
+        // `on_ground && ac1_live` -- so AC1 had to already be live before
+        // the tie that would have made it live could close. Ground power
+        // could therefore never energise a single main AC bus in any
+        // configuration a crew can actually reach: plug the cart into an
+        // aircraft that has already gone dark and the whole AC network
+        // stays dark, and with it every consumer that reads
+        // `ELEC_AC_n_BUS_IS_POWERED`. It looked as though it worked only
+        // because `Network::new` starts every bus at its nominal voltage,
+        // so an aircraft *built* with the cart already connected latched
+        // that circular gate the right way round on its very first frame.
+        //
+        // One `GroundPower` model still stands for the whole connected
+        // set, because that is what this port connects and disconnects:
+        // `efb.rs::set_ext_power` writes all four `EXT_PWR_AVAIL:{1..4}`
+        // together and `Truth::gpu_plugged_in` is "any of the four". Four
+        // contactors off one `Source` is electrically four carts of that
+        // source's rating, which is exactly the four-receptacle
+        // installation FlyByWire models: `RATED_APPARENT_POWER_VA` is per
+        // receptacle, so the connected set carries 4 x 90 kVA rather than
+        // asking one cart to hold the whole aircraft up on its own.
         let gpu = net.add_source(Source::new("gpu"));
-        net.add_contactor(Contactor::new("gpu-line", ContactorKind::Feeder, FeedSource::Source(gpu), BusId::AcGndFltSvc, MIN_RESISTANCE_OHM));
+        for (i, &bus) in gen_buses.iter().enumerate() {
+            let contactor_id: &'static str = Box::leak(format!("gpu-{}-line", i + 1).into_boxed_str());
+            net.add_contactor(Contactor::new(contactor_id, ContactorKind::Feeder, FeedSource::Source(gpu), bus, MIN_RESISTANCE_OHM));
+        }
 
         let rat = net.add_source(Source::new("rat"));
         net.add_contactor(Contactor::new("rat-line", ContactorKind::Feeder, FeedSource::Source(rat), BusId::AcEmer, MIN_RESISTANCE_OHM));

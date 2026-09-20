@@ -190,7 +190,7 @@ pub fn register(r: &mut Registry) {
     }
     register_component(r, &mut counters, 24, "24_elec.static-inv".to_string(), "STATIC INVERTER".to_string(), "sources::StaticInverter", &[("efficiency_loss", "degraded switching efficiency: 0 healthy (85%) .. 1 floor (30%)", "0..1, efficiency interpolates from 0.85 down to 0.30", "less real power deliverable to AC_EMER for the same battery input, faster battery drain in an emergency configuration")]);
     register_component(r, &mut counters, 24, "24_elec.rat".to_string(), "RAT".to_string(), "sources::Rat", &[("jammed", "turbine fails to fully deploy/partially seized: 0 healthy .. 1 no power even when deployed", "0..1, fraction of aerodynamic power lost", "less (or, at 1.0, no) emergency electrical power available from the RAT in an all-generation-lost configuration")]);
-    register_component(r, &mut counters, 24, "24_elec.gpu".to_string(), "GPU (ground power)".to_string(), "sources::GroundPower", &[("weak_cart", "a weak/miswired ground cart: 0 healthy .. 1 up to 5x reactance", "0..1, series reactance grows toward 5x", "ground-service bus voltage sags harder under load while on ground power")]);
+    register_component(r, &mut counters, 24, "24_elec.gpu".to_string(), "GPU (ground power)".to_string(), "sources::GroundPower", &[("weak_cart", "a weak/miswired ground cart: 0 healthy .. 1 up to 5x reactance", "0..1, series reactance grows toward 5x", "the main AC buses the four external power contactors feed sag harder under load while on ground power")]);
 
     // ---------------------------------------------------------------------
     // ECAM alerts. Trigger/procedure variable names follow this plugin's
