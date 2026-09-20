@@ -58,6 +58,51 @@ fn thermal_ambient_derate(ambient_c: f64) -> f64 {
 /// justify a second constant).
 const MAGNETIC_TRIP_MULTIPLE: f64 = 10.0;
 
+/// Full-scale `trip_calibration_drift`: how far below its own nameplate a
+/// fully drifted breaker's effective trip point sits, as a fraction of the
+/// rating. At 1.0 magnitude the curve reacts as though the part were rated
+/// `1 - MAX_CALIBRATION_DRIFT` times its real rating.
+///
+/// **GENERIC, and it stays GENERIC after a search for a real figure**,
+/// because every published number bounds a *conforming* part rather than a
+/// failed one. The manufacturer's own calibration requirement for exactly
+/// this class of device -- the Sensata/Klixon MS3320 thermal aircraft
+/// breaker series whose AS39019/MIL-PRF-39019 ampere table
+/// `catalog::standard_size` takes every rating from -- is published as:
+/// carry 100 % of rated current at +25 C without tripping, maximum
+/// ultimate trip 138 % of rating at +25 C. That fixes a healthy part's
+/// trip point somewhere in 100..138 % of nameplate. Nothing public states
+/// how far below 100 % an aged, out-of-calibration part's trip point
+/// migrates before it is found and replaced; general breaker maintenance
+/// guidance condemns a unit at roughly 10 % deviation from its specified
+/// setting rather than characterising what a unit left in service does.
+///
+/// 40 % is therefore chosen as "grossly out of spec but still a plausible
+/// undetected part": 40 percentage points below the standard's own
+/// must-hold floor, four times the deviation at which field guidance says
+/// to replace it. It is **not** widened past that to make particular
+/// catalogue entries trip. Doing so would mean asserting that a degraded
+/// aircraft breaker opens below 60 % of its nameplate, which no source in
+/// hand supports, and it would be inventing a magnitude to light up a
+/// registered failure -- the exact thing `docs/deep/BRIEF.md` hard rule 3
+/// forbids. What that leaves inert is measured instead of hidden: 168 of
+/// the 396 breakers protecting a modelled load never draw enough current
+/// for a fully drifted trip point to reach, in any state this crate
+/// models, so 168 registered `trip_calibration_drift` failures are inert
+/// by construction. See [`Breaker::minimum_trip_current_a`] and
+/// `live::tests::how_many_drift_failures_are_inert_by_construction`, which
+/// names all 168 and proves the closest of them cannot be tripped.
+///
+/// Worth knowing before anyone reaches for this constant again: 42 of
+/// those 168 sit within 2 % of tripping, and they are there because
+/// `catalog::standard_size` rounds every rating **up** to the real
+/// manufactured AS39019 ampere series. The CVR and the DFDR draw 1.79 A,
+/// margin to 2.23 A, buy the real 3 A part, and land 0.2 % below the
+/// 1.8 A that part opens at when fully drifted. The fix for those, if one
+/// is wanted, is a sourced answer to "what does a real A380 put a 1.8 A
+/// recorder on", not a larger number here.
+const MAX_CALIBRATION_DRIFT: f64 = 0.4;
+
 /// SSPC arc-fault detection proxy. A real arc-fault detector analyses
 /// high-frequency current noise/spectral signature (well beyond this
 /// simulation's fidelity); this uses the tick-to-tick current slope as a
@@ -318,6 +363,26 @@ impl Breaker {
         true
     }
 
+    /// The lowest steady current that can ever open this breaker, at the
+    /// given ambient: its effective rating with `trip_calibration_drift`
+    /// fully armed.
+    ///
+    /// Below this the I^2t element settles at `ratio^2 < 1` and never
+    /// reaches the trip rise, however long the current is carried and
+    /// whatever drift magnitude is armed; the magnetic element is ten
+    /// times further away again, and the SSPC arc channel needs a current
+    /// *step*, not a steady load. So a `trip_calibration_drift` failure on
+    /// a breaker whose own circuit never draws this much is inert by
+    /// construction rather than by a wiring gap --
+    /// [`MAX_CALIBRATION_DRIFT`] explains why the honest answer is to
+    /// measure that rather than widen the ceiling, and
+    /// `super::live`'s `BREAKERS_DRIFT_INERT_COUNT` reports how many of
+    /// the catalogue it is right now.
+    pub fn minimum_trip_current_a(&self, ambient_c: f64) -> f64 {
+        let ambient_factor = if self.kind == BreakerKind::Thermal { thermal_ambient_derate(ambient_c) } else { 1.0 };
+        self.rated_a * (1.0 - MAX_CALIBRATION_DRIFT) * ambient_factor
+    }
+
     /// Advance one tick given the real current this breaker is carrying
     /// (A), its own bay's ambient temperature (deg C), and its two health
     /// faults. Returns whether it tripped *this* tick (it may already have
@@ -340,31 +405,13 @@ impl Breaker {
         let weld = faults.contact_resistance.clamp(0.0, 1.0);
 
         // Calibration drift lowers the effective rating the curve reacts
-        // to -- up to 40% low at full drift (GENERIC: a real drifted part
-        // is out of tolerance, but a breaker that drifted further than that
-        // would already have been pulled at the last maintenance check).
-        //
-        // 40% is deliberately kept, having been checked against what it has
-        // to reach: `catalog` sizes every breaker at `P/(V*pf)*1.25`, so a
-        // healthy circuit carries at most about 0.8x its own rating (0.79x
-        // is the measured worst case across every profile -- see
-        // `live::tests::no_healthy_circuit_settles_above_its_own_breakers_
-        // rating`). At full drift the effective rating is 0.6x, so that
-        // same normal load sits at 1.32x of it and trips in tens of
-        // seconds: the registered effect ("opens under a load it should
-        // carry") is reachable on every breaker actually carrying its own
-        // design load. What a 40% ceiling cannot do is nuisance-trip a
-        // circuit loaded under 60% of its rating -- but that is the right
-        // answer rather than a limitation: a breaker with twice the margin
-        // it needs genuinely is harder to nuisance-trip, and widening the
-        // ceiling until those trip too would be inventing a fault
-        // magnitude to make an entry in the catalogue light up.
+        // to, by up to [`MAX_CALIBRATION_DRIFT`] at full drift.
         //
         // The thermal ambient derate stacks on top of it; a real SSPC's
         // electronic curve does not need an ambient term (its own
         // datasheet-documented advantage: temperature-stable trip point).
         let ambient_factor = if self.kind == BreakerKind::Thermal { thermal_ambient_derate(ambient_c) } else { 1.0 };
-        let effective_rated_a = (self.rated_a * (1.0 - 0.4 * drift) * ambient_factor).max(1e-6);
+        let effective_rated_a = (self.rated_a * (1.0 - MAX_CALIBRATION_DRIFT * drift) * ambient_factor).max(1e-6);
         let ratio = current_a / effective_rated_a;
 
         // Welded/pitted contacts do not have a single failure point; the

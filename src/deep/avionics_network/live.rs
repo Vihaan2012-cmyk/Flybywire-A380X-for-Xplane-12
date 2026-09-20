@@ -42,16 +42,34 @@
 //! overheats, which is right: the supervisor's own time constant is
 //! seconds.
 //!
+//! ## Where the power comes from
+//!
+//! Every module's supply and every extraction fan's supply is read from
+//! `deep::electrical`'s own solved network, through the published-frame
+//! seam `deep::live` provides: that area publishes
+//! `ELEC_AC_{1..4}_BUS_POTENTIAL` and `ELEC_DC_{1,2}_BUS_POTENTIAL` from
+//! its per-bus solve -- generators, TRs, batteries, contactors, ties,
+//! per-load and per-breaker state -- and [`LiveAvionicsNetwork`] reads
+//! them back one frame later (see [`LiveAvionicsNetwork::bus_volts`] for
+//! the indexing, the lag and what happens when the name is absent).
+//!
+//! This is what makes an electrical failure reach the avionics: arming a
+//! bus short, a generator fault, a contactor or a feeder breaker in
+//! `deep::electrical` collapses the bus it really feeds, and the modules
+//! and bay fans on that bus go with it, rather than the two models
+//! disagreeing about who has power.
+//!
 //! ## What `Truth` cannot supply yet
 //!
-//! * **Which bus feeds which module and which fan.** `Truth` publishes two
-//!   DC and four AC bus voltages but not the avionics load allocation, so
-//!   modules are spread across the two DC buses and each bay's two fans
-//!   across two AC buses (see [`LiveAvionicsNetwork::new`]). That spread is
-//!   a real design property -- no bus loss may take out a whole bay -- but
-//!   the actual A380 allocation is not public and is not in `Truth`;
-//!   `Truth::avionics_module_bus` (or the electrical area publishing each
-//!   module's supply) would replace it.
+//! * **Which bus feeds which module and which fan.** Neither `Truth` nor
+//!   `deep::electrical` carries the avionics *load allocation* -- the
+//!   published buses say what each bus is doing, not which CPIOM hangs off
+//!   which one -- so modules are spread across the two DC buses and each
+//!   bay's two fans across two AC buses (see
+//!   [`LiveAvionicsNetwork::new`]). That spread is a real design property
+//!   -- no bus loss may take out a whole bay -- but the actual A380
+//!   allocation is not public; `deep::electrical` modelling each module as
+//!   a named load on a named bus would replace it.
 //! * **ARINC 429 bus faults.** `arinc429.rs` models the legacy
 //!   point-to-point links, but `registry.rs` deliberately does not
 //!   enumerate them per instance (which LRU on which wire is a
@@ -80,8 +98,34 @@ pub fn live_system() -> Box<dyn Area> {
 
 /// A 115 V AC bus (avionics extraction fans) and a 28 V DC bus (the
 /// modules themselves) are alive above these.
+///
+/// These stay this area's own numbers rather than deferring to
+/// `deep::electrical`'s `ELEC_<bus>_BUS_IS_POWERED`: that flag is
+/// deliberately loose (its own `POWERED_VOLTAGE_FRACTION` is 50 % of
+/// nominal -- "is there any real power here at all"), and a CPIOM or a
+/// 115 V extraction fan motor is not running on a bus at 60 V. Reading
+/// the solved *potential* and applying this area's own equipment
+/// threshold to it is strictly finer-grained than reading the flag.
 const AC_BUS_ALIVE_V: f64 = 90.0;
 const DC_BUS_ALIVE_V: f64 = 18.0;
+
+/// `deep::electrical`'s own published potential for each of the four main
+/// AC buses and the two main DC buses, in the order this area (and
+/// `Truth::ac_bus_volts` / `Truth::dc_bus_volts`) indexes them.
+///
+/// The mapping is checked, not assumed. `deep::electrical`'s
+/// `network::ALL_BUS_IDS` is ordered `Ac1, Ac2, Ac3, Ac4, AcEss,
+/// AcEssShed, AcEmer, AcGndFltSvc, Dc1, Dc2, ...`; its `live::bus_tag`
+/// spells those first four `AC_1..AC_4` and the two DC mains `DC_1`,
+/// `DC_2`; and `live::publish` emits `ELEC_<tag>_BUS_POTENTIAL` for each.
+/// `deep::plugin` fills `Truth::ac_bus_volts[i]` from
+/// `ELEC_AC_{i+1}_BUS_POTENTIAL` and `Truth::dc_bus_volts[i]` from
+/// `ELEC_DC_{i+1}_BUS_POTENTIAL` (`plugin.rs`'s own id table), so index
+/// `i` means the same physical bus on both sides of this seam and the
+/// fallback below is genuinely the same bus, not a different one.
+const AC_BUS_POTENTIAL_VAR: [&str; 4] =
+    ["ELEC_AC_1_BUS_POTENTIAL", "ELEC_AC_2_BUS_POTENTIAL", "ELEC_AC_3_BUS_POTENTIAL", "ELEC_AC_4_BUS_POTENTIAL"];
+const DC_BUS_POTENTIAL_VAR: [&str; 2] = ["ELEC_DC_1_BUS_POTENTIAL", "ELEC_DC_2_BUS_POTENTIAL"];
 
 /// How long a virtual link's data stays usable with nothing new arriving.
 /// GENERIC: half a second is several times the loosest BAG in the
@@ -402,12 +446,43 @@ impl LiveAvionicsNetwork {
         }
     }
 
+    /// Volts on one bus, taken from `deep::electrical`'s own solve.
+    ///
+    /// `Truth::published` carries what every other area published on the
+    /// previous frame (`deep::live`'s designed one-frame lag, which on a
+    /// bus whose contactors move in tens of milliseconds and whose
+    /// consumers here have seconds-long time constants is well inside the
+    /// noise). A name nobody published reads as `None`, never as zero.
+    ///
+    /// **When the name is absent we fall back to the matching raw `Truth`
+    /// field, deliberately.** That field is FlyByWire's own bus potential
+    /// for the same bus, and it is a real voltage: 0 V on a dead bus. So
+    /// the fallback is *not* "default to powered" -- a genuinely dark
+    /// aircraft still reads dark through it, and every failure this change
+    /// exists to expose still fires. It covers exactly two cases: the
+    /// first frame, before any area has published anything, and a build in
+    /// which `deep::electrical` is not among the ticked areas. In both,
+    /// the alternative (assume the bus is dead) would take every avionics
+    /// module off both networks for a reason that has nothing to do with
+    /// the electrical system, which would be a fabricated failure rather
+    /// than a conservative default.
+    ///
+    /// Where both exist the published value wins outright: per
+    /// `docs/deep/authority.md` the deep model is authoritative, and the
+    /// raw field is FlyByWire's coarse answer *after* it has been told
+    /// what this model concluded.
+    fn bus_volts(truth: &Truth, name: Option<&&'static str>, raw: f64) -> f64 {
+        name.and_then(|n| truth.published.get(n)).unwrap_or(raw)
+    }
+
     fn ac_bus_alive(truth: &Truth, bus: usize) -> bool {
-        truth.ac_bus_volts.get(bus).copied().unwrap_or(0.0) > AC_BUS_ALIVE_V
+        let raw = truth.ac_bus_volts.get(bus).copied().unwrap_or(0.0);
+        Self::bus_volts(truth, AC_BUS_POTENTIAL_VAR.get(bus), raw) > AC_BUS_ALIVE_V
     }
 
     fn dc_bus_alive(truth: &Truth, bus: usize) -> bool {
-        truth.dc_bus_volts.get(bus).copied().unwrap_or(0.0) > DC_BUS_ALIVE_V
+        let raw = truth.dc_bus_volts.get(bus).copied().unwrap_or(0.0);
+        Self::bus_volts(truth, DC_BUS_POTENTIAL_VAR.get(bus), raw) > DC_BUS_ALIVE_V
     }
 
     /// What one module dissipates as heat right now: its rated
@@ -425,8 +500,8 @@ impl LiveAvionicsNetwork {
 
     /// Assembles every failure this area's `registry.rs` registers into the
     /// fault set `graph`/`message`/`consequences` consume, with bus power
-    /// from `Truth` and the bay overheat trips from this tick's
-    /// ventilation.
+    /// from `deep::electrical`'s solved buses and the bay overheat trips
+    /// from this tick's ventilation.
     fn network_faults(&self, truth: &Truth, faults: &Faults) -> NetworkFaults {
         let mut nf = NetworkFaults::default();
 
@@ -806,6 +881,7 @@ impl Area for LiveAvionicsNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deep::live::PublishedFrame;
 
     /// Every bus alive: the aircraft powered and the avionics running.
     fn powered() -> Truth {
@@ -1248,5 +1324,149 @@ mod tests {
         );
         assert_eq!(published["AVNCS_VL_FWS_WARNINGS_PATHS_DESIGNED"], 2.0, "the design target does not change");
     }
-}
 
+    // -----------------------------------------------------------------
+    // The seam into `deep::electrical`.
+    // -----------------------------------------------------------------
+
+    /// A module's supply is the electrical model's solved bus, not the raw
+    /// `Truth` field. Raw `Truth` says both DC mains sit at nominal; the
+    /// electrical area published them dead last frame. The modules must
+    /// follow the electrical area.
+    #[test]
+    fn module_power_follows_the_electrical_areas_solved_bus_not_the_raw_truth_field() {
+        let mut truth = powered();
+        truth.published = PublishedFrame(BTreeMap::from([
+            ("ELEC_DC_1_BUS_POTENTIAL".to_string(), 0.0),
+            ("ELEC_DC_2_BUS_POTENTIAL".to_string(), 0.0),
+        ]));
+        assert_eq!(truth.dc_bus_volts, [28.0; 2], "setup: the raw field still claims both DC mains are at nominal");
+
+        let mut area = LiveAvionicsNetwork::new();
+        let published = run(&mut area, &truth, &Faults::default(), 5.0);
+        assert_eq!(
+            published["AVNCS_MODULE_CPIOM_C1_AVAILABLE"], 0.0,
+            "the electrical model says its bus is dead; the module cannot still be on the network"
+        );
+        assert_eq!(published["AVNCS_MODULE_CPIOM_A1_AVAILABLE"], 0.0);
+        assert_eq!(published["AFDX_NETWORK_A_AVAILABLE"], 0.0);
+        assert_eq!(published["AFDX_NETWORK_B_AVAILABLE"], 0.0);
+    }
+
+    /// The same seam the other way round, which is the half that proves
+    /// the raw field really is only a fallback: raw `Truth` claims every
+    /// bus is dark, the electrical area published them alive, and the
+    /// avionics run.
+    #[test]
+    fn the_electrical_areas_solved_bus_also_wins_when_the_raw_field_is_the_pessimistic_one() {
+        let mut truth = Truth { dt_s: 1.0 / 30.0, ..Truth::default() };
+        assert_eq!(truth.dc_bus_volts, [0.0; 2], "setup: the raw field claims a dark aircraft");
+        truth.published = PublishedFrame(BTreeMap::from([
+            ("ELEC_AC_1_BUS_POTENTIAL".to_string(), 115.0),
+            ("ELEC_AC_2_BUS_POTENTIAL".to_string(), 115.0),
+            ("ELEC_AC_3_BUS_POTENTIAL".to_string(), 115.0),
+            ("ELEC_AC_4_BUS_POTENTIAL".to_string(), 115.0),
+            ("ELEC_DC_1_BUS_POTENTIAL".to_string(), 28.0),
+            ("ELEC_DC_2_BUS_POTENTIAL".to_string(), 28.0),
+        ]));
+
+        let mut area = LiveAvionicsNetwork::new();
+        let published = run(&mut area, &truth, &Faults::default(), 5.0);
+        assert_eq!(published["AVNCS_MODULE_CPIOM_C1_AVAILABLE"], 1.0);
+        assert_eq!(published["AFDX_NETWORK_A_AVAILABLE"], 1.0);
+        assert_eq!(
+            published["AVNCS_AVIONICS_BAY_FWD_AIRFLOW_FRAC"], 1.0,
+            "the bay extraction fans hang off the solved AC buses too"
+        );
+    }
+
+    /// Losing one solved DC main must take out only the modules on it --
+    /// the spread across the two DC buses is the design property
+    /// [`LiveAvionicsNetwork::new`] documents, and it only means anything
+    /// if the two buses can be lost independently.
+    #[test]
+    fn losing_one_solved_dc_main_takes_only_the_modules_on_that_bus() {
+        let mut truth = powered();
+        truth.published = PublishedFrame(BTreeMap::from([
+            ("ELEC_DC_1_BUS_POTENTIAL".to_string(), 0.0),
+            ("ELEC_DC_2_BUS_POTENTIAL".to_string(), 28.0),
+        ]));
+        let mut area = LiveAvionicsNetwork::new();
+        let published = run(&mut area, &truth, &Faults::default(), 5.0);
+        assert_eq!(published["AVNCS_MODULE_CPIOM_C1_AVAILABLE"], 0.0, "CPIOM-C1 is end system 0, so it is on DC 1");
+        assert_eq!(
+            published["AVNCS_MODULE_CPIOM_A1_AVAILABLE"], 1.0,
+            "CPIOM-A1 is end system 1, so it is on DC 2 and must survive"
+        );
+    }
+
+    /// The whole point of closing the seam, end to end and with nothing
+    /// hand-fed: two real areas in a real `Deep`, and a real registered
+    /// `deep::electrical` failure -- a short from the DC 1 busbar to
+    /// structure -- taking a CPIOM off both AFDX networks. Before this
+    /// change no electrical failure could reach this area at all, because
+    /// the raw `Truth` field it used to read is held at nominal in both
+    /// runs below and never moves.
+    #[test]
+    fn a_real_electrical_bus_failure_takes_a_real_avionics_module_off_the_network() {
+        use crate::deep::api::Registry;
+        use crate::deep::electrical::live::board;
+        use crate::deep::live::Deep;
+
+        let short_dc1 = {
+            let mut reg = Registry::default();
+            crate::deep::electrical::registry::register(&mut reg);
+            reg.failures
+                .iter()
+                .find(|f| f.component == "24_elec.bus.DC1" && f.model_field.contains("short_to_ground"))
+                .expect("deep::electrical registers a short-to-ground on the DC 1 busbar")
+                .id
+        };
+
+        let truth = || Truth {
+            dt_s: 1.0 / 30.0,
+            on_ground: false,
+            engine_running: [true; 4],
+            engine_n1_frac: [0.9; 4],
+            engine_n2_frac: [0.9; 4],
+            engine_n3_frac: [0.9; 4],
+            ac_bus_volts: [115.0; 4],
+            dc_bus_volts: [28.0; 2],
+            ..Truth::default()
+        };
+
+        let run_for = |faults: &Faults| -> BTreeMap<String, f64> {
+            board::clear();
+            let mut deep = Deep::new()
+                .with_area(crate::deep::electrical::live::live_system())
+                .with_area(live_system());
+            let mut published = BTreeMap::new();
+            for _ in 0..300 {
+                published.clear();
+                deep.tick(truth(), faults, &mut |n, v| {
+                    published.insert(n.to_string(), v);
+                });
+            }
+            board::clear();
+            published
+        };
+
+        let healthy = run_for(&Faults::default());
+        assert!(
+            healthy["ELEC_DC_1_BUS_POTENTIAL"] > DC_BUS_ALIVE_V,
+            "setup: the electrical area must actually solve DC 1 alive"
+        );
+        assert_eq!(healthy["AVNCS_MODULE_CPIOM_C1_AVAILABLE"], 1.0, "setup: the module runs on a healthy aircraft");
+
+        let shorted = run_for(&Faults::from_pairs([(short_dc1, 1.0)]));
+        assert!(
+            shorted["ELEC_DC_1_BUS_POTENTIAL"] <= DC_BUS_ALIVE_V,
+            "a dead short on the busbar must collapse it, got {} V",
+            shorted["ELEC_DC_1_BUS_POTENTIAL"]
+        );
+        assert_eq!(
+            shorted["AVNCS_MODULE_CPIOM_C1_AVAILABLE"], 0.0,
+            "an armed electrical failure must reach the avionics module it really feeds"
+        );
+    }
+}

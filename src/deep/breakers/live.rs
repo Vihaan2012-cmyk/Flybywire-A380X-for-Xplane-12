@@ -116,6 +116,12 @@ pub struct BreakersLive {
     fault_tripped_count: f64,
     locked_out_count: f64,
     unprotected_count: f64,
+    /// Units whose own circuit is, right now, drawing less than the
+    /// smallest current that could ever open them -- so their registered
+    /// `trip_calibration_drift` failure is armable but cannot act. See
+    /// [`super::trip::Breaker::minimum_trip_current_a`] and
+    /// [`BreakersLive::publish`].
+    drift_inert_count: f64,
 }
 
 /// This area's live system, constructed cold: every catalogue breaker
@@ -182,7 +188,7 @@ impl BreakersLive {
         }
 
         let unprotected_count = units.iter().filter(|u| u.def.protected_load.is_none()).count() as f64;
-        Self { units, routed, welded_mirror, faults_were_armed: false, tripped_count: 0.0, fault_tripped_count: 0.0, locked_out_count: 0.0, unprotected_count }
+        Self { units, routed, welded_mirror, faults_were_armed: false, tripped_count: 0.0, fault_tripped_count: 0.0, locked_out_count: 0.0, unprotected_count, drift_inert_count: 0.0 }
     }
 
     /// Read-only access to one unit's live trip state, for tests and for
@@ -260,6 +266,13 @@ impl Area for BreakersLive {
         // follows several of them -- reads as anything else.
         self.fault_tripped_count = self.units.iter().filter(|u| matches!(u.breaker.status(), SspcStatus::Tripped(_) | SspcStatus::LockedOut)).count() as f64;
         self.locked_out_count = self.units.iter().filter(|u| u.breaker.is_locked_out()).count() as f64;
+        // How much of the drift half of this area's catalogue can do
+        // nothing at all in the state the aircraft is in right now. A
+        // circuit below its breaker's fully-drifted effective rating
+        // settles at `ratio^2 < 1` and never reaches the trip rise, so
+        // arming `trip_calibration_drift` on it changes nothing, at any
+        // magnitude, for any duration.
+        self.drift_inert_count = self.units.iter().filter(|u| u.current_a < u.breaker.minimum_trip_current_a(ambient_c)).count() as f64;
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -281,6 +294,20 @@ impl Area for BreakersLive {
         out("BREAKERS_TRIPPED_NOT_COMMANDED_COUNT", self.fault_tripped_count);
         out("BREAKERS_LOCKED_OUT_COUNT", self.locked_out_count);
         out("BREAKERS_PROTECTING_NO_MODELLED_LOAD", self.unprotected_count);
+        // The failure-audit diagnostic: of the 399 registered
+        // `trip_calibration_drift` failures, how many are inert *in this
+        // state* -- armable, routed onto a real unit, and still unable to
+        // change anything, because the circuit the unit protects is not
+        // drawing enough current for even a fully drifted trip point to
+        // reach. It is a live number rather than a constant because it is
+        // a property of the load, not of the breaker: the same unit can be
+        // inert in cruise and live during a start. See
+        // `tests::how_many_drift_failures_are_inert_by_construction` for
+        // the ones that are inert in *every* modelled state, which is the
+        // number the audit wants, and `trip::MAX_CALIBRATION_DRIFT` for
+        // why the honest response is to report this rather than widen the
+        // drift ceiling until it goes away.
+        out("BREAKERS_DRIFT_INERT_COUNT", self.drift_inert_count);
 
         // The typed side of `BKR_<id>_OPEN`, which `deep::electrical` reads
         // back next frame to open the matching contacts.
@@ -686,6 +713,188 @@ mod tests {
         }
         live.publish(&mut |name, v| assert!(v.is_finite(), "{name} is {v}"));
     }
+
+    /// **The audit number.** `trip_calibration_drift` is registered on all
+    /// 399 breakers, but the trip curve can only act on a circuit whose
+    /// current actually reaches the fully-drifted effective rating
+    /// ([`super::trip::Breaker::minimum_trip_current_a`]: 60 % of
+    /// nameplate, less the thermal ambient derate). A breaker whose own
+    /// circuit never gets there in *any* modelled state has a registered,
+    /// armable drift failure that cannot change anything -- inert by
+    /// construction, not by a wiring gap, and this is how many.
+    ///
+    /// This is deliberately not "fixed" by widening the drift ceiling:
+    /// `trip::MAX_CALIBRATION_DRIFT` records why no source in hand puts a
+    /// degraded aircraft breaker's trip point below 60 % of its nameplate.
+    /// The cause is mostly `catalog::standard_size`, and it is a real
+    /// property of real aircraft rather than a modelling artefact: ratings
+    /// are rounded **up** to the manufactured AS39019 ampere series, whose
+    /// steps are coarse at the low end (1, 2, 3, 4, 5, 7.5, 10, 15 A), so
+    /// a load that margins to just over one step gets the next part up and
+    /// then sits well under 60 % of it. The CVR and the DFDR are exactly
+    /// that case: 50 W on a 28 V bus is 1.79 A, margins to 2.23 A, and is
+    /// protected by the real 3 A part, 60 % of which is 1.8 A -- just
+    /// above anything the recorder ever draws.
+    ///
+    /// The honest reading of a name on this list is not "wire it up" but
+    /// "this breaker is genuinely hard to nuisance-trip, and the registry
+    /// entry claiming a consequence for it is the thing that is wrong".
+    #[test]
+    fn how_many_drift_failures_are_inert_by_construction() {
+        use crate::deep::integration::failure_audit::profiles;
+
+        // Best case for tripping, over every modelled state: the highest
+        // current each circuit ever carries, against the lowest effective
+        // rating full drift can produce. A thermal breaker is given the
+        // largest ambient derate MIL-PRF-39019's own qualification range
+        // allows (+71 C), which is more help than any profile's static air
+        // temperature actually gives it, so nothing is called inert that
+        // some hot bay might still trip; an SSPC's electronic curve has no
+        // ambient term at all.
+        let mut best: HashMap<&'static str, f64> = HashMap::new();
+        for p in profiles() {
+            board::clear();
+            let mut elec = ElectricalLive::new();
+            let mut live = BreakersLive::new();
+            let truth = Truth { dt_s: 0.1, ..(p.truth)() };
+            let faults = Faults::default();
+            for f in 0..600 {
+                elec.tick(&truth, &faults);
+                live.tick(&truth, &faults);
+                // Hold every trip element closed: this measures the load,
+                // not the protection.
+                for u in live.units.iter_mut() {
+                    u.breaker.maintenance_clear_lockout();
+                    let _ = u.breaker.reset();
+                }
+                elec.publish(&mut |_, _| {});
+                live.publish(&mut |_, _| {});
+                if f >= 100 {
+                    for u in live.units.iter() {
+                        let floor = u.breaker.minimum_trip_current_a(71.0).max(1e-9);
+                        let r = u.current_a / floor;
+                        let e = best.entry(u.def.id).or_insert(0.0);
+                        if r > *e {
+                            *e = r;
+                        }
+                    }
+                }
+            }
+            board::clear();
+        }
+
+        let live = BreakersLive::new();
+        let protecting_a_load = live.units.iter().filter(|u| u.net_index.is_some()).count();
+        let mut inert: Vec<(&'static str, f64)> = live
+            .units
+            .iter()
+            .filter(|u| u.net_index.is_some())
+            .map(|u| (u.def.id, best.get(u.def.id).copied().unwrap_or(0.0)))
+            .filter(|&(_, r)| r < 1.0)
+            .collect();
+        inert.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let named: Vec<String> = inert.iter().map(|(id, r)| format!("{id} {r:.3}x")).collect();
+
+        // Proof rather than arithmetic: the one closest to tripping, its
+        // real registered failure armed at full magnitude, run for two
+        // minutes of simulated time in every modelled state, still does
+        // not open. If that one cannot, none below it can.
+        if let Some(&(closest, ratio)) = inert.first() {
+            let armed = Faults::from_pairs([(failure_id_for(closest, "trip_calibration_drift"), 1.0)]);
+            for p in profiles() {
+                board::clear();
+                let truth = Truth { dt_s: 0.1, ..(p.truth)() };
+                let mut elec = ElectricalLive::new();
+                let mut brk = BreakersLive::new();
+                for _ in 0..1_200 {
+                    elec.tick(&truth, &armed);
+                    brk.tick(&truth, &armed);
+                    elec.publish(&mut |_, _| {});
+                    brk.publish(&mut |_, _| {});
+                }
+                assert!(
+                    brk.breaker(closest).expect("the id came from the unit list").closed,
+                    "{closest} is the inert unit closest to its drifted trip point ({ratio:.3}x), so full drift must not open it -- and it opened in profile {}",
+                    p.name
+                );
+                board::clear();
+            }
+        }
+
+        assert_eq!(
+            inert.len(),
+            DRIFT_INERT_IN_EVERY_STATE,
+            "{} of the {protecting_a_load} breakers protecting a modelled load never reach their own fully-drifted trip point in any profile, \
+             so that many registered trip_calibration_drift failures are inert by construction: {named:?}",
+            inert.len()
+        );
+    }
+
+    /// **168 of the 396** breakers protecting a modelled load: how many
+    /// registered `trip_calibration_drift` failures no state this crate
+    /// models can act on, as measured by
+    /// [`how_many_drift_failures_are_inert_by_construction`]. Pinned so
+    /// that a load, a rating or the drift ceiling changing has to move this
+    /// number deliberately.
+    ///
+    /// They are not a wiring gap -- every one is routed onto a real unit
+    /// carrying a real solved current -- and they fall into three clearly
+    /// different groups, which the test prints in order:
+    ///
+    /// * **42 at 0.984x or better**, i.e. within 2 % of tripping: `cvr`,
+    ///   `dfdr`, the VCMs, the OCSMs, the CPIOM-B cabin functions,
+    ///   `acars-mu`, `interphone`, `xpdr-1/2`. These are pure
+    ///   `catalog::standard_size` rounding: a 1.79 A recorder margins to
+    ///   2.23 A, buys the real 3 A part, and lands 0.2 % under the 1.8 A
+    ///   a fully drifted 3 A part would open at. Nothing is wrong with
+    ///   them; they are simply on the wrong side of a manufactured step.
+    /// * **113 far inside** (0.08x .. 0.98x): the valve position
+    ///   indicators, proximity sensors and radio-altimeter antenna
+    ///   circuits, milliamp loads on the smallest part the AS39019 series
+    ///   makes (1 A). A breaker with ten times the margin it needs
+    ///   genuinely is impossible to nuisance-trip.
+    /// * **13 at 0.000x**: the second breakers (`lgciu-1-2nd-bkr`,
+    ///   `adirs-*-2nd-bkr`, `tcas-2nd-bkr`), the gear and gear-door
+    ///   actuators and the cargo-door actuator controls -- loads no
+    ///   modelled state ever energises. Their drift failure is inert for
+    ///   the same reason the three battery-output breakers' are: there is
+    ///   no current, not that there is too little.
+    ///
+    /// The honest conclusion is that a registry entry promising "the
+    /// breaker opens under a load it should carry" is wrong for all 168,
+    /// and the failure audit's "changes nothing measurable" total should
+    /// keep counting them until those entries are withdrawn -- not that
+    /// `trip::MAX_CALIBRATION_DRIFT` should be widened until they light up.
+    const DRIFT_INERT_IN_EVERY_STATE: usize = 168;
+
+    /// The live counterpart, and the cheap one: `BREAKERS_DRIFT_INERT_COUNT`
+    /// reports the same thing for the state the aircraft is in right now,
+    /// so it is never zero on a real aircraft (a great many circuits are
+    /// simply not switched on) and it is never all 399 either.
+    #[test]
+    fn the_live_drift_inert_count_is_published_and_is_a_real_number() {
+        board::clear();
+        let mut elec = ElectricalLive::new();
+        let mut live = BreakersLive::new();
+        let truth = flying_truth();
+        let mut published = BTreeMap::new();
+        for _ in 0..60 {
+            elec.tick(&truth, &Faults::default());
+            live.tick(&truth, &Faults::default());
+            published.clear();
+            elec.publish(&mut |n, v| {
+                published.insert(n.to_string(), v);
+            });
+            live.publish(&mut |n, v| {
+                published.insert(n.to_string(), v);
+            });
+        }
+        let inert = published["BREAKERS_DRIFT_INERT_COUNT"];
+        assert!(inert > 0.0, "a flying aircraft has circuits that are not switched on; none of their drift failures can act");
+        assert!(inert < published["BREAKERS_TOTAL"], "and it cannot be all of them: {inert}");
+        board::clear();
+    }
+
 }
 
 #[cfg(test)]
