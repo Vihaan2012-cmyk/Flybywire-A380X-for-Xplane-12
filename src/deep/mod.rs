@@ -16,6 +16,7 @@ pub mod fuel;
 pub mod gear_structure;
 pub mod hydraulics;
 pub mod integration;
+pub mod live;
 pub mod pneumatic_ducts;
 pub mod sensors;
 pub mod thermal_zones;
