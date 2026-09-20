@@ -195,7 +195,7 @@ mod tests {
             gearbox_elec_load_w: baseline_gearbox_w,
             ..isa_sea_level()
         };
-        let baseline_out = run_to_steady_state(&mut engine, baseline_inputs, 60.0);
+        let baseline_out = run_to_steady_state(&mut engine, baseline_inputs, 200.0);
 
         // ---- Raised: the same generator now demands `baseline_w + delta_w`, through the real contract. ----
         let mut vars2 = offline_vars();
@@ -213,10 +213,9 @@ mod tests {
             gearbox_elec_load_w: raised_gearbox_w,
             ..isa_sea_level()
         };
-        let raised_out = run_to_steady_state(&mut engine_raised, raised_inputs, 60.0);
+        let raised_out = run_to_steady_state(&mut engine_raised, raised_inputs, 200.0);
 
         let measured_delta_fuel_kg_s = raised_out.fuel_flow_kg_s - baseline_out.fuel_flow_kg_s;
-        let predicted_delta_fuel_kg_s = delta_w / (params::LHV_JET_A1_J_KG * params::COMBUSTOR_EFFICIENCY);
 
         assert!(
             measured_delta_fuel_kg_s > 0.0,
@@ -224,10 +223,45 @@ mod tests {
             baseline_out.fuel_flow_kg_s,
             raised_out.fuel_flow_kg_s
         );
-        let relative_error = (measured_delta_fuel_kg_s - predicted_delta_fuel_kg_s).abs() / predicted_delta_fuel_kg_s;
         assert!(
-            relative_error < 0.35,
-            "measured delta fuel flow {measured_delta_fuel_kg_s} kg/s vs independent LHV-based prediction {predicted_delta_fuel_kg_s} kg/s (error {relative_error})"
+            (raised_out.n1_pct - target_n1_corrected_pct).abs() < 0.1 && (baseline_out.n1_pct - target_n1_corrected_pct).abs() < 0.1,
+            "both runs must have reached the same N1 for the comparison to mean anything: baseline {} raised {}",
+            baseline_out.n1_pct,
+            raised_out.n1_pct
+        );
+
+        // The independent check is a thermodynamic bracket, not a single
+        // number. The heat the extra fuel carries is
+        // `delta_fuel * LHV * eta_combustor`; what has to come out of it is
+        // `delta_w` of shaft work at the gearbox. The ratio between them is
+        // the *marginal* thermal efficiency of the core at this operating
+        // point -- an efficiency, so:
+        //
+        // * it cannot exceed 1. Getting 150 kW of shaft work from less fuel
+        //   heat than 150 kW would break the first law, so
+        //   `delta_w / (LHV * eta_comb)` is a hard floor on the extra fuel.
+        // * it cannot be arbitrarily good either. A large modern three-shaft
+        //   core takes fuel heat to shaft work at roughly 40-50% at high
+        //   power (a ~50% overall thermal efficiency is the best any civil
+        //   turbofan core achieves, and marginal efficiency sits near it);
+        //   below about 25% would mean the engine had stopped behaving like
+        //   a turbine engine at all.
+        //
+        // Bracketing on that band is an independent statement about
+        // conservation of energy, derived from published figures for the
+        // class of engine, that the model has to land inside -- not a number
+        // read back off the model.
+        let first_law_floor_kg_s = delta_w / (params::LHV_JET_A1_J_KG * params::COMBUSTOR_EFFICIENCY);
+        let marginal_thermal_efficiency = delta_w / (measured_delta_fuel_kg_s * params::LHV_JET_A1_J_KG * params::COMBUSTOR_EFFICIENCY);
+        assert!(
+            measured_delta_fuel_kg_s > first_law_floor_kg_s,
+            "the extra fuel {measured_delta_fuel_kg_s} kg/s carries less heat than the {delta_w} W of shaft work it has to do \
+             (first-law floor {first_law_floor_kg_s} kg/s)"
+        );
+        assert!(
+            (0.25..=0.55).contains(&marginal_thermal_efficiency),
+            "the core turned {delta_w} W of extra gearbox load into {measured_delta_fuel_kg_s} kg/s of extra fuel, a marginal \
+             thermal efficiency of {marginal_thermal_efficiency:.3} -- outside the 0.25..0.55 a large turbofan core can have"
         );
 
         // ---- Decouple: same demand change, contract cut (EngineLoads::update never called on vars3). ----
@@ -245,17 +279,38 @@ mod tests {
             gearbox_elec_load_w: cut_gearbox_w,
             ..isa_sea_level()
         };
-        let cut_out = run_to_steady_state(&mut engine_cut, cut_inputs, 60.0);
+        let cut_out = run_to_steady_state(&mut engine_cut, cut_inputs, 200.0);
 
-        let cut_delta_fuel_kg_s = (cut_out.fuel_flow_kg_s - baseline_out.fuel_flow_kg_s).abs();
+        // With the contract cut, the engine is told about no load at all, so
+        // it must burn *less* than the baseline (which carries `baseline_w`),
+        // and must show no sign of the raised demand the electrical side is
+        // sitting on. Two things have to hold:
+        //
+        // 1. The raised demand never arrived. If it had leaked through by
+        //    some other path, fuel flow would have gone up toward the raised
+        //    case instead of down.
+        // 2. What the engine *does* burn is set by what it was told, and by
+        //    the same physics: dropping `baseline_w` of load off the gearbox
+        //    has to give the fuel back at the same marginal efficiency the
+        //    150 kW step cost, within the same band. That pins the
+        //    relationship to the load the engine saw, not to the demand the
+        //    electrical side published.
         assert!(
-            cut_delta_fuel_kg_s < measured_delta_fuel_kg_s * 0.05,
-            "with the gearbox-load contract cut, fuel flow must not move with the (unpropagated) electrical load: \
-             baseline {} cut {} (would-be connected delta {})",
+            cut_out.fuel_flow_kg_s < baseline_out.fuel_flow_kg_s,
+            "with the contract cut the engine carries no gearbox load at all and must burn less than the baseline: \
+             baseline {} cut {} raised {}",
             baseline_out.fuel_flow_kg_s,
             cut_out.fuel_flow_kg_s,
-            measured_delta_fuel_kg_s
+            raised_out.fuel_flow_kg_s
+        );
+        let cut_delta_fuel_kg_s = baseline_out.fuel_flow_kg_s - cut_out.fuel_flow_kg_s;
+        let cut_marginal_efficiency = baseline_w / (cut_delta_fuel_kg_s * params::LHV_JET_A1_J_KG * params::COMBUSTOR_EFFICIENCY);
+        assert!(
+            (0.25..=0.55).contains(&cut_marginal_efficiency),
+            "dropping the baseline {baseline_w} W of gearbox load saved {cut_delta_fuel_kg_s} kg/s, a marginal thermal \
+             efficiency of {cut_marginal_efficiency:.3} -- the engine is not answering the load it was actually handed"
         );
     }
 }
+
 
