@@ -52,6 +52,39 @@ use std::collections::BTreeMap;
 
 use super::integration::weather_truth::EnvironmentTruth;
 
+/// What every area published on the previous frame, by variable name.
+///
+/// This is how one area reads another's output. The areas are deliberately
+/// independent -- none may call into another, so that each stays separately
+/// testable -- but the aircraft is not: a pneumatic duct's overheat loop
+/// watches the temperature of the bay it runs through, and that bay is the
+/// thermal area's to compute. Passing the previous frame's published values
+/// back in keeps the areas decoupled while letting the physics join up.
+///
+/// A name nobody published reads as `None`, never as zero: an area must be
+/// able to tell "the bay is at 0 C" from "nothing models that bay".
+#[derive(Clone, Debug, Default)]
+pub struct PublishedFrame(pub BTreeMap<String, f64>);
+
+impl PublishedFrame {
+    /// What another area published for `name` last frame, if anything did.
+    pub fn get(&self, name: &str) -> Option<f64> {
+        self.0.get(name).copied()
+    }
+
+    /// `get`, with a caller-chosen stand-in for "nobody models this yet".
+    /// The fallback belongs to the caller because only it knows what a
+    /// physically sane substitute is -- ambient for a duct pressure, say,
+    /// never zero.
+    pub fn get_or(&self, name: &str, fallback: f64) -> f64 {
+        self.get(name).unwrap_or(fallback)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Everything the deep areas read about the rest of the simulation.
 ///
 /// Filled once per frame by the plugin. Anything an area needs that is not
@@ -86,6 +119,10 @@ pub struct Truth {
     pub dc_bus_volts: [f64; 2],
     /// Hydraulic system pressures, green and yellow, Pa.
     pub hydraulic_pressure_pa: [f64; 2],
+    /// What every area published last frame. Empty on the first frame and
+    /// whenever an area has not published a name yet, so read it through
+    /// `get`/`get_or` and never assume a zero means anything.
+    pub published: PublishedFrame,
 }
 
 impl Default for Truth {
@@ -114,6 +151,7 @@ impl Default for Truth {
             ac_bus_volts: [0.0; 4],
             dc_bus_volts: [0.0; 2],
             hydraulic_pressure_pa: [0.0; 2],
+            published: PublishedFrame::default(),
         }
     }
 }
@@ -166,12 +204,15 @@ pub trait Area {
 pub struct Deep {
     areas: Vec<Box<dyn Area>>,
     truth: Truth,
+    /// What the areas published last frame, handed back to them as
+    /// `Truth::published` on the next one.
+    last_published: PublishedFrame,
 }
 
 impl Deep {
     /// Every area that has a live system, constructed cold.
     pub fn new() -> Self {
-        Self { areas: Vec::new(), truth: Truth::default() }
+        Self { areas: Vec::new(), truth: Truth::default(), last_published: PublishedFrame::default() }
     }
 
     pub fn with_area(mut self, area: Box<dyn Area>) -> Self {
@@ -187,14 +228,27 @@ impl Deep {
 
     /// Step every area, then publish. `publish` runs after every area has
     /// ticked so that no area can see half a frame.
+    ///
+    /// Everything published is also kept, and handed back to the areas on
+    /// the next tick as `Truth::published`, which is how one area reads
+    /// another's output -- a duct's overheat loop watching the bay
+    /// temperature the thermal area computes, say. The one-frame lag is the
+    /// deliberate one this module's header describes.
     pub fn tick(&mut self, truth: Truth, faults: &Faults, out: &mut dyn FnMut(&str, f64)) {
         self.truth = truth;
+        self.truth.published = std::mem::take(&mut self.last_published);
         for area in &mut self.areas {
             area.tick(&self.truth, faults);
         }
+        let mut published = std::mem::take(&mut self.truth.published);
+        published.0.clear();
         for area in &self.areas {
-            area.publish(out);
+            area.publish(&mut |name, value| {
+                published.0.insert(name.to_string(), value);
+                out(name, value);
+            });
         }
+        self.last_published = published;
     }
 
     pub fn area_names(&self) -> Vec<&'static str> {
@@ -339,6 +393,59 @@ mod tests {
             });
         }
         assert_eq!(reported, actual);
+    }
+
+    /// One area reading another's output, which is what the pneumatic
+    /// overheat loops need from the thermal zones.
+    #[derive(Default)]
+    struct Downstream {
+        saw: Option<f64>,
+    }
+
+    impl Area for Downstream {
+        fn name(&self) -> &'static str {
+            "downstream"
+        }
+        fn tick(&mut self, truth: &Truth, _faults: &Faults) {
+            self.saw = truth.published.get("TEST_COUNTER_TICKS");
+        }
+        fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
+            out("TEST_DOWNSTREAM_SAW", self.saw.unwrap_or(-1.0));
+        }
+    }
+
+    #[test]
+    fn an_area_reads_what_another_published_on_the_previous_frame() {
+        // Registration order must not matter: `Downstream` is stepped
+        // *before* `Counter` here, and still sees its value, because every
+        // area ticks before any area publishes.
+        let mut deep = Deep::new().with_area(Box::new(Downstream::default())).with_area(Box::new(Counter::default()));
+        let faults = Faults::default();
+        let mut published = BTreeMap::new();
+        let mut run = |deep: &mut Deep, published: &mut BTreeMap<String, f64>| {
+            deep.tick(Truth::default(), &faults, &mut |name, value| {
+                published.insert(name.to_string(), value);
+            });
+        };
+
+        run(&mut deep, &mut published);
+        assert_eq!(published.get("TEST_DOWNSTREAM_SAW"), Some(&-1.0), "nothing has been published yet, so the read must come back absent rather than zero");
+
+        run(&mut deep, &mut published);
+        assert_eq!(published.get("TEST_DOWNSTREAM_SAW"), Some(&1.0), "the second frame sees the first frame's value");
+
+        run(&mut deep, &mut published);
+        assert_eq!(published.get("TEST_DOWNSTREAM_SAW"), Some(&2.0), "and it keeps up, exactly one frame behind");
+    }
+
+    #[test]
+    fn a_name_nobody_publishes_is_absent_not_zero() {
+        // An area has to be able to tell "the bay is at 0 C" from "nothing
+        // models that bay", which is why this is an Option.
+        let frame = PublishedFrame::default();
+        assert_eq!(frame.get("NOBODY_PUBLISHES_THIS"), None);
+        assert_eq!(frame.get_or("NOBODY_PUBLISHES_THIS", 288.15), 288.15);
+        assert!(frame.is_empty());
     }
 
     #[test]

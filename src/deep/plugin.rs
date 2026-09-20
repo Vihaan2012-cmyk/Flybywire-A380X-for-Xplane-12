@@ -332,6 +332,9 @@ impl DeepLayer {
 
         Truth {
             dt_s,
+            // `Deep::tick` replaces this with the previous frame's values
+            // before it steps anything; the plugin never fills it.
+            published: Default::default(),
             altitude_ft: f(self.refs.elevation_m).map_or(default.altitude_ft, |m| m * crate::M_TO_FT),
             on_ground: self
                 .refs
