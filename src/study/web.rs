@@ -431,7 +431,42 @@ pub(crate) fn components_json() -> String {
             })
         })
         .collect();
+
+    // The `deep` areas' own components (`deep::registry()`), which
+    // `components::list()` knows nothing about: they are a separate
+    // catalogue with their own health parameters, one row per parameter
+    // the same way the rows above are. `value` is null rather than 0.0 --
+    // these carry no live value in this registry, and a zero would read as
+    // "measured healthy" when the truth is "not measured here". Their live
+    // state is whatever their area publishes.
+    let mut list = list;
+    for c in deep_components() {
+        for param in &c.params {
+            list.push(json!({
+                "source": "deep",
+                "component": c.id,
+                "area": format!("{:?}", c.area),
+                "ata": c.ata,
+                "chapter": failures::chapter(u64::from(c.ata)),
+                "componentName": c.name,
+                "param": param.name,
+                "healthy": param.healthy,
+                "description": param.meaning,
+                "value": Value::Null,
+                "failures": c.failures,
+            }));
+        }
+    }
     json!({ "components": list }).to_string()
+}
+
+/// Every component the `deep` areas register, built once.
+///
+/// `deep::registry()` assembles several thousand definitions across
+/// eighteen areas, which is far too much work to redo on every request.
+fn deep_components() -> &'static [crate::deep::api::ComponentDef] {
+    static COMPONENTS: std::sync::OnceLock<Vec<crate::deep::api::ComponentDef>> = std::sync::OnceLock::new();
+    COMPONENTS.get_or_init(|| crate::deep::registry().components)
 }
 
 /// `GET /study/mel?q=...`: free-text search of the operator MEL.
@@ -527,6 +562,47 @@ pub(crate) fn breakers_json() -> String {
             })
         })
         .collect();
+
+    // The `deep::breakers` ELMS catalogue: 399 breakers taken from the real
+    // panels, a separate and much larger set than the one above, with their
+    // own live state published by `deep::breakers::live` as
+    // `BKR_<id>_OPEN`/`_STATUS`. Read through the same snapshot, so a
+    // breaker reads as closed only when its area has actually said so.
+    let mut list = list;
+    for def in crate::deep::breakers::catalog::all() {
+        let open = read(&format!("BKR_{}_OPEN", def.id));
+        let trip = match read(&format!("BKR_{}_STATUS", def.id)) {
+            Some(v) if v == 2. => "thermal",
+            Some(v) if v == 3. => "magnetic",
+            Some(v) if v == 4. => "arc-fault",
+            Some(v) if v == 5. => "locked-out",
+            Some(v) if v == 1. => "pulled",
+            _ => "none",
+        };
+        list.push(json!({
+            "source": "deep",
+            "id": def.id,
+            "name": def.name,
+            "ata": def.ata,
+            "chapter": failures::chapter(u64::from(def.ata)),
+            "bus": format!("{:?}", def.bus),
+            "ratingA": def.rating_a,
+            "currentA": read(&format!("ELEC_BKR_{}_CURRENT_A", def.id)),
+            // Unpublished (the area has not ticked yet) reads as closed:
+            // a breaker nobody has reported on is not a tripped breaker.
+            "closed": open != Some(1.),
+            "trip": trip,
+            "consumers": def.consumer,
+            "basis": def.basis,
+            "panel": format!("{:?}", def.panel),
+            "row": def.position.row,
+            "column": def.position.column,
+            "label": def.position.label,
+            // Named honestly: a breaker whose equipment this crate models
+            // no load for carries no current and cannot trip.
+            "protectsModelledLoad": def.protected_load.is_some(),
+        }));
+    }
     json!({ "breakers": list, "systemsCfgAbsorbed": true }).to_string()
 }
 
@@ -806,9 +882,53 @@ mod tests {
         let v: Value = serde_json::from_str(&breakers_json()).unwrap();
         assert_eq!(v["systemsCfgAbsorbed"], true);
         let list = v["breakers"].as_array().unwrap();
-        assert_eq!(list.len(), crate::breakers::catalog().len());
-        assert!(list.iter().all(|b| b["source"] == "catalogue"), "no raw systemsCfg entry should be emitted any more");
-        assert!(list.iter().all(|b| b["gates"].is_string()), "every entry must report how it gates its consumer");
+        // Two catalogues now: this crate's own gating breakers, and
+        // `deep::breakers`'s 399-entry ELMS panel set. Neither emits a raw
+        // systems.cfg entry, which is what this test exists to hold.
+        let legacy: Vec<&Value> = list.iter().filter(|b| b["source"] == "catalogue").collect();
+        let deep: Vec<&Value> = list.iter().filter(|b| b["source"] == "deep").collect();
+        assert_eq!(legacy.len(), crate::breakers::catalog().len());
+        assert_eq!(deep.len(), crate::deep::breakers::catalog::all().len());
+        assert_eq!(legacy.len() + deep.len(), list.len(), "no raw systemsCfg entry should be emitted any more");
+        assert!(legacy.iter().all(|b| b["gates"].is_string()), "every gating entry must report how it gates its consumer");
+    }
+
+    /// The ELMS panel set reaches the Study page, with the honest flag on
+    /// the ones whose equipment this crate models no load for -- those
+    /// carry no current and cannot trip, and the page should not pretend
+    /// otherwise.
+    #[test]
+    fn the_deep_elms_breakers_reach_the_study_page_with_their_panel_positions() {
+        let v: Value = serde_json::from_str(&breakers_json()).unwrap();
+        let list = v["breakers"].as_array().unwrap();
+        let deep: Vec<&Value> = list.iter().filter(|b| b["source"] == "deep").collect();
+        assert!(deep.len() > 300, "the ELMS catalogue should be here: {}", deep.len());
+        for b in &deep {
+            assert!(b["name"].as_str().is_some_and(|s| !s.is_empty()), "unnamed: {b}");
+            assert!(b["chapter"].as_str().is_some_and(|c| c != "Other"), "every ELMS breaker has a real chapter: {b}");
+            assert!(b["ratingA"].as_f64().is_some_and(|r| r > 0.0), "every breaker has a rating: {b}");
+            assert!(b["protectsModelledLoad"].is_boolean());
+            assert!(b["label"].is_string(), "panel position carries its label: {b}");
+        }
+        assert!(deep.iter().any(|b| b["protectsModelledLoad"] == false), "the known gap should still be visible, not hidden");
+    }
+
+    /// The deep areas' components reach the Study page too, one row per
+    /// health parameter, with a null live value rather than a zero that
+    /// would read as "measured healthy".
+    #[test]
+    fn the_deep_components_reach_the_study_page_without_faking_a_live_value() {
+        let v: Value = serde_json::from_str(&components_json()).unwrap();
+        let list = v["components"].as_array().unwrap();
+        let deep: Vec<&Value> = list.iter().filter(|c| c["source"] == "deep").collect();
+        assert!(deep.len() > 1_000, "the deep component catalogue should be here: {}", deep.len());
+        for c in deep.iter().take(200) {
+            assert!(c["component"].as_str().is_some_and(|s| !s.is_empty()));
+            assert!(c["param"].as_str().is_some_and(|s| !s.is_empty()));
+            assert!(c["value"].is_null(), "a deep component carries no live value here: {c}");
+            assert!(c["healthy"].is_number());
+            assert!(c["chapter"].as_str().is_some_and(|ch| ch != "Other"), "real chapter: {c}");
+        }
     }
 
     #[test]
