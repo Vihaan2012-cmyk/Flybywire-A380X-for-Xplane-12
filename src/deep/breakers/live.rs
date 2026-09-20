@@ -865,7 +865,17 @@ mod tests {
     /// and the failure audit's "changes nothing measurable" total should
     /// keep counting them until those entries are withdrawn -- not that
     /// `trip::MAX_CALIBRATION_DRIFT` should be widened until they light up.
-    const DRIFT_INERT_IN_EVERY_STATE: usize = 168;
+    /// Was 168 until the essential-bus limit cycle was fixed. Sixteen of
+    /// these only reached their fully-drifted trip point in `cold_dark`
+    /// because the essential buses sat at a sagged voltage there, so their
+    /// constant-power loads drew inflated current. With those buses
+    /// honestly dead on a battery-only aircraft they draw nothing, and the
+    /// count rose rather than fell: the coverage those sixteen had was an
+    /// artefact of a bug, not real. `failure_audit::profiles()` still has
+    /// no emergency-electrical configuration (in flight, all generation
+    /// lost, RAT out), which is where they would genuinely carry current;
+    /// adding one is the honest way to win that coverage back.
+    const DRIFT_INERT_IN_EVERY_STATE: usize = 184;
 
     /// The live counterpart, and the cheap one: `BREAKERS_DRIFT_INERT_COUNT`
     /// reports the same thing for the state the aircraft is in right now,

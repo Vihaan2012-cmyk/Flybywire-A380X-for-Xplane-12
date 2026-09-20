@@ -1315,14 +1315,41 @@ impl ElectricalLive {
             self.net.loads[i].commanded_on = self.rat_solenoid_on;
         }
 
-        // The static inverter and the RAT feed the emergency AC bus, and
-        // that bus backs the ESS bus up, only once each is actually
-        // producing.
+        // The static inverter and the RAT feed the emergency AC bus, each
+        // once it is actually producing.
         let inv_live = producing(&self.net, self.contactor_source(self.contactor.static_inv_line));
         self.net.contactors[self.contactor.static_inv_line].commanded_closed = emergency && inv_live;
         let rat_live = self.rat_deployed && producing(&self.net, self.src_rat);
         self.net.contactors[self.contactor.rat_line].commanded_closed = rat_live;
-        self.net.contactors[self.contactor.ac_emer_to_ess].commanded_closed = emergency && (inv_live || rat_live);
+
+        // The emergency AC bus backs the *essential* AC bus up only from
+        // the RAT's own emergency generator -- never from the static
+        // inverter alone.
+        //
+        // `sources::StaticInverter::RATED_W` is 135 W (real, FBW-sourced:
+        // FlyByWire's own `power_consumption.rs` AC_STAT_INV bus demand,
+        // which is the whole load that inverter is sized to carry, and is
+        // why this network gives it its own `AcEmer` bus rather than
+        // hanging it on `AcEss`). `loads.rs` catalogues about 1.36 kW on
+        // `AcEss` -- ten times that -- so tying the two together asks a
+        // 135 W inverter for the entire essential AC bus. There is no
+        // solution to that network in which the bus stays above its own
+        // loads' `min_operating_voltage`: the bus collapses, every load on
+        // it drops out on under-voltage, the unloaded bus recovers, the
+        // loads' `UNDERVOLTAGE_LOCKOUT_S` expires, they all restart
+        // together and collapse it again -- a permanent limit cycle, with
+        // the bus straying either side of the 90 V at which `sources.rs`
+        // decides TR ESS has an AC input. TR ESS is (was) the essential DC
+        // bus's only feed, so the essential *DC* bus toggled powered/
+        // unpowered with it, tearing down and rebuilding every consumer
+        // that watches `ELEC_DC_ESS_BUS_IS_POWERED` -- including the
+        // cockpit's own radio panels. It is the same overload
+        // `command_emergency_shed`'s own doc describes, one bus further
+        // in, and the fix is the same in kind: do not connect a source to
+        // a bus it cannot hold up. The RAT (`sources::Rat::MAX_POWER_W`,
+        // 70 kW) can, and it is the real A380 emergency-configuration
+        // source for AC ESS.
+        self.net.contactors[self.contactor.ac_emer_to_ess].commanded_closed = emergency && rat_live;
 
         // The shed buses drop in emergency configuration; that is what makes
         // them shed buses.
@@ -1341,11 +1368,35 @@ impl ElectricalLive {
         // TR -- the real Airbus arrangement, and the reason one TR's rating
         // does not have to cover the whole essential load on its own.
         self.net.contactors[self.contactor.dc_ess_feed_1].commanded_closed = tr_live[0];
-        // The DC tie picks a dead DC bus up from the live one; the battery
-        // bus is tied to DC ESS only while DC ESS is itself being held up,
-        // so a dead essential bus can never drain the batteries through it.
+        // The DC tie picks a dead DC bus up from the live one.
         self.net.contactors[self.contactor.dc_tie_1_2].commanded_closed = tr_live[0] != tr_live[1];
-        self.net.contactors[self.contactor.dc_bat_tie].commanded_closed = tr_live[2] || tr_live[0];
+        // The battery/essential tie is the real battery contactor, and it
+        // closes for the two real reasons an Airbus closes one:
+        //
+        // * a TR is on line, so the main DC network is alive and the
+        //   batteries are being *charged* from it; or
+        // * the aircraft is in emergency electrical configuration in
+        //   flight, where the batteries are the essential DC bus's own
+        //   source. That is the whole purpose of the contactor.
+        //
+        // It must never be gated on the essential bus's own powered state.
+        // It used to be -- `tr_live[2]` is "TR ESS has an AC input", which
+        // in emergency configuration is decided by a bus the essential
+        // bus's own load feeds back into -- so the one tie that exists to
+        // pick a *dead* essential bus up could only close while something
+        // else was already holding it up. That is a feed conditional on
+        // its own result: the bus comes up, its load pulls the source that
+        // decides the gate down, the gate opens, the bus dies, the load
+        // goes with it, the source recovers and it all repeats, at frame
+        // rate, with nothing in the loop to damp it.
+        //
+        // On the ground with nothing running the tie stays open, which is
+        // also the real behaviour and the reason a parked Airbus does not
+        // flatten its batteries overnight: the batteries feed their own
+        // hot buses (`bat_direct` below) and nothing else. The essential
+        // DC bus is then honestly dead rather than held up by a
+        // circular feed.
+        self.net.contactors[self.contactor.dc_bat_tie].commanded_closed = tr_live[0] || tr_live[2] || (emergency && !truth.on_ground);
         // The battery-direct contactor is the real BAT pushbutton's own
         // contactor (`ContactorKind::BatteryDirect`) -- AUTO closes it onto
         // the battery/hot bus, OFF opens it, exactly the real Airbus
@@ -2553,5 +2604,85 @@ mod tests {
         let published = run(&mut ElectricalLive::new(), &apu, &Faults::default(), 30);
         let total: f64 = (1..=2).map(|n| published[&format!("ELEC_APU_GEN_{n}_LOAD_W")]).sum();
         assert!(total > 0.0, "both APU generators on line carrying the whole aircraft publish {total} W between them");
+    }
+
+    /// The electrical model has to **settle**. A cold aircraft standing on
+    /// its own batteries, with nothing else running, has exactly one
+    /// correct electrical configuration, and it must hold it: the hot
+    /// buses alive on their batteries, the main and essential networks
+    /// dead, and nothing changing state again until the crew or a
+    /// generator changes something.
+    ///
+    /// It did not. `ac-emer-to-ess` tied the 135 W static inverter to the
+    /// 1.36 kW essential AC bus, which has no solution in which the bus
+    /// holds its own loads' `min_operating_voltage`, so those thirteen
+    /// loads collapsed the bus, dropped out, waited out their
+    /// `UNDERVOLTAGE_LOCKOUT_S`, restarted together and collapsed it
+    /// again -- for ever, about every 5.5 s. `dc-bat-tie` then made the
+    /// batteries' feed to the essential DC bus conditional on TR ESS,
+    /// whose own AC input is that same cycling bus, so the essential DC
+    /// bus had no feed at all that was not downstream of the cycle: its
+    /// only source was a TR rectifying a bus a 135 W inverter was holding
+    /// up, and whether it read powered came down to which side of the 90 V
+    /// TR cut-in that cycle was on at the time. In the sim it crossed, and
+    /// every consumer watching `ELEC_DC_ESS_BUS_IS_POWERED` -- the
+    /// cockpit's radio panels among them -- was torn down and rebuilt on
+    /// each crossing.
+    ///
+    /// So this asserts the whole essential chain is still, not merely that
+    /// the published flag is: the flag was the visible symptom, the loads
+    /// underneath it are where the limit cycle actually lives, and
+    /// counting their transitions is what makes this test fail on the bug
+    /// rather than on one bus happening to stay the right side of a
+    /// threshold.
+    #[test]
+    fn a_battery_only_aircraft_settles_instead_of_limit_cycling_its_essential_buses() {
+        /// Everything downstream of the emergency/essential transfer
+        /// logic: if any of it is oscillating, this is where it shows.
+        const ESSENTIAL_CHAIN: [BusId; 5] = [BusId::AcEmer, BusId::AcEss, BusId::AcEssShed, BusId::DcEss, BusId::DcEssShed];
+        /// 30 s at 30 Hz: nearly six full `UNDERVOLTAGE_LOCKOUT_S` periods,
+        /// so a cycle with that period cannot hide between two samples.
+        const FRAMES: usize = 900;
+        /// The first 3 s are the aircraft coming up from every bus at zero
+        /// -- real transitions, not a limit cycle. Counting starts after.
+        const SETTLE: usize = 90;
+
+        board::clear();
+        let mut live = ElectricalLive::new();
+        // `Truth::default()` is exactly the reported aircraft: on the
+        // ground, no engine running, no APU, no ground power, both battery
+        // pushbuttons in AUTO.
+        let truth = Truth::default();
+        let faults = Faults::default();
+
+        let (mut dc_ess_changes, mut ac_ess_changes, mut load_changes) = (0usize, 0usize, 0usize);
+        let mut previous: Option<(bool, bool, Vec<bool>)> = None;
+        for frame in 0..FRAMES {
+            live.tick(&truth, &faults);
+            let dc_ess = live.report.bus_powered[BusId::DcEss.index()];
+            let ac_ess = live.report.bus_powered[BusId::AcEss.index()];
+            let loads: Vec<bool> = live.net.loads.iter().filter(|l| ESSENTIAL_CHAIN.contains(&l.spec.bus)).map(|l| l.powered).collect();
+            if let Some((was_dc, was_ac, was_loads)) = &previous {
+                if frame >= SETTLE {
+                    dc_ess_changes += (*was_dc != dc_ess) as usize;
+                    ac_ess_changes += (*was_ac != ac_ess) as usize;
+                    load_changes += was_loads.iter().zip(&loads).filter(|(a, b)| a != b).count();
+                }
+            }
+            previous = Some((dc_ess, ac_ess, loads));
+        }
+
+        assert_eq!(
+            load_changes, 0,
+            "the essential buses' own loads changed state {load_changes} times over {} settled frames: something on the essential chain is limit-cycling",
+            FRAMES - SETTLE
+        );
+        assert!(
+            dc_ess_changes <= 2,
+            "DC ESS changed powered state {dc_ess_changes} times in {} settled frames; a battery-only aircraft has one configuration, not a cycle",
+            FRAMES - SETTLE
+        );
+        assert!(ac_ess_changes <= 2, "AC ESS changed powered state {ac_ess_changes} times in {} settled frames", FRAMES - SETTLE);
+        board::clear();
     }
 }
