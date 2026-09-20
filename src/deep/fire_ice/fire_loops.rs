@@ -257,6 +257,31 @@ pub struct ZoneFireStatus {
     pub fire: bool,
     pub loop_a_fault: bool,
     pub loop_b_fault: bool,
+    /// Each loop's own raw opinion ("I see fire"), *before* the zone's
+    /// AND/OR combination -- a shorted loop reads `true` here even though
+    /// it is deliberately not a `loop_x_fault` (module doc: a short is
+    /// electrically indistinguishable from real heat) and even though AND
+    /// logic keeps the zone-level `fire` above `false` until the other loop
+    /// agrees. Without this, a single shorted loop changes nothing anywhere
+    /// this crate publishes, which is exactly the silent-failure gap this
+    /// field closes: the real aircraft annunciates a single loop reading
+    /// fire (that is the point of having two), even when the zone itself
+    /// correctly withholds the fire warning.
+    pub loop_a_signal: bool,
+    pub loop_b_signal: bool,
+}
+
+impl ZoneFireStatus {
+    /// The two loops disagree about whether there is a fire -- the
+    /// discrete a real fire-detection unit's own "loop fault/disagree"
+    /// annunciation is built on. True for a lone short or a lone open (the
+    /// open side reads `false`, matching a real "no fire" opinion, so it
+    /// still disagrees with a shorted or genuinely hot partner), false when
+    /// both loops agree (both healthy-cold, both healthy-hot, or both
+    /// shorted/faulted together).
+    pub fn loop_disagree(&self) -> bool {
+        self.loop_a_signal != self.loop_b_signal
+    }
 }
 
 pub struct ZoneDetector {
@@ -296,7 +321,7 @@ impl ZoneDetector {
             }
         };
 
-        ZoneFireStatus { fire, loop_a_fault: a.loop_fault, loop_b_fault: b.loop_fault }
+        ZoneFireStatus { fire, loop_a_fault: a.loop_fault, loop_b_fault: b.loop_fault, loop_a_signal: a.fire_signal, loop_b_signal: b.fire_signal }
     }
 }
 
@@ -391,6 +416,36 @@ mod tests {
         let status = zone.evaluate(20.0, 20.0, faults_a, faults_b);
         assert!(status.loop_a_fault && status.loop_b_fault);
         assert!(status.fire, "total simultaneous loss of both loops must fail safe toward presumed fire");
+    }
+
+    #[test]
+    fn a_lone_shorted_loop_annunciates_disagreement_while_the_zone_withholds_fire() {
+        // The bug this module doc now names directly: a shorted loop is
+        // correctly *not* a `loop_x_fault` (indistinguishable from real
+        // heat), and AND logic correctly withholds the zone's own `fire`
+        // until the other loop agrees -- but before `loop_a_signal`/
+        // `loop_disagree` existed, both of those correct decisions added up
+        // to a lone short changing nothing at all anywhere. It must now
+        // show up as a real disagreement between the two loops' own raw
+        // readings.
+        let zone = ZoneDetector::new(LoopLogic::And);
+        let shorted_a = LoopFaults { short_circuit: 1.0, ..Default::default() };
+        let status = zone.evaluate(20.0, 20.0, shorted_a, LoopFaults::default());
+        assert!(!status.fire, "AND logic must still withhold the zone-level fire warning");
+        assert!(!status.loop_a_fault && !status.loop_b_fault, "a short is not a loop fault");
+        assert!(status.loop_a_signal, "the shorted loop's own raw reading must say fire");
+        assert!(!status.loop_b_signal, "the healthy loop's own raw reading must say no fire");
+        assert!(status.loop_disagree(), "the two loops disagreeing must be its own visible discrete");
+    }
+
+    #[test]
+    fn two_healthy_loops_agreeing_never_disagree() {
+        let zone = ZoneDetector::new(LoopLogic::And);
+        let cold = zone.evaluate(20.0, 20.0, LoopFaults::default(), LoopFaults::default());
+        assert!(!cold.loop_disagree());
+        let hot = zone.evaluate(FIRE_TRIP_C + 50.0, FIRE_TRIP_C + 50.0, LoopFaults::default(), LoopFaults::default());
+        assert!(!hot.loop_disagree());
+        assert!(hot.fire);
     }
 
     #[test]

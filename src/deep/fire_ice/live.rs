@@ -65,7 +65,21 @@
 //!   `thermal_zones`' contribution on the bulk hold's own smoke
 //!   concentration. No cargo-bay fire/agent pushbutton exists in this port
 //!   either (`Controls`'s own doc), so cargo bottles still only leak, they
-//!   are never commanded to fire.
+//!   are never commanded to fire -- `Self::NO_CARGO_FIRE_COMMAND`'s own doc
+//!   comment is the honest account of that decision and what `Truth` would
+//!   need for it to change; the bottle's own low-pressure switch is
+//!   published regardless, since the leak that drives it needs no command.
+//! - **A single shorted (or open) fire loop used to be invisible.** Zone
+//!   detection is correctly AND (`fire_loops::ZoneDetector`), and a short is
+//!   correctly not classed as a `loop_x_fault` (indistinguishable from real
+//!   heat) -- but nothing published either loop's own raw reading, so a
+//!   lone shorted loop moved nothing at all anywhere in this crate, even
+//!   though the real dual-loop architecture exists precisely so a single
+//!   loop disagreeing is itself annunciated. `FIRE_LOOP_A/B_<ZONE>_FIRE`
+//!   (each loop's own raw signal) and `FIRE_LOOP_<ZONE>_DISAGREE` (the two
+//!   loops disagreeing) are published below for exactly that, and
+//!   `registry.rs`'s `<ZONE> FIRE DET FAULT` alert now triggers on the
+//!   disagreement too, alongside the pre-existing open-circuit fault.
 
 use super::anti_ice::{BleedAntiIceFaults, BleedAntiIceSurface, ProbeHeater, ProbeHeaterFaults, RainRemoval, RainRemovalFaults, WindowHeat, WindowHeatFaults, NACELLE_ANTI_ICE, WINDOW_TARGET_C, WING_ANTI_ICE};
 use super::combustion::{Fluid, ZoneCombustion, ZoneSupply, HYDRAULIC_FLUID, JET_FUEL};
@@ -221,6 +235,13 @@ struct ZoneReport {
     fire: bool,
     loop_a_fault: bool,
     loop_b_fault: bool,
+    /// Each loop's own raw "I see fire" opinion, published so a single
+    /// shorted (or otherwise disagreeing) loop is visible even though the
+    /// zone's own AND logic correctly withholds `fire` and a short is
+    /// correctly not a `loop_x_fault` (see `fire_loops::ZoneFireStatus`'s
+    /// own doc).
+    loop_a_signal: bool,
+    loop_b_signal: bool,
     agent_fraction: f64,
 }
 
@@ -268,6 +289,9 @@ struct VarNames {
     zone_agent: [String; 9],
     loop_a_fault: [String; 9],
     loop_b_fault: [String; 9],
+    loop_a_fire: [String; 9],
+    loop_b_fire: [String; 9],
+    loop_disagree: [String; 9],
     bottle_low: [[String; 2]; 4],
     squib: [[String; 2]; 4],
     probe_fault: [String; 8],
@@ -287,6 +311,7 @@ struct VarNames {
     nacelle_ice_thickness: [String; 4],
     cargo_smoke_detected: [String; 2],
     cargo_smoke_density: [String; 2],
+    cargo_bottle_low_pressure: [String; 2],
 }
 
 impl VarNames {
@@ -307,6 +332,9 @@ impl VarNames {
             zone_agent: std::array::from_fn(|z| format!("FIRE_ZONE_{}_AGENT_FRACTION", ZONE_KEYS[z])),
             loop_a_fault: std::array::from_fn(|z| format!("FIRE_LOOP_A_{}_FAULT", ZONE_KEYS[z])),
             loop_b_fault: std::array::from_fn(|z| format!("FIRE_LOOP_B_{}_FAULT", ZONE_KEYS[z])),
+            loop_a_fire: std::array::from_fn(|z| format!("FIRE_LOOP_A_{}_FIRE", ZONE_KEYS[z])),
+            loop_b_fire: std::array::from_fn(|z| format!("FIRE_LOOP_B_{}_FIRE", ZONE_KEYS[z])),
+            loop_disagree: std::array::from_fn(|z| format!("FIRE_LOOP_{}_DISAGREE", ZONE_KEYS[z])),
             bottle_low: std::array::from_fn(|e| std::array::from_fn(|b| format!("FIRE_BOTTLE_ENG{}_{}_LOW_PRESSURE", e + 1, b + 1))),
             squib: std::array::from_fn(|e| std::array::from_fn(|b| format!("FIRE_SQUIB_{}_ENG_{}_IS_DISCHARGED", b + 1, e + 1))),
             probe_fault: std::array::from_fn(|p| format!("PROBE_HEAT_{}_FAULT", PROBE_KEYS[p])),
@@ -326,6 +354,7 @@ impl VarNames {
             nacelle_ice_thickness: std::array::from_fn(|e| format!("ICE_NACELLE{}_THICKNESS_M", e + 1)),
             cargo_smoke_detected: std::array::from_fn(|b| format!("CARGO_{}_SMOKE_DETECTED", ["FWD", "AFT"][b])),
             cargo_smoke_density: std::array::from_fn(|b| format!("CARGO_{}_SMOKE_DENSITY_KG_M3", ["FWD", "AFT"][b])),
+            cargo_bottle_low_pressure: std::array::from_fn(|b| format!("FIRE_BOTTLE_CARGO_{}_LOW_PRESSURE", ["FWD", "AFT"][b])),
         }
     }
 }
@@ -362,6 +391,40 @@ impl FireIceLive {
     const SMOKE_DETECTOR_PATH_M: f64 = 1.0;
     /// A lavatory's own free volume, m^3. **GENERIC**.
     const LAVATORY_VOLUME_M3: f64 = 2.0;
+
+    /// The cargo suppression systems' own fire-command input, permanently
+    /// held off.
+    ///
+    /// This used to be a bare literal `false` passed straight into
+    /// `CargoSuppressionSystem::step`, standing in for a cockpit control
+    /// that does not exist. It is named and documented here instead,
+    /// because the two facts about it matter and a bare `false` hides both:
+    ///
+    /// 1. It is not a stand-in for "the crew hasn't pressed the button
+    ///    yet" the way `rain_removal_selected` above is (that field is real
+    ///    and wired, just never actuated in this port). No cargo fire
+    ///    pushbutton or agent pushbutton exists anywhere in `Truth` at all
+    ///    -- `Controls`'s own doc comment is explicit that this port models
+    ///    8 engine bottles and 1 APU bottle and *no* cargo ones, and
+    ///    `docs/deep/truth-requests.md` records the same gap. `Truth`/
+    ///    `Controls` live in `src/deep/live.rs`, outside this directory, so
+    ///    adding the field is not this pass's call to make even if it were
+    ///    warranted.
+    /// 2. Because of (1), the two cargo squib failures (`cargo_fwd_bottle`/
+    ///    `cargo_aft_bottle`'s `squib_failure`) are genuinely inert: with no
+    ///    command that could ever discharge the bottle, whether the squib
+    ///    *would* fail to fire is unobservable. That is not a bug in this
+    ///    file to silently paper over with a fake control -- `registry.rs`'s
+    ///    own `FailureDef.effect` text for those two ids now says so
+    ///    explicitly, and what `Truth::controls` would need to add
+    ///    (`cargo_fire_pb_released`/`cargo_agent_pb_pressed`, one pair per
+    ///    hold, mirroring the engine/APU fields this same pass already
+    ///    wired) is recorded there and in `PROGRESS.md` for whoever owns
+    ///    `live.rs`/`truth-requests.md` next. The bottle's *leak* failure is
+    ///    unaffected by any of this -- it drains independently of
+    ///    `fire_command`, and its own low-pressure switch is now published
+    ///    below.
+    const NO_CARGO_FIRE_COMMAND: bool = false;
 
     pub fn new() -> Self {
         let start_c = 15.0;
@@ -475,6 +538,8 @@ impl FireIceLive {
                 fire: status.fire,
                 loop_a_fault: status.loop_a_fault,
                 loop_b_fault: status.loop_b_fault,
+                loop_a_signal: status.loop_a_signal,
+                loop_b_signal: status.loop_b_signal,
                 agent_fraction: self.concentration[z].suppression_fraction(),
             };
         }
@@ -535,7 +600,7 @@ impl FireIceLive {
             let cargo_faults = BottleFaults { leak: faults.get(leak_id), squib_failure: faults.get(leak_id + 1) };
             let delivered = {
                 let (system, concentration) = (&mut self.cargo_suppression[b], &self.concentration[zone]);
-                system.step(ambient_c, false, zone_pa, concentration, &cargo_faults, dt)
+                system.step(ambient_c, Self::NO_CARGO_FIRE_COMMAND, zone_pa, concentration, &cargo_faults, dt)
             };
             agent[zone] += delivered;
         }
@@ -665,6 +730,9 @@ impl crate::deep::live::Area for FireIceLive {
             out(&n.zone_agent[z], self.zones[z].agent_fraction);
             out(&n.loop_a_fault[z], on(self.zones[z].loop_a_fault));
             out(&n.loop_b_fault[z], on(self.zones[z].loop_b_fault));
+            out(&n.loop_a_fire[z], on(self.zones[z].loop_a_signal));
+            out(&n.loop_b_fire[z], on(self.zones[z].loop_b_signal));
+            out(&n.loop_disagree[z], on(self.zones[z].loop_a_signal != self.zones[z].loop_b_signal));
         }
         for e in 0..4 {
             for b in 0..2 {
@@ -680,6 +748,11 @@ impl crate::deep::live::Area for FireIceLive {
             out(&n.cargo_smoke_detected[b], on(self.cargo_smoke_alarm[b]));
             out(&n.cargo_smoke_density[b], self.cargo_smoke[b].smoke_density_kg_m3());
             out(&format!("CARGO_{}_AGENT_METERING", ["FWD", "AFT"][b]), on(self.cargo_suppression[b].is_metering()));
+            // The cargo bottle's leak failure drains it independently of
+            // `fire_command` (see `NO_CARGO_FIRE_COMMAND`'s own doc), so its
+            // low-pressure switch is a real, observable consequence even
+            // though the bottle can never actually be fired in this port.
+            out(&n.cargo_bottle_low_pressure[b], on(self.cargo_suppression[b].bottle.is_low_pressure()));
         }
 
         for s in 0..2 {
@@ -779,6 +852,7 @@ mod tests {
         for zone in ZONE_KEYS {
             required.push(format!("FIRE_LOOP_A_{zone}_FAULT"));
             required.push(format!("FIRE_LOOP_B_{zone}_FAULT"));
+            required.push(format!("FIRE_LOOP_{zone}_DISAGREE"));
         }
         for probe in ["PITOT1", "PITOT2", "PITOT3"] {
             required.push(format!("PROBE_HEAT_{probe}_FAULT"));
@@ -848,6 +922,51 @@ mod tests {
         assert_eq!(map["FIRE_LOOP_B_ENG1_FAULT"], 1.0, "loop B open must read as a loop fault");
         assert_eq!(map["FIRE_LOOP_A_ENG1_FAULT"], 0.0, "a short is not distinguishable from heat, so it is not a fault");
         assert_eq!(map["FIRE_DETECTED_ENG:1"], 1.0, "with B faulted the unit trusts A alone, and A says fire");
+    }
+
+    #[test]
+    fn a_lone_shorted_engine_fire_loop_annunciates_disagreement_while_the_zone_stays_quiet() {
+        // The live-level version of `fire_loops`'s own unit test: with
+        // nothing else armed and no ignition source, engine 1's loop A
+        // shorted must now show up as a per-loop signal and a disagree
+        // discrete even though the zone itself correctly never declares
+        // ENG 1 FIRE (AND logic, one loop still cold).
+        let mut truth = ground_running_truth();
+        truth.engine_running = [false; 4];
+        truth.apu_running = false;
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::from_pairs([(fire(2), 1.0)]), 10);
+        let map = published(area.as_ref());
+        assert_eq!(map["FIRE_DETECTED_ENG:1"], 0.0, "AND logic must still withhold the zone-level warning");
+        assert_eq!(map["FIRE_LOOP_A_ENG1_FAULT"], 0.0, "a short is not a loop fault");
+        assert_eq!(map["FIRE_LOOP_A_ENG1_FIRE"], 1.0, "the shorted loop's own raw reading must say fire");
+        assert_eq!(map["FIRE_LOOP_B_ENG1_FIRE"], 0.0, "the healthy loop's own raw reading must say no fire");
+        assert_eq!(map["FIRE_LOOP_ENG1_DISAGREE"], 1.0, "the disagreement itself must be a visible discrete");
+        assert_eq!(map["FIRE_LOOP_ENG2_DISAGREE"], 0.0, "engine 2 is untouched and healthy");
+    }
+
+    #[test]
+    fn a_leaking_cargo_bottle_shows_low_pressure_even_though_it_can_never_be_fired() {
+        // `NO_CARGO_FIRE_COMMAND` keeps the cargo bottles' `fire_command`
+        // permanently false (no real cargo pushbutton exists in this port),
+        // but the leak failure drains the bottle independently of that
+        // command, so its low-pressure switch must still move.
+        // The cargo bottle's design charge (30 kg, `Self::CARGO_BOTTLE_
+        // CHARGE_KG`) is 6x the engine bottles' (5 kg), but the leak orifice
+        // is the same absolute `extinguishing::LEAK_AREA_MAX_M2` regardless
+        // of bottle size, and pressure holds flat until the charge falls
+        // below the 5% residual-liquid fraction -- so draining a 30 kg
+        // bottle down to that same fraction takes proportionally longer
+        // than the ~11 h the engine-bottle version of this test needs.
+        let mut truth = ground_running_truth();
+        truth.engine_running = [false; 4];
+        truth.apu_running = false;
+        truth.dt_s = 60.0;
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::from_pairs([(fire(219), 1.0)]), 5000); // ~83 h
+        let map = published(area.as_ref());
+        assert_eq!(map["FIRE_BOTTLE_CARGO_FWD_LOW_PRESSURE"], 1.0, "a full-severity leak must empty the cargo FWD bottle over hours");
+        assert_eq!(map["FIRE_BOTTLE_CARGO_AFT_LOW_PRESSURE"], 0.0, "the AFT bottle is healthy");
     }
 
     #[test]

@@ -37,10 +37,17 @@
 //! FlyByWire's ARINC 429 cabin delta-pressure word, and one representative
 //! `A32NX_COND_MAIN_DECK_1_TEMP` zone), so this area reads them directly
 //! instead of the interim `CabinCommands` fields that used to stand in for
-//! them. What is still missing is anything the cabin crew or passengers
-//! *do* -- water drawn, toilets flushed, call buttons pressed, doors
-//! opened -- which stays collected in [`CabinCommands`], documented one by
-//! one.
+//! them. `Truth::controls::water_demand_l_s` (galley, lavatory) and
+//! `cargo_door_commanded_open` are real now too, and are read from there
+//! (see [`CabinLive::tick`]) instead of `CabinCommands`'s own now-removed
+//! stand-ins -- without a real service demand the potable-water system
+//! never actually draws down or flows, and without a real target the cargo
+//! door actuator never moves, so neither system's own failures had
+//! anything to act on (`deep::integration::failure_audit`'s sweep found
+//! exactly this). What is still missing is anything else the cabin crew or
+//! passengers *do* -- toilets flushed, call buttons pressed, passenger
+//! doors opened -- which stays collected in [`CabinCommands`], documented
+//! one by one.
 
 use crate::deep::api::Registry;
 use crate::deep::live::{Faults, Truth};
@@ -86,11 +93,9 @@ const SHOWERS_FITTED: bool = true;
 /// environment, and what the people in it are doing.
 #[derive(Clone, Copy, Debug)]
 pub struct CabinCommands {
-    /// Potable water drawn by the galleys and the lavatories, l/s, and the
-    /// number of showers requested. What the cabin actually consumes is a
-    /// service-load input, not a physical state anything here can derive.
-    pub galley_demand_l_s: f64,
-    pub lav_demand_l_s: f64,
+    /// Showers requested this tick. `Truth::controls::water_demand_l_s`
+    /// (galley, lavatory) now carries the water draw itself; there is no
+    /// real shower-request count in this port, so it stays here.
     pub shower_requests: usize,
     /// A toilet flushed in each zone this tick (edge-triggered, as
     /// `waste::WasteInputs` documents).
@@ -106,11 +111,12 @@ pub struct CabinCommands {
     /// The cabin seat-power master switch, which the CAB IFE SMOKE
     /// procedure's own `SEAT POWER ... OFF` line reads back.
     pub seat_power_on: bool,
-    /// The modelled door: how far open it is (0..100 percent), whether its
-    /// slide is armed, and the cargo-door switch's commanded travel.
+    /// The modelled passenger door: how far open it is (0..100 percent),
+    /// and whether its slide is armed. `Truth::controls::
+    /// cargo_door_commanded_open` now carries the cargo-door switch's own
+    /// commanded travel (see [`CabinLive::tick`]).
     pub door_open_percent: f64,
     pub slide_armed_commanded: bool,
-    pub cargo_door_target_percent: f64,
     /// The cabin's own call buttons.
     pub attendant_call_pressed: [bool; Zone::COUNT],
     pub purser_call_pressed: bool,
@@ -124,8 +130,6 @@ impl Default for CabinCommands {
     /// water and every door shut.
     fn default() -> Self {
         Self {
-            galley_demand_l_s: 0.0,
-            lav_demand_l_s: 0.0,
             shower_requests: 0,
             flush_commanded: [false; Zone::COUNT],
             oven_commanded: [true; Zone::COUNT],
@@ -136,7 +140,6 @@ impl Default for CabinCommands {
             seat_power_on: true,
             door_open_percent: 0.0,
             slide_armed_commanded: false,
-            cargo_door_target_percent: 0.0,
             attendant_call_pressed: [false; Zone::COUNT],
             purser_call_pressed: false,
             emergency_call_pressed: false,
@@ -271,6 +274,11 @@ pub struct CabinLive {
     galley_bus_fault: [bool; Zone::COUNT],
     /// This frame's new crew calls, highest priority first.
     new_calls: Vec<CabinEvent>,
+    /// This tick's cargo-door target, 0..100 percent, from
+    /// `Truth::controls::cargo_door_commanded_open[0]` (the forward cargo
+    /// door, this model's one representative cargo-door instance). Stored
+    /// because `publish` only ever sees `&self`, never `Truth`.
+    cargo_door_commanded_percent: f64,
 
     /// Inputs `Truth` does not carry; see [`CabinCommands`].
     pub commands: CabinCommands,
@@ -299,6 +307,7 @@ impl CabinLive {
             door_out: DoorSlideOutputs::default(),
             galley_bus_fault: [false; Zone::COUNT],
             new_calls: Vec::new(),
+            cargo_door_commanded_percent: 0.0,
             commands: CabinCommands::default(),
         }
     }
@@ -410,8 +419,13 @@ impl crate::deep::live::Area for CabinLive {
             cabin_temp_k: truth.cabin_temp_k,
             oat_c: truth.environment.sat_c,
             tas_mps: truth.environment.tas_ms,
-            galley_demand_l_s: self.commands.galley_demand_l_s,
-            lav_demand_l_s: self.commands.lav_demand_l_s + rinse_l_s,
+            // Real cabin-service draw (`Truth::controls::water_demand_l_s`,
+            // `[galley, lavatory]`) plus the lavatories' own rinse draw:
+            // without this, the potable system never actually flowed, so
+            // none of its leak/heater/pressurisation failures had anything
+            // to act on (`deep::integration::failure_audit`'s sweep).
+            galley_demand_l_s: truth.controls.water_demand_l_s[0],
+            lav_demand_l_s: truth.controls.water_demand_l_s[1] + rinse_l_s,
             shower_requests: self.commands.shower_requests,
             heater_commanded: self.commands.water_heater_commanded,
         };
@@ -425,6 +439,14 @@ impl crate::deep::live::Area for CabinLive {
             actuator_jam: faults.get(self.ids.cargo_jam),
             hydraulic_loss: faults.get(self.ids.cargo_hydraulic),
         };
+        // The forward cargo door's switch, `Truth::controls::
+        // cargo_door_commanded_open[0]` (`[fwd, aft, bulk]`; this model
+        // registers one cargo-door actuator as the representative class,
+        // per `registry.rs`'s own note): without a real commanded target
+        // the actuator never had anywhere to go, so a jam or a hydraulic
+        // loss had no travel to cap (`deep::integration::failure_audit`'s
+        // sweep found exactly this).
+        self.cargo_door_commanded_percent = (truth.controls.cargo_door_commanded_open[0] * 100.0).clamp(0.0, 100.0);
         let door_inputs = DoorSlideInputs {
             door_open_percent: self.commands.door_open_percent,
             cabin_diff_pressure_pa: cabin_diff_pa,
@@ -434,7 +456,7 @@ impl crate::deep::live::Area for CabinLive {
             // they are put on the yellow system, the same one
             // `gear_structure` assigns the nose and body legs.
             hydraulic_pressure_pa: truth.hydraulic_pressure_pa[1],
-            cargo_door_target_percent: self.commands.cargo_door_target_percent,
+            cargo_door_target_percent: self.cargo_door_commanded_percent,
         };
         self.door_out = self.door.step(&door_inputs, &door_faults, dt);
 
@@ -525,7 +547,7 @@ impl crate::deep::live::Area for CabinLive {
         out("CABIN_SLIDE_DEPLOYED:1", b(self.door_out.slide_deployed));
         out("CABIN_CARGO_DOOR_JAMMED:1", b(self.door_out.cargo_door_jammed));
         out("CABIN_CARGO_DOOR_PERCENT:1", self.door_out.cargo_door_percent);
-        out("CABIN_CARGO_DOOR_CMD:1", self.commands.cargo_door_target_percent);
+        out("CABIN_CARGO_DOOR_CMD:1", self.cargo_door_commanded_percent);
 
         // ---- Crew calls ----------------------------------------------------
         let priority = self.crew_calls.active_call().map_or(0.0, |e| match e.priority() {
@@ -735,20 +757,39 @@ mod tests {
         truth.environment.sat_c = -30.0;
         truth.environment.tas_ms = 100.0;
         truth.on_ground = false;
+        truth.controls.water_demand_l_s = [0.0, 0.02]; // water actually reaching the masts
 
         let mut live = CabinLive::new();
-        live.commands.lav_demand_l_s = 0.02; // water actually reaching the masts
         let id = live.ids.mast_heater[0];
 
         let healthy = run(&mut live, &truth, &Faults::default(), 3600.0);
         assert_eq!(healthy.get("CABIN_MAST_BLOCKED:1"), Some(&0.0), "a heated mast does not ice");
 
         let mut live = CabinLive::new();
-        live.commands.lav_demand_l_s = 0.02;
         let failed = run(&mut live, &truth, &Faults::from_pairs([(id, 1.0)]), 3600.0);
         assert!(failed["CABIN_MAST_ICE_KG:1"] > healthy["CABIN_MAST_ICE_KG:1"], "an unheated mast must accrete ice");
         assert_eq!(failed.get("CABIN_MAST_BLOCKED:1"), Some(&1.0));
         assert_eq!(failed.get("CABIN_MAST_BLOCKED:2"), Some(&0.0), "the other mast is still heated");
+    }
+
+    /// `deep::integration::failure_audit`'s sweep found the water quantity
+    /// sensor fault dead: with no real service demand ever reaching
+    /// `water::WaterInputs`, the tank never actually drained, so "frozen at
+    /// the last reading" and "tracking the real level" read identically
+    /// (both ~100%). `Truth::controls::water_demand_l_s` fixes that; this
+    /// proves it end to end, driven purely through `Truth`, not through
+    /// `CabinCommands` (which no longer has a demand field at all).
+    #[test]
+    fn a_stuck_water_quantity_sensor_only_shows_once_real_demand_drains_the_tank() {
+        let mut truth = powered_truth();
+        truth.controls.water_demand_l_s = [0.1, 0.05]; // a real galley + lavatory draw
+        let id = CabinLive::new().ids.water_qty_sensor;
+
+        let healthy = run(&mut CabinLive::new(), &truth, &Faults::default(), 3600.0);
+        let stuck = run(&mut CabinLive::new(), &truth, &Faults::from_pairs([(id, 1.0)]), 3600.0);
+
+        assert!(healthy["CABIN_WATER_QTY_PERCENT"] < 99.0, "an hour of real draw must show up as the tank actually emptying: {}", healthy["CABIN_WATER_QTY_PERCENT"]);
+        assert!((stuck["CABIN_WATER_QTY_PERCENT"] - 100.0).abs() < 1e-6, "a stuck sensor must freeze at its last (full) reading instead of tracking the real drain");
     }
 
     #[test]
@@ -757,8 +798,8 @@ mod tests {
         // beyond the jammed travel limit".
         let mut truth = powered_truth();
         truth.dt_s = 0.5;
+        truth.controls.cargo_door_commanded_open = [1.0, 0.0, 0.0]; // forward cargo door commanded fully open
         let mut live = CabinLive::new();
-        live.commands.cargo_door_target_percent = 100.0;
         let id = live.ids.cargo_jam;
 
         let healthy = run(&mut live, &truth, &Faults::default(), 120.0);
@@ -766,7 +807,6 @@ mod tests {
         assert_eq!(healthy.get("CABIN_CARGO_DOOR_JAMMED:1"), Some(&0.0));
 
         let mut live = CabinLive::new();
-        live.commands.cargo_door_target_percent = 100.0;
         let jammed = run(&mut live, &truth, &Faults::from_pairs([(id, 0.6)]), 120.0);
         assert!(jammed["CABIN_CARGO_DOOR_PERCENT:1"] < 45.0, "a 60% jam caps travel at 40%: {}", jammed["CABIN_CARGO_DOOR_PERCENT:1"]);
         assert_eq!(jammed.get("CABIN_CARGO_DOOR_JAMMED:1"), Some(&1.0));

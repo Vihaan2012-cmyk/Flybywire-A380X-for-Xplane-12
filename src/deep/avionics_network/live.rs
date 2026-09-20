@@ -179,6 +179,55 @@ struct Snapshot {
     /// [`availability_code`]) and the age of the data behind it.
     function_availability: Vec<f64>,
     function_age_s: Vec<f64>,
+
+    // --- Everything below makes a *single* fault visible on its own,
+    // rather than only through a whole network side or a monitored
+    // function's rolled-up status (see this module's own doc comment and
+    // `docs/deep/BRIEF.md`'s audit finding on this area: 93 of 159
+    // registered failures moved nothing published). Each is a direct
+    // read of the exact model field the matching failure in `registry.rs`
+    // drives, so arming that failure at any magnitude above zero moves
+    // its own variable, in every aircraft state, independent of whether
+    // it currently lies on a monitored function's path. ---
+    /// Per side, per switch (`NetworkTopology::switches[side]` order):
+    /// `SwitchFaults::is_available()` and `1 - failure`.
+    switch_available: [Vec<bool>; 2],
+    switch_health_frac: [Vec<f64>; 2],
+    /// Per side, per switch, per port (`NetworkTopology::switch_ports`
+    /// order): `1 - port_failure` facing that one neighbour.
+    switch_port_health_frac: [Vec<Vec<f64>>; 2],
+    /// Per side, per segment (`NetworkTopology::edges` order): `1 - open`.
+    segment_health_frac: [Vec<f64>; 2],
+    /// Per end system: whether it can currently reach at least one other
+    /// up end system on that side -- finer than `network_available`
+    /// (which is the *aircraft's* network, not this one module's own
+    /// attachment), and what actually distinguishes "this module lost one
+    /// side" from "the whole side is down" or "everything is fine".
+    module_network_reachable: Vec<[bool; 2]>,
+    /// `module_network_reachable` collapsed to a count, 0..2: the number
+    /// this module is "one fault from losing the function" language in
+    /// the audit means directly -- `1.0` is exactly the state redundancy
+    /// monitoring exists to catch.
+    module_networks_up: Vec<f64>,
+    /// Per end system, per partition (`EndSystemSpec::partitions` order):
+    /// `ModuleFaults::partition_available`.
+    module_partition_available: Vec<Vec<bool>>,
+    /// Per end system, per side: this module's own egress port load as a
+    /// fraction of line rate (`graph::PortLoad::offered_bps /
+    /// capacity_bps`) -- what a babbling transmitter actually does to its
+    /// own port, visible before it ever costs another virtual link a
+    /// frame.
+    module_port_load_frac: Vec<[f64; 2]>,
+    /// Per bay, `[primary, standby]`: each fan's own contribution to the
+    /// draught (`ventilation::Fan::output_frac`), before `Bay::step`
+    /// takes the *best* of the two -- the number a single fan failure
+    /// moves even though the bay's own airflow fraction does not.
+    bay_fan_health_frac: Vec<[f64; 2]>,
+    /// Per virtual link (`NetworkTopology::virtual_links` order): how many
+    /// of the two networks currently carry a real path from its source to
+    /// every one of its destinations -- "how many paths does this virtual
+    /// link actually have", against the two it is always designed for.
+    vl_paths_up: Vec<f64>,
 }
 
 /// `Availability` as a published number: 2 normal (fully redundant),
@@ -188,6 +237,23 @@ fn availability_code(a: Availability) -> f64 {
         Availability::Normal => 2.0,
         Availability::Degraded => 1.0,
         Availability::Lost => 0.0,
+    }
+}
+
+/// A key-safe name for whichever kind of node this is, for the per-port and
+/// per-cable Var names below (`AVNCS_SWITCH_<sw>_PORT_<neighbour>_...`,
+/// `AVNCS_CABLE_<a>_<b>_<side>_...`).
+fn node_key(topology: &NetworkTopology, side: NetworkSide, node: NodeId) -> String {
+    match node {
+        NodeId::Switch(i) => key_safe(&topology.switches[side.index()][i].name),
+        NodeId::End(i) => key_safe(topology.end_systems[i].name),
+    }
+}
+
+fn side_letter(side: NetworkSide) -> &'static str {
+    match side {
+        NetworkSide::A => "A",
+        NetworkSide::B => "B",
     }
 }
 
@@ -439,6 +505,7 @@ impl Area for LiveAvionicsNetwork {
 
         let mut bay_airflow = vec![0.0; self.bays.len()];
         let mut bay_temp_c = vec![0.0; self.bays.len()];
+        let mut bay_fan_health_frac = vec![[0.0_f64; 2]; self.bays.len()];
         for (b, live) in self.bays.iter_mut().enumerate() {
             let ids = &self.ids.bays[b];
             let fans: Vec<Fan> = [0usize, 1]
@@ -447,6 +514,9 @@ impl Area for LiveAvionicsNetwork {
                     faults: FanFaults { failure: faults.get(ids.fans[f]) },
                 })
                 .to_vec();
+            // Each fan's own contribution, before `Bay::step` collapses the
+            // two to whichever is better -- see `Snapshot::bay_fan_health_frac`.
+            bay_fan_health_frac[b] = [fans[0].output_frac(), fans[1].output_frac()];
             let heat_w: f64 = live
                 .modules
                 .iter()
@@ -487,19 +557,101 @@ impl Area for LiveAvionicsNetwork {
         // `registry.rs`: the network side is available if any end system
         // can still reach any other one on it. A side with only one module
         // left up is not a network.
+        //
+        // The same walk also records, *per end system*, whether it is one
+        // of the pair that made that side available -- `network_available`
+        // alone cannot tell "every module still reaches every other one"
+        // from "exactly one pair does and everything else is isolated", and
+        // it is that per-module answer a single cable or port fault
+        // actually moves (see `Snapshot::module_network_reachable`).
         let mut network_available = [false; 2];
+        let mut module_network_reachable = vec![[false; 2]; self.topology.end_systems.len()];
         for side in NetworkSide::BOTH {
+            let s = side.index();
             let up: Vec<usize> =
                 (0..self.topology.end_systems.len()).filter(|&i| module_available[i]).collect();
-            'pairs: for (n, &a) in up.iter().enumerate() {
-                for &b in &up[n + 1..] {
-                    if graph.reachable(side, NodeId::End(a), NodeId::End(b), &nf) {
-                        network_available[side.index()] = true;
-                        break 'pairs;
+            for &a in &up {
+                for &b in &up {
+                    if a != b && graph.reachable(side, NodeId::End(a), NodeId::End(b), &nf) {
+                        network_available[s] = true;
+                        module_network_reachable[a][s] = true;
                     }
                 }
             }
         }
+        let module_networks_up: Vec<f64> =
+            module_network_reachable.iter().map(|r| r[0] as u8 as f64 + r[1] as u8 as f64).collect();
+
+        // ---- Per-switch, per-port and per-cable health: the exact model
+        // field every switch/port/cable failure in `registry.rs` drives,
+        // published directly rather than only through whatever function
+        // happens to route over it this tick. ----------------------------
+        let mut switch_available: [Vec<bool>; 2] = Default::default();
+        let mut switch_health_frac: [Vec<f64>; 2] = Default::default();
+        let mut switch_port_health_frac: [Vec<Vec<f64>>; 2] = Default::default();
+        let mut segment_health_frac: [Vec<f64>; 2] = Default::default();
+        for side in NetworkSide::BOTH {
+            let s = side.index();
+            for sw in &self.ids.switches[s] {
+                let failure = faults.get(sw.failure).clamp(0.0, 1.0);
+                switch_available[s].push(failure < 1.0);
+                switch_health_frac[s].push(1.0 - failure);
+                switch_port_health_frac[s]
+                    .push(sw.ports.iter().map(|&(_, id)| 1.0 - faults.get(id).clamp(0.0, 1.0)).collect());
+            }
+            for &(_, id) in &self.ids.segments[s] {
+                segment_health_frac[s].push(1.0 - faults.get(id).clamp(0.0, 1.0));
+            }
+        }
+
+        // ---- Per-partition availability: independent of the module's own
+        // AFDX interface (ARINC 653 fault containment), so a partition
+        // failure has to be read here, not off the module's own
+        // `_AVAILABLE`. -----------------------------------------------
+        let module_partition_available: Vec<Vec<bool>> = self
+            .ids
+            .modules
+            .iter()
+            .enumerate()
+            .map(|(i, m)| m.partitions.iter().map(|&pid| module_available[i] && faults.get(pid) < 1.0).collect())
+            .collect();
+
+        // ---- Per-module egress port load: what a babbling transmitter
+        // does to its own attachment port, visible even in a state where it
+        // has not yet cost another virtual link a frame (`graph::PortLoad`
+        // is not otherwise published anywhere). ---------------------------
+        let module_port_load_frac: Vec<[f64; 2]> = (0..self.topology.end_systems.len())
+            .map(|i| {
+                NetworkSide::BOTH.map(|side| {
+                    let switch = NodeId::Switch(self.topology.end_systems[i].attach[side.index()]);
+                    let load = graph.port_load(side, NodeId::End(i), switch, &nf);
+                    if load.capacity_bps > 0.0 {
+                        (load.offered_bps / load.capacity_bps).max(0.0)
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .collect();
+
+        // ---- Per virtual link: how many of the two networks actually
+        // carry a path from its source to every one of its destinations
+        // right now, against the two it is always designed for. ----------
+        let vl_paths_up: Vec<f64> = self
+            .topology
+            .virtual_links
+            .iter()
+            .map(|vl| {
+                NetworkSide::BOTH
+                    .iter()
+                    .filter(|&&side| {
+                        vl.destinations
+                            .iter()
+                            .all(|&d| graph.reachable(side, NodeId::End(vl.source), NodeId::End(d), &nf))
+                    })
+                    .count() as f64
+            })
+            .collect();
 
         for monitor in &mut self.monitors {
             monitor.step(&self.topology, &graph, &nf, dt, self.now_s);
@@ -522,6 +674,16 @@ impl Area for LiveAvionicsNetwork {
             bay_temp_c,
             function_availability,
             function_age_s,
+            switch_available,
+            switch_health_frac,
+            switch_port_health_frac,
+            segment_health_frac,
+            module_network_reachable,
+            module_networks_up,
+            module_partition_available,
+            module_port_load_frac,
+            bay_fan_health_frac,
+            vl_paths_up,
         };
     }
 
@@ -570,6 +732,73 @@ impl Area for LiveAvionicsNetwork {
                 &format!("AVNCS_FUNCTION_{key}_AGE_S"),
                 s.function_age_s.get(i).copied().unwrap_or(0.0),
             );
+        }
+
+        // --- redundancy made visible: per-switch, per-port, per-cable,
+        // per-partition and per-module-attachment state, so a single fault
+        // moves something even when it never changes a whole network side
+        // or a monitored function's rolled-up status. ---------------------
+        for side in NetworkSide::BOTH {
+            let sidx = side.index();
+            for (i, spec) in self.topology.switches[sidx].iter().enumerate() {
+                let key = key_safe(&spec.name);
+                out(
+                    &format!("AVNCS_SWITCH_{key}_AVAILABLE"),
+                    f64::from(s.switch_available[sidx].get(i).copied().unwrap_or(true)),
+                );
+                out(
+                    &format!("AVNCS_SWITCH_{key}_HEALTH_FRAC"),
+                    s.switch_health_frac[sidx].get(i).copied().unwrap_or(1.0),
+                );
+                for (p, neighbour) in self.topology.switch_ports(side, i).into_iter().enumerate() {
+                    let nkey = node_key(&self.topology, side, neighbour);
+                    out(
+                        &format!("AVNCS_SWITCH_{key}_PORT_{nkey}_HEALTH_FRAC"),
+                        s.switch_port_health_frac[sidx].get(i).and_then(|v| v.get(p)).copied().unwrap_or(1.0),
+                    );
+                }
+            }
+            for (k, (a, b)) in self.topology.edges(side).into_iter().enumerate() {
+                let akey = node_key(&self.topology, side, a);
+                let bkey = node_key(&self.topology, side, b);
+                out(
+                    &format!("AVNCS_CABLE_{akey}_{bkey}_{}_HEALTH_FRAC", side_letter(side)),
+                    s.segment_health_frac[sidx].get(k).copied().unwrap_or(1.0),
+                );
+            }
+        }
+
+        for (i, es) in self.topology.end_systems.iter().enumerate() {
+            let key = key_safe(es.name);
+            for (p, part) in es.partitions.iter().enumerate() {
+                let pkey = key_safe(part);
+                out(
+                    &format!("AVNCS_MODULE_{key}_PARTITION_{pkey}_AVAILABLE"),
+                    f64::from(s.module_partition_available.get(i).and_then(|v| v.get(p)).copied().unwrap_or(false)),
+                );
+            }
+            let load = s.module_port_load_frac.get(i).copied().unwrap_or([0.0; 2]);
+            out(&format!("AVNCS_MODULE_{key}_PORT_LOAD_FRAC_A"), load[0]);
+            out(&format!("AVNCS_MODULE_{key}_PORT_LOAD_FRAC_B"), load[1]);
+            let reach = s.module_network_reachable.get(i).copied().unwrap_or([false; 2]);
+            out(&format!("AVNCS_MODULE_{key}_NETWORK_A_REACHABLE"), f64::from(reach[0]));
+            out(&format!("AVNCS_MODULE_{key}_NETWORK_B_REACHABLE"), f64::from(reach[1]));
+            out(
+                &format!("AVNCS_MODULE_{key}_NETWORKS_UP"),
+                s.module_networks_up.get(i).copied().unwrap_or(0.0),
+            );
+        }
+
+        for (b, bay) in self.bays.iter().enumerate() {
+            let health = s.bay_fan_health_frac.get(b).copied().unwrap_or([0.0; 2]);
+            out(&format!("AVNCS_{}_FAN_PRIMARY_HEALTH_FRAC", bay.key), health[0]);
+            out(&format!("AVNCS_{}_FAN_STANDBY_HEALTH_FRAC", bay.key), health[1]);
+        }
+
+        for (i, vl) in self.topology.virtual_links.iter().enumerate() {
+            let key = key_safe(vl.name);
+            out(&format!("AVNCS_VL_{key}_PATHS_UP"), s.vl_paths_up.get(i).copied().unwrap_or(0.0));
+            out(&format!("AVNCS_VL_{key}_PATHS_DESIGNED"), NetworkSide::BOTH.len() as f64);
         }
     }
 }
@@ -801,6 +1030,223 @@ mod tests {
             assert!(published.contains_key(&name), "{name} is never published");
         }
         assert_eq!(area.name(), "avionics_network");
+    }
+
+    // -----------------------------------------------------------------
+    // Redundancy made visible: the audit found 93 of this area's 159
+    // failures moved nothing published, because only a whole network side
+    // or a monitored function's rolled-up status was ever read back. The
+    // tests below arm exactly those failure classes and check the direct
+    // per-component reading each one now drives, plus the pair the brief
+    // asks for explicitly: cutting one side of a dual-redundant link must
+    // move a published variable while the function stays available, and a
+    // second cut must then take it down.
+    // -----------------------------------------------------------------
+
+    /// The central pair: a single cable cut costs redundancy, visibly, and
+    /// only the second cut (the other side of the same attachment) costs
+    /// the function. `cutting_one_networks_attachment_cable_costs_
+    /// redundancy_not_the_function` above already proves the function's
+    /// own status; this proves the *redundancy* is separately visible even
+    /// though that function's own status does not distinguish "one fault
+    /// from losing this" from "fully healthy" on its own two-valued read.
+    #[test]
+    fn cutting_both_sides_of_a_modules_attachment_shows_redundancy_loss_then_function_loss() {
+        let area = LiveAvionicsNetwork::new();
+        let attach = area.topology.end_systems[0].attach; // CPIOM-C1
+        let index = FaultIndex::build();
+        let id_a = index.id(&format!(
+            "AFDX cable {:?}-{:?} ({:?}) failure",
+            NodeId::End(0),
+            NodeId::Switch(attach[0]),
+            NetworkSide::A
+        ));
+        let id_b = index.id(&format!(
+            "AFDX cable {:?}-{:?} ({:?}) failure",
+            NodeId::End(0),
+            NodeId::Switch(attach[1]),
+            NetworkSide::B
+        ));
+        assert!(id_a != 0 && id_b != 0, "the cables' registered names changed");
+
+        // First cut: network A only. The module and the function it feeds
+        // both stay up, but the aircraft is now one fault from losing the
+        // function, and that has to be a published fact, not something
+        // only visible once it is too late.
+        let mut one = LiveAvionicsNetwork::new();
+        let published = run(&mut one, &powered(), &Faults::from_pairs([(id_a, 1.0)]), 5.0);
+        assert_eq!(published["AVNCS_MODULE_CPIOM_C1_AVAILABLE"], 1.0, "the module itself is untouched");
+        assert_eq!(published["AVNCS_MODULE_CPIOM_C1_NETWORK_A_REACHABLE"], 0.0, "the cut side must read unreachable");
+        assert_eq!(published["AVNCS_MODULE_CPIOM_C1_NETWORK_B_REACHABLE"], 1.0, "the other side is untouched");
+        assert_eq!(published["AVNCS_MODULE_CPIOM_C1_NETWORKS_UP"], 1.0, "exactly one fault from losing the function");
+        assert_eq!(
+            published["AVNCS_FUNCTION_ECAM_WARNINGS_AT_CPIOM_A1_AVAILABILITY"], 1.0,
+            "degraded, not lost, on the first cut alone"
+        );
+
+        // Second cut: network B too. Now the module really is off both
+        // networks and the function it feeds is genuinely lost.
+        let mut both = LiveAvionicsNetwork::new();
+        let published = run(&mut both, &powered(), &Faults::from_pairs([(id_a, 1.0), (id_b, 1.0)]), 5.0);
+        assert_eq!(published["AVNCS_MODULE_CPIOM_C1_NETWORK_A_REACHABLE"], 0.0);
+        assert_eq!(published["AVNCS_MODULE_CPIOM_C1_NETWORK_B_REACHABLE"], 0.0);
+        assert_eq!(published["AVNCS_MODULE_CPIOM_C1_NETWORKS_UP"], 0.0);
+        assert_eq!(
+            published["AVNCS_FUNCTION_ECAM_WARNINGS_AT_CPIOM_A1_AVAILABILITY"], 0.0,
+            "both sides cut: the function must actually be lost now"
+        );
+    }
+
+    /// One of the audit's 48 dead port failures: a switch port failure that
+    /// sits nowhere near either reference function's path used to move
+    /// nothing published at all. It now reads directly off its own port.
+    #[test]
+    fn a_single_port_failure_moves_that_ports_own_health_reading() {
+        let area = LiveAvionicsNetwork::new();
+        let switch_name = area.topology.switches[0][0].name.clone(); // "AFDX-A-1"
+        let neighbour = area.topology.switch_ports(NetworkSide::A, 0)[0]; // a switch-switch port
+        let index = FaultIndex::build();
+        let id = index.id(&format!("AFDX switch {switch_name} port to {neighbour:?} failure"));
+        assert_ne!(id, 0, "the port's registered name changed");
+
+        let mut area = LiveAvionicsNetwork::new();
+        let published = run(&mut area, &powered(), &Faults::from_pairs([(id, 1.0)]), 1.0);
+
+        let switch_key = key_safe(&switch_name);
+        let neighbour_key = node_key(&area.topology, NetworkSide::A, neighbour);
+        let var_name = format!("AVNCS_SWITCH_{switch_key}_PORT_{neighbour_key}_HEALTH_FRAC");
+        assert_eq!(published[&var_name], 0.0, "a fully failed port must read zero on its own variable");
+        assert_eq!(
+            published[&format!("AVNCS_SWITCH_{switch_key}_HEALTH_FRAC")], 1.0,
+            "the switch's own health is independent of one port"
+        );
+    }
+
+    /// One of the audit's 24 dead cable failures, and one of its 8 dead
+    /// switch failures: both now read directly off their own component
+    /// regardless of whether they happen to sit on a monitored path.
+    #[test]
+    fn a_cable_and_a_switch_failure_each_move_their_own_component_reading() {
+        let area = LiveAvionicsNetwork::new();
+        let (a, b) = area.topology.edges(NetworkSide::A)[0];
+        let cable_index = FaultIndex::build();
+        let cable_id = cable_index.id(&format!("AFDX cable {a:?}-{b:?} ({:?}) failure", NetworkSide::A));
+        assert_ne!(cable_id, 0);
+
+        let mut cable_area = LiveAvionicsNetwork::new();
+        let published = run(&mut cable_area, &powered(), &Faults::from_pairs([(cable_id, 1.0)]), 1.0);
+        let akey = node_key(&cable_area.topology, NetworkSide::A, a);
+        let bkey = node_key(&cable_area.topology, NetworkSide::A, b);
+        assert_eq!(published[&format!("AVNCS_CABLE_{akey}_{bkey}_A_HEALTH_FRAC")], 0.0);
+
+        // A switch with no end system of its own attached ("AFDX-A-2"),
+        // so failing it wholesale cannot be confused with a module fault.
+        let switch_name = area.topology.switches[0][1].name.clone();
+        let switch_index = FaultIndex::build();
+        let switch_id = switch_index.id(&format!("AFDX switch {switch_name} failure"));
+        assert_ne!(switch_id, 0);
+
+        let mut switch_area = LiveAvionicsNetwork::new();
+        let published = run(&mut switch_area, &powered(), &Faults::from_pairs([(switch_id, 1.0)]), 1.0);
+        let switch_key = key_safe(&switch_name);
+        assert_eq!(published[&format!("AVNCS_SWITCH_{switch_key}_AVAILABLE")], 0.0);
+        assert_eq!(published[&format!("AVNCS_SWITCH_{switch_key}_HEALTH_FRAC")], 0.0);
+    }
+
+    /// One of the audit's 7 dead partition failures: ARINC 653 fault
+    /// containment means a crashed partition never touches the module's own
+    /// AFDX interface or its sibling partitions, so it has to be read off
+    /// its own variable, not inferred from `..._AVAILABLE`.
+    #[test]
+    fn a_partition_failure_moves_only_its_own_partition_variable() {
+        let index = FaultIndex::build();
+        let id = index.id("CPIOM-C1 partition ECAM failure");
+        assert_ne!(id, 0);
+
+        let mut area = LiveAvionicsNetwork::new();
+        let published = run(&mut area, &powered(), &Faults::from_pairs([(id, 1.0)]), 1.0);
+
+        assert_eq!(published["AVNCS_MODULE_CPIOM_C1_PARTITION_ECAM_AVAILABLE"], 0.0);
+        assert_eq!(
+            published["AVNCS_MODULE_CPIOM_C1_PARTITION_FWS_AVAILABLE"], 1.0,
+            "its sibling partition is untouched"
+        );
+        assert_eq!(
+            published["AVNCS_MODULE_CPIOM_C1_AVAILABLE"], 1.0,
+            "the module's own AFDX interface is unaffected by one partition"
+        );
+    }
+
+    /// One of the audit's 3 dead babbling-node failures: oversubscription
+    /// is a property of the babbling module's own egress port, not of any
+    /// one virtual link sharing it, and used to be visible only once it
+    /// cost some other traffic a frame.
+    #[test]
+    fn a_babbling_end_system_moves_its_own_egress_port_load_fraction() {
+        let index = FaultIndex::build();
+        let id = index.id("CPIOM-C1 babbling (unregulated transmission)");
+        assert_ne!(id, 0);
+
+        let mut healthy = LiveAvionicsNetwork::new();
+        let base = run(&mut healthy, &powered(), &Faults::default(), 1.0);
+        assert!(base["AVNCS_MODULE_CPIOM_C1_PORT_LOAD_FRAC_A"] < 1.0, "a healthy port is not oversubscribed");
+
+        let mut area = LiveAvionicsNetwork::new();
+        let published = run(&mut area, &powered(), &Faults::from_pairs([(id, 1.0)]), 1.0);
+        assert!(
+            published["AVNCS_MODULE_CPIOM_C1_PORT_LOAD_FRAC_A"] > 1.0,
+            "a babbling transmitter must oversubscribe its own port"
+        );
+    }
+
+    /// One of the audit's 4 dead bay-fan failures: `Bay::step` takes the
+    /// *best* of a bay's two fans, so a single fan failure never moves the
+    /// bay's own airflow fraction -- it has to be read off the fan itself.
+    #[test]
+    fn a_single_fan_failure_moves_its_own_health_reading_even_though_the_bays_airflow_does_not() {
+        let index = FaultIndex::build();
+        let primary = index.id("AVIONICS_BAY_FWD PRIMARY extraction fan failure");
+        assert_ne!(primary, 0);
+
+        let mut area = LiveAvionicsNetwork::new();
+        let published = run(&mut area, &powered(), &Faults::from_pairs([(primary, 1.0)]), 1.0);
+
+        assert_eq!(
+            published["AVNCS_AVIONICS_BAY_FWD_FAN_PRIMARY_HEALTH_FRAC"], 0.0,
+            "the failed fan's own health must read zero"
+        );
+        assert_eq!(
+            published["AVNCS_AVIONICS_BAY_FWD_FAN_STANDBY_HEALTH_FRAC"], 1.0,
+            "its healthy twin is untouched"
+        );
+        assert_eq!(
+            published["AVNCS_AVIONICS_BAY_FWD_AIRFLOW_FRAC"], 1.0,
+            "the bay draught is still fully established behind the healthy fan"
+        );
+    }
+
+    /// "How many paths a virtual link actually has versus how many it
+    /// should have": a healthy dual network carries every VL on both
+    /// sides; losing every switch on one side costs it exactly one, and
+    /// the designed count never moves.
+    #[test]
+    fn a_virtual_links_path_count_reflects_the_network_not_just_endpoint_health() {
+        let mut healthy = LiveAvionicsNetwork::new();
+        let published = run(&mut healthy, &powered(), &Faults::default(), 1.0);
+        assert_eq!(
+            published["AVNCS_VL_FWS_WARNINGS_PATHS_UP"], 2.0,
+            "a healthy dual network carries every VL on both sides"
+        );
+        assert_eq!(published["AVNCS_VL_FWS_WARNINGS_PATHS_DESIGNED"], 2.0);
+
+        let mut one_side_down = LiveAvionicsNetwork::new();
+        let ids: Vec<(u64, f64)> = one_side_down.ids.switches[0].iter().map(|s| (s.failure, 1.0)).collect();
+        let published = run(&mut one_side_down, &powered(), &Faults::from_pairs(ids), 1.0);
+        assert_eq!(
+            published["AVNCS_VL_FWS_WARNINGS_PATHS_UP"], 1.0,
+            "losing every switch on one side must cost that VL exactly one path"
+        );
+        assert_eq!(published["AVNCS_VL_FWS_WARNINGS_PATHS_DESIGNED"], 2.0, "the design target does not change");
     }
 }
 

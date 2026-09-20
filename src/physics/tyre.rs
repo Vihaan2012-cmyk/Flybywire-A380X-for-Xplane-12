@@ -61,7 +61,7 @@ const N2_SPECIFIC_GAS_CONSTANT: f64 = gas::R_UNIVERSAL / N2_MOLAR_MASS_KG_MOL;
 /// A380 main gear tyres (~15.5 bar / 225 psi) and is flagged generic rather
 /// than cited to a specific page, matching this file's own convention for
 /// uncited thresholds (see `damage.rs`'s `FUSE_PLUG_MELT_C`).
-const COLD_PRESSURE_PA: f64 = 1_550_000.0;
+pub const COLD_PRESSURE_PA: f64 = 1_550_000.0;
 /// ISA reference temperature the cold pressure above is quoted at (15 C),
 /// the same reference `gas.rs`'s own tests use.
 const COLD_TEMP_K: f64 = 288.15;

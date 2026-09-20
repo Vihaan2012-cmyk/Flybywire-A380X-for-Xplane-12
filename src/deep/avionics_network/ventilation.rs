@@ -64,7 +64,15 @@ impl Fan {
     }
 
     /// This fan's own contribution to establishing the draught, 0..1.
-    fn output_frac(&self) -> f64 {
+    ///
+    /// Published directly (`live.rs`'s `AVNCS_<bay>_FAN_<role>_HEALTH_FRAC`)
+    /// so that losing one of a bay's two fans is visible on its own: the
+    /// bay's own `airflow_frac` is the *best* of its fans
+    /// (`Bay::step` takes the max, since a healthy second fan fully covers
+    /// for a failed one), so a single fan failure never moves it — without
+    /// this per-fan number, that whole class of failure is invisible until
+    /// the second fan goes too.
+    pub fn output_frac(&self) -> f64 {
         if self.powered {
             1.0 - self.faults.failure.clamp(0.0, 1.0)
         } else {

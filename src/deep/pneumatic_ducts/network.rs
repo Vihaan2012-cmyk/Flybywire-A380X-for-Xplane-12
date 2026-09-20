@@ -126,6 +126,20 @@ const WING_GEAR_WELL: usize = 8;
 pub const ZONE_COUNT: usize = 9;
 pub const ODLS_ZONE_COUNT: usize = 7;
 
+/// This zone's own absolute ODLS alarm temperature (`odls.rs`'s own module
+/// doc for the derivation): the pylon bays and the APU's tail-cone bay run
+/// hot in normal operation from engine/APU proximity, the same
+/// "pylon/strut" compartment class `thermal_zones::PROGRESS.md`'s
+/// investigation names; the wing leading-edge duct runs are the cooler
+/// "wing/fuselage" class.
+fn odls_threshold_k(zone: usize) -> f64 {
+    if zone == TAIL_CONE || PYLON.contains(&zone) {
+        OverheatDetectionLoop::THRESHOLD_PYLON_STRUT_K
+    } else {
+        OverheatDetectionLoop::THRESHOLD_WING_FUSELAGE_K
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Upstream stage constants (IP tap, HP valve, PR/shutoff valve).
 // ---------------------------------------------------------------------------
@@ -306,6 +320,13 @@ pub struct NetworkOutputs {
     pub jet_impact_flux_w_m2: [f64; ZONE_COUNT],
     pub odls_trip: [bool; ODLS_ZONE_COUNT],
     pub odls_loop_fault: [bool; ODLS_ZONE_COUNT],
+    /// Each loop's own health, independent of the other (module doc on
+    /// `odls::OdlsOutputs`'s identically-named fields): a single loop
+    /// failing open must be visible on its own even though, correctly, it
+    /// cannot move `odls_loop_fault`/`odls_trip` while its twin stays
+    /// healthy.
+    pub odls_loop_a_fault: [bool; ODLS_ZONE_COUNT],
+    pub odls_loop_b_fault: [bool; ODLS_ZONE_COUNT],
     pub engine_isolated: [bool; 4],
     pub apu_isolated: bool,
     pub cross_bleed_valve_open: [f64; 3],
@@ -321,6 +342,15 @@ pub struct NetworkOutputs {
     pub hyd_reservoir_pressure_pa: [f64; 2],
     pub engine_precooler_overtemp: [bool; 4],
     pub apu_precooler_overtemp: bool,
+    /// Real mass flow actually being drawn from the APU's own load
+    /// compressor this tick, kg/s -- the precooler's own hot-side flow
+    /// through [`APU_VALVE_AREA_M2`], computed from the real
+    /// `ApuBleedInput` port condition, zero whenever `apu_bleed_selected`
+    /// is false. `deep::apu` needs this to know its load compressor is
+    /// actually loaded (otherwise its own erosion/surge-control-valve/IGV
+    /// failures have nothing to act on): published as
+    /// `PNEU_APU_BLEED_DEMAND_KG_S` (`live.rs`).
+    pub apu_bleed_demand_kg_s: f64,
     /// Each precooler's own delivered outlet temperature, K -- the
     /// quantity its fouling/FAV/sensor faults actually act on, and what a
     /// bleed page or Study panel shows. (`overtemp` above is only the
@@ -394,7 +424,7 @@ impl DuctNetwork {
             wai: std::array::from_fn(|i| DuctSection::new(ZONE_NAMES[WING_LE[i]], Self::WAI_DUCT_VOLUME_M3, Self::WAI_DUCT_DIAMETER_M, Self::WAI_DUCT_UA_W_K, p, k)),
             start: std::array::from_fn(|i| DuctSection::new(ZONE_NAMES[PYLON[i]], Self::START_DUCT_VOLUME_M3, Self::START_DUCT_DIAMETER_M, Self::START_DUCT_UA_W_K, p, k)),
             hyd_reservoir: std::array::from_fn(|_| DuctSection::new(ZONE_NAMES[WING_GEAR_WELL], Self::HYD_RESERVOIR_DUCT_VOLUME_M3, Self::HYD_RESERVOIR_DUCT_DIAMETER_M, Self::HYD_RESERVOIR_DUCT_UA_W_K, p, k)),
-            odls: [OverheatDetectionLoop::new(k); ODLS_ZONE_COUNT],
+            odls: std::array::from_fn(|z| OverheatDetectionLoop::new(k, odls_threshold_k(z))),
             engine_isolated: [false; 4],
             apu_isolated: false,
             wai_valve_open: [0.0; 2],
@@ -426,9 +456,11 @@ impl DuctNetwork {
         // --- ODLS first (confirm-delayed, reflects last tick's zone
         // condition consistently before any flow moves this tick).
         for z in 0..ODLS_ZONE_COUNT {
-            let o = self.odls[z].step(inputs.zone_air_k[z], inputs.ambient_k, dt, &faults.odls[z]);
+            let o = self.odls[z].step(inputs.zone_air_k[z], dt, &faults.odls[z]);
             out.odls_trip[z] = o.trip;
             out.odls_loop_fault[z] = o.loop_fault;
+            out.odls_loop_a_fault[z] = o.loop_a_fault;
+            out.odls_loop_b_fault[z] = o.loop_b_fault;
         }
         for i in 0..4 {
             if out.odls_trip[PYLON[i]] {
@@ -518,6 +550,7 @@ impl DuctNetwork {
             let pc = self.apu_precooler.step(dt, src.temp_k, mdot_hot, src.fan_air_available_kg_s, src.fan_air_k, &faults.apu_precooler);
             self.apu_duct.gas.add_mass(mdot_hot * dt, pc.outlet_temp_k, src.pressure_pa);
             out.apu_precooler_overtemp = pc.overtemp_active;
+            out.apu_bleed_demand_kg_s = mdot_hot;
             out.apu_precooler_outlet_k = pc.outlet_temp_k;
 
             let (relief, backflow) = self.apu_precooler.relief_and_backflow_kg_s(self.apu_duct.gas.pressure_pa(), inputs.ambient_pa, &faults.apu_precooler);
@@ -813,7 +846,7 @@ mod tests {
     fn a_confirmed_pylon_overheat_isolates_that_engines_pr_valve_and_its_cross_bleed_connections() {
         let mut net = DuctNetwork::new();
         let mut inputs = base_inputs();
-        inputs.zone_air_k[0] = 250.0 + OverheatDetectionLoop::THRESHOLD_ABOVE_AMBIENT_K + 30.0; // engine 1's pylon is hot
+        inputs.zone_air_k[0] = OverheatDetectionLoop::THRESHOLD_PYLON_STRUT_K + 30.0; // engine 1's pylon is hot, past its own absolute threshold
         let mut out = NetworkOutputs::default();
         for _ in 0..30 {
             out = net.step(&inputs, &DuctNetworkFaults::default());

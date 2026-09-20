@@ -282,6 +282,18 @@ impl Apu {
         let generator_torque_nm = if omega > 1.0 { gens_out.total_shaft_power_w / omega } else { 0.0 };
         let accessory_torque_nm =
             load_compressor_torque_nm + generator_torque_nm + fixed_accessory_torque_nm + cold_drag_nm;
+        // Ram air can only windmill the rotor if it can actually reach the
+        // compressor face: `start_envelope::windmill_torque_nm` computes the
+        // torque a fully open scoop inlet would impart, with no idea whether
+        // the inlet door (`self.inlet_door`, stepped just above) is open at
+        // all. Gating it by the door's own open fraction is what makes a
+        // closed door (MASTER SW off, or the door still jammed/transiting)
+        // correctly windmill nothing -- before this gate, a shut-down APU in
+        // cruise spooled up on ram air alone through a closed door, reaching
+        // tens of percent N with nobody having started it (zero when
+        // stationary was always the tell: no ram air, no torque, regardless
+        // of the door).
+        let windmill_torque_nm = windmill_torque_nm * door_open_frac.clamp(0.0, 1.0);
         let driving_torque_nm = starter_out.starter_torque_nm + windmill_torque_nm;
 
         // Life-derived baseline wear (end of previous tick) combined with
@@ -457,6 +469,41 @@ mod tests {
         assert!(!out.available);
     }
 
+    /// The bug this pass fixes: `windmill_torque_nm` used to drive the spool
+    /// regardless of the inlet door's own position, so a shut-down APU in
+    /// cruise (real ram air, real dynamic pressure, MASTER SW never
+    /// pressed) spooled itself up to tens of percent N on ram air through a
+    /// door that was never commanded open. Zero when stationary was always
+    /// the tell that this was ram air, not a real start; the fix has to
+    /// hold at zero in the air too, for as long as the door stays shut.
+    #[test]
+    fn a_healthy_apu_stays_at_zero_n_in_cruise_with_the_master_switch_off() {
+        let mut apu = Apu::new(218.8); // a representative cold-cruise ambient
+        let mut inputs = base_inputs();
+        // Real cruise dynamic pressure: `start_envelope`'s own windmill
+        // test uses 230 m/s at sea-level density to get a clearly nonzero
+        // windmill torque out of `windmill_torque_nm` in isolation; this is
+        // the same order of magnitude, so the door gate is doing real work
+        // here, not just multiplying an already-negligible number by zero.
+        inputs.true_airspeed_mps = 230.0;
+        inputs.ambient_pressure_pa = 23_800.0;
+        inputs.ambient_temperature_k = 218.8;
+        // `base_inputs()` defaults `master_on` to `true` (most of this
+        // file's other tests want the door open); this scenario is the
+        // opposite one, the crew never touching the APU at all this
+        // flight, so both have to be forced off explicitly.
+        inputs.master_on = false;
+        inputs.start_selected = false;
+        let mut out = Outputs::default();
+        for _ in 0..3600 {
+            // one simulated hour at dt = 1 s
+            out = apu.step(&inputs, &ApuFaults::default());
+            assert_eq!(out.n_percent, 0.0, "N moved off zero at tick with the master switch off and the inlet door never commanded open");
+        }
+        assert_eq!(out.n_percent, 0.0);
+        assert_eq!(out.inlet_door_open_frac, 0.0, "the door was never commanded open either");
+    }
+
     #[test]
     fn a_fire_confirmed_mid_run_commands_shutoff_and_the_bleed_valve_closes() {
         let mut apu = Apu::new(288.15);
@@ -484,6 +531,39 @@ mod tests {
         assert!(out.fire_confirmed);
         assert_eq!(out.bleed_output.mass_flow_kg_s, 0.0);
         assert!(out.fire_bottle_pressure_frac < 1.0);
+    }
+
+    /// `live.rs` still cannot feed this a real generator load today (see
+    /// its own module doc: `deep::electrical` computes each generator's
+    /// delivered watts internally but does not publish it, and
+    /// `bleed_demand_kg_s`/`gen1_electrical_load_w`/`gen2_electrical_load_w`
+    /// all still fall back to 0.0 through `Truth::published` for want of
+    /// it). This proves the machine's own side of that wiring is real and
+    /// ready: once a real watt figure reaches `Inputs::gen1_electrical_load_w`,
+    /// asking a generator for more than it is rated for does drive it into
+    /// `overloaded`, with no fault armed at all -- overload is a consequence
+    /// of the load itself, not something that needs a failure to switch on.
+    #[test]
+    fn a_generator_carrying_a_real_load_past_its_rating_is_overloaded() {
+        let mut apu = Apu::new(288.15);
+        let mut inputs = base_inputs();
+        inputs.gen1_used = true;
+        // Comfortably past `Generator::rated_real_power_w()`
+        // (`params::GENERATOR_RATED_APPARENT_VA * ..._POWER_FACTOR`):
+        // `generators.rs`'s own tests use 3x rated as "way over".
+        inputs.gen1_electrical_load_w = 3.0 * (params::GENERATOR_RATED_APPARENT_VA * params::GENERATOR_RATED_POWER_FACTOR);
+        let out = apu.step(&inputs, &ApuFaults::default());
+        assert!(out.gen1_output.overloaded, "a generator asked for 3x its rated power must report overloaded");
+        assert!(!out.gen2_output.overloaded, "generator 2 was never used and must stay healthy");
+
+        // The reverse: the same generator well under its rating is not
+        // overloaded, so this is a real threshold and not a stuck flag.
+        let mut apu2 = Apu::new(288.15);
+        let mut light = base_inputs();
+        light.gen1_used = true;
+        light.gen1_electrical_load_w = 0.2 * (params::GENERATOR_RATED_APPARENT_VA * params::GENERATOR_RATED_POWER_FACTOR);
+        let out2 = apu2.step(&light, &ApuFaults::default());
+        assert!(!out2.gen1_output.overloaded);
     }
 
     #[test]

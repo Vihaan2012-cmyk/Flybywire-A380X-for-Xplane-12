@@ -273,4 +273,46 @@ glue (`read`/`write`, Vars) once the lead wires `pub mod apu;` into
   machine the open-loop schedule cannot know about. `Apu::step` now sub-steps its whole control chain at 0.05 s
   like `PowerSection::step` already did, so a half-second post-pause frame no longer overshoots governed speed.
   Measured: governs 100.000% / 603 C at dt 1/30..0.5, healthy; the reported 77.6% governing did not reproduce.
+- [done] Runaway-APU fix (`failure_audit.rs` finding: "the APU spools to 85% N
+  in cruise with the MASTER SW off") — `apu.rs`'s `step_once` added
+  `windmill_torque_nm` to `driving_torque_nm` unconditionally, so ram air
+  windmilled the rotor through a shut inlet door: with the door never
+  commanded open (MASTER SW off the whole flight), the raw `start_envelope::
+  windmill_torque_nm` value is now gated by `door_open_frac` before it
+  reaches the torque balance -- a closed (or still-jammed/transiting) door
+  correctly windmills nothing, matching zero windmill torque at zero door
+  opening the same way the model already correctly gives zero windmill torque
+  at zero airspeed. New test `a_healthy_apu_stays_at_zero_n_in_cruise_with_
+  the_master_switch_off` (`apu.rs`) runs a simulated hour at real cruise
+  dynamic pressure with the crew never touching the APU and asserts `n_percent
+  == 0.0` on every tick.
+- [done] APU generator load wiring (`failure_audit.rs` finding: "all four APU
+  generator failures are dead") — `live.rs` no longer hardcodes `gen1_used`/
+  `gen2_used` to `false`: both now read the real APU GEN 1/2 pushbuttons
+  (`Truth::controls.apu_gen_pb_on`). `gen1_electrical_load_w`/`gen2_
+  electrical_load_w`/`bleed_demand_kg_s` are no longer bare literal `0.0`s
+  either -- all three now read through `Truth::published.get_or(name, 0.0)`
+  under documented names (`"ELEC_APU_GEN_1_LOAD_W"`/`"_2_"`, `"PNEU_APU_
+  BLEED_DEMAND_KG_S"`), the exact mechanism `docs/deep/live.rs` describes for
+  one area consuming another's output. Checked by hand, not assumed: neither
+  `deep::electrical` nor `deep::pneumatic_ducts` currently publishes any of
+  these three under any name (`deep::electrical`'s own `measured_apu_gen_
+  load_w` is computed every tick but never published, and what it *does*
+  publish for these sources -- the `apu-gen-<n>-bkr` feeder breaker current --
+  is, by that file's own module doc, a duplicate measurement of the whole
+  bus's current, not the individual generator's, so it cannot honestly stand
+  in here), so all three still read back as `0.0` today -- a real "nothing
+  measured this yet" state, not a fabricated load. `apu.rs`'s new
+  `a_generator_carrying_a_real_load_past_its_rating_is_overloaded` test proves
+  the machine's own side of the wiring (feeding `Inputs` directly): a
+  generator asked for 3x its rated power reports `overloaded` with no fault
+  armed at all, and one well under its rating does not. `live.rs`'s new
+  `a_published_apu_generator_load_reaches_the_generator_and_can_overload_it`
+  test proves the `Truth::published` read itself: nothing published leaves it
+  healthy, and seeding `"ELEC_APU_GEN_1_LOAD_W"` in `Truth::published` (as
+  `deep::electrical` would once it publishes) overloads generator 1 with no
+  further code change. Still blocked, and out of this pass's scope to fix:
+  `deep::electrical` publishing a real per-generator watt figure and `deep::
+  pneumatic_ducts` publishing a real bleed demand figure -- both are other
+  areas' own directories.
 - [done] sourced-constants pass — params.rs, registry.rs — Split the EGT limits into control / warning-caution / protective-trip, which they were conflating. Sourced to FBW's own PW980A model: start control limit 900 C (`pw980_physics.rs:547`), protective trip 950 C (`pw980_physics.rs:664`), running warning 900 C (`pw980.rs:32` -- note the A320 APS3200's is 682 C, so this is genuinely aircraft-specific), start warning 900/982 C by FL250 and caution = warning - 33 C (`electronic_control_box.rs:276-277,341-344`). Added `egt_warning_c`/`egt_caution_c` plus 4 tests. `EGT_RUNNING_LIMIT_C` 750 stays GENERIC but is now explicitly a *control* limit below the 900 warning. The ECAM trigger now references `EGT_TRIP_C` instead of a bare 950 literal. Not yet published as vars: `APU_EGT_WARNING_C`/`APU_EGT_CAUTION_C` need a pressure altitude in the APU publisher, which it does not currently receive.

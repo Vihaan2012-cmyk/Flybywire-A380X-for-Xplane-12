@@ -32,22 +32,26 @@
 //!
 //! `Truth::engine_fuel_flow_kg_s` is `physics::engine`'s own real fuel flow
 //! into each combustor -- not a fan-speed guess -- and is what drains each
-//! feed tank now. Every tank starts loaded, too: [`FuelLive::new`] seeds
-//! the same FlyByWire FADEC default gallons the aircraft's own cold start
-//! uses (`crate::fuel::DEFAULT_GALLONS`) through [`FuelLive::load_tank`],
-//! since nothing else in this pass's scope calls it with X-Plane's live
-//! reading (see [`FuelLive::seed_default_fuel_load`]).
+//! feed tank now. Every tank starts loaded, too: [`FuelLive::new`] seeds a
+//! realistic full long-haul dispatch load across all eleven tanks (see
+//! [`FuelLive::seed_default_fuel_load`]) rather than
+//! `crate::fuel::DEFAULT_GALLONS`'s ramp/cold-start defaults, which fill the
+//! four feed tanks only -- real fuel for "what is in the feed tanks for
+//! engine start", not for "what does a fuelled long-haul departure look
+//! like", and a seed that left the other seven tanks permanently empty, so
+//! their own wall-leak and trim-pump failures could never move a kilogram.
 //!
 //! ## What is not in `Truth` yet
 //!
 //! A handful of inputs this system genuinely needs still have no field in
-//! [`Truth`]: APU fuel burn, the aircraft's pitch/bank and sustained
-//! accelerations, and whether the crew has selected jettison or
-//! cross-feed. They are collected in [`FuelCommands`] as one explicit,
+//! [`Truth`]: APU fuel burn, and the aircraft's pitch/bank and sustained
+//! accelerations. They are collected in [`FuelCommands`] as one explicit,
 //! documented block rather than invented from what is available. The
-//! defaults are an aircraft that is not burning APU fuel and has neither
-//! jettison nor cross-feed selected -- a real state, not a placeholder
-//! quantity.
+//! defaults are an aircraft that is not burning APU fuel and is wings
+//! level -- a real state, not a placeholder quantity. Jettison and
+//! cross-feed selection are real cockpit controls now
+//! (`Truth::controls::jettison_armed`/`jettison_valve_selected`/
+//! `crossfeed_valve_selected`) and are read from there instead.
 
 use crate::deep::api::{failure_id, Area, Registry};
 use crate::deep::live::{Faults, Truth};
@@ -102,14 +106,39 @@ const MAX_GALLERY_LEAK_AREA_M2: f64 = 1.0e-5;
 /// Rolling window and discrepancy threshold for `leak::LeakDetector`.
 /// **GENERIC** -- the module's own doc is explicit that no public numeric
 /// FUEL LEAK window or threshold exists for this type, and that only the
-/// shape of the algorithm is the documented real principle. 60 s windows
-/// confirmed over 3 of them put the alert about three minutes behind a leak
-/// big enough to matter, and 100 kg over a minute (1.7 kg/s) is far above
-/// any gauging noise while being well under the smallest leak worth
-/// annunciating.
-const LEAK_WINDOW_S: f64 = 60.0;
-const LEAK_THRESHOLD_KG: f64 = 100.0;
+/// shape of the algorithm is the documented real principle.
+///
+/// Fuel leak is the one failure whose entire value is early annunciation, so
+/// these three constants were sized against the *smallest* leak the
+/// catalogue actually arms rather than picked independently of it: a
+/// full-severity tank-wall leak (`MAX_TANK_WALL_LEAK_AREA_M2` = 1 cm^2) out
+/// of a feed tank at this module's own seeded 95%-full load
+/// (`FULL_LOAD_FRACTION`, ~1.8 m of head) is
+/// `1.0e-4 * 804 * sqrt(2*9.80665*1.8) = 0.48 kg/s`
+/// (`leak::tank_wall_leak_kg_s`'s own orifice law). Over one 35 s window that
+/// is 16.8 kg of unmetered loss -- comfortably clear of a 10 kg threshold
+/// (this model runs the FQMS with no gauging noise of its own once no probe
+/// fault is armed, so 10 kg is not fighting a noise floor, only guarding
+/// against a single-tick rounding artefact) -- and three confirmed windows
+/// is 105 s, inside the 120 s an early-annunciation failure has to clear to
+/// be worth anything. The previous constants (60 s / 100 kg / 3 windows,
+/// 180 s minimum and a required rate of 1.7 kg/s) demanded more than three
+/// times the leak the catalogue's own maximum orifice can produce, over
+/// three times the window: `deep::integration::failure_audit`'s sweep found
+/// exactly that -- all four live feed-tank leaks measured as dead because no
+/// profile ran long enough at a high enough rate to confirm even once.
+const LEAK_WINDOW_S: f64 = 35.0;
+const LEAK_THRESHOLD_KG: f64 = 10.0;
 const LEAK_CONFIRM_WINDOWS: u32 = 3;
+
+/// Fraction of each tank's own structural capacity [`FuelLive::
+/// seed_default_fuel_load`] loads it to. **GENERIC**: no published "standard
+/// full load" order exists for an A380 dispatch; 0.95 leaves the same few
+/// percent of thermal-expansion ullage a real fuelling procedure keeps
+/// (CS 25.969), applied uniformly across all eleven tanks rather than
+/// guessing a route-specific loading schedule this model has no basis to
+/// pick.
+const FULL_LOAD_FRACTION: f64 = 0.95;
 
 /// Reference transfer rate the three shortfall detectors compare against,
 /// kg/s. Only the *ratio* of achieved to required reaches
@@ -156,10 +185,6 @@ pub struct FuelCommands {
     pub bank_deg: f64,
     pub lateral_accel_g: f64,
     pub longitudinal_accel_g: f64,
-    /// The jettison selector, and the cross-feed selector the FUEL LEAK
-    /// procedure's own `CROSSFEED ... OFF` line reads back.
-    pub jettison_selected: bool,
-    pub crossfeed_selected: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +390,23 @@ pub struct FuelLive {
     trim_fault: bool,
     cg_fault: bool,
     crossfeed_fault: bool,
+    /// Whether any of the four cross-feed valves is crew-selected open this
+    /// tick (`Truth::controls::crossfeed_valve_selected`), published as
+    /// `FUEL_CROSSFEED_OPEN` -- kept as its own field rather than read back
+    /// from `Truth` in `publish` because `publish` only ever sees `&self`.
+    crossfeed_open: bool,
+    /// Each trim pump's own raw degradation, published individually
+    /// (`FUEL_TRIM_PUMP_DEGRADATION:1`/`:2`) because the path's own fault
+    /// detector cannot show a single pump's failure at all: the two pumps
+    /// are modelled as fully mutually redundant (`tick_transfers`'s own
+    /// `trim_pump_loss` takes the *minimum* of the two, i.e. the healthier
+    /// one), which is a real design choice `registry.rs` documents
+    /// explicitly ("both together stop trim transfer altogether") and not a
+    /// bug to remove -- but it does mean a maintenance-facing indication of
+    /// one pump's own health has to be a direct instrument reading, the same
+    /// way a real aircraft still shows a LO PRESS caution on the specific
+    /// failed pump even though its redundant twin keeps the transfer going.
+    trim_pump_degradation: [f64; 2],
     leak_detector: LeakDetector,
     leak_detected: bool,
     total_leak_kg_s: f64,
@@ -372,6 +414,20 @@ pub struct FuelLive {
     fqms_low_confidence: bool,
     fob_lo_temp: bool,
     filter_ice_detected: bool,
+    /// Each engine feed filter's own raw free-water fraction and heater
+    /// health, published individually
+    /// (`FUEL_FILTER_WATER_FRACTION:n`/`FUEL_FILTER_HEATER_FAULT:n`) for the
+    /// same reason as `trim_pump_degradation`: `thermal::
+    /// filter_ice_blockage_fraction` only shows *ice*, which needs cold fuel
+    /// **and** free water **and** a failed heater all at once (a working
+    /// heater's whole job is to prevent any icing at all, so it correctly
+    /// suppresses the water fault's ice consequence to zero on its own, and
+    /// there is correctly no water to freeze when only the heater has
+    /// failed) -- a real aircraft still carries a direct water-in-fuel
+    /// sensor and a direct heater-fault caution independent of whether ice
+    /// has actually formed yet, which is what these two publish.
+    filter_water_fraction: [f64; N_ENGINES],
+    filter_heater_failed: [bool; N_ENGINES],
     indicated_fob_kg: f64,
     /// Inputs `Truth` does not carry; see [`FuelCommands`].
     pub commands: FuelCommands,
@@ -404,6 +460,8 @@ impl FuelLive {
             trim_fault: false,
             cg_fault: false,
             crossfeed_fault: false,
+            crossfeed_open: false,
+            trim_pump_degradation: [0.0; 2],
             leak_detector: LeakDetector::new(),
             leak_detected: false,
             total_leak_kg_s: 0.0,
@@ -411,6 +469,8 @@ impl FuelLive {
             fqms_low_confidence: false,
             fob_lo_temp: false,
             filter_ice_detected: false,
+            filter_water_fraction: [0.0; N_ENGINES],
+            filter_heater_failed: [false; N_ENGINES],
             indicated_fob_kg: 0.0,
             commands: FuelCommands::default(),
             fuel_type: FuelType::JetA1,
@@ -419,10 +479,14 @@ impl FuelLive {
         live
     }
 
-    /// Seeds every tank from `crate::fuel::DEFAULT_GALLONS`: FlyByWire's own
-    /// FADEC cold-start default (`FuelConfiguration_A380X.h:31-43`, the same
-    /// per-tank gallons that module's own doc cites and `aircraft_presets.rs`'s
-    /// expedited-load path already reuses) rather than an invented number.
+    /// Seeds every one of the eleven tanks to [`FULL_LOAD_FRACTION`] of its
+    /// own structural capacity (`geometry::TankShape::capacity_gal`): a
+    /// realistic full long-haul dispatch load, not
+    /// `crate::fuel::DEFAULT_GALLONS`'s ramp/cold-start default (FlyByWire's
+    /// own FADEC cold-start gallons, `FuelConfiguration_A380X.h:31-43`),
+    /// which fills the four feed tanks alone and leaves the other seven --
+    /// both outer, both mid, both inner and the trim tank -- permanently
+    /// dry.
     ///
     /// This is the honest fix for "nothing seeds this system, so a live
     /// aircraft starts with dry tanks": `deep::fuel` cannot read X-Plane's
@@ -431,27 +495,21 @@ impl FuelLive {
     /// own doc and `docs/deep/truth-requests.md`), and the plugin wiring
     /// that would call [`Self::load_tank`] with those live readings each
     /// time the aircraft loads or is refuelled belongs to `plugin.rs`,
-    /// outside this pass's directory. Seeding the same real default the
-    /// aircraft's own FADEC uses is the closest honest substitute: a real,
-    /// cited aircraft default, not a fabricated fill level, and every tank
-    /// still responds correctly to a real `load_tank` call once the plugin
-    /// makes one (refuelling, or a future live-quantity sync, both already
-    /// exercised by this file's own tests).
-    ///
-    /// `DEFAULT_GALLONS`'s tank order (1..11, `FUEL_LEFT_OUTER_QTY.. FUEL_
-    /// TRIM_QTY`) is the same `flight_model.cfg` `Tank.N` numbering
-    /// `geometry::ALL_TANKS`/`TANK_SUFFIX` already use, confirmed by the
-    /// indices this crate's own default actually sets: feed tanks 1-4 only
-    /// (index 1, 4, 5, 8, zero-based -- `left_outer, feed_1, left_mid,
-    /// left_inner, feed_2, feed_3, right_inner, right_mid, feed_4, ...`),
-    /// exactly `Self::feed_tank_index`'s own four engines.
+    /// outside this pass's directory. But seeding only the feed tanks (a
+    /// real number, for cold engine start) meant the other seven tanks'
+    /// own wall-leak failures, and both trim-tank pumps, could never act on
+    /// anything: a wall leak's driving head is that tank's own liquid depth
+    /// and a pump's job is to move that tank's own contents
+    /// (`deep::integration::failure_audit`'s sweep found exactly this: 7 of
+    /// 11 tank-wall leaks measured dead). A uniform fraction of each real,
+    /// cited capacity is a real dispatch state, not a fabricated fill level,
+    /// and every tank still responds correctly to a real `load_tank` call
+    /// once the plugin makes one (refuelling, or a future live-quantity
+    /// sync, both already exercised by this file's own tests).
     fn seed_default_fuel_load(&mut self, temp_c: f64) {
-        for (i, &tank) in ALL_TANKS.iter().enumerate() {
-            let gallons = crate::fuel::DEFAULT_GALLONS[i];
-            if gallons <= 0.0 {
-                continue;
-            }
-            let kg = gallons * geometry::GAL_TO_M3 * REFERENCE_DENSITY_15C_KG_M3;
+        for &tank in ALL_TANKS.iter() {
+            let capacity_gal = TankShape::of(tank).capacity_gal;
+            let kg = capacity_gal * FULL_LOAD_FRACTION * geometry::GAL_TO_M3 * REFERENCE_DENSITY_15C_KG_M3;
             self.load_tank(tank, kg, temp_c);
         }
     }
@@ -652,6 +710,12 @@ impl crate::deep::live::Area for FuelLive {
             let wax = thermal::wax_fraction(temp_c, self.fuel_type);
             self.filter_ice[eng] = ice;
             self.filter_blockage[eng] = thermal::filter_blockage_fraction(wax, ice);
+            // Direct instrument readings, independent of whether ice has
+            // actually formed: see `filter_water_fraction`'s own doc for why
+            // `filter_ice`/`filter_blockage` alone cannot show either fault
+            // in isolation.
+            self.filter_water_fraction[eng] = water;
+            self.filter_heater_failed[eng] = heater_failed;
             if ice > 0.0 {
                 self.filter_ice_detected = true;
             }
@@ -679,13 +743,23 @@ impl crate::deep::live::Area for FuelLive {
         }
 
         // ---- Transfer paths ----------------------------------------------
-        self.tick_transfers(faults, dt, gallery_leak_fraction);
+        self.tick_transfers(truth, faults, dt, gallery_leak_fraction);
 
         // ---- Jettison ----------------------------------------------------
         self.tick_jettison(truth, faults, dt);
 
         // ---- Leak detection ----------------------------------------------
-        let metered_flow = truth.engine_fuel_flow_kg_s.iter().map(|f| f.max(0.0)).sum::<f64>() + self.commands.apu_fuel_flow_kg_s.max(0.0);
+        // Metered *and accounted* consumption: the engines, the APU, and a
+        // commanded jettison. `leak::LeakDetector` has no notion of
+        // jettison on its own -- it only ever sees a total indicated
+        // quantity and a "fuel used" figure -- so a jettison in progress
+        // has to be folded into the same accounted term the engines are, or
+        // the detector reads a real, commanded, non-leak loss as an
+        // unmetered one and either raises a false FUEL LEAK during every
+        // jettison or, worse, has its confirm window's accounting thrown off
+        // by jettison flow while a real leak is also present.
+        let metered_flow =
+            truth.engine_fuel_flow_kg_s.iter().map(|f| f.max(0.0)).sum::<f64>() + self.commands.apu_fuel_flow_kg_s.max(0.0) + self.jettison_flow_kg_s[0].max(0.0) + self.jettison_flow_kg_s[1].max(0.0);
         self.leak_detected = self.leak_detector.update(self.indicated_fob_kg, metered_flow, dt, LEAK_WINDOW_S, LEAK_THRESHOLD_KG, LEAK_CONFIRM_WINDOWS);
     }
 
@@ -695,7 +769,7 @@ impl crate::deep::live::Area for FuelLive {
         // Every variable this area's `registry.rs` names in an ECAM
         // trigger.
         out("FUEL_LEAK_DETECTED", b(self.leak_detected));
-        out("FUEL_CROSSFEED_OPEN", b(self.commands.crossfeed_selected));
+        out("FUEL_CROSSFEED_OPEN", b(self.crossfeed_open));
         out("FUEL_CROSSFEED_FAULT", b(self.crossfeed_fault));
         out("FUEL_TRIM_TRANSFER_FAULT", b(self.trim_fault));
         out("FUEL_CG_TRANSFER_DEGRADED", b(self.cg_fault));
@@ -722,11 +796,16 @@ impl crate::deep::live::Area for FuelLive {
             let n = eng + 1;
             out(&format!("FUEL_FILTER_BLOCKAGE:{n}"), self.filter_blockage[eng]);
             out(&format!("FUEL_FILTER_ICE:{n}"), self.filter_ice[eng]);
+            out(&format!("FUEL_FILTER_WATER_FRACTION:{n}"), self.filter_water_fraction[eng]);
+            out(&format!("FUEL_FILTER_HEATER_FAULT:{n}"), b(self.filter_heater_failed[eng]));
         }
         for side in 0..2 {
             let n = side + 1;
             out(&format!("FUEL_JETTISON_VALVE_POSITION:{n}"), self.jettison_valves[side].position);
             out(&format!("FUEL_JETTISON_FLOW_KG_S:{n}"), self.jettison_flow_kg_s[side]);
+        }
+        for pump in 0..2 {
+            out(&format!("FUEL_TRIM_PUMP_DEGRADATION:{}", pump + 1), self.trim_pump_degradation[pump]);
         }
     }
 }
@@ -752,8 +831,16 @@ impl FuelLive {
     /// The transfer paths: each one's `TransferFaults` from the failures
     /// registered against its own valves and pumps, then the shortfall
     /// detector `registry.rs` wires to its ECAM alert.
-    fn tick_transfers(&mut self, faults: &Faults, dt: f64, gallery_leak_fraction: f64) {
+    fn tick_transfers(&mut self, truth: &Truth, faults: &Faults, dt: f64, gallery_leak_fraction: f64) {
         let worst = |ids: &[u64]| ids.iter().map(|&id| faults.get(id)).fold(0.0f64, f64::max);
+
+        // Each pump's own raw health, for the direct per-pump indication
+        // (`trim_pump_degradation`'s own doc): recorded before the
+        // redundancy fold below so a single pump's failure is still visible
+        // even though it cannot move the path-level fault flag on its own.
+        for (i, &id) in self.ids.trim_pump.iter().enumerate() {
+            self.trim_pump_degradation[i] = faults.get(id);
+        }
 
         // Trim transfer: the two trim pumps in parallel (both must degrade
         // for the path to lose flow), in series with the inlet valves and
@@ -783,10 +870,13 @@ impl FuelLive {
         let cg_achieved = cg_transfer::achieved_transfer_rate_kg_s(cg_required_rate, &cg);
         self.cg_fault = self.cg_detector.update(cg_required_rate, cg_achieved, TRANSFER_TOLERANCE, 5.0, dt);
 
-        // Wing cross-feed: required either because the crew selected it or
-        // because the wings are genuinely out of balance.
+        // Wing cross-feed: required either because the crew has selected at
+        // least one of the four cross-feed valves open
+        // (`Truth::controls::crossfeed_valve_selected`) or because the
+        // wings are genuinely out of balance.
         let (left, right) = self.wing_masses_kg();
-        let xfeed_required = self.commands.crossfeed_selected || cg_transfer::wing_balance_transfer_needed(left, right, WING_IMBALANCE_LIMIT_KG);
+        self.crossfeed_open = truth.controls.crossfeed_valve_selected.iter().any(|&s| s);
+        let xfeed_required = self.crossfeed_open || cg_transfer::wing_balance_transfer_needed(left, right, WING_IMBALANCE_LIMIT_KG);
         let xfeed = TransferFaults { valve_stuck_fraction: worst(&self.ids.crossfeed), pump_degradation_fraction: 0.0, gallery_leak_fraction };
         let xfeed_required_rate = if xfeed_required { TRANSFER_REFERENCE_RATE_KG_S } else { 0.0 };
         let xfeed_achieved = cg_transfer::achieved_transfer_rate_kg_s(xfeed_required_rate, &xfeed);
@@ -812,7 +902,6 @@ impl FuelLive {
     /// rise, exactly as that function's own doc sets out.
     fn tick_jettison(&mut self, truth: &Truth, faults: &Faults, dt: f64) {
         let ambient_pa = truth.environment.ambient_pressure_pa.max(0.0);
-        let commanded = self.commands.jettison_selected;
 
         // Jettison draws from the wing tanks, left nozzle from the left
         // wing and right from the right: the deepest tank on that side
@@ -821,6 +910,12 @@ impl FuelLive {
         const RIGHT_GROUP: [Tank; 4] = [Tank::RightInner, Tank::RightMid, Tank::RightOuter, Tank::Feed4];
 
         for side in 0..2 {
+            // Master jettison arm switch, plus this side's own nozzle-valve
+            // pushbutton (`Truth::controls::jettison_armed`/
+            // `jettison_valve_selected`) -- the real two-stage A380 panel
+            // (an ARM guard plus an independent VALVE OPEN pushbutton per
+            // side), not a single combined selector.
+            let commanded = truth.controls.jettison_armed && truth.controls.jettison_valve_selected[side];
             let stuck = faults.get(self.ids.jettison_valve[side]);
             self.jettison_valves[side].step(commanded, JETTISON_VALVE_TRAVEL_S, stuck, dt);
             let position = self.jettison_valves[side].position;
@@ -907,7 +1002,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deep::live::Area as _;
+    use crate::deep::live::{Area as _, Controls};
     use std::collections::BTreeMap;
 
     fn published(area: &dyn crate::deep::live::Area) -> BTreeMap<String, f64> {
@@ -975,22 +1070,31 @@ mod tests {
         }
     }
 
+    /// `Truth::controls` with the four cross-feed valves crew-selected open.
+    fn crossfeed_selected_truth() -> Truth {
+        Truth { controls: Controls { crossfeed_valve_selected: [true; 4], ..Controls::default() }, ..Truth::default() }
+    }
+
+    /// `Truth::controls` with jettison armed and both nozzle valves
+    /// selected -- the real two-stage panel `tick_jettison` now reads.
+    fn jettison_selected_truth() -> Truth {
+        Truth { controls: Controls { jettison_armed: true, jettison_valve_selected: [true; 2], ..Controls::default() }, ..Truth::default() }
+    }
+
     #[test]
     fn a_stuck_crossfeed_valve_raises_the_wing_crossfeed_fault_its_registry_entry_promises() {
         // registry.rs: "wing-balance cross-feed cannot move fuel between
         // wings through this valve".
         let mut live = FuelLive::new();
         full_tanks(&mut live, 10.0);
-        live.commands.crossfeed_selected = true;
         let id = live.ids.crossfeed[0];
 
-        let healthy = run(&mut live, &Truth::default(), &Faults::default(), 5.0);
+        let healthy = run(&mut live, &crossfeed_selected_truth(), &Faults::default(), 5.0);
         assert_eq!(healthy.get("FUEL_CROSSFEED_FAULT"), Some(&0.0));
 
         let mut live = FuelLive::new();
         full_tanks(&mut live, 10.0);
-        live.commands.crossfeed_selected = true;
-        let faulted = run(&mut live, &Truth::default(), &Faults::from_pairs([(id, 1.0)]), 5.0);
+        let faulted = run(&mut live, &crossfeed_selected_truth(), &Faults::from_pairs([(id, 1.0)]), 5.0);
         assert_eq!(faulted.get("FUEL_CROSSFEED_FAULT"), Some(&1.0), "a seized cross-feed valve must raise FUEL WING XFEED FAULT");
         assert_eq!(faulted.get("FUEL_CROSSFEED_OPEN"), Some(&1.0));
     }
@@ -1000,16 +1104,14 @@ mod tests {
         // registry.rs: "jettison rate through that nozzle falls in
         // proportion, lengthening the time needed to reach max landing
         // weight".
-        let truth = Truth::default();
+        let truth = jettison_selected_truth();
         let mut clear = FuelLive::new();
         full_tanks(&mut clear, 10.0);
-        clear.commands.jettison_selected = true;
         let nozzle = clear.ids.jettison_nozzle[0];
         let clear_out = run(&mut clear, &truth, &Faults::default(), 20.0);
 
         let mut blocked = FuelLive::new();
         full_tanks(&mut blocked, 10.0);
-        blocked.commands.jettison_selected = true;
         let blocked_out = run(&mut blocked, &truth, &Faults::from_pairs([(nozzle, 0.8)]), 20.0);
 
         let clear_flow = clear_out["FUEL_JETTISON_FLOW_KG_S:1"];
@@ -1026,13 +1128,11 @@ mod tests {
         // cancel and the rate is the same at sea level and at cruise.
         let mut sea_level = FuelLive::new();
         full_tanks(&mut sea_level, 10.0);
-        sea_level.commands.jettison_selected = true;
-        let low = run(&mut sea_level, &Truth::default(), &Faults::default(), 20.0);
+        let low = run(&mut sea_level, &jettison_selected_truth(), &Faults::default(), 20.0);
 
         let mut cruise = FuelLive::new();
         full_tanks(&mut cruise, 10.0);
-        cruise.commands.jettison_selected = true;
-        let mut truth = Truth::default();
+        let mut truth = jettison_selected_truth();
         truth.environment.ambient_pressure_pa = 22_600.0; // ~FL350
         truth.altitude_ft = 35_000.0;
         truth.on_ground = false;
@@ -1067,6 +1167,98 @@ mod tests {
         assert!(out["FUEL_TOTAL_LEAK_KG_S"] > 0.0);
     }
 
+    /// `deep::integration::failure_audit`'s sweep found 7 of the 11
+    /// tank-wall leaks dead because `seed_default_fuel_load` only filled the
+    /// four feed tanks. This proves the fix directly: a leak on an
+    /// otherwise-untouched non-feed tank, from the aircraft's own default
+    /// seeded state (no `full_tanks` test helper), must still lose real
+    /// fuel. `LeftOuter` and `Trim` are two of the seven tanks that could
+    /// never leak a drop before this fix.
+    #[test]
+    fn every_one_of_the_eleven_seeded_tanks_can_leak_not_just_the_four_feed_tanks() {
+        for (tank, idx) in [(Tank::LeftOuter, 0usize), (Tank::Trim, 10usize)] {
+            let mut live = FuelLive::new();
+            let before = live.tank_mass_kg(tank);
+            assert!(before > 0.0, "{tank:?} must be seeded with real fuel, not left dry: {before} kg");
+            let id = live.ids.tank_leak[idx];
+            run(&mut live, &Truth::default(), &Faults::from_pairs([(id, 1.0)]), 10.0);
+            let after = live.tank_mass_kg(tank);
+            assert!(after < before, "{tank:?} must actually lose fuel once holed: {before} -> {after}");
+        }
+    }
+
+    /// The two trim pumps are seeded now (`FULL_LOAD_FRACTION` fills the
+    /// trim tank too), but `TransferFaultDetector`'s own redundancy model
+    /// means a single pump's failure genuinely cannot move
+    /// `FUEL_TRIM_TRANSFER_FAULT` on its own -- that is a real, registered
+    /// design choice (`registry.rs`: "both together stop trim transfer
+    /// altogether"), not a bug. What must still change is the direct
+    /// per-pump indication.
+    #[test]
+    fn a_single_failed_trim_pump_is_masked_by_its_own_redundancy_but_still_shows_on_its_own_gauge() {
+        let mut live = FuelLive::new();
+        let id = live.ids.trim_pump[0];
+        let out = run(&mut live, &Truth::default(), &Faults::from_pairs([(id, 1.0)]), 5.0);
+        assert_eq!(out.get("FUEL_TRIM_TRANSFER_FAULT"), Some(&0.0), "the healthy twin pump genuinely covers a single failure");
+        assert_eq!(out.get("FUEL_TRIM_PUMP_DEGRADATION:1"), Some(&1.0), "but the failed pump's own health must still be a real, published reading");
+        assert_eq!(out.get("FUEL_TRIM_PUMP_DEGRADATION:2"), Some(&0.0));
+    }
+
+    /// `thermal::filter_ice_blockage_fraction` needs cold fuel, free water
+    /// *and* a failed heater all at once, so a single-fault audit sweep
+    /// cannot see either the water-contamination or the heater failure on
+    /// its own through the ice consequence alone (a working heater's whole
+    /// job is to suppress ice regardless of how much water is present, and
+    /// there is nothing to freeze with no water). Each failure still has to
+    /// move something on its own: a real water-in-fuel sensor and a real
+    /// heater-fault caution, independent of whether ice has actually formed.
+    #[test]
+    fn filter_water_and_heater_failures_each_move_their_own_direct_reading_even_alone() {
+        let mut cold = Truth::default();
+        cold.environment.sat_c = -30.0;
+        cold.environment.leading_edge_c = -30.0;
+
+        let mut live = FuelLive::new();
+        let water_id = live.ids.filter_water[0];
+        let out = run(&mut live, &cold, &Faults::from_pairs([(water_id, 1.0)]), 1.0);
+        assert_eq!(out.get("FUEL_FILTER_WATER_FRACTION:1"), Some(&1.0), "the water-in-fuel reading must move even with a healthy heater");
+        assert_eq!(out.get("FUEL_FILTER_ICE_DETECTED"), Some(&0.0), "a healthy heater genuinely suppresses ice regardless of water present");
+
+        let mut live = FuelLive::new();
+        let heater_id = live.ids.filter_heater[0];
+        let out = run(&mut live, &cold, &Faults::from_pairs([(heater_id, 1.0)]), 1.0);
+        assert_eq!(out.get("FUEL_FILTER_HEATER_FAULT:1"), Some(&1.0), "the heater-fault caution must move even with no water contamination armed");
+        assert_eq!(out.get("FUEL_FILTER_ICE_DETECTED"), Some(&0.0), "there is genuinely nothing to freeze with no water present");
+    }
+
+    /// The whole point of `leak::LeakDetector`: fuel leak's entire value is
+    /// early annunciation, so a full-severity feed-tank leak (the kind
+    /// `deep::integration::failure_audit`'s sweep found could never confirm
+    /// inside any profile it ran) must raise `FUEL_LEAK_DETECTED` well
+    /// inside 120 s -- not the 180 s minimum the previous constants
+    /// demanded.
+    #[test]
+    fn a_full_severity_feed_tank_leak_raises_fuel_leak_detected_within_120_seconds() {
+        let mut live = FuelLive::new();
+        let id = live.ids.tank_leak[1]; // Feed1
+        let mut truth = Truth::default();
+        truth.dt_s = 1.0; // one tick per simulated second, matching the window math
+        let out = run(&mut live, &truth, &Faults::from_pairs([(id, 1.0)]), 110.0);
+        assert_eq!(out.get("FUEL_LEAK_DETECTED"), Some(&1.0), "a full-severity feed-tank leak must confirm within 120 s of unmetered loss");
+    }
+
+    /// The companion fix this leak-detector change depends on: jettison flow
+    /// is a real, commanded, *accounted* loss, and must not itself be read
+    /// as an unmetered "leak" by the same detector a genuine leak uses.
+    #[test]
+    fn a_commanded_jettison_alone_never_raises_fuel_leak_detected() {
+        let mut live = FuelLive::new();
+        let mut truth = jettison_selected_truth();
+        truth.dt_s = 1.0;
+        let out = run(&mut live, &truth, &Faults::default(), 110.0);
+        assert_eq!(out.get("FUEL_LEAK_DETECTED"), Some(&0.0), "a commanded jettison is accounted for, not a leak");
+    }
+
     /// The whole point of this pass: a feed tank drains at the engine's
     /// own real fuel flow (`Truth::engine_fuel_flow_kg_s`), not at a
     /// derived, fan-speed-based guess, and the aircraft starts with fuel
@@ -1075,6 +1267,13 @@ mod tests {
     fn a_feed_tank_drains_at_the_engines_real_burn_from_a_seeded_load() {
         let mut live = FuelLive::new();
         let before = live.tank_mass_kg(Tank::Feed1);
+        // Feed1 and Feed2 have different real capacities (7299.6 vs 7753.2
+        // US gal, `geometry::shape`), so each needs its own "before" --
+        // comparing Feed2 against Feed1's is only safe by the coincidence
+        // that `crate::fuel::DEFAULT_GALLONS` used to load every feed tank
+        // to the same 1233.9 gal, which the real per-tank seed
+        // (`FULL_LOAD_FRACTION` of each tank's own capacity) no longer does.
+        let feed2_before = live.tank_mass_kg(Tank::Feed2);
         assert!(before > 0.0, "a live aircraft must not start with dry tanks: {before} kg");
 
         let mut truth = Truth::default();
@@ -1086,7 +1285,7 @@ mod tests {
         }
         let after = live.tank_mass_kg(Tank::Feed1);
         assert!((before - after - 100.0).abs() < 1e-6, "feed 1 must lose exactly the commanded 1 kg/s burn: {before} -> {after}");
-        assert_eq!(live.tank_mass_kg(Tank::Feed2), before, "the other feed tanks, fed by engines with zero commanded flow, must be untouched");
+        assert_eq!(live.tank_mass_kg(Tank::Feed2), feed2_before, "the other feed tanks, fed by engines with zero commanded flow, must be untouched");
 
         // A fan spinning with no engine fuel flow reported must not burn
         // anything -- this is not the fan-speed-derived guess it replaced.

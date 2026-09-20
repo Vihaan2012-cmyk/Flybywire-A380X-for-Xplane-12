@@ -260,9 +260,24 @@ pub mod board {
         BOARD.with(|b| f(&mut b.borrow_mut()))
     }
 
-    /// Reset the board (tests only -- a fresh live system in a new thread
-    /// already starts clean, but a test that builds several in one thread
-    /// wants the previous one's last frame gone).
+    /// Reset the board.
+    ///
+    /// Nothing outside this module has to remember to call this:
+    /// [`super::ElectricalLive::new`] does it itself, and that constructor
+    /// is on the only path by which an aircraft's electrical area comes
+    /// into existence (`deep::live::all_areas`). It stays public because
+    /// it is the honest name for the operation, and because a test driving
+    /// `breakers`/`wiring` *without* an electrical area still needs it.
+    ///
+    /// The board is process state rather than `Deep` state on purpose --
+    /// it is a typed channel (`Vec<f64>` per breaker, per load, per bus)
+    /// and `deep::live`'s own inter-area channel carries single `f64`s by
+    /// name -- but process state that survives an aircraft is a bug, not a
+    /// feature: two `all_areas()` built one after another in one thread
+    /// used to share it, so a second flight in one session started on the
+    /// previous aircraft's breaker currents, bus voltages and harness
+    /// damage, and two runs of an identical healthy state came out 135
+    /// published variables apart.
     pub fn clear() {
         with_board_mut(|b| *b = Board::default());
     }
@@ -701,6 +716,15 @@ struct Names {
     bus_frequency: Vec<String>,
     gen_fault: Vec<String>,
     apu_gen_fault: Vec<String>,
+    /// Real delivered power out of each engine/APU generator, W: the
+    /// per-source figure `measured_gen_load_w`/`measured_apu_gen_load_w`
+    /// already compute from each source's own Thevenin branch. Published
+    /// because `deep::apu` reads `ELEC_APU_GEN_{1,2}_LOAD_W` for its
+    /// generator wear and overload protection, and the only other thing
+    /// this area published for those sources is a *breaker* current, which
+    /// is the whole bus's, not the individual generator's.
+    gen_load_w: Vec<String>,
+    apu_gen_load_w: Vec<String>,
     tr_fault: Vec<String>,
     bat_fault: Vec<String>,
     bat_charge: Vec<String>,
@@ -749,6 +773,11 @@ pub struct ElectricalLive {
     /// `[nose, left, right]`, matching `Controls::gear_door_commanded_open`.
     gear_actuator: [usize; 3],
     gear_door_actuator: [usize; 3],
+
+    /// The heavy AC motor loads that are simply not running when the
+    /// aircraft has no generation on line at all -- see
+    /// [`Self::command_emergency_shed`].
+    emergency_shed_load: Vec<usize>,
 
     /// Breakers this area opened because `deep::breakers` commanded it, so
     /// the command releasing can close them again (and a breaker this
@@ -834,6 +863,14 @@ impl Default for ElectricalLive {
 
 impl ElectricalLive {
     pub fn new() -> Self {
+        // A new electrical area is a new aircraft, and the board is the
+        // typed channel this area shares with `deep::breakers` and
+        // `deep::wiring`. Clearing it here rather than asking every caller
+        // to remember is what makes it impossible to start a second flight
+        // in one process on the previous aircraft's breaker currents, bus
+        // voltages and harness damage -- see `board::clear`.
+        board::clear();
+
         // Built in exactly the order `registry::register` builds it, so the
         // failure ids it assigns line up with this network's own indices.
         let mut net = Network::new();
@@ -953,6 +990,18 @@ impl ElectricalLive {
         let gear_actuator = [find_l(&net, "gear-actuator-nose"), find_l(&net, "gear-actuator-left"), find_l(&net, "gear-actuator-right")];
         let gear_door_actuator = [find_l(&net, "gear-door-actuator-nose"), find_l(&net, "gear-door-actuator-left"), find_l(&net, "gear-door-actuator-right")];
 
+        // The two families of heavy AC motor load that a real A380 does not
+        // run on emergency electrical power (see
+        // `command_emergency_shed`). Resolved once here rather than by
+        // name every frame; every id is one `loads.rs` builds, so a
+        // renaming there fails this lookup loudly instead of silently
+        // shedding nothing.
+        let emergency_shed_load: Vec<usize> = ["hyd-epump-ga", "hyd-epump-gb", "hyd-epump-ya", "hyd-epump-yb"]
+            .iter()
+            .map(|id| find_l(&net, id))
+            .chain((0..25).map(|i| find_l(&net, &format!("fuel-pump-{i}"))))
+            .collect();
+
         let (routed, unresolved) = route_failures(&net);
         debug_assert!(unresolved.is_empty(), "unrouted registered failures: {unresolved:?}");
 
@@ -962,6 +1011,8 @@ impl ElectricalLive {
             bus_frequency: ALL_BUS_IDS.iter().map(|&b| format!("ELEC_{}_BUS_FREQUENCY", bus_tag(b))).collect(),
             gen_fault: (1..=4).map(|n| format!("ELEC_GEN_{n}_FAULT")).collect(),
             apu_gen_fault: (1..=2).map(|n| format!("ELEC_APU_GEN_{n}_FAULT")).collect(),
+            gen_load_w: (1..=4).map(|n| format!("ELEC_ENG_GEN_{n}_LOAD_W")).collect(),
+            apu_gen_load_w: (1..=2).map(|n| format!("ELEC_APU_GEN_{n}_LOAD_W")).collect(),
             tr_fault: ["1", "2", "ESS", "APU"].iter().map(|s| format!("ELEC_TR_{s}_FAULT")).collect(),
             bat_fault: (1..=2).map(|n| format!("ELEC_BAT_{n}_FAULT")).collect(),
             bat_charge: (1..=2).map(|n| format!("ELEC_BAT_{n}_CHARGE_FRACTION")).collect(),
@@ -995,6 +1046,7 @@ impl ElectricalLive {
             cargo_door_ctl,
             gear_actuator,
             gear_door_actuator,
+            emergency_shed_load,
             externally_opened: vec![false; n_breakers],
             feeder_breaker,
             report: NetworkReport::default(),
@@ -1210,13 +1262,39 @@ impl ElectricalLive {
         }
 
         // AC ESS: normally from AC1, alternate from AC4.
-        let ac1_live = self.net.bus(BusId::Ac1).voltage >= AC_UNDERVOLTAGE_TRIP_V;
-        let ac4_live = self.net.bus(BusId::Ac4).voltage >= AC_UNDERVOLTAGE_TRIP_V;
+        //
+        // "Live" here means *fed by a real source*, not merely "at
+        // voltage". The distinction matters because every bus-to-bus
+        // contactor in this network is bidirectional (`network::relax`
+        // conducts through a tie both ways, which is what a real tie bar
+        // is), so the emergency AC bus's own inverter back-feeds AC ESS and
+        // -- through a closed `ac-ess-feed-1` -- AC1 itself. Deciding
+        // "AC1 is live" from the voltage alone therefore reads the
+        // emergency configuration's own output as evidence that the
+        // emergency configuration is not needed: the transfer logic
+        // latches on to its own back-feed and the whole network
+        // limit-cycles at the frame rate, one frame in emergency and the
+        // next out of it, forever. (That is what it did on a cold and dark
+        // aircraft: every AC and DC bus flapping between dead and alive on
+        // alternate frames, which restarted a dozen motor loads' switch-on
+        // inrush every single frame and, entirely correctly, cooked their
+        // breakers open on a genuinely sustained overcurrent.)
+        //
+        // `anchored` above is the honest statement of the same thing: at
+        // least one generator, APU generator or ground-power unit is
+        // actually on line onto the main AC network. A main AC bus is live
+        // when that is true *and* the bus is at voltage -- the second term
+        // still catches a bus isolated by its own feeder breaker with a
+        // generator running behind it.
+        let main_ac_anchored = anchored;
+        let main_ac_at_voltage = [BusId::Ac1, BusId::Ac2, BusId::Ac3, BusId::Ac4].map(|b| self.net.bus(b).voltage >= AC_UNDERVOLTAGE_TRIP_V);
+        let ac1_live = main_ac_anchored && main_ac_at_voltage[0];
+        let ac4_live = main_ac_anchored && main_ac_at_voltage[3];
         self.net.contactors[self.contactor.ac_ess_feed_1].commanded_closed = ac1_live;
         self.net.contactors[self.contactor.ac_ess_feed_4].commanded_closed = !ac1_live && ac4_live;
 
         // Emergency configuration: no main AC bus is alive at all.
-        let emergency = !ac1_live && !ac4_live && self.net.bus(BusId::Ac2).voltage < AC_UNDERVOLTAGE_TRIP_V && self.net.bus(BusId::Ac3).voltage < AC_UNDERVOLTAGE_TRIP_V;
+        let emergency = !main_ac_anchored || !main_ac_at_voltage.iter().any(|&live| live);
         self.emergency_config = emergency;
 
         // The RAT deploys on a total loss of main AC generation in flight.
@@ -1375,6 +1453,37 @@ impl ElectricalLive {
             let in_transit = pos > GEAR_TRANSIT_MARGIN_FRACTION && pos < 1.0 - GEAR_TRANSIT_MARGIN_FRACTION;
             self.net.loads[self.gear_door_actuator[i]].commanded_on = in_transit;
             self.net.loads[self.gear_actuator[i]].commanded_on = in_transit;
+        }
+    }
+
+    /// The heavy AC motor loads that stop when the aircraft loses all
+    /// generation and is left on its batteries, static inverter and (in
+    /// flight) the RAT.
+    ///
+    /// The four electric hydraulic pumps (2.1 kW each) and the 25 AC fuel
+    /// boost pumps (600 W each) are, between them, about 23 kW of motor
+    /// load sitting on the AC buses. A static inverter is a few hundred
+    /// VA. On a real A380 in emergency electrical configuration neither
+    /// family is running at all -- the hydraulic systems are on their
+    /// engine-driven pumps (and, if it is out, the RAT), and the fuel
+    /// system is on suction feed; "fuel pumps lost" is part of what an
+    /// ELEC EMER CONFIG actually means to a crew.
+    ///
+    /// Without this the model asked the inverter for all 23 kW: every one
+    /// of those motors would drop out on under-voltage, wait out its own
+    /// lockout, restart together, collapse the essential buses again, and
+    /// repeat -- a real cyclic overload, which correctly (and, on a cold
+    /// and dark aircraft, repeatedly) cooked the breaker of whatever else
+    /// shared their bus. The shed is the load-side fix that condition
+    /// asks for; nothing about any breaker's rating or curve changes.
+    ///
+    /// `capacity_w` is this area's own already-computed real generation on
+    /// line, so the test is "is anything actually generating", not a
+    /// voltage that the emergency sources themselves produce.
+    fn command_emergency_shed(&mut self, generation_on_line_w: f64) {
+        let shed = generation_on_line_w <= 0.0;
+        for &i in &self.emergency_shed_load {
+            self.net.loads[i].commanded_on = !shed;
         }
     }
 
@@ -1560,6 +1669,7 @@ impl Area for ElectricalLive {
         self.command_transit_loads(truth);
 
         let capacity_w = self.capacity_w(truth, gpu_plugged_in);
+        self.command_emergency_shed(capacity_w);
         let budget = power_budget(&self.net, capacity_w);
         // Schmitt band, so the relay cannot chatter at the balance point.
         self.galley_shed_commanded = if self.galley_shed_commanded {
@@ -1658,10 +1768,12 @@ impl Area for ElectricalLive {
         }
         for i in 0..4 {
             out(&self.names.gen_fault[i], if self.gen_fault[i] { 1.0 } else { 0.0 });
+            out(&self.names.gen_load_w[i], self.measured_gen_load_w[i]);
             out(&self.names.tr_fault[i], if self.tr_fault[i] { 1.0 } else { 0.0 });
         }
         for i in 0..2 {
             out(&self.names.apu_gen_fault[i], if self.apu_gen_fault[i] { 1.0 } else { 0.0 });
+            out(&self.names.apu_gen_load_w[i], self.measured_apu_gen_load_w[i]);
             out(&self.names.bat_fault[i], if self.bat_fault[i] { 1.0 } else { 0.0 });
             out(&self.names.bat_charge[i], self.bat_charge[i]);
         }
@@ -2389,5 +2501,57 @@ mod tests {
             0.0,
             "the deep model's verdict must change FlyByWire's own solve, not just a display"
         );
+    }
+
+    /// A second aircraft built in the same process must start clean.
+    ///
+    /// The board is a `thread_local!`, so it used to survive an aircraft:
+    /// two `all_areas()` built one after another shared the first one's
+    /// last frame of breaker currents, bus voltages and harness damage,
+    /// and two runs of the *identical* healthy state came out 135
+    /// published variables apart. Nothing here calls `board::clear()` --
+    /// that is the point: `ElectricalLive::new` does it, so a caller
+    /// cannot forget.
+    #[test]
+    fn a_second_aircraft_in_the_same_process_does_not_inherit_the_first_ones_board() {
+        let truth = flying_truth();
+        let faults = Faults::default();
+
+        let mut first = ElectricalLive::new();
+        let a = run(&mut first, &truth, &faults, 30);
+        assert!(board::with_board(|b| b.breaker_current_a.iter().any(|&i| i > 0.0)), "the first aircraft must leave real current on the board, or this test proves nothing");
+
+        let mut second = ElectricalLive::new();
+        let b = run(&mut second, &truth, &faults, 30);
+
+        let differing: Vec<&String> = a.iter().filter(|(k, v)| b.get(*k).map_or(true, |w| w != *v)).map(|(k, _)| k).collect();
+        assert!(differing.is_empty(), "{} published variables differ between two identical healthy aircraft, e.g. {:?}", differing.len(), differing.iter().take(6).collect::<Vec<_>>());
+    }
+
+    /// The real delivered power of each engine and APU generator, which
+    /// `deep::apu` reads back for its own generator wear and overload
+    /// protection. The only thing this area published for those sources
+    /// before was a breaker current, which is the whole bus's rather than
+    /// the individual machine's.
+    #[test]
+    fn each_generator_publishes_its_own_delivered_power() {
+        let truth = flying_truth();
+        let published = run(&mut ElectricalLive::new(), &truth, &Faults::default(), 30);
+        for n in 1..=4 {
+            let w = published[&format!("ELEC_ENG_GEN_{n}_LOAD_W")];
+            assert!(w > 0.0 && w.is_finite(), "engine generator {n} is on line and carrying the aircraft, but publishes {w} W");
+        }
+        for n in 1..=2 {
+            let name = format!("ELEC_APU_GEN_{n}_LOAD_W");
+            let w = published[&name];
+            assert!(w.is_finite() && w >= 0.0, "{name} published {w}");
+        }
+
+        // ... and with the APU actually running and its generators on
+        // line, the APU figure is real rather than zero.
+        let apu = Truth { apu_running: true, on_ground: true, engine_running: [false; 4], engine_n2_frac: [0.0; 4], ..flying_truth() };
+        let published = run(&mut ElectricalLive::new(), &apu, &Faults::default(), 30);
+        let total: f64 = (1..=2).map(|n| published[&format!("ELEC_APU_GEN_{n}_LOAD_W")]).sum();
+        assert!(total > 0.0, "both APU generators on line carrying the whole aircraft publish {total} W between them");
     }
 }

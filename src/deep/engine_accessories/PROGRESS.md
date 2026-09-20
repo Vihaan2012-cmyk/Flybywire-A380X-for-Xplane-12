@@ -33,3 +33,59 @@
   failure. Inputs `Truth` does not carry yet are collected in one documented
   `...Commands` struct per area rather than invented.
 - [done] sourced-constants pass — fuel/common.rs — `viscosity_cst` relabelled as an explicit specification-*worst-case* curve rather than a typical batch: its cold anchor is DEF STAN 91-091 / ASTM D1655's -20 C ceiling of 8.0 mm^2/s, which is why it reads ~1.92 mm^2/s at 20 C against a typical batch's ~1.7. Searched CGSB 3.23, ASTM D1655, DEF STAN 91-091, CRC Report 635 and supplier data sheets for a citable *typical* cold-end figure: every public source pins only the maximum, so no re-anchor is possible. Left as is deliberately -- high viscosity is the demanding direction for the filter and pump models.
+- [done] **Whole area brought live** — `live.rs` — `EngineChain` now owns, per
+  engine, every subsystem this area models, not just the fuel chain and the
+  EEC: both ignition chains (ATA 74), the starter air valve + air turbine
+  starter + duty-cycle heating (80), the IP VSV and both handling bleed
+  valves (72/75), three spools' imbalance vibration and all five bearings'
+  defect signatures and chip detectors (77), the thrust reverser on engines
+  2/3 (78), and the nacelle anti-ice valve, ventilation and both fire zones'
+  detection loops (30/71/26). Every one of this area's registered failures is
+  now routed into the `model_field` its entry names, and every variable its
+  104 previously-unreachable ECAM alerts trigger on is published.
+- [done] **The fuel chain was metering zero.** `EngineAccessoryCommands::
+  wf_command_kg_s` defaulted to `[0.0; 4]` and nothing ever set it, so
+  `metering_error_fraction` returned 0 unconditionally and the whole chain was
+  inert. It reads `Truth::engine_fuel_flow_kg_s` — this crate's own engine
+  model's real flow into the combustor — and the override is now an
+  `Option`, for tests only.
+- New cross-area reads (through `Truth::published`, one frame behind):
+  `DEEP_PNEU_ENG_n_START_DUCT_PRESSURE_PA` (`deep::pneumatic_ducts`) drives the
+  air turbine starter's supply; `THERMAL_ZONE_NACELLECOWLn_TEMPERATURE_C`
+  (`deep::thermal_zones`) is what the fire detection loops sense.
+- Still inert, and why: the six reverser lock faults and the reverser actuator
+  jam need a *deploy command*, and nothing in `Truth`, `Controls` or any other
+  area's published set carries a reverse-thrust selection. The model is wired
+  and tested through `EngineAccessoryCommands::reverser_deploy_commanded`;
+  `Truth` needs a reverser lever. The 16 fire-loop "fails to detect" faults are
+  correctly invisible until a nacelle zone is actually above the loops' trip
+  temperature — that is what the redundant loop is for, not a gap.
+- Published-name strings are built once per engine at construction
+  (`ChainNames`) rather than `format!`-ed every frame, as
+  `deep::pneumatic_ducts::live` already does.
+- [fixed] `ENG n EEC CHANNEL FAULT` only knew about channel A: `EecState`
+  carried `active` and nothing else, so losing the *standby* channel was
+  invisible and all four channel-B faults moved nothing. `EecState` now
+  reports each channel's serviceability — the same discrete verdict
+  `Eec::select` already derives — and the alert means what it says on the
+  aircraft: the EEC is running single-channel, whichever channel died.
+- Measured: this area's 350 registered failures, swept through
+  `integration::failure_audit`'s whole profile set — **320 move something
+  published, 30 do not**: the 16 fire-loop `fails_to_detect` (correctly
+  invisible until a nacelle zone is above the loops' trip temperature) and
+  all 14 reverser faults (no reverse-thrust selection exists in `Truth`).
+  All 104 of this area's previously-unreachable ECAM alerts now read
+  published variables; `ecam_triggers_that_read_a_variable_no_area_publishes`
+  reports 0 alerts that can never fire across the whole registry.
+  Frame cost 7.2 us per frame, release, tick + publish, four engines.
+- Asked for by the sensors area, and *not* published, because this area does
+  not model them and a value would have to be invented: `A32NX_ENG_n_OIL_
+  PRESSURE_PA` / `_OIL_TEMPERATURE_C` / `_OIL_QUANTITY_FRACTION` (the oil
+  system is `physics::engine::oil`, the lead's, not this directory's),
+  `A32NX_ENG_n_TGT_TRUE_C` (TGT is measured downstream of the LP turbine, a
+  station nothing in this port computes — the same gap `EngineAccessory
+  Commands::engine_tgt_k` documents) and `A32NX_ENG_n_T25_C` (HPC inlet; the
+  only compressor station `Truth` carries is the customer bleed tap, which is
+  IP *delivery* and port-dependent, not station 2.5). The vibration indices
+  they also asked for, `A32NX_ENG_n_N1_VIB_INDEX` and `_N3_VIB_INDEX`, are
+  published (with `_N2_`), so those 24 failures are unblocked.

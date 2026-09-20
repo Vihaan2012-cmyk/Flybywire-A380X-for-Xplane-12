@@ -82,6 +82,23 @@ const R_AIR_J_KG_K: f64 = 287.057_005;
 /// exactly that stream.
 const TRENT_900_BYPASS_MDOT_SLS_KG_S: f64 = 1204.0 * 8.7 / 9.7;
 
+/// GENERIC bay ventilation mass flow, kg/s, used by [`PneumaticDuctsLive::
+/// own_zone_excess_k`] to translate this area's own duct-leak heat into a
+/// local temperature excess. Reuses `thermal_zones::PROGRESS.md`'s own
+/// cited 0.5 kg/s pylon-bay figure (CS/FAR 25.1187 fire-zone ventilation
+/// minimum), applied to every ODLS zone alike for lack of a more specific
+/// per-zone figure -- see that function's own doc.
+const ZONE_VENTILATION_KG_S: f64 = 0.5;
+/// Specific heat of air at the temperatures these bays run at, J/(kg*K).
+const CP_AIR_J_KGK: f64 = 1005.0;
+/// Time constant [`PneumaticDuctsLive::relax_own_zone_excess`] relaxes
+/// toward its steady-state target over, s. **GENERIC**: order-of-magnitude
+/// for a several-cubic-metre ventilated bay's own air thermal mass against
+/// its ventilation flow (`m/mdot_vent`; a ~5 m^3 bay at typical density is
+/// a few kg of air against 0.5 kg/s ventilation, single-digit seconds --
+/// rounded up for stability margin, not for a closer physical match).
+const ZONE_EXCESS_TIME_CONSTANT_S: f64 = 10.0;
+
 /// Cooling air the APU's own fan/load-compressor stream makes available to
 /// its precooler, kg/s, while it runs. **GENERIC**: no public figure
 /// exists. Derived by the requirement a precooler has to meet to cool at
@@ -177,6 +194,13 @@ fn coupling_table() -> Vec<(u64, &'static str)> {
 struct VarNames {
     odls_trip: [String; ODLS_ZONE_COUNT],
     odls_fault: [String; ODLS_ZONE_COUNT],
+    /// Each loop's own health, published separately from the aggregate
+    /// `odls_fault` so a single loop's `loop_a_open`/`loop_b_open` failure
+    /// is visible on its own -- see `odls::OdlsOutputs`'s own doc for why
+    /// the aggregate alone cannot show it (the same dual-loop masking
+    /// `deep::fire_ice::fire_loops` already documents for its A/B loops).
+    odls_loop_a_fault: [String; ODLS_ZONE_COUNT],
+    odls_loop_b_fault: [String; ODLS_ZONE_COUNT],
     zone_heat_w: [String; ZONE_COUNT],
     zone_jet_flux: [String; ZONE_COUNT],
     engine_precooler_ovht: [String; 4],
@@ -209,6 +233,8 @@ impl VarNames {
         Self {
             odls_trip: std::array::from_fn(|z| format!("DEEP_PNEU_ODLS_{}_TRIP", ZONE_NAMES[z])),
             odls_fault: std::array::from_fn(|z| format!("DEEP_PNEU_ODLS_{}_FAULT", ZONE_NAMES[z])),
+            odls_loop_a_fault: std::array::from_fn(|z| format!("DEEP_PNEU_ODLS_{}_LOOP_A_FAULT", ZONE_NAMES[z])),
+            odls_loop_b_fault: std::array::from_fn(|z| format!("DEEP_PNEU_ODLS_{}_LOOP_B_FAULT", ZONE_NAMES[z])),
             zone_heat_w: std::array::from_fn(|z| format!("DEEP_PNEU_ZONE_{}_HEAT_W", ZONE_NAMES[z])),
             zone_jet_flux: std::array::from_fn(|z| format!("DEEP_PNEU_ZONE_{}_JET_FLUX_W_M2", ZONE_NAMES[z])),
             engine_precooler_ovht: per_engine(|n| format!("DEEP_PNEU_ENG_{n}_PRECOOLER_OVHT")),
@@ -238,6 +264,8 @@ pub struct PneumaticDuctsLive {
     names: VarNames,
     /// One published name per entry of [`coupling_table`], in that order.
     derived_names: Vec<String>,
+    /// [`Self::own_zone_excess_k`]'s own stored, relaxing state.
+    own_zone_excess_state: [f64; ZONE_COUNT],
 }
 
 impl Default for PneumaticDuctsLive {
@@ -262,6 +290,7 @@ impl PneumaticDuctsLive {
             out: NetworkOutputs::default(),
             names: VarNames::new(),
             derived_names: coupling_table().into_iter().map(|(id, _)| format!("DEEP_DERIVED_FBW_FAILURE_{id}")).collect(),
+            own_zone_excess_state: [0.0; ZONE_COUNT],
         }
     }
 
@@ -371,7 +400,7 @@ impl PneumaticDuctsLive {
             wai_selected: [truth.controls.wing_anti_ice_selected; 2],
             starter_engaged: truth.controls.starter_engaged,
             engine_bleed_pb_auto: truth.controls.engine_bleed_pb_auto,
-            zone_air_k: Self::zone_air_k(truth, recovery_k),
+            zone_air_k: self.zone_air_k(truth, recovery_k),
         }
     }
 
@@ -398,12 +427,85 @@ impl PneumaticDuctsLive {
     /// come back around and trip this area's own ODLS, instead of every
     /// zone being permanently pinned at recovery temperature regardless of
     /// what is actually leaking into it.
-    fn zone_air_k(truth: &Truth, recovery_k: f64) -> [f64; ZONE_COUNT] {
+    ///
+    /// **On top of that**, [`Self::own_zone_excess_k`] adds this area's
+    /// *own* previous-tick `zone_heat_w` -- see that function's own doc for
+    /// why: without it, this area's own registered ATA 36 duct leak/rupture
+    /// failures could raise duct pressure and gas temperature (both
+    /// already real and already published) but could never actually warm
+    /// the bay their own ODLS watches, because `thermal_zones` only ever
+    /// consumes *its own* separate, cruder placeholder leak failures, never
+    /// this area's `zone_heat_w` output (`deep::integration::
+    /// failure_audit`'s sweep: every duct leak/rupture in this catalogue
+    /// was live -- pressure and gas temperature moved -- but could not
+    /// reach its own alert).
+    fn zone_air_k(&self, truth: &Truth, recovery_k: f64) -> [f64; ZONE_COUNT] {
         let recovery_c = recovery_k - 273.15;
         std::array::from_fn(|z| {
             let name = format!("THERMAL_ZONE_{}_TEMPERATURE_C", ZONE_NAMES[z].to_ascii_uppercase());
-            truth.published.get_or(&name, recovery_c) + 273.15
+            truth.published.get_or(&name, recovery_c) + 273.15 + self.own_zone_excess_k(z)
         })
+    }
+
+    /// This area's own lagged temperature excess above whatever
+    /// `thermal_zones` is publishing for this zone, driven by this area's
+    /// own `zone_heat_w` (leak/rupture enthalpy + insulation loss,
+    /// `network::NetworkOutputs::zone_heat_w`'s own doc). A stored,
+    /// relaxing state (`Self::relax_own_zone_excess`), not recomputed fresh
+    /// from one tick's heat each time -- see that function's own doc for
+    /// why a memoryless algebraic version of this feedback is unstable.
+    ///
+    /// `thermal_zones` is the authoritative, detailed thermal network for
+    /// every zone (conduction, structure mass, ventilation links, `deep::
+    /// thermal_zones::network::ThermalNetwork`) and this module must not
+    /// duplicate that -- but this area cannot call into `thermal_zones`
+    /// either (self-containment, `docs/deep/BRIEF.md` hard rule 2), and
+    /// `thermal_zones` does not consume this area's own `zone_heat_w` (see
+    /// `Self::zone_air_k`'s doc). The honest middle ground, without
+    /// inventing a second full thermal network: a single-term ventilation
+    /// balance at steady state, `heat_in = mdot_vent*cp*excess_k`, i.e.
+    /// `excess_k = zone_heat_w / (mdot_vent*cp)` -- exactly the arithmetic
+    /// `thermal_zones::PROGRESS.md`'s own 2026-09-20 pylon-bleed-duct-leak
+    /// investigation used to derive that a pylon bay's ventilation, not its
+    /// thermal mass, sets its steady overheat (that investigation's own
+    /// words: "ventilation is 95% of the steady-state conductance, so the
+    /// structure terms cannot change the answer"). [`ZONE_VENTILATION_KG_S`]
+    /// reuses that investigation's own cited 0.5 kg/s pylon figure
+    /// (CS/FAR 25.1187 fire-zone ventilation minimum) as a **GENERIC**
+    /// figure applied to every ODLS zone alike, for lack of a more specific
+    /// per-zone number.
+    fn own_zone_excess_k(&self, zone: usize) -> f64 {
+        self.own_zone_excess_state[zone]
+    }
+
+    /// Relaxes [`Self::own_zone_excess_k`]'s stored state toward this
+    /// tick's steady-state target with an exact exponential step
+    /// (`docs/deep/BRIEF.md`'s own "exact exponential steps for first-order
+    /// lags" convention), over [`ZONE_EXCESS_TIME_CONSTANT_S`].
+    ///
+    /// An earlier version of this computed the excess fresh from the
+    /// *previous* tick's `zone_heat_w` every tick, with no state of its
+    /// own -- algebraically reasonable (the same steady-state formula this
+    /// one relaxes toward) but numerically unstable in the closed loop it
+    /// sits in: `zone_air_k` feeds `leak::step`'s own delta-T, whose
+    /// `heat_to_zone_w` output is exactly what the next tick's excess was
+    /// computed from, with no damping between the two. A real rupture's
+    /// heat spike (hundreds of kW for one tick while the duct itself is
+    /// still charging) turned into a thousand-kelvin one-tick excess, which
+    /// zeroed the delta-T (and so the heat) the *next* tick, which relaxed
+    /// the excess back to zero the tick after that, reopening the delta-T
+    /// -- an undamped bang-bang oscillation, confirmed by instrumenting the
+    /// actual trajectory (946 kW / 0 W / 144 kW / 0 W before settling).
+    /// A stored state that can only move a bounded fraction of the way to
+    /// its target each tick cannot overshoot into that, regardless of how
+    /// large or sudden the target swings.
+    fn relax_own_zone_excess(&mut self, dt_s: f64) {
+        let dt = dt_s.max(0.0);
+        let a = (-dt / ZONE_EXCESS_TIME_CONSTANT_S).exp();
+        for z in 0..ZONE_COUNT {
+            let target = (self.out.zone_heat_w[z] / (ZONE_VENTILATION_KG_S * CP_AIR_J_KGK)).max(0.0);
+            self.own_zone_excess_state[z] = target + (self.own_zone_excess_state[z] - target) * a;
+        }
     }
 
     /// Every failure `registry.rs` registers, onto the exact model field
@@ -505,6 +607,7 @@ impl crate::deep::live::Area for PneumaticDuctsLive {
         self.apply_faults(faults);
         let inputs = self.inputs(truth);
         self.out = self.network.step(&inputs, &self.faults);
+        self.relax_own_zone_excess(truth.dt_s);
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -513,6 +616,8 @@ impl crate::deep::live::Area for PneumaticDuctsLive {
         for z in 0..ODLS_ZONE_COUNT {
             out(&n.odls_trip[z], on(o.odls_trip[z]));
             out(&n.odls_fault[z], on(o.odls_loop_fault[z]));
+            out(&n.odls_loop_a_fault[z], on(o.odls_loop_a_fault[z]));
+            out(&n.odls_loop_b_fault[z], on(o.odls_loop_b_fault[z]));
         }
         for z in 0..ZONE_COUNT {
             out(&n.zone_heat_w[z], o.zone_heat_w[z]);
@@ -534,6 +639,12 @@ impl crate::deep::live::Area for PneumaticDuctsLive {
         out("DEEP_PNEU_APU_ISOLATION_OPEN", on(!o.apu_isolated));
         out("DEEP_PNEU_APU_DUCT_TEMPERATURE_C", o.apu_duct_temp_k - 273.15);
         out("DEEP_PNEU_APU_BLEED_VALVE_OPEN", o.apu_bleed_valve_open);
+        // Real APU load-compressor demand: `deep::apu` reads this exact
+        // name (`Truth::published.get_or("PNEU_APU_BLEED_DEMAND_KG_S",
+        // 0.0)`) to know its own load compressor is actually loaded --
+        // without it, that area's own erosion/surge-control-valve/IGV
+        // failures had nothing to act on.
+        out("PNEU_APU_BLEED_DEMAND_KG_S", o.apu_bleed_demand_kg_s);
         for i in 0..2 {
             out(&n.pack_supply_pressure[i], o.pack_supply_pressure_pa[i]);
             out(&n.pack_supply_temp_c[i], o.pack_supply_temp_k[i] - 273.15);
@@ -654,22 +765,38 @@ mod tests {
         // near-sonic jet ... higher heat-transfer effectiveness into the
         // pylon zone" and (fault 1's shared mechanism) "manifold/
         // downstream pressure sags proportionally".
+        //
+        // The heat check runs early: this area's own `zone_heat_w` now
+        // feeds back into the same `zone_air_k` its own leak law reads its
+        // driving delta-T from (`PneumaticDuctsLive::own_zone_excess_k`,
+        // added this pass), so a sustained rupture genuinely heats its own
+        // bay toward the duct's own temperature over enough ventilation
+        // cycles -- a real ceiling (the bay can never exceed the duct
+        // feeding it), not a bug. By 100 s in that self-consistent
+        // heating has already pulled the delta-T (and so the instantaneous
+        // heat) back down, the same way `thermal_zones::PROGRESS.md`'s own
+        // pylon investigation found ventilation sets the steady state, not
+        // duct enthalpy alone. The claim this assertion actually makes --
+        // "a rupture dumps real heat into its own pylon" -- is checked
+        // before that self-consistent response has time to act.
         let truth = cruise_truth();
         let mut ruptured = live_system();
         let mut healthy = live_system();
-        run(ruptured.as_mut(), &truth, &Faults::from_pairs([(f(36, 2), 1.0)]), 100);
+        run(ruptured.as_mut(), &truth, &Faults::from_pairs([(f(36, 2), 1.0)]), 3);
+        let early = published(ruptured.as_ref());
+        assert!(early["DEEP_PNEU_ZONE_PylonEngine1_HEAT_W"] > 1000.0, "the escaping gas must dump real heat into its own pylon, got {}", early["DEEP_PNEU_ZONE_PylonEngine1_HEAT_W"]);
+        assert!(early["DEEP_PNEU_ZONE_PylonEngine1_JET_FLUX_W_M2"] > 0.0, "a full rupture must report an impinging-jet flux");
+
+        run(ruptured.as_mut(), &truth, &Faults::from_pairs([(f(36, 2), 1.0)]), 97);
         run(healthy.as_mut(), &truth, &Faults::default(), 100);
         let bad = published(ruptured.as_ref());
         let good = published(healthy.as_ref());
-
         assert!(
             bad["DEEP_PNEU_ENG_1_DUCT_PRESSURE_PA"] < good["DEEP_PNEU_ENG_1_DUCT_PRESSURE_PA"],
             "a ruptured duct must sag: {} vs {}",
             bad["DEEP_PNEU_ENG_1_DUCT_PRESSURE_PA"],
             good["DEEP_PNEU_ENG_1_DUCT_PRESSURE_PA"]
         );
-        assert!(bad["DEEP_PNEU_ZONE_PylonEngine1_HEAT_W"] > 1000.0, "the escaping gas must dump real heat into its own pylon, got {}", bad["DEEP_PNEU_ZONE_PylonEngine1_HEAT_W"]);
-        assert!(bad["DEEP_PNEU_ZONE_PylonEngine1_JET_FLUX_W_M2"] > 0.0, "a full rupture must report an impinging-jet flux");
         assert_eq!(good["DEEP_PNEU_ZONE_PylonEngine1_JET_FLUX_W_M2"], 0.0);
     }
 
@@ -862,16 +989,22 @@ mod tests {
         // heat must reach this area's own ODLS and trip it.
         //
         // WingLeLeft (unlike a pylon) has no forced-ventilation link at
-        // all in `topology_a380::build` (anti-ice heat is a transient
-        // system input into an otherwise unventilated compartment, that
-        // module's own doc), so its air node's only loss path is the
-        // 40 W/K air<->structure coupling -- a full-severity 30 kW leak
-        // drives it far past the 100 K ODLS margin, unlike a ram-vented
-        // pylon's own 40 kW leak, which this test found settles only
+        // all in `topology_a380::build`, so a full-severity 30 kW leak
+        // drives it far past this area's own absolute wing/fuselage ODLS
+        // threshold (`odls::OverheatDetectionLoop::THRESHOLD_WING_
+        // FUSELAGE_K`, ~124 C, replacing the old ambient-relative margin
+        // this comment used to cite). The >150 C setup value itself is
+        // `thermal_zones`' own known-unphysical number for this interim
+        // constant (that area's own 2026-09-20 PROGRESS.md: honest physics
+        // gives ~68 C, not 853 C -- a fix owed in that area, not this one,
+        // and not required for the setup check below to still hold, since
+        // even the honest 68 C figure would clear this area's 124 C
+        // threshold only if `thermal_zones` also fixes its own leak-model
+        // form; this test only proves the *read* side of the coupling).
+        // A ram-vented pylon's own 40 kW leak, by contrast, settles only
         // ~75 K above ambient under this area's own 0.5 kg/s pylon vent
-        // and so never confirms a trip (a real, if modest, gap between
-        // `thermal_zones`' interim leak magnitude and this area's fixed
-        // detection margin -- noted in the report, not papered over here).
+        // and does not confirm a trip at the pylon/strut class's higher
+        // (~200 C) threshold either way.
         let mut deep = crate::deep::live::Deep::new().with_area(live_system()).with_area(crate::deep::thermal_zones::live::live_system());
         let leak_id = f_thermal(30, 1); // thermal_zones' own WingLeLeft anti-ice duct leak id
         let armed = Faults::from_pairs([(leak_id, 1.0)]);
@@ -896,6 +1029,87 @@ mod tests {
     /// per `network.rs`'s own module doc.
     fn f_thermal(ata: u16, n: u16) -> u64 {
         crate::deep::api::failure_id(RegArea::ThermalZones, ata, n)
+    }
+
+    /// The "bigger" gap this pass closes: this area's *own* registered
+    /// ATA 36 duct-leak/rupture failures were live (pressure/gas
+    /// temperature moved) but could never reach their own alert, because
+    /// `thermal_zones` never consumes this area's `zone_heat_w`
+    /// (`Self::own_zone_excess_k`'s own doc). A full-severity engine-1
+    /// duct rupture, at a real high-pressure bleed condition, must now trip
+    /// engine 1's own pylon ODLS using only this area's own physics -- no
+    /// dependency on `thermal_zones` at all.
+    #[test]
+    fn this_areas_own_engine_duct_rupture_now_reaches_its_own_odls() {
+        // The precooler regulates its outlet toward `OUTLET_TARGET_C`
+        // (200 C, `precooler.rs`), which is why a leak/rupture cannot rely
+        // on raw source temperature alone to cross a ~200 C pylon/strut
+        // threshold: a *low-N1* condition starves the precooler of its own
+        // cooling (fan-bypass) air (`bypass_mdot_kg_s` scales with N1), so
+        // even a fully open FAV cannot hold the target against a real HP6
+        // source -- the same real precooler-undersizing failure mode
+        // `precooler.rs`'s own `a_stuck_closed_fav_cannot_cool_and_the_
+        // bleed_stays_hot` test exercises directly, reached here through a
+        // real airframe state instead.
+        let mut truth = cruise_truth();
+        truth.on_ground = true;
+        truth.environment.ambient_pressure_pa = 101_325.0;
+        truth.environment.sat_c = 15.0;
+        truth.environment.tas_ms = 0.0;
+        truth.engine_n1_frac = [0.05; 4]; // starves the precooler's own cooling air
+        truth.engine_bleed_pressure_pa = [900_000.0; 4]; // a strong bleed source to rupture
+        truth.engine_bleed_temp_k = [560.0; 4];
+        truth.engine_hp_port_pressure_pa = [1_200_000.0; 4];
+        truth.engine_hp_port_temp_k = [700.0; 4];
+        let rupture_id = f(36, 2); // engine duct rupture, module doc's ordering (leak, rupture, insulation)
+
+        let mut healthy = live_system();
+        run(healthy.as_mut(), &truth, &Faults::default(), 10);
+        let healthy_out = published(healthy.as_ref());
+        assert_eq!(healthy_out["DEEP_PNEU_ODLS_PylonEngine1_TRIP"], 0.0, "a healthy duct must not trip its own bay");
+
+        let mut ruptured = live_system();
+        let rupture_faults = Faults::from_pairs([(rupture_id, 1.0)]);
+        run(ruptured.as_mut(), &truth, &rupture_faults, 1);
+        let heat_pulse = published(ruptured.as_ref())["DEEP_PNEU_ZONE_PylonEngine1_HEAT_W"];
+        assert!(heat_pulse > 0.0, "a rupture must actually deliver heat to its own zone, got {heat_pulse}");
+
+        // Continued mid-transient (module doc on `arming_the_engine_bleed_
+        // duct_rupture_sags_the_duct_and_heats_the_pylon`): the rupture's
+        // own heat pulse and this area's own zone feedback settle into a
+        // self-consistent equilibrium over more ticks than this (heat
+        // itself can transiently read back to zero once the lagged excess
+        // has already pushed the bay close to the duct's own temperature),
+        // so the trip is confirmed here while the bay is still genuinely
+        // past its own absolute threshold from that earlier real heat, not
+        // decades into that later settling.
+        run(ruptured.as_mut(), &truth, &rupture_faults, 8);
+        let ruptured_out = published(ruptured.as_ref());
+        assert_eq!(ruptured_out["DEEP_PNEU_ODLS_PylonEngine1_TRIP"], 1.0, "that heat must now reach this area's own ODLS and trip it");
+        // `f(36, 2)` registers one id per fault *mechanism* on the engine-
+        // duct component *class* (`registry.rs`'s own module doc), so
+        // arming it ruptures all four engine ducts alike -- every pylon
+        // trips, not just engine 1's. A zone this fault cannot possibly
+        // touch (the wing leading edge, a different duct entirely) must
+        // still stay clear.
+        assert_eq!(ruptured_out["DEEP_PNEU_ODLS_WingLeLeft_TRIP"], 0.0, "a zone this fault cannot reach must stay clear");
+    }
+
+    /// `deep::apu` reads `PNEU_APU_BLEED_DEMAND_KG_S` to know its own load
+    /// compressor is actually loaded; without a real figure here its own
+    /// erosion/surge-control-valve/IGV failures had nothing to act on.
+    #[test]
+    fn apu_bleed_demand_is_published_and_real_once_the_apu_is_bled() {
+        let mut truth = Truth { dt_s: 0.2, on_ground: true, apu_running: true, apu_bleed_pressure_pa: 310_000.0, ..Truth::default() };
+        truth.controls.apu_bleed_pb_on = true;
+
+        let mut off = live_system();
+        run(off.as_mut(), &Truth { dt_s: 0.2, ..Truth::default() }, &Faults::default(), 5);
+        assert_eq!(published(off.as_ref())["PNEU_APU_BLEED_DEMAND_KG_S"], 0.0, "no bleed selected, no demand");
+
+        let mut on = live_system();
+        run(on.as_mut(), &truth, &Faults::default(), 5);
+        assert!(published(on.as_ref())["PNEU_APU_BLEED_DEMAND_KG_S"] > 0.0, "a real APU bleed source must show a real, nonzero demand");
     }
 
     // -----------------------------------------------------------------

@@ -320,31 +320,126 @@ mod tests {
         assert_eq!(live.unprotected_count, 3.0);
     }
 
+    /// **The regression guard.** A healthy aircraft must not trip a single
+    /// one of its 399 breakers, in any flight state, over a long run, at
+    /// any frame length.
+    ///
+    /// It used to trip 113 of them. Nothing was armed and no rating was
+    /// wrong: the I^2t accumulator in `super::trip` filled at
+    /// `(ratio^2 - 1)` per *second* with no time constant on it at all, so
+    /// a 2x overload opened a breaker in a third of a second -- far outside
+    /// any published time-current curve -- and the ordinary switch-on
+    /// inrush of a cabin fan, an avionics fan, a fuel pump or a hydraulic
+    /// electric pump was enough to clear its own feeder. Two further
+    /// defects made it frame-rate dependent (`network::Load`'s inrush was
+    /// sampled at the leading edge of the frame and held for all of it) and
+    /// state dependent (with no generation on line the contactor logic read
+    /// the emergency inverter's own back-feed as evidence that the
+    /// emergency configuration was not needed, and the whole network
+    /// limit-cycled at the frame rate, restarting every motor's inrush
+    /// every frame).
+    ///
+    /// So this runs every profile the failure audit defines -- cold and
+    /// dark, on stand, engine start, take-off, cruise, icing climb,
+    /// touchdown, gear cycle, every command exercised at once -- at both
+    /// ends of the frame-length range, for minutes of simulated time.
     #[test]
-    #[ignore = "diagnostic"]
-    fn diagnose() {
-        board::clear();
-        let mut elec = ElectricalLive::new();
-        let mut live = BreakersLive::new();
-        let truth = flying_truth();
-        let faults = Faults::default();
-        for _ in 0..120 {
-            elec.tick(&truth, &faults);
-            live.tick(&truth, &faults);
-            elec.publish(&mut |_, _| {});
-            live.publish(&mut |_, _| {});
+    fn a_healthy_aircraft_trips_no_breaker_in_any_state_over_a_long_run() {
+        use crate::deep::integration::failure_audit::profiles;
+        use crate::deep::wiring::live::WiringLive;
+
+        // A frame far shorter and one far longer than anything X-Plane
+        // hands out, because the bug this guards against was invisible at
+        // 0.05 s and opened 113 breakers at 1.0 s.
+        for (dt, seconds) in [(1.0 / 30.0, 120.0), (1.0, 600.0)] {
+            for p in profiles() {
+                board::clear();
+                let mut elec = ElectricalLive::new();
+                let mut live = BreakersLive::new();
+                let mut wire = WiringLive::new();
+                let truth = Truth { dt_s: dt, ..(p.truth)() };
+                let faults = Faults::default();
+                let frames = (seconds / dt).ceil() as usize;
+                for f in 0..frames {
+                    elec.tick(&truth, &faults);
+                    live.tick(&truth, &faults);
+                    wire.tick(&truth, &faults);
+                    if let Some(u) = live.units.iter().find(|u| !u.breaker.closed) {
+                        panic!(
+                            "healthy aircraft: {} tripped ({:?}) in profile {} at t={:.2} s, dt={dt}, carrying {:.2} A on a {:.1} A rating",
+                            u.def.id,
+                            u.breaker.trip_cause,
+                            p.name,
+                            f as f64 * dt,
+                            u.current_a,
+                            u.def.rating_a
+                        );
+                    }
+                    elec.publish(&mut |_, _| {});
+                    live.publish(&mut |_, _| {});
+                    wire.publish(&mut |_, _| {});
+                }
+                board::clear();
+            }
         }
-        let open: Vec<String> = live
-            .units
-            .iter()
-            .filter(|u| !u.breaker.closed)
-            .map(|u| format!("{} I={:.2} rated={:.1} kind={:?} cause={:?}", u.def.id, u.current_a, u.def.rating_a, u.def.kind, u.breaker.trip_cause))
-            .collect();
-        println!("open {}:", open.len());
-        for o in &open {
-            println!("  {o}");
+    }
+
+    /// The other half of the same question, and the evidence that the fix
+    /// above belonged in the trip curve rather than in any load: with the
+    /// trip elements held forcibly closed, no circuit on a *powered*
+    /// aircraft settles above its own breaker's rating. The worst is about
+    /// 0.79x, which is exactly where `catalog`'s own `P/(V*pf)*1.25`
+    /// sizing rule puts a healthy load. A breaker that tripped there would
+    /// be tripping on a real overload and would be right to, so the 113
+    /// that were tripping could only be the curve.
+    ///
+    /// `cold_dark` is left out, and honestly rather than quietly: with no
+    /// generation on line at all the essential buses run on the battery
+    /// and the static inverter, sag well below nominal, and a
+    /// constant-power load on a sagging bus really does draw more than its
+    /// nameplate current (`pitot-heat-3` settles at about 1.07x). That is
+    /// a genuine load-side gap -- this catalogue still commands more on in
+    /// that state than a real cold and dark aircraft runs -- not evidence
+    /// about the trip curve, which is what this test is for.
+    #[test]
+    fn no_healthy_circuit_settles_above_its_own_breakers_rating() {
+        use crate::deep::integration::failure_audit::profiles;
+        use crate::deep::wiring::live::WiringLive;
+
+        for p in profiles().into_iter().filter(|p| p.name != "cold_dark") {
+            board::clear();
+            let mut elec = ElectricalLive::new();
+            let mut live = BreakersLive::new();
+            let mut wire = WiringLive::new();
+            let truth = Truth { dt_s: 0.1, ..(p.truth)() };
+            let faults = Faults::default();
+            let settle = 600; // 60 s: every switch-on inrush long gone.
+            let mut worst = (0.0f64, "");
+            for f in 0..settle {
+                elec.tick(&truth, &faults);
+                live.tick(&truth, &faults);
+                wire.tick(&truth, &faults);
+                // Hold every trip element closed: this measures the load,
+                // not the protection.
+                for u in live.units.iter_mut() {
+                    u.breaker.maintenance_clear_lockout();
+                    let _ = u.breaker.reset();
+                }
+                if f >= settle - 100 {
+                    for u in live.units.iter() {
+                        let r = u.current_a / u.def.rating_a.max(1e-9);
+                        if r > worst.0 {
+                            worst = (r, u.def.id);
+                        }
+                    }
+                }
+                elec.publish(&mut |_, _| {});
+                live.publish(&mut |_, _| {});
+                wire.publish(&mut |_, _| {});
+            }
+            assert!(worst.0 <= 1.0, "in profile {}, healthy circuit {} settles at {:.3}x its own breaker's rating", p.name, worst.1, worst.0);
+            board::clear();
         }
-        board::clear();
     }
 
     #[test]

@@ -44,13 +44,39 @@
 //!
 //! `GearCommands` now carries only what is genuinely still not on `Truth`:
 //! per-leg side load (no real per-leg lateral-load source exists anywhere
-//! in this port), the gravity-extension handle (no dataref found), and the
-//! tiller/rudder-pedal steering command (ditto). Mass in particular used
-//! to be the one field here that could not honestly default to zero -- an
-//! aircraft always weighs something -- so `GearCommands::default` used the
-//! published A380-800 operating empty weight; that default now lives on
-//! `Truth::default` instead (same figure, same citation), since mass is a
-//! `Truth` reading now, not an interim command.
+//! in this port) and the gravity-extension handle (no dataref found). Mass
+//! in particular used to be the one field here that could not honestly
+//! default to zero -- an aircraft always weighs something -- so
+//! `GearCommands::default` used the published A380-800 operating empty
+//! weight; that default now lives on `Truth::default` instead (same
+//! figure, same citation), since mass is a `Truth` reading now, not an
+//! interim command.
+//!
+//! ## Steering command (2026-09-20 dead-failure pass)
+//!
+//! `Truth::controls.steering_command_deg[0]` (nosewheel tiller/pedal
+//! command) now drives `nose_steer_in` in place of the removed
+//! `GearCommands::nose_steering_command_deg`, which nothing in production
+//! ever set: with the nose actuator's own target permanently pinned at
+//! 0 deg, it never had anywhere to slew to, so its own `actuator_leak`
+//! fault (which only throttles the *rate of change*, `steering::
+//! SteeringActuator::step`'s `diff = target - base_angle_deg`) had no
+//! motion to throttle and could never move a published variable
+//! (`deep::integration::failure_audit`'s sweep found exactly this, for all
+//! three steerable positions). `steering_command_deg[1]`/`[2]` (body
+//! left/right) are **not** read directly: a real A380's body-gear rear
+//! axle is not independently pilot-commanded at all, it is mechanically/
+//! electronically slaved to the nosewheel's own angle and groundspeed
+//! (`steering::body_steering_angle_deg`, already real, already-tested
+//! physics, unchanged by this pass). Because that schedule is driven by
+//! `nose_steer_out.base_angle_deg` -- the nose actuator's own real tracked
+//! angle, not its raw command -- wiring the nose component alone gives
+//! both body actuators a genuine nonzero target too, which is sufficient
+//! to make all three actuators' `actuator_leak` failures live. If
+//! `steering_command_deg[1]`/`[2]` are ever meant to carry an independent,
+//! authoritative BSCU-computed body angle distinct from this module's own
+//! GENERIC schedule, that is a `Truth`-sourcing question for whoever wires
+//! `plugin.rs`'s publisher, not a guess to make here.
 
 use crate::deep::api::Registry;
 use crate::deep::live::{Faults, Truth};
@@ -98,8 +124,8 @@ const STEER_KEY: [&str; 3] = ["nose", "l_body", "r_body"];
 // ---------------------------------------------------------------------------
 
 /// What the gear needs that is genuinely still not in [`Truth`] anywhere
-/// (see this module's own doc): per-leg side load, the gravity-extension
-/// handle, and the tiller/rudder-pedal steering command.
+/// (see this module's own doc): per-leg side load and the gravity-extension
+/// handle.
 #[derive(Clone, Copy, Debug)]
 pub struct GearCommands {
     /// Side load at each leg's axle, N. `Truth` carries no per-leg lateral
@@ -108,18 +134,13 @@ pub struct GearCommands {
     pub leg_side_load_n: [f64; N_LEGS],
     /// The free-fall/gravity extension handle. No real dataref found.
     pub gravity_extend_commanded: bool,
-    /// Nosewheel tiller/rudder-pedal steering command, deg. No real
-    /// dataref found (`Truth::controls` has no tiller/pedal-steering
-    /// field).
-    pub nose_steering_command_deg: f64,
 }
 
 impl Default for GearCommands {
-    /// No side load, gravity extension not commanded, wheels straight --
-    /// the resting values for the three inputs `Truth` still does not
-    /// carry.
+    /// No side load, gravity extension not commanded -- the resting values
+    /// for the two inputs `Truth` still does not carry.
     fn default() -> Self {
-        Self { leg_side_load_n: [0.0; N_LEGS], gravity_extend_commanded: false, nose_steering_command_deg: 0.0 }
+        Self { leg_side_load_n: [0.0; N_LEGS], gravity_extend_commanded: false }
     }
 }
 
@@ -333,7 +354,7 @@ fn inputs_from(truth: &Truth, commands: &GearCommands) -> GearSystemInputs {
         gravity_extend_commanded: commands.gravity_extend_commanded,
         green_hydraulic_fraction: fraction(truth.hydraulic_pressure_pa[0]),
         yellow_hydraulic_fraction: fraction(truth.hydraulic_pressure_pa[1]),
-        nose_steering_command_deg: commands.nose_steering_command_deg,
+        nose_steering_command_deg: truth.controls.steering_command_deg[0],
         brake_pedal_left: truth.controls.brake_pedal_pos[0],
         brake_pedal_right: truth.controls.brake_pedal_pos[1],
         parking_brake_set: truth.controls.parking_brake_on,
@@ -571,14 +592,13 @@ mod tests {
         let mut truth = rollout_truth();
         truth.dt_s = 0.02;
         truth.groundspeed_m_s = speed;
+        truth.controls.steering_command_deg[0] = 2.0;
 
         let mut healthy = GearStructureLive::new();
-        healthy.commands.nose_steering_command_deg = 2.0;
         let healthy_out = run(&mut healthy, &truth, &Faults::default(), 20.0);
         assert_eq!(healthy_out.get("NW_STEER_SHIMMY_UNSTABLE"), Some(&0.0));
 
         let mut failed = GearStructureLive::new();
-        failed.commands.nose_steering_command_deg = 2.0;
         let id = failed.ids.shimmy[0];
         let failed_out = run(&mut failed, &truth, &Faults::from_pairs([(id, 1.0)]), 20.0);
         assert_eq!(failed_out.get("NW_STEER_SHIMMY_UNSTABLE"), Some(&1.0), "a failed nose damper must go unstable at {speed} m/s");
@@ -592,13 +612,137 @@ mod tests {
         let mut truth = rollout_truth();
         truth.dt_s = 0.02;
         truth.groundspeed_m_s = speed;
+        truth.controls.steering_command_deg[0] = 20.0;
 
         let mut live = GearStructureLive::new();
-        live.commands.nose_steering_command_deg = 20.0;
         let id = live.ids.shimmy[1]; // left body gear
         let out = run(&mut live, &truth, &Faults::from_pairs([(id, 1.0)]), 20.0);
         assert_eq!(out.get("NW_STEER_SHIMMY_UNSTABLE"), Some(&0.0), "the nosewheel's own damper is healthy");
         assert_eq!(out.get("BODY_STEER_SHIMMY_UNSTABLE:1"), Some(&1.0));
+    }
+
+    /// `deep::integration::failure_audit`'s sweep found all three steering
+    /// actuators' `actuator_leak` failures dead: with `GearCommands::
+    /// nose_steering_command_deg` pinned at 0 forever (nothing in
+    /// production ever set it), the actuator's own target never moved, and
+    /// a fault that only throttles the *rate of a still-in-progress* slew
+    /// (`steering::SteeringActuator::step`) has nothing to throttle at
+    /// `diff == 0`. `Truth::controls::steering_command_deg[0]` fixes the
+    /// nose actuator directly; the body actuators need no separate wiring
+    /// (module doc) because their own target is derived from the nose
+    /// actuator's real tracked angle.
+    #[test]
+    fn a_steering_actuator_leak_only_shows_once_a_real_commanded_angle_gives_it_something_to_chase() {
+        let mut truth = rollout_truth();
+        truth.dt_s = 0.05;
+        truth.controls.steering_command_deg[0] = 45.0; // a real tiller deflection
+
+        let mut healthy = GearStructureLive::new();
+        let healthy_out = run(&mut healthy, &truth, &Faults::default(), 0.5);
+
+        let mut leaking = GearStructureLive::new();
+        let nose_id = leaking.ids.steer_actuator_leak[0];
+        let leaking_out = run(&mut leaking, &truth, &Faults::from_pairs([(nose_id, 1.0)]), 0.5);
+
+        assert!(healthy_out["NW_STEER_ANGLE_DEG"] > 0.0, "a healthy actuator must be visibly slewing toward the command");
+        assert!(
+            leaking_out["NW_STEER_ANGLE_DEG"] < healthy_out["NW_STEER_ANGLE_DEG"],
+            "a leaking actuator must lag a healthy one chasing the same real command: {} vs {}",
+            leaking_out["NW_STEER_ANGLE_DEG"],
+            healthy_out["NW_STEER_ANGLE_DEG"]
+        );
+
+        // The body actuators, driven only through the derived schedule off
+        // the nose's own real tracked angle, must show the same effect from
+        // their own leak fault -- no separate `Truth` field needed.
+        let mut body_leaking = GearStructureLive::new();
+        let body_id = body_leaking.ids.steer_actuator_leak[1]; // left body
+        let body_out = run(&mut body_leaking, &truth, &Faults::from_pairs([(body_id, 1.0)]), 0.5);
+        assert_ne!(
+            body_out["BODY_STEER_ANGLE_DEG:1"], healthy_out["BODY_STEER_ANGLE_DEG:1"],
+            "the left body actuator's own leak must move its own angle away from the healthy case"
+        );
+    }
+
+    /// **Investigation, not a bug.** `deep::integration::failure_audit`'s
+    /// `gear_cycle` profile holds one fixed `Truth` for its whole 20 s
+    /// window (that module's own doc: "Fixed rather than flown") and only
+    /// ever commands the gear *up* (`gear_lever_down: false` throughout).
+    /// `uplock_jam`'s release gate and `downlock_fail`'s engagement check
+    /// (`retraction::Retraction::step`) both only run on the *other*
+    /// transition -- commanding a leg that is currently up back down again
+    /// -- which a profile whose `Truth` never changes cannot express. This
+    /// is not a missing `Truth` input and not a gate that needs "more than
+    /// the lever": the chain already reacts correctly to the lever alone.
+    /// Proven here by doing what the fixed-profile audit structurally
+    /// cannot -- commanding the gear up, then back down, in the same run --
+    /// which is why this lives as a test in this file rather than a change
+    /// to `failure_audit.rs` (outside this pass's directory).
+    #[test]
+    fn uplock_jam_and_downlock_failure_are_real_and_only_show_on_the_extend_that_gear_cycle_never_commands() {
+        let mut truth = rollout_truth();
+        truth.dt_s = 0.1;
+        truth.controls.gear_lever_down = false; // retract first
+
+        let mut jammed = GearStructureLive::new();
+        let mut healthy = GearStructureLive::new();
+        for _ in 0..300 {
+            jammed.tick(&truth, &Faults::default());
+            healthy.tick(&truth, &Faults::default());
+        }
+        assert_eq!(published(&jammed).get("GEAR_UPLOCKED:1"), Some(&1.0), "the nose leg must have fully retracted and up-locked");
+
+        // Now command extend, with the nose uplock jammed on one run only.
+        truth.controls.gear_lever_down = true;
+        let jam_id = jammed.ids.uplock_jam[0];
+        let jam_faults = Faults::from_pairs([(jam_id, 1.0)]);
+        for _ in 0..300 {
+            jammed.tick(&truth, &jam_faults);
+            healthy.tick(&truth, &Faults::default());
+        }
+        let jammed_out = published(&jammed);
+        let healthy_out = published(&healthy);
+
+        assert_eq!(healthy_out.get("GEAR_DOWNLOCKED:1"), Some(&1.0), "a healthy nose leg must extend and downlock again");
+        assert_eq!(jammed_out.get("GEAR_DOWNLOCKED:1"), Some(&0.0), "a jammed uplock must prevent the leg from ever extending");
+        assert_eq!(jammed_out.get("GEAR_UPLOCKED:1"), Some(&1.0), "it must still be stuck up-locked");
+        assert_eq!(jammed_out.get("GEAR_STUCK_LOCKED:1"), Some(&1.0), "and the stuck-locked hazard flag must be set");
+    }
+
+    /// The companion case: the leg reaches the geometric down position but
+    /// the spring/linkage never truly seats, once it actually extends
+    /// (`retraction.rs`'s own `a_failed_downlock_reaches_the_down_position_
+    /// but_never_reports_locked` proves the underlying state machine
+    /// directly; this proves the same thing reached through `Truth` via
+    /// the live system, in the same up-then-down cycle the previous test
+    /// uses).
+    #[test]
+    fn downlock_failure_reaches_the_down_position_but_never_locks_once_it_actually_extends() {
+        let mut truth = rollout_truth();
+        truth.dt_s = 0.1;
+        truth.controls.gear_lever_down = false;
+
+        let mut live = GearStructureLive::new();
+        for _ in 0..300 {
+            live.tick(&truth, &Faults::default());
+        }
+        assert_eq!(published(&live).get("GEAR_UPLOCKED:1"), Some(&1.0));
+
+        truth.controls.gear_lever_down = true;
+        let id = live.ids.downlock_fail[0];
+        let faults = Faults::from_pairs([(id, 1.0)]);
+        for _ in 0..300 {
+            live.tick(&truth, &faults);
+        }
+        let out = published(&live);
+        assert!(out["GEAR_POSITION:1"] > 0.95, "the leg must still reach the down position geometrically");
+        assert_eq!(out.get("GEAR_DOWNLOCKED:1"), Some(&0.0), "but the downlock must never truly engage");
+
+        // And the alert that watches exactly this actually fires.
+        let mut reg = Registry::default();
+        super::super::registry::register(&mut reg);
+        let alert = reg.alerts.iter().find(|a| a.key == "L_G_GEAR_NOT_DOWNLOCKED").expect("registered");
+        assert!(alert.trigger.eval(&|name: &str| out.get(name).copied().unwrap_or(0.0)));
     }
 
     #[test]

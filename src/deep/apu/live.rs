@@ -38,25 +38,46 @@
 //! ground/automatic bottle discharge `fire_ice` already models) is
 //! `Truth::controls.fire_pb_apu_released` for the same reason.
 //!
-//! Two inputs the machine genuinely needs are still not in `Truth` (or
-//! published by any area) and nothing here invents them
-//! (`docs/deep/BRIEF.md` hard rule 3):
+//! Two inputs the machine genuinely needs are still not published by any
+//! area and nothing here invents them (`docs/deep/BRIEF.md` hard rule 3),
+//! but both are now read *through* `Truth::published` (`.get_or(name,
+//! fallback)`) rather than hardcoded, so the day either area starts
+//! publishing the real figure, this area comes alive with no further code
+//! change here -- exactly the documented inter-area mechanism `deep::live`
+//! describes, used here for two inputs nobody supplies yet instead of one
+//! another area already does:
 //!
-//! * **Bleed demand.** The load compressor's customer demand comes from the
-//!   pneumatic ducts, which is another area; areas can read another area's
-//!   *published* output (`Truth::published`), but `deep::pneumatic_ducts`
-//!   does not publish a bleed demand figure today, so this stays zero. Zero
-//!   is a real operating state -- APU BLEED off, IGVs closed, surge valve
-//!   open -- not a placeholder, but it is not the only one, and either a
-//!   published pneumatic demand or `Truth::apu_bleed_demand_kg_s` would make
-//!   the other ones reachable.
-//! * **Generator electrical load.** `Truth::ac_bus_volts` says which AC
-//!   buses are alive but not how many watts the APU's two generators are
-//!   carrying, so both are modelled unloaded and neither can be driven into
-//!   its overload. `deep::electrical` computes this every tick internally
-//!   (`ElectricalLive::measured_apu_gen_load_w`) but does not publish it;
-//!   publishing it (or a `Truth::apu_generator_load_w: [f64; 2]`) would make
-//!   the APU GEN 1/2 FAULT alerts' overload path reachable.
+//! * **Bleed demand** (`"PNEU_APU_BLEED_DEMAND_KG_S"`). The load
+//!   compressor's customer demand comes from the pneumatic ducts; checked
+//!   directly (`grep -r "BLEED_DEMAND\|kg_s\"" src/deep/pneumatic_ducts`),
+//!   that area publishes valve *positions* (`DEEP_PNEU_APU_BLEED_VALVE_
+//!   OPEN`) but no mass-flow figure at all today, so this reads back as the
+//!   fallback, `0.0`. Zero is a real operating state -- APU BLEED off, IGVs
+//!   closed, surge valve open -- not a placeholder, but it is not the only
+//!   one; the day `deep::pneumatic_ducts` publishes a real demand under this
+//!   name, the load compressor's IGV/SCV/surge failures and the bleed-demand
+//!   side of `APU_BLEED_FAULT` all become reachable with it.
+//! * **Generator electrical load**
+//!   (`"ELEC_APU_GEN_1_LOAD_W"`/`"ELEC_APU_GEN_2_LOAD_W"`). `deep::
+//!   electrical` computes each generator's own delivered watts every tick
+//!   internally (`ElectricalLive::measured_apu_gen_load_w`,
+//!   `source_delivered_w` = branch current x bus voltage) but does not
+//!   publish either one -- what it does publish for these sources (`ELEC_
+//!   BKR_apu-gen-<n>-bkr_CURRENT_A`) is, by that file's own module doc, a
+//!   *duplicate measurement of the whole bus's* current, not the individual
+//!   generator's, so it cannot honestly be substituted here either. Both
+//!   still fall back to `0.0`, so neither generator can yet be driven into
+//!   its overload (`GeneratorFaults`' clamp only engages above
+//!   `Generator::rated_real_power_w()`) -- proven reachable given a real
+//!   load in `apu.rs`'s own
+//!   `a_generator_carrying_a_real_load_past_its_rating_is_overloaded` test,
+//!   which feeds `Inputs` directly rather than waiting on this wiring.
+//!   `gen1_used`/`gen2_used` *are* real today: the crew's own APU GEN 1/2
+//!   pushbuttons (`Truth::controls.apu_gen_pb_on`), replacing the permanent
+//!   `false` this module used to hold them at -- on its own this changes
+//!   nothing published (load is still 0 either way), but it stops the two
+//!   pushbuttons being silently ignored and is what the load figure above
+//!   needs to already be correct on the day it arrives.
 
 use super::apu::{Apu, Inputs, Outputs};
 use super::ecb::{ChannelFaults, EcbFaults, SensorFault};
@@ -223,13 +244,18 @@ impl Area for LiveApu {
             master_on: truth.controls.apu_master_sw_on,
             start_selected: truth.controls.apu_start_pb_on,
             battery: Self::battery(truth),
-            // See the module docs: still no `Truth`/published bleed demand
-            // or generator load.
-            bleed_demand_kg_s: 0.0,
-            gen1_used: false,
-            gen2_used: false,
-            gen1_electrical_load_w: 0.0,
-            gen2_electrical_load_w: 0.0,
+            // See the module doc: neither area publishes these yet, so both
+            // read back as the documented fallback, 0.0, until one does --
+            // not a fabricated value, the real "nothing measured this" case
+            // `Truth::published`'s own doc calls for.
+            bleed_demand_kg_s: truth.published.get_or("PNEU_APU_BLEED_DEMAND_KG_S", 0.0),
+            // Real crew selections (`Truth::controls.apu_gen_pb_on`), not a
+            // permanent `false`: see the module doc for why this alone does
+            // not yet move anything published.
+            gen1_used: truth.controls.apu_gen_pb_on[0],
+            gen2_used: truth.controls.apu_gen_pb_on[1],
+            gen1_electrical_load_w: truth.published.get_or("ELEC_APU_GEN_1_LOAD_W", 0.0),
+            gen2_electrical_load_w: truth.published.get_or("ELEC_APU_GEN_2_LOAD_W", 0.0),
             // `deep::fire_ice`'s own confirmed APU bay detection, one frame
             // behind through the documented published-frame mechanism (see
             // the module doc). Absent (nothing published yet, e.g. the
@@ -531,6 +557,34 @@ mod tests {
         assert_eq!(vars["APU_FIRE_LOOP_DETECTED"], 1.0, "a published FIRE_DETECTED_APU must be confirmed here");
         assert_eq!(vars["APU_FIRE_CONFIRMED"], 1.0);
         assert!(vars["APU_FIRE_BOTTLE_PRESSURE"] < 1.0, "the fire pushbutton must actually discharge the bottle");
+    }
+
+    /// The wiring itself, proven the same way the APU fire detection test
+    /// above proves its own `Truth::published` read: with nothing published
+    /// under `"ELEC_APU_GEN_1_LOAD_W"`, the generator stays unloaded (the
+    /// documented `0.0` fallback, not a fabricated one); once something
+    /// *is* published under that exact name -- what `deep::electrical`
+    /// would do the day it starts -- this area picks it straight up and
+    /// drives generator 1 into its overload with no further code change
+    /// here, one frame late like every other cross-area read.
+    #[test]
+    fn a_published_apu_generator_load_reaches_the_generator_and_can_overload_it() {
+        let truth = running_truth();
+
+        let mut unpublished = LiveApu::new();
+        let vars = run(&mut unpublished, &truth, &Faults::default(), 5.0);
+        assert_eq!(vars["APU_GEN_1_OVERLOAD"], 0.0, "nothing published under the load's name must not fabricate a load");
+
+        let mut overloaded = LiveApu::new();
+        let mut published_frame = BTreeMap::new();
+        // Comfortably past the generator's own rated real power
+        // (`params::GENERATOR_RATED_APPARENT_VA * ..._POWER_FACTOR`, 96 kW).
+        published_frame.insert("ELEC_APU_GEN_1_LOAD_W".to_string(), 3.0 * params::GENERATOR_RATED_APPARENT_VA * params::GENERATOR_RATED_POWER_FACTOR);
+        let mut truth_with_load = truth.clone();
+        truth_with_load.published = crate::deep::live::PublishedFrame(published_frame);
+        let vars = run(&mut overloaded, &truth_with_load, &Faults::default(), 1.0 / 30.0);
+        assert_eq!(vars["APU_GEN_1_OVERLOAD"], 1.0, "a published load past rating must overload generator 1");
+        assert_eq!(vars["APU_GEN_2_OVERLOAD"], 0.0, "generator 2's own load was never published and must stay healthy");
     }
 
     #[test]

@@ -125,6 +125,17 @@ pub struct EecState {
     pub disagree: [bool; 5],
     pub active: ActiveChannel,
     pub fuel_flow_disagree: bool,
+    /// Each channel's own serviceability, as the EEC's built-in test
+    /// equipment declares it -- the same discrete verdict [`Eec::select`]
+    /// already derives to decide which channel flies the engine, reported
+    /// rather than thrown away.
+    ///
+    /// Without this, losing the *standby* channel is invisible: selection
+    /// keeps the healthy channel in control and nothing downstream can
+    /// tell a dual-channel EEC from one running single-channel, which is
+    /// precisely the condition an EEC CHANNEL FAULT annunciates.
+    pub channel_a_serviceable: bool,
+    pub channel_b_serviceable: bool,
 }
 
 impl EecState {
@@ -147,9 +158,16 @@ impl Eec {
         Self { channel_a: Channel::new(), channel_b: Channel::new() }
     }
 
+    /// Whether a channel's electronics are serviceable at all: below half
+    /// a fully-dead channel it still controls, above it the EEC declares
+    /// it lost and ignores it entirely rather than merely distrusting it.
+    fn channel_serviceable(fault: f64) -> bool {
+        fault.clamp(0.0, 1.0) < 0.5
+    }
+
     fn select(a_fault: f64, b_fault: f64) -> ActiveChannel {
-        let a_ok = a_fault.clamp(0.0, 1.0) < 0.5;
-        let b_ok = b_fault.clamp(0.0, 1.0) < 0.5;
+        let a_ok = Self::channel_serviceable(a_fault);
+        let b_ok = Self::channel_serviceable(b_fault);
         if a_ok {
             ActiveChannel::A
         } else if b_ok {
@@ -184,7 +202,14 @@ impl Eec {
             disagree[i] = (reads_a[i] - reads_b[i]).abs() > DISAGREE_THRESHOLD[i];
         }
 
-        EecState { selected, disagree, active, fuel_flow_disagree: (fuel_flow_a_kg_s - fuel_flow_b_kg_s).abs() > FUEL_FLOW_DISAGREE_THRESHOLD_KG_S }
+        EecState {
+            selected,
+            disagree,
+            active,
+            fuel_flow_disagree: (fuel_flow_a_kg_s - fuel_flow_b_kg_s).abs() > FUEL_FLOW_DISAGREE_THRESHOLD_KG_S,
+            channel_a_serviceable: Self::channel_serviceable(faults.channel_a_fault),
+            channel_b_serviceable: Self::channel_serviceable(faults.channel_b_fault),
+        }
     }
 }
 
@@ -270,10 +295,31 @@ mod tests {
     }
 
     #[test]
+    fn losing_the_standby_channel_is_reported_even_though_the_other_keeps_control() {
+        // A dual-channel EEC running on one channel is an annunciated
+        // condition, and which channel died does not change that. With
+        // only `active` to go on, a dead channel B was invisible.
+        let mut eec = Eec::new();
+        let healthy = settle(&mut eec, &EecFaults::default(), 1.0);
+        assert!(healthy.channel_a_serviceable && healthy.channel_b_serviceable);
+
+        let mut eec = Eec::new();
+        let b_dead = settle(&mut eec, &EecFaults { channel_b_fault: 1.0, ..EecFaults::default() }, 1.0);
+        assert_eq!(b_dead.active, ActiveChannel::A, "A still flies the engine");
+        assert!(b_dead.channel_a_serviceable);
+        assert!(!b_dead.channel_b_serviceable, "but the EEC knows it has lost its standby channel");
+
+        let mut eec = Eec::new();
+        let a_dead = settle(&mut eec, &EecFaults { channel_a_fault: 1.0, ..EecFaults::default() }, 1.0);
+        assert!(!a_dead.channel_a_serviceable);
+        assert!(a_dead.channel_b_serviceable);
+    }
+
+    #[test]
     fn a_fuel_flow_disagree_is_flagged_independently_of_the_other_five_parameters() {
         let mut eec = Eec::new();
         let dt = 0.02;
-        let mut out = EecState { selected: [0.0; 5], disagree: [false; 5], active: ActiveChannel::A, fuel_flow_disagree: false };
+        let mut out = EecState { selected: [0.0; 5], disagree: [false; 5], active: ActiveChannel::A, fuel_flow_disagree: false, channel_a_serviceable: true, channel_b_serviceable: true };
         for _ in 0..150 {
             out = eec.step(truth(), 3.4, 1.0, &EecFaults::default(), dt);
         }

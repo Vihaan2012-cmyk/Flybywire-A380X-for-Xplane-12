@@ -75,3 +75,47 @@ switch `CPIOM-A1` attaches through). Final state: clean build, 0 warnings, all 5
 - [perf] `graph.rs` — `NetworkGraph` builds each side's adjacency once in `new` instead of rebuilding it inside
   every path search; a live network re-runs those searches for every virtual link on every frame.
 - [done] sourced-constants pass — ventilation.rs, live.rs — `TRIP_SPAN_K` is no longer free: the overheat ramp now begins at RTCA DO-160 Temperature and Altitude Category A1's +55 C operating high temperature (pressurised, temperature-controlled location), i.e. exactly where the equipment stops being qualified. The 70 C fully-tripped end stays GENERIC (DO-160G Table 4-1's short-time figures are not publicly reproduced). The module-to-bus and fan-to-bus allocations stay GENERIC with the search recorded: the segregation property is real (CS 25.1309/25.1360), the allocation is not public and FBW model no electrical supply for CPIOMs or bay fans.
+- [done] Redundancy made observable (deep failure audit: 93 of this area's 159 failures moved nothing published) —
+  `ventilation.rs` (`Fan::output_frac` made `pub`), `live.rs` (`Snapshot`, `tick`, `publish`, tests). Root cause: the
+  area only ever published a whole network side's boolean availability and two reference functions' rolled-up
+  status, so a single switch/port/cable/partition/babbling/fan fault that never happened to flip one of those two
+  coarse numbers was invisible, however correctly the model itself was applying it. New Vars, one per component the
+  matching `registry.rs` failure already names (all direct reads of that failure's own model field, no new state):
+  - `AVNCS_SWITCH_<name>_AVAILABLE` / `_HEALTH_FRAC` — per switch, both sides (`SwitchFaults.failure`).
+  - `AVNCS_SWITCH_<name>_PORT_<neighbour>_HEALTH_FRAC` — per switch port (`SwitchFaults.port_failure[neighbour]`).
+  - `AVNCS_CABLE_<a>_<b>_<A|B>_HEALTH_FRAC` — per physical segment (`LinkFaults.open`).
+  - `AVNCS_MODULE_<name>_PARTITION_<part>_AVAILABLE` — per ARINC 653 partition (`PartitionFaults.failure`), independent
+    of the module's own `_AVAILABLE` (partition-level fault containment).
+  - `AVNCS_MODULE_<name>_PORT_LOAD_FRAC_<A|B>` — `graph::PortLoad::offered_bps/capacity_bps` at the module's own
+    attach port, moved directly by `EndSystemFaults.babbling` even before it costs another VL a frame.
+  - `AVNCS_<bay>_FAN_PRIMARY_HEALTH_FRAC` / `_STANDBY_HEALTH_FRAC` — each fan's own `output_frac()`, since
+    `Bay::step` takes the *best* of the two and so never moves the bay's own `_AIRFLOW_FRAC` on a single fan failure.
+  - `AVNCS_MODULE_<name>_NETWORK_A_REACHABLE` / `_NETWORK_B_REACHABLE` / `_NETWORKS_UP` — whether *this* end system
+    (not the aircraft's network as a whole) can still reach another live one on each side, and the count 0..2. This
+    is the actual "one fault from losing the function" signal the audit's problem statement asks for:
+    `AFDX_NETWORK_<A|B>_AVAILABLE` only goes false once *every* pair is isolated on that side, so a healthy,
+    fully-redundant network and one running every function on a single network both read the same `1`. `NETWORKS_UP
+    == 1` is the state redundancy monitoring exists to catch.
+  - `AVNCS_VL_<name>_PATHS_UP` / `_PATHS_DESIGNED` — per virtual link, how many of the two networks currently carry
+    a real path from its source to every one of its destinations, against the two (`NetworkSide::BOTH.len()`) it is
+    always designed for.
+  Verified against the failure classes the audit named dead: switch (8), port (48), cable (24), partition (7) and
+  babbling (3) failures now each move their own new variable directly, independent of whether they lie on either
+  reference function's path (new tests: `a_single_port_failure_moves_that_ports_own_health_reading`,
+  `a_cable_and_a_switch_failure_each_move_their_own_component_reading`,
+  `a_partition_failure_moves_only_its_own_partition_variable`,
+  `a_babbling_end_system_moves_its_own_egress_port_load_fraction`). Bay-fan failures (4): confirmed still not
+  observable via `_AIRFLOW_FRAC` (by design — the bay genuinely does not care which fan is running) and now
+  observable via the new per-fan health Var (`a_single_fan_failure_moves_its_own_health_reading_even_though_the_
+  bays_airflow_does_not`). The redundancy pair the brief asked for explicitly —
+  `cutting_both_sides_of_a_modules_attachment_shows_redundancy_loss_then_function_loss` — cuts one side of
+  CPIOM-C1's own attachment cable (module and function both stay up, `NETWORKS_UP` drops 2 -> 1) and then the other
+  side too (function now genuinely lost). `registry.rs`'s alert triggers were checked against every Var now
+  published (`grep -n 'var(' registry.rs`): all four already read Vars this area publishes
+  (`AFDX_NETWORK_A/B_AVAILABLE`, `AVNCS_MODULE_<name>_AVAILABLE`, `AVNCS_<bay>_AIRFLOW_FRAC`) — no orphaned trigger
+  in this area. No new ECAM alert added for degraded-but-working redundancy: the real A380's ECAM does not
+  annunciate single-switch/port/cable-level AFDX degradation (that is CMS/BITE-level maintenance information, not a
+  crew message), and the existing NETWORK AFDX 1/2 FAULT alerts already cover the crew-relevant case (a whole
+  network side actually gone). The new Vars are for the EFB Study page and for `consequences::FunctionMonitor` (or
+  a future one) to reason about, not for a new crew-facing alert -- see the report handed back for this task for
+  the full reasoning.

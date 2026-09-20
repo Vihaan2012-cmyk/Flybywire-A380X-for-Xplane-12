@@ -83,6 +83,20 @@ registration (mandatory addendum) backfilled for each finished item.
   grounded addition), and a passenger oxygen/cabin-crew-call cross-check
   with `oxygen.rs`'s existing mask-deployment state.
 
+## 2026-09-20 — dead-failure audit follow-up (12 failures closed or explained)
+
+`deep::integration::failure_audit`'s sweep found 12 of this area's failures dead, both traced to the same root cause: `CabinCommands` (this area's own stand-in for inputs `Truth` did not carry) held `galley_demand_l_s`/`lav_demand_l_s`/`cargo_door_target_percent` at a permanent 0.0 default that nothing in `Truth` or the audit ever set, so the potable-water system never actually flowed and the cargo-door actuator never had anywhere to go. `Truth::controls` now carries both for real (`water_demand_l_s: [galley, lavatory]`, `cargo_door_commanded_open: [fwd, aft, bulk]`), so both fields were removed from `CabinCommands` entirely and `CabinLive::tick` reads the real values instead:
+
+- `water_inputs.galley_demand_l_s`/`lav_demand_l_s` now come from `truth.controls.water_demand_l_s[0]`/`[1]` (plus the waste system's own rinse draw, unchanged).
+- `door_inputs.cargo_door_target_percent` now comes from `truth.controls.cargo_door_commanded_open[0]` (the forward door — this model registers one cargo-door actuator as its representative class, per `registry.rs`), scaled to the 0..100 percent the actuator model expects and stored in a new `cargo_door_commanded_percent` field so `publish` (which only ever sees `&self`) can still report `CABIN_CARGO_DOOR_CMD:1`.
+
+Traced which of the 12 failures needed which half of the fix, by reading `water.rs::WaterSystem::step` directly rather than guessing:
+
+- **Needed real demand:** the potable water quantity sensor (`38_wtr.qty_sensor`) — with `water_l` never draining, "frozen at the last reading" and "tracking the real level" read identically (both ~100%). New test: `a_stuck_water_quantity_sensor_only_shows_once_real_demand_drains_the_tank`, driven purely through `Truth` (no `CabinCommands` write at all).
+- **Needed a real target:** both cargo-door actuator failures (jam, hydraulic loss) — a target that never moved off 0% meant a jam's `(1-jam)*100%` cap and a hydraulic loss's "cannot move at all" were both trivially satisfied already at rest. `a_jammed_cargo_door_actuator_caps_its_travel_and_reports_the_fault` (pre-existing) now drives this through `truth.controls.cargo_door_commanded_open` instead of the removed `CabinCommands` field; its assertions are unchanged.
+- **Already independently live (not part of the demand fix, checked by reading `water::WaterSystem::step`):** the three zone water-heater faults and both drain-mast heater faults are a standalone thermal balance against `heater_commanded`/OAT with no dependency on flow at all (`a_failed_drain_mast_heater_lets_the_mast_ice_up_in_cold_air`, pre-existing, still passes); the potable-water leak scales with `flow_fraction.max(pressure_ratio)`, so a pressurised tank leaks whether or not anything is drawing from it. If any of these five were still in the dead list, the cause is a different one this pass did not find (e.g. `bleed_available`'s own gauge-pressure threshold against the profiles' actual bleed pressures) and is not claimed fixed here.
+- The remaining waste-system failures (generator, level sensors, flush valves) are driven by `flush_commanded`, which stayed in `CabinCommands` — no real `Truth::controls` field exists for a passenger flushing a toilet, so those are left exactly as before (genuinely `d`, a state this pass does not reach, not touched to avoid a fake input).
+
 ## Live system (deep push, `live.rs`)
 
 - [done] `live.rs` — the area's live instance behind `crate::deep::live::Area`

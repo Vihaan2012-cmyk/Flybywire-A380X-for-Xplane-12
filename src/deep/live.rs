@@ -136,6 +136,21 @@ pub struct Truth {
     /// engine model (`physics::engine`'s IP8/HP6 port outputs).
     pub engine_bleed_pressure_pa: [f64; 4],
     pub engine_bleed_temp_k: [f64; 4],
+    /// Per engine: indicated oil pressure at the bearing feed manifold
+    /// (Pa above the chamber vents) and indicated tank oil temperature,
+    /// from this crate's own `physics::engine::oil` model.
+    ///
+    /// There is deliberately no oil *quantity* here: the engine's oil
+    /// model carries pressures, temperatures and flows but no tank level,
+    /// so a quantity would have to be invented. The sensors area has four
+    /// oil quantity transducers waiting on one.
+    pub engine_oil_pressure_pa: [f64; 4],
+    pub engine_oil_temp_c: [f64; 4],
+    /// Tyre inflation pressure per wheel, Pa absolute, from this crate's
+    /// own `physics::tyre` model (nitrogen, Gay-Lussac with carcass
+    /// temperature). 16 wheels: the four main legs' braked wheels. The nose
+    /// pair is not in that model, so a sensor on those has nothing to read.
+    pub tyre_pressure_pa: [f64; 16],
     /// APU: running, and its bleed available at the valve.
     pub apu_running: bool,
     pub apu_bleed_pressure_pa: f64,
@@ -309,6 +324,19 @@ pub struct Controls {
     /// `true` when the gear lever is selected down.
     pub gear_lever_down: bool,
     pub parking_brake_on: bool,
+    /// Nose-wheel tiller and body-gear steering command, degrees, `[nose,
+    /// body left, body right]`. Positive right.
+    pub steering_command_deg: [f64; 3],
+    /// Fuel jettison armed, and the two jettison nozzle valves selected.
+    pub jettison_armed: bool,
+    pub jettison_valve_selected: [bool; 2],
+    /// Engine feed cross-feed valves selected open, one per engine.
+    pub crossfeed_valve_selected: [bool; 4],
+    /// Cargo door commanded open fraction, `[fwd, aft, bulk]`.
+    pub cargo_door_commanded_open: [f64; 3],
+    /// Galley and lavatory draw, litres per second, as the cabin service
+    /// actually consumes it: `[galley, lavatory]`.
+    pub water_demand_l_s: [f64; 2],
     /// `[left, right]` brake pedal deflection, 0.0 released .. 1.0 full.
     pub brake_pedal_pos: [f64; 2],
     pub engine_master_on: [bool; 4],
@@ -352,6 +380,12 @@ impl Default for Controls {
             pack_pb_on: [true; 2],
             starter_engaged: [false; 4],
             rain_removal_selected: [false; 2],
+            steering_command_deg: [0.0; 3],
+            jettison_armed: false,
+            jettison_valve_selected: [false; 2],
+            crossfeed_valve_selected: [false; 4],
+            cargo_door_commanded_open: [0.0; 3],
+            water_demand_l_s: [0.0; 2],
             gear_door_commanded_open: [0.0; 3],
             gear_lever_down: true,
             parking_brake_on: true,
@@ -410,6 +444,12 @@ impl Default for Truth {
             engine_running: [false; 4],
             engine_bleed_pressure_pa: [101_325.0; 4],
             engine_bleed_temp_k: [288.15; 4],
+            // A cold aircraft's tyres sit at their service pressure; zero
+            // would read as sixteen flat tyres before the first frame.
+            tyre_pressure_pa: [crate::physics::tyre::COLD_PRESSURE_PA; 16],
+            // A cold engine's oil sits at ambient with the pump stopped.
+            engine_oil_pressure_pa: [0.0; 4],
+            engine_oil_temp_c: [15.0; 4],
             apu_running: false,
             apu_bleed_pressure_pa: 101_325.0,
             ac_bus_volts: [0.0; 4],

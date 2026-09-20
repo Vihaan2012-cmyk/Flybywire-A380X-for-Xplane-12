@@ -240,3 +240,41 @@ suffix is confirmed, rather than this module inventing a permanent parallel stat
   exist as a separate cockpit control (only the pushbutton is real, `docs/deep/
   truth-requests.md`).
   positions documented in `live::ControlAssumptions`).
+
+## 2026-09-20 — dead-failure audit follow-up
+
+- **ODLS threshold, form fixed**: `odls.rs`'s `THRESHOLD_ABOVE_AMBIENT_K` (ambient-relative) replaced
+  with two absolute set points, `THRESHOLD_WING_FUSELAGE_K` (~124 C) and `THRESHOLD_PYLON_STRUT_K`
+  (~200 C), assigned per zone in `network.rs::odls_threshold_k` (pylons + APU tail-cone = hot class,
+  wing leading edge = cool class), per `thermal_zones::PROGRESS.md`'s derivation. `OdlsOutputs`
+  gained `loop_a_fault`/`loop_b_fault` (published as `DEEP_PNEU_ODLS_<zone>_LOOP_A/B_FAULT`) so a
+  single open loop is visible even though it correctly cannot move the aggregate fault/trip alone
+  (the dual-loop masking the task named) — new tests in `odls.rs`.
+- **This area's own duct leaks now reach its own ODLS**: `thermal_zones` never consumed this area's
+  `zone_heat_w`, so a real leak/rupture here could move duct pressure/gas temperature but never the
+  bay temperature its own ODLS reads. `PneumaticDuctsLive::relax_own_zone_excess` adds a stored,
+  exponentially-lagged local hotspot excess (steady-state `zone_heat_w/(mdot_vent*cp)`, reusing
+  `thermal_zones`' own cited 0.5 kg/s pylon ventilation figure) on top of whatever `thermal_zones`
+  publishes. An earlier memoryless version of this (recomputed fresh each tick, no state) oscillated
+  violently in the closed loop with `leak::step`'s own delta-T (verified by instrumentation: 946 kW /
+  0 / 144 kW / 0 before settling) — the lagged, stateful version is unconditionally stable. New test:
+  `this_areas_own_engine_duct_rupture_now_reaches_its_own_odls`. Fixed
+  `arming_the_engine_bleed_duct_rupture_sags_the_duct_and_heats_the_pylon`'s setup to check heat
+  early (self-consistent cooling now makes the 100-tick number honestly smaller, the bay-cannot-
+  exceed-the-duct ceiling this same investigation names for the wing case below).
+- **`WINGLELEFT > 150 C` test**: left as is (still passes) — `thermal_zones`' own `WING_DUCT_LEAK_
+  MAX_HEAT_W` fixed-wattage form is that area's file, out of scope here; comment corrected to say so
+  and to stop citing the old relative-margin threshold.
+- **`PNEU_APU_BLEED_DEMAND_KG_S`** published (`NetworkOutputs::apu_bleed_demand_kg_s` = the real
+  precooler hot-side mdot, zero when bleed not selected) for `deep::apu`'s load-compressor coupling.
+  Could not confirm this also explains this area's own 3 "dead" APU precooler/FAV/sensor failures:
+  reading `precooler.rs::step` shows `mdot_hot` was already nonzero under `ground_apu`/
+  `apu_start_soak` before this change (bleed available, real orifice flow) — if those three are
+  still dead post-sweep, the cause is something else, not an unloaded path.
+- **Tyre pressure request (coordinator)**: `deep::gear_structure` does not model tyre pressure at
+  all; the real model (`physics::tyre::Tyres`, nitrogen/Gay-Lussac, per-wheel) already exists and
+  already publishes `TYRE_PRESSURE_PA:n` for all 16 wheels, but through the plugin's own Var/
+  `SimulatorReaderWriter` channel, not `Truth`. No deep area can see it without a `Truth` field
+  sourced from that model — not invented here.
+- **Fuel tanks / leak timing / controls wiring**: see `deep/fuel/PROGRESS.md`, `deep/cabin/
+  PROGRESS.md`, `deep/gear_structure/PROGRESS.md` (different areas, same task).

@@ -83,32 +83,41 @@ const ARC_FAULT_DI_DT_A_PER_S: f64 = 500.0;
 /// that no single energisation transient can ever reach it.
 const ARC_FAULT_CONFIRM_S: f64 = 0.1;
 
-/// SSPC time constant for the emulated I^2t curve: a microprocessor-timed
-/// curve is deliberately tighter/more repeatable than a bimetal's
-/// mechanical one (a real, documented SSPC advantage -- precise, consistent
-/// trip time against a bimetal's much wider manufacturing tolerance band).
-/// GENERIC values, chosen so the SSPC curve is visibly faster than the
-/// thermal one at the same overload ratio, not calibrated to a specific
-/// datasheet.
-const SSPC_TAU_S: f64 = 8.0;
+/// The trip element's own first-order thermal time constant, s: the single
+/// number that sets **both** how fast it heats toward its steady-state
+/// temperature rise under an overload and how fast it cools once the
+/// overload clears. One piece of metal has one such constant -- see
+/// [`Breaker::step`]'s own note on why this model has exactly one of them
+/// and not a separate "how fast does it trip" knob.
+///
+/// From it, the closed-form time to trip from cold at `r` times the rated
+/// current is `tau * ln(r^2 / (r^2 - 1))` (derived in [`Breaker::step`]).
+/// At `THERMAL_TAU_S` that is 5.8 s at 2x rated and 11.8 s at 1.5x --
+/// the same order as the one already-verified breaker curve in this plugin
+/// (`crate::physics::electrical::THERMAL_TRIP_K`, `docs/physics/
+/// electrical.md` section 6: 2x rated trips in about 10 s, asserted by
+/// `physics::electrical`'s own
+/// `a_moderate_overload_trips_on_the_thermal_curve_near_its_predicted_time`),
+/// which is the real precedent in this codebase this module's header cites
+/// and is inside the seconds-to-tens-of-seconds band a real aircraft
+/// thermal breaker's published time-current curve gives at 200 % rating.
+/// GENERIC in the sense that no per-part-number curve is public, but not
+/// free: it is pinned to that existing, tested curve.
 const THERMAL_TAU_S: f64 = 20.0;
 
-/// How much tighter the SSPC's own emulated I^2t curve is set than a
-/// bimetal's, as a multiplier on the rate its accumulator fills at the same
-/// overload. A bimetal breaker is manufactured to a wide trip-time
-/// tolerance band and has to be set generously so the slow end of that band
-/// still protects the wire; a microprocessor-timed curve has no such band
-/// and is set close to the wire's real withstand, so it clears the same
-/// overload sooner (the documented SSPC advantage this module's own
+/// The same constant for an SSPC's emulated thermal model: a
+/// microprocessor-timed curve is deliberately tighter and more repeatable
+/// than a bimetal's mechanical one (a real, documented SSPC advantage --
+/// precise, consistent trip time against a bimetal's much wider
+/// manufacturing tolerance band, which the bimetal part has to be set
+/// generously around so that the *slow* end of its band still protects the
+/// wire). GENERIC 8 s, a little under half [`THERMAL_TAU_S`]: the published
+/// tolerance band for this class of thermal part is roughly a factor of two
+/// wide, so an electronic curve with no such band clears the same overload
+/// in roughly half the time (2.3 s at 2x rated) -- what this module's own
 /// `an_sspc_trips_faster_than_a_thermal_breaker_at_the_same_overload`
-/// asserts). GENERIC 2x: the published tolerance band for this class of
-/// thermal part is roughly a factor of two wide.
-///
-/// Kept separate from [`SSPC_TAU_S`] on purpose: `tau` is the element's own
-/// cooling time constant, a physical property, and an electronic curve
-/// being *set tighter* is not the same statement as it *remembering
-/// longer*.
-const SSPC_CURVE_GAIN: f64 = 2.0;
+/// asserts.
+const SSPC_TAU_S: f64 = 8.0;
 
 /// A real SSPC's own microprocessor logic latches into a maintenance-only
 /// lockout after repeated trips in a short window, rather than letting the
@@ -334,6 +343,23 @@ impl Breaker {
         // to -- up to 40% low at full drift (GENERIC: a real drifted part
         // is out of tolerance, but a breaker that drifted further than that
         // would already have been pulled at the last maintenance check).
+        //
+        // 40% is deliberately kept, having been checked against what it has
+        // to reach: `catalog` sizes every breaker at `P/(V*pf)*1.25`, so a
+        // healthy circuit carries at most about 0.8x its own rating (0.79x
+        // is the measured worst case across every profile -- see
+        // `live::tests::no_healthy_circuit_settles_above_its_own_breakers_
+        // rating`). At full drift the effective rating is 0.6x, so that
+        // same normal load sits at 1.32x of it and trips in tens of
+        // seconds: the registered effect ("opens under a load it should
+        // carry") is reachable on every breaker actually carrying its own
+        // design load. What a 40% ceiling cannot do is nuisance-trip a
+        // circuit loaded under 60% of its rating -- but that is the right
+        // answer rather than a limitation: a breaker with twice the margin
+        // it needs genuinely is harder to nuisance-trip, and widening the
+        // ceiling until those trip too would be inventing a fault
+        // magnitude to make an entry in the catalogue light up.
+        //
         // The thermal ambient derate stacks on top of it; a real SSPC's
         // electronic curve does not need an ambient term (its own
         // datasheet-documented advantage: temperature-stable trip point).
@@ -370,16 +396,49 @@ impl Breaker {
             return self.trip(TripCause::ArcFault);
         }
 
-        // I^2t heat accumulator: heats with (I/Ir)^2 above 1, cools
-        // exponentially otherwise, so a brief inrush does not trip it but a
-        // sustained overload does -- the defining behaviour of a real
-        // thermal breaker (and of an SSPC's own emulated thermal model,
-        // which real parts run for exactly this reason: compatibility with
-        // downstream wiring's own I^2t withstand rating).
-        let (tau_s, gain) = if self.kind == BreakerKind::Thermal { (THERMAL_TAU_S, 1.0) } else { (SSPC_TAU_S, SSPC_CURVE_GAIN) };
-        let heat_in = if ratio > 1.0 { gain * (ratio * ratio - 1.0) } else { 0.0 };
-        let cool = self.heat / tau_s;
-        self.heat = (self.heat + (heat_in - cool) * dt).max(0.0);
+        // I^2t thermal element, as the standard first-order thermal
+        // replica of the real piece of metal.
+        //
+        // `heat` is the element's own temperature rise above its bay,
+        // normalised so that 1.0 is the rise at which the mechanism trips
+        // (`REFERENCE_AMBIENT_C`'s own note: the ambient derate above has
+        // already moved the rating, so this datum is fixed). Ohmic
+        // self-heating makes the *steady-state* rise proportional to
+        // I^2, so in these units the element is driven toward `ratio^2`
+        // with its own time constant:
+        //
+        //     d(heat)/dt = (ratio^2 - heat) / tau
+        //
+        // which is a first-order lag and is stepped below by its exact
+        // exponential solution, so the answer does not depend on the frame
+        // rate (`docs/deep/BRIEF.md`'s own convention). Everything a real
+        // breaker does falls out of it rather than being asserted:
+        //
+        // * below rated current the element settles at `ratio^2 < 1` and
+        //   never trips, however long the load is carried;
+        // * a brief inrush, however large, only moves `heat` by the
+        //   fraction of `tau` it lasts, so it does not trip;
+        // * a sustained overload trips, from cold, at
+        //   `t = tau * ln(r^2 / (r^2 - 1))` -- an inverse-time curve,
+        //   asymptotically slow just above rated and very fast at several
+        //   times rated, which is the shape of every published breaker
+        //   time-current curve;
+        // * and the element *saturates* at `ratio^2` rather than
+        //   integrating without bound, which is what lets `weld_factor`
+        //   below mean "welded shut" and not merely "slow".
+        //
+        // There is deliberately no second, independent "time to trip"
+        // constant: one piece of metal has one thermal time constant, and
+        // an earlier version of this model that filled the accumulator at
+        // `(ratio^2 - 1)` per *second* regardless of `tau` was tripping a
+        // 2x overload in a third of a second -- far outside any published
+        // curve, and enough to open 113 of the 399 catalogue breakers on a
+        // completely healthy aircraft, every one of them on the ordinary
+        // switch-on inrush of its own load.
+        let tau_s = if self.kind == BreakerKind::Thermal { THERMAL_TAU_S } else { SSPC_TAU_S };
+        let target = ratio * ratio;
+        let decay = (-dt / tau_s.max(1e-6)).exp();
+        self.heat = (target + (self.heat - target) * decay).max(0.0);
 
         if self.heat >= weld_factor {
             self.trip(TripCause::Thermal)

@@ -142,15 +142,33 @@ fn register_extinguishing(r: &mut Registry) {
     for eng in 1..=4u16 {
         for bottle in 1..=2u16 {
             n += 1;
-            register_bottle(r, &mut n, &format!("26_fire.eng{eng}_bottle{bottle}"), &format!("ENG {eng} fire bottle {bottle}"));
+            register_bottle(r, &mut n, &format!("26_fire.eng{eng}_bottle{bottle}"), &format!("ENG {eng} fire bottle {bottle}"), None);
         }
     }
     n += 1;
-    register_bottle(r, &mut n, "26_fire.apu_bottle1", "APU fire bottle");
+    register_bottle(r, &mut n, "26_fire.apu_bottle1", "APU fire bottle", None);
+    // The cargo bottles' squib failure is registered honestly, not
+    // silently reused from the engine/APU wording: `live.rs`'s
+    // `FireIceLive::step_bottles` passes a permanently-false fire command
+    // for both cargo bottles (`Self::NO_CARGO_FIRE_COMMAND`), because no
+    // cargo fire pushbutton or agent pushbutton exists anywhere in
+    // `Truth::controls` in this port (`Controls`'s own doc,
+    // `docs/deep/truth-requests.md`) -- unlike the engine/APU squibs, which
+    // this same pass wired to the real fire/agent pushbuttons. With no
+    // command that can ever discharge the bottle, whether the squib would
+    // fail to fire is unobservable; the leak failure on the same component
+    // is unaffected (it drains independently of any command) and its own
+    // low-pressure switch is published. This is not this pass's decision to
+    // fix by inventing a control: `Truth`/`Controls` live outside this
+    // directory, so the honest fix is to say so here and name what would be
+    // needed (`cargo_fire_pb_released`/`cargo_agent_pb_pressed`, one pair
+    // per hold, mirroring the engine/APU fields already added) rather than
+    // to leave the generic engine/APU wording implying it already works.
+    const CARGO_SQUIB_EFFECT: &str = "would reduce/zero the agent delivered when the bottle is fired, but no cargo fire/agent pushbutton exists in this port's Truth::controls (see docs/deep/truth-requests.md), so the bottle can never actually be commanded to discharge and this failure is currently unobservable -- unlike the engine/APU squibs, which the real fire/agent pushbuttons now drive";
     n += 1;
-    register_bottle(r, &mut n, "26_fire.cargo_fwd_bottle", "Cargo FWD suppression bottle");
+    register_bottle(r, &mut n, "26_fire.cargo_fwd_bottle", "Cargo FWD suppression bottle", Some(CARGO_SQUIB_EFFECT));
     n += 1;
-    register_bottle(r, &mut n, "26_fire.cargo_aft_bottle", "Cargo AFT suppression bottle");
+    register_bottle(r, &mut n, "26_fire.cargo_aft_bottle", "Cargo AFT suppression bottle", Some(CARGO_SQUIB_EFFECT));
 
     // Cargo optical smoke detectors.
     for bay in ["fwd", "aft"] {
@@ -203,7 +221,7 @@ fn register_extinguishing(r: &mut Registry) {
     });
 }
 
-fn register_bottle(r: &mut Registry, n: &mut u16, component_id: &str, title: &str) {
+fn register_bottle(r: &mut Registry, n: &mut u16, component_id: &str, title: &str, squib_effect_override: Option<&str>) {
     let leak_id = failure_id(Area::FireIce, ATA_FIRE_PROTECTION, *n);
     *n += 1;
     let squib_id = failure_id(Area::FireIce, ATA_FIRE_PROTECTION, *n);
@@ -237,7 +255,7 @@ fn register_bottle(r: &mut Registry, n: &mut u16, component_id: &str, title: &st
         component: component_id.to_string(),
         model_field: "deep::fire_ice::extinguishing::BottleFaults.squib_failure".into(),
         magnitude: "0..1, reduces the achieved discharge orifice area; at 1.0 the disc never ruptures at all".into(),
-        effect: "reduced or (at 1.0) zero agent delivered into the zone when fired, regardless of a correct fire pushbutton/agent pushbutton sequence".into(),
+        effect: squib_effect_override.unwrap_or("reduced or (at 1.0) zero agent delivered into the zone when fired, regardless of a correct fire pushbutton/agent pushbutton sequence").into(),
     });
 }
 
@@ -527,7 +545,18 @@ fn register_ecam(r: &mut Registry) {
         let open_b = failure_id(Area::FireIce, ATA_FIRE_PROTECTION, (zi as u16) * 4 + 3);
         let short_b = failure_id(Area::FireIce, ATA_FIRE_PROTECTION, (zi as u16) * 4 + 4);
         r.alert(
-            EcamAlert::new(&format!("{}_FIRE_DET_FAULT", zone.to_uppercase()), ATA_FIRE_PROTECTION, &format!("{} FIRE DET FAULT", ZONE_TITLES[zi]), Level::Caution, any(vec![var(&format!("FIRE_LOOP_A_{}_FAULT", zone.to_uppercase())).on(), var(&format!("FIRE_LOOP_B_{}_FAULT", zone.to_uppercase())).on()]))
+            EcamAlert::new(&format!("{}_FIRE_DET_FAULT", zone.to_uppercase()), ATA_FIRE_PROTECTION, &format!("{} FIRE DET FAULT", ZONE_TITLES[zi]), Level::Caution, any(vec![
+                var(&format!("FIRE_LOOP_A_{}_FAULT", zone.to_uppercase())).on(),
+                var(&format!("FIRE_LOOP_B_{}_FAULT", zone.to_uppercase())).on(),
+                // A lone shorted loop is not a `loop_x_fault` (it reads
+                // indistinguishably from real heat), but it *is* a real
+                // disagreement between the two loops -- exactly what the
+                // dual-loop architecture exists to let the crew see. Without
+                // this arm, `open_a`/`open_b` were the only reachable causes
+                // and `short_a`/`short_b` (named in `raised_by` below) could
+                // never actually move this alert's trigger.
+                var(&format!("FIRE_LOOP_{}_DISAGREE", zone.to_uppercase())).on(),
+            ]))
                 .confirm(5.0)
                 .status_line(&format!("{} fire detection degraded to single loop", ZONE_TITLES[zi]))
                 .raised_by(&[open_a, short_a, open_b, short_b]),

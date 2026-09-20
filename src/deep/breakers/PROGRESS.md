@@ -329,3 +329,4 @@ Worked jointly across `deep::breakers` (this directory) and
   "a breaker in series with a source's own output", which
   `deep::electrical::network` does not have today (`Load`/`Source` are
   the only two node types). Out of scope for this pass.
+- [done] phantom trips: the I^2t element had no time constant (filled at (r^2-1) per second), so an ordinary switch-on inrush opened 113 of 399 breakers on a healthy aircraft -- replaced with the first-order thermal replica `d(heat)/dt = (ratio^2 - heat)/tau`, exact-exponential stepped; kept the 40% calibration-drift ceiling and documented why -- trip.rs, live.rs -- new guard `a_healthy_aircraft_trips_no_breaker_in_any_state_over_a_long_run` (11 states x 2 frame lengths x minutes) plus `no_healthy_circuit_settles_above_its_own_breakers_rating`

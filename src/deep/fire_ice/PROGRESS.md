@@ -187,3 +187,41 @@ OVERHEAT}`, `ANTI_ICE_{WING_L,WING_R}_OVERHEAT`, `WINDOW_HEAT_{L,R}_FAULT`,
   leading edge despite the crew selecting anti-ice on, and a healthy valve still stays shut with
   nothing selected. Still missing from `Truth`: no cargo-bay fire/agent pushbutton exists in
   this port, so cargo bottles still only leak.
+
+- [done] Loop-disagree pass (`failure_audit.rs` finding: "a shorted engine fire
+  loop is completely silent") — `fire_loops.rs`'s `ZoneFireStatus` now carries
+  each loop's own raw `fire_signal` (`loop_a_signal`/`loop_b_signal`) and a
+  `loop_disagree()` helper, alongside the pre-existing `loop_x_fault` (which a
+  short correctly never sets, since it is indistinguishable from real heat).
+  `live.rs` publishes `FIRE_LOOP_A/B_<ZONE>_FIRE` and `FIRE_LOOP_<ZONE>_
+  DISAGREE` for all 9 zones, and `registry.rs`'s `<ZONE> FIRE DET FAULT`
+  Caution now also triggers on the disagreement, which is what makes the 18
+  previously-inert loop *short-circuit* failures (one per loop per zone) move
+  something published for the first time -- AND logic still correctly
+  withholds the zone's own fire warning for a single loop. New tests in both
+  files. Note for whoever reads the failure_audit's "8 ENG n FAN/CORE FIRE DET
+  FAULT alerts" line: those alerts belong to `engine_accessories::registry`'s
+  own separate FAN/CORE fire-detection model (`engine_accessories::nacelle::
+  fire_detection`, its own `loop_disagree`, its own `A32NX_ENG_n_{FAN,CORE}_
+  FIRE_LOOP_DISAGREE` trigger var), which is still entirely unwired into that
+  area's own live system -- a different model in a directory outside this
+  pass's scope, not something this fix touches or can reach into.
+
+- [done] Cargo bottle fire-command decision (`failure_audit.rs` finding: "cargo
+  fire bottles can never be fired") — the literal `false` `step_bottles` used
+  to pass as both cargo bottles' fire command is now a named, fully-documented
+  constant, `FireIceLive::NO_CARGO_FIRE_COMMAND`. Decision made honestly, not
+  patched over: no cargo fire/agent pushbutton exists anywhere in `Truth::
+  controls` in this port (`Controls`'s own doc, `docs/deep/truth-requests.md`),
+  and `Truth`/`Controls` live in `src/deep/live.rs`, outside this directory, so
+  adding one is not this pass's call. `registry.rs`'s two cargo squib
+  `FailureDef.effect` strings now say plainly that the failure is currently
+  unobservable for want of that command (previously identical wording to the
+  now-real engine/APU squibs, which is what made this misleading), and name
+  what `Truth` would need (`cargo_fire_pb_released`/`cargo_agent_pb_pressed`,
+  mirroring the engine/APU fields). The bottles' *leak* failures are
+  unaffected (they drain independently of any fire command) and now publish a
+  real low-pressure switch (`FIRE_BOTTLE_CARGO_{FWD,AFT}_LOW_PRESSURE`), which
+  they did not before -- so of the 4 cargo bottle failures, the 2 leaks are
+  now live and the 2 squibs are honestly documented as inert rather than
+  silently assumed to work.

@@ -182,6 +182,10 @@ struct EngineIds {
     n2_pct: VariableIdentifier,
     n3_pct: VariableIdentifier,
     state: VariableIdentifier,
+    /// `GENERAL ENG OIL PRESSURE:n` / `... OIL TEMPERATURE:n`, which
+    /// `engine_commands.rs` writes straight from `physics::engine::oil`.
+    oil_pressure_psi: VariableIdentifier,
+    oil_temp_c: VariableIdentifier,
     ip_port_pressure_pa: VariableIdentifier,
     ip_port_temp_k: VariableIdentifier,
     hp_port_pressure_pa: VariableIdentifier,
@@ -214,6 +218,8 @@ impl EngineIds {
             n2_pct: vars.get(format!("ENGINE_N2:{n}")),
             n3_pct: vars.get(format!("ENGINE_N3:{n}")),
             state: vars.get(format!("ENGINE_STATE:{n}")),
+            oil_pressure_psi: vars.get(format!("GENERAL ENG OIL PRESSURE:{n}")),
+            oil_temp_c: vars.get(format!("GENERAL ENG OIL TEMPERATURE:{n}")),
             ip_port_pressure_pa: vars.get(format!("ENGINE_IP_PORT_PRESSURE_PA:{n}")),
             ip_port_temp_k: vars.get(format!("ENGINE_IP_PORT_TEMP_K:{n}")),
             hp_port_pressure_pa: vars.get(format!("ENGINE_HP_PORT_PRESSURE_PA:{n}")),
@@ -319,6 +325,9 @@ struct Ids {
     dc_bus_potential: [VariableIdentifier; 2],
     /// Green and yellow, in `Truth::hydraulic_pressure_pa`'s order.
     hydraulic_pressure_psi: [VariableIdentifier; 2],
+    /// `TYRE_PRESSURE_PA:n`, which `physics::tyre` writes from its own
+    /// per-wheel nitrogen model.
+    tyre_pressure_pa: [VariableIdentifier; 16],
     surfaces: SurfaceIds,
     controls: ControlIds,
 }
@@ -456,6 +465,7 @@ impl DeepLayer {
             ac_bus_potential: [1, 2, 3, 4].map(|n| vars.get(format!("ELEC_AC_{n}_BUS_POTENTIAL"))),
             dc_bus_potential: [1, 2].map(|n| vars.get(format!("ELEC_DC_{n}_BUS_POTENTIAL"))),
             hydraulic_pressure_psi: ["GREEN", "YELLOW"].map(|c| vars.get(format!("HYD_{c}_SYSTEM_1_SECTION_PRESSURE"))),
+            tyre_pressure_pa: std::array::from_fn(|i| vars.get(format!("TYRE_PRESSURE_PA:{}", i + 1))),
             surfaces: SurfaceIds::new(vars),
             controls: ControlIds::new(vars),
         };
@@ -535,12 +545,16 @@ impl DeepLayer {
         let mut engine_hp_port_pressure_pa = default.engine_hp_port_pressure_pa;
         let mut engine_hp_port_temp_k = default.engine_hp_port_temp_k;
         let mut engine_fuel_flow_kg_s = [0.0; 4];
+        let mut engine_oil_pressure_pa = default.engine_oil_pressure_pa;
+        let mut engine_oil_temp_c = default.engine_oil_temp_c;
         let mut controls = default.controls;
         for (i, e) in self.ids.engines.iter().enumerate() {
             engine_n1_frac[i] = vars.read(&e.n1_pct) / 100.0;
             engine_n2_frac[i] = vars.read(&e.n2_pct) / 100.0;
             engine_n3_frac[i] = vars.read(&e.n3_pct) / 100.0;
             engine_running[i] = vars.read(&e.state) == ENGINE_STATE_ON;
+            engine_oil_pressure_pa[i] = vars.read(&e.oil_pressure_psi) * PSI_TO_PA;
+            engine_oil_temp_c[i] = vars.read(&e.oil_temp_c);
             // `engine_commands.rs:466`: the IP port feeds the customer
             // bleed unless the HP valve is open.
             let from_ip = vars.read(&e.hp_valve_open) == 0.0;
@@ -708,6 +722,20 @@ impl DeepLayer {
             engine_running,
             engine_bleed_pressure_pa,
             engine_bleed_temp_k,
+            engine_oil_pressure_pa,
+            engine_oil_temp_c,
+            // `physics::tyre` writes these every frame from its own
+            // per-wheel nitrogen model; a wheel it has not written yet
+            // reads its service pressure, not zero, because zero is a flat
+            // tyre rather than an absent reading.
+            tyre_pressure_pa: std::array::from_fn(|i| {
+                let p = vars.read(&self.ids.tyre_pressure_pa[i]);
+                if p > 0.0 {
+                    p
+                } else {
+                    default.tyre_pressure_pa[i]
+                }
+            }),
             apu_running: vars.read(&self.ids.apu_available) != 0.0,
             apu_bleed_pressure_pa,
             ac_bus_volts: std::array::from_fn(|i| vars.read(&self.ids.ac_bus_potential[i])),

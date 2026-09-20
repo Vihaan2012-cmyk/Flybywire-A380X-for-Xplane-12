@@ -113,6 +113,28 @@ const POWERED_VOLTAGE_FRACTION: f64 = 0.5;
 /// a load right at its own dropout point chattering on and off as its own
 /// switch-on inrush sags the bus back below the threshold it just cleared.
 const UNDERVOLTAGE_RESTART_MARGIN: f64 = 1.05;
+/// How long a load that has dropped out on a genuine under-voltage
+/// condition stays off before it is even allowed to try
+/// [`UNDERVOLTAGE_RESTART_MARGIN`] again, s.
+///
+/// A voltage margin alone is not enough hysteresis, because the voltage it
+/// is measured against is the one the bus sits at *with this load already
+/// off*: an under-supplied bus therefore always looks recovered the instant
+/// the load stops loading it, the load comes straight back, its own inrush
+/// sags the bus again, and the pair chatter at exactly the frame rate --
+/// which on a cold and dark aircraft restarted a dozen motor loads' inrush
+/// on every single frame and, entirely correctly, cooked their breakers
+/// open on the resulting sustained overcurrent. A real under-voltage
+/// lockout is a timer as well as a comparator for this exact reason.
+///
+/// GENERIC 5 s, but bounded at both ends rather than picked: it has to be
+/// comfortably longer than the longest switch-on inrush in `loads.rs`
+/// (2.0 s, the resistive heaters' cold-resistance transient), so that a
+/// restart is always attempted against a settled bus and never against the
+/// tail of the transient that caused the dropout; and short enough that a
+/// genuine recovery -- a generator coming on line, a tie closing -- is
+/// picked up far faster than a crew could act on it.
+const UNDERVOLTAGE_LOCKOUT_S: f64 = 5.0;
 /// A `high_resistance` (overheat) load fault's ceiling: at full severity the
 /// load draws this much *extra* real power on top of its own rated demand
 /// (GENERIC: a badly-degraded but not yet fully shorted winding/connector
@@ -706,6 +728,11 @@ pub struct Load {
     /// clears that raised bar, at which point it resumes immediately and
     /// the latch clears.
     undervoltage_latched: bool,
+    /// Time left on this load's own under-voltage lockout, s (see
+    /// [`UNDERVOLTAGE_LOCKOUT_S`]): the comparator's timer half. Zero
+    /// whenever the load is free to come back the moment a feed clears
+    /// [`Load::undervoltage_threshold`].
+    undervoltage_lockout_s: f64,
 }
 
 impl Load {
@@ -719,20 +746,51 @@ impl Load {
     /// (see [`LoadFeed`]'s own doc) -- every real dual/triple-fed A380 LRU
     /// this catalogue models uses this constructor.
     pub fn new_multi_feed(spec: LoadSpec, feeds: Vec<LoadFeed>) -> Self {
-        Self { spec, feeds, commanded_on: true, faults: LoadFaults::default(), time_energized_s: 0.0, was_on: false, current_a: 0.0, powered: false, active_feed: None, undervoltage_latched: false }
+        Self { spec, feeds, commanded_on: true, faults: LoadFaults::default(), time_energized_s: 0.0, was_on: false, current_a: 0.0, powered: false, active_feed: None, undervoltage_latched: false, undervoltage_lockout_s: 0.0 }
     }
 
     fn health(&self) -> f64 {
         (1.0 - self.faults.open_circuit.clamp(0.0, 1.0)).max(0.0)
     }
 
-    fn inrush_multiplier(&self) -> f64 {
+    /// The inrush multiple **averaged over this frame**, not sampled at its
+    /// leading edge.
+    ///
+    /// The inrush itself is an exact `exp(-t / tau)` decay from
+    /// `inrush_multiple` back to 1x, with `tau = inrush_duration_s / 3`.
+    /// Sampling that at the *start* of each frame and holding it for the
+    /// whole frame makes the answer depend on the frame rate: a 0.5 s motor
+    /// inrush sampled at its peak and held for a 1 s frame reports about
+    /// twice the charge that actually flowed, and everything downstream
+    /// that integrates current over time -- above all `deep::breakers`'
+    /// I^2t trip elements, which sit in series with this load's own breaker
+    /// -- then sees a transient that never happened. (That is exactly how a
+    /// healthy aircraft came to trip 113 of its 399 breakers at a 1 s step
+    /// and none at 0.05 s.)
+    ///
+    /// The mean of the decay over `[t, t + dt]` has a closed form, so this
+    /// costs one extra `exp` and is exact at any frame length:
+    ///
+    ///     mean = 1 + (m - 1) * (tau / dt) * (exp(-t/tau) - exp(-(t+dt)/tau))
+    ///
+    /// It conserves the inrush's own charge exactly -- summed over any
+    /// partition of the transient it gives the same integral -- and tends
+    /// to the instantaneous value as `dt` tends to zero.
+    fn inrush_multiplier(&self, dt_s: f64) -> f64 {
         if self.spec.inrush_duration_s <= 0.0 || self.spec.inrush_multiple <= 1.0 {
-            1.0
-        } else {
-            let tau = (self.spec.inrush_duration_s / 3.0).max(1.0e-6);
-            1.0 + (self.spec.inrush_multiple - 1.0) * (-self.time_energized_s / tau).exp()
+            return 1.0;
         }
+        let tau = (self.spec.inrush_duration_s / 3.0).max(1.0e-6);
+        let t = self.time_energized_s.max(0.0);
+        let start = (-t / tau).exp();
+        if dt_s <= 0.0 {
+            // A zero-length frame has no average to take; report the
+            // instantaneous value, which is what a consumer of a zero-dt
+            // tick means by "the current right now".
+            return 1.0 + (self.spec.inrush_multiple - 1.0) * start;
+        }
+        let end = (-(t + dt_s) / tau).exp();
+        1.0 + (self.spec.inrush_multiple - 1.0) * (tau / dt_s) * (start - end)
     }
 
     /// Fan/pump affinity-law scaling for the small subset of loads with a
@@ -783,6 +841,15 @@ impl Load {
         }
     }
 
+    /// Whether this load's own under-voltage lockout is still counting down
+    /// (see [`UNDERVOLTAGE_LOCKOUT_S`]). Held constant for the whole tick --
+    /// it is only stepped in [`Load::step`] -- so every relaxation sweep
+    /// within one tick sees the same answer and the solve cannot chatter
+    /// between including and excluding the load.
+    fn undervoltage_locked_out(&self) -> bool {
+        self.undervoltage_lockout_s > 0.0
+    }
+
     /// Picks the first (highest-priority) feed whose own breaker is closed
     /// and whose bus voltage clears this load's own under-voltage threshold
     /// (raised while [`Load::undervoltage_latched`]) -- the real behaviour
@@ -793,6 +860,9 @@ impl Load {
     /// logic. Returns the winning feed's index into `self.feeds` and that
     /// bus's voltage.
     fn select_feed(&self, voltages: &[f64], breakers: &[Breaker]) -> Option<(usize, f64)> {
+        if self.undervoltage_locked_out() {
+            return None;
+        }
         let threshold = self.undervoltage_threshold();
         for (i, feed) in self.feeds.iter().enumerate() {
             if feed.breaker >= breakers.len() || !breakers[feed.breaker].closed {
@@ -828,7 +898,7 @@ impl Load {
             // up here.
             return (0.0, self.short_conductance());
         }
-        let base_p = self.spec.rated_power_w * health * self.inrush_multiplier() * self.frequency_multiplier(freq_hz);
+        let base_p = self.spec.rated_power_w * health * self.inrush_multiplier(dt_s) * self.frequency_multiplier(freq_hz);
         let hr = self.faults.high_resistance.clamp(0.0, 1.0);
         let p = base_p * (1.0 + hr * HIGH_RESISTANCE_MAX_EXTRA_FRACTION);
         (p, self.short_conductance())
@@ -839,7 +909,13 @@ impl Load {
     /// whichever feed (if any) is presently live. Call once per tick, after
     /// [`Network::step`]'s relaxation sweep has settled `voltages`.
     pub fn step(&mut self, voltages: &[f64], frequencies: &[f64], breakers: &[Breaker], dt_s: f64, tick: u64) -> LoadOutputs {
-        let Some((feed_idx, v)) = self.select_feed(voltages, breakers) else {
+        // Selected against exactly the state the relaxation sweep above
+        // saw, *then* the lockout timer is stepped -- once per tick, here,
+        // and never inside `select_feed` -- so the sweep and this commit
+        // cannot disagree about whether this load was on the bus.
+        let selection = self.select_feed(voltages, breakers);
+        self.undervoltage_lockout_s = (self.undervoltage_lockout_s - dt_s.max(0.0)).max(0.0);
+        let Some((feed_idx, v)) = selection else {
             // No feed can supply this load right now. Distinguish "every
             // feed's breaker is simply open" (not a voltage fault, no latch)
             // from "at least one feed's breaker is closed but its bus is
@@ -852,8 +928,13 @@ impl Load {
                 .filter(|f| f.breaker < breakers.len() && breakers[f.breaker].closed)
                 .map(|f| voltages[f.bus.index()])
                 .fold(0.0_f64, f64::max);
-            if best_energised_feed_voltage > 0.0 {
+            if best_energised_feed_voltage > 0.0 && !self.undervoltage_latched {
+                // The *edge*: this is the tick the load actually dropped
+                // out, so this is where its lockout timer starts. Starting
+                // it every tick the load is latched would never let it
+                // expire.
                 self.undervoltage_latched = true;
+                self.undervoltage_lockout_s = UNDERVOLTAGE_LOCKOUT_S;
             }
             self.was_on = false;
             self.time_energized_s = 0.0;
