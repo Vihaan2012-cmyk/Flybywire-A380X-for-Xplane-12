@@ -153,3 +153,22 @@ OVERHEAT}`, `ANTI_ICE_{WING_L,WING_R}_OVERHEAT`, `WINDOW_HEAT_{L,R}_FAULT`,
 4. Cross-feed (`extinguishing::CrossFeed`) is modelled as a routing
    decision but not yet exercised end-to-end with two real `Bottle`/zone
    pairs in one test.
+
+- [done] live system — `live.rs` (`live_system() -> Box<dyn deep::live::Area>`), `mod.rs` —
+  owns the nine `ZoneDetector`/`ZoneCombustion`/`ZoneConcentration` sets, 8 engine bottles +
+  APU bottle + 2 cargo suppression systems, both cargo smoke detectors, the lavatory link, 2
+  wing + 4 nacelle anti-ice surfaces, 8 probe heaters, 2 window heaters, 2 rain-removal
+  systems and the wing/nacelle icing surfaces. Driven from `Truth`: the icing environment via
+  `integration::weather_truth`'s real cloud sample, `engine_running`/`apu_running` as the only
+  ignition sources, `on_ground` for the APU's automatic agent discharge, and
+  `precipitation_on_aircraft_ratio` x TAS for the windshield water catch. Consumes all 36 loop
+  failures, all 9 leak sources, all 22 bottle/squib failures, both smoke detectors, the
+  lavatory link and all 50 ATA 30 failures. Publishes `FIRE_DETECTED_*`, `FIRE_LOOP_A/B_*_FAULT`,
+  `FIRE_BOTTLE_ENG<n>_<b>_LOW_PRESSURE`, `FIRE_SQUIB_*_IS_DISCHARGED`, `CARGO_<bay>_SMOKE_DETECTED`,
+  `ANTI_ICE_*_VALVE_OPEN`/`_OVERHEAT`, `PROBE_HEAT_*_FAULT`, `WINDOW_HEAT_*_FAULT` and the
+  underlying temperatures/ice thicknesses. 11 tests.
+  Still missing from `Truth`: fire/agent pushbuttons (only bottle *leaks* and the APU ground
+  discharge are observable), wing/nacelle anti-ice selection, rain-removal selection, and a
+  cabin/lavatory local temperature. No bulk hold exists in `fire_loops::ZONES`, so
+  `CARGO_BULK_SMOKE_DETECTED` is not published here (that alert reaches its trigger through
+  `thermal_zones`' contribution instead).

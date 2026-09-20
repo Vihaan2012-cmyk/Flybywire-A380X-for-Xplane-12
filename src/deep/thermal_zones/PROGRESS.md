@@ -80,3 +80,15 @@ once wired in.
 - More `ThermalComponent` registrations per zone (only 5 representative ones are registered in
   `topology_a380::build()`; every zone could plausibly host one) if another agent's failure needs
   a specific one that does not exist yet.
+
+- [done] live system — `live.rs` (`live_system() -> Box<dyn deep::live::Area>`), `mod.rs` —
+  owns one `topology_a380::build()` network + its `ThermalDamageRegistry`, stepped from `Truth`
+  (outside air from `environment`, electric extract fans gated on any main AC bus >= 100 V).
+  Consumes every failure this area registers (21/1-7, 26/1-8, 30/1-10, 32/1-3, 36/1-4, 49/1,
+  53/1) onto the exact `model_field` each names. Publishes
+  `THERMAL_ZONE_<NAME>_TEMPERATURE_C` / `_STRUCTURE_TEMPERATURE_C` / `_SMOKE_CONCENTRATION`
+  for all 26 zones and `THERMAL_COMPONENT_<NAME>_DAMAGE` for all 5 registered components (83
+  variables). 9 tests, including failure-to-published-variable tests for the cargo fire, the
+  avionics fan, the crown blanket, a nacelle fire and a vent-scoop blockage.
+  Still missing from `Truth`: solar irradiance (solar load passes 0), commanded gear-door
+  position (the ATA 32 jam latch is implemented but has nothing to diverge from).

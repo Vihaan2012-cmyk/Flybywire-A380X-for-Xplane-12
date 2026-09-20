@@ -196,3 +196,18 @@ suffix is confirmed, rather than this module inventing a permanent parallel stat
   (currently this network takes the regulated bleed condition as a fixed external input,
   per its own documented scope boundary) — would need this directory to also model the HP/PR
   valve stage, currently left to FBW's own ported systems.
+
+- [done] live system — `live.rs` (`live_system() -> Box<dyn deep::live::Area>`), `mod.rs`,
+  plus additive outputs on `network::NetworkOutputs` (precooler outlet temperatures, duct gas
+  temperatures, and a refresh of the engine-duct pressures after the cross-bleed block so the
+  published value is post-cross-bleed). Owns one `DuctNetwork` driven from `Truth`: ambient,
+  the engine bleed port as the IP8 tap, fan-duct cooling air derived from `engine_n1_frac` and
+  ambient density against the public Trent 900 bypass flow, and the APU's load-compressor
+  discharge temperature from its own published pressure ratio. Consumes all 35 registered
+  failures (36/1-32, 30/1-3). Publishes `DEEP_PNEU_ODLS_<zone>_TRIP`/`_FAULT` (7 zones),
+  `DEEP_PNEU_ENG_<n>_PRECOOLER_OVHT`, `DEEP_PNEU_APU_PRECOOLER_OVHT`, isolation states, every
+  duct pressure/temperature, valve position and per-zone leak heat/jet flux. 8 tests.
+  Still missing from `Truth`: separate HP6 port conditions (the HP branch is held shut rather
+  than fed a fabricated pressure), the zone air temperatures ODLS watches (every zone is given
+  the recovery temperature), and the bleed/cross-bleed/pack/WAI/starter selections (interim
+  positions documented in `live::ControlAssumptions`).

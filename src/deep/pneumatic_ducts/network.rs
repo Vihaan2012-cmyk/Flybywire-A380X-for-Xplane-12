@@ -313,6 +313,19 @@ pub struct NetworkOutputs {
     pub hyd_reservoir_pressure_pa: [f64; 2],
     pub engine_precooler_overtemp: [bool; 4],
     pub apu_precooler_overtemp: bool,
+    /// Each precooler's own delivered outlet temperature, K -- the
+    /// quantity its fouling/FAV/sensor faults actually act on, and what a
+    /// bleed page or Study panel shows. (`overtemp` above is only the
+    /// binary trip that temperature crosses.)
+    pub engine_precooler_outlet_k: [f64; 4],
+    pub apu_precooler_outlet_k: f64,
+    /// Gas temperature in each duct volume, K, alongside the pressures
+    /// above: a duct's state is (P, T), and insulation-damage/leak faults
+    /// move the temperature as much as the pressure.
+    pub engine_duct_temp_k: [f64; 4],
+    pub apu_duct_temp_k: f64,
+    pub pack_supply_temp_k: [f64; 2],
+    pub wai_duct_temp_k: [f64; 2],
 }
 
 pub struct DuctNetwork {
@@ -462,6 +475,7 @@ impl DuctNetwork {
             let pc = self.engine_precooler[i].step(dt, pr_source_temp, pr_mdot, ports.fan_air_available_kg_s, ports.fan_air_k, &faults.engine_precooler[i]);
             self.engine_duct[i].gas.add_mass(pr_mdot * dt, pc.outlet_temp_k, pr_source_pa);
             out.engine_precooler_overtemp[i] = pc.overtemp_active;
+            out.engine_precooler_outlet_k[i] = pc.outlet_temp_k;
             out.hp_valve_open[i] = self.hp_valve_open[i];
             out.pr_valve_open[i] = self.pr_valve_open[i];
             out.transfer_pipe_pressure_pa[i] = self.transfer_pipe[i].pressure_pa();
@@ -474,6 +488,7 @@ impl DuctNetwork {
             let (heat, flux) = Self::apply_faults(&mut self.engine_duct[i], inputs.ambient_pa, inputs.zone_air_k[PYLON[i]], dt, &faults.engine_duct[i]);
             Self::credit(&mut out, PYLON[i], heat, flux);
             out.engine_duct_pressure_pa[i] = self.engine_duct[i].gas.pressure_pa();
+            out.engine_duct_temp_k[i] = self.engine_duct[i].gas.temp_k();
         }
 
         // --- APU's own stage: source -> precooler -> APU duct (always
@@ -488,6 +503,7 @@ impl DuctNetwork {
             let pc = self.apu_precooler.step(dt, src.temp_k, mdot_hot, src.fan_air_available_kg_s, src.fan_air_k, &faults.apu_precooler);
             self.apu_duct.gas.add_mass(mdot_hot * dt, pc.outlet_temp_k, src.pressure_pa);
             out.apu_precooler_overtemp = pc.overtemp_active;
+            out.apu_precooler_outlet_k = pc.outlet_temp_k;
 
             let (relief, backflow) = self.apu_precooler.relief_and_backflow_kg_s(self.apu_duct.gas.pressure_pa(), inputs.ambient_pa, &faults.apu_precooler);
             let (t, p) = (self.apu_duct.gas.temp_k(), self.apu_duct.gas.pressure_pa());
@@ -567,16 +583,27 @@ impl DuctNetwork {
             transfer_kg(dt, VALVE_CD, HYD_RESERVOIR_ORIFICE_AREA_M2, &mut d3.gas, &mut self.hyd_reservoir[1].gas);
         }
 
+        // The cross-bleed/consumer block above moved mass between the four
+        // engine ducts, so their published state is refreshed here rather
+        // than left at the pre-cross-bleed value the upstream loop set.
+        for i in 0..4 {
+            out.engine_duct_pressure_pa[i] = self.engine_duct[i].gas.pressure_pa();
+            out.engine_duct_temp_k[i] = self.engine_duct[i].gas.temp_k();
+        }
+        out.apu_duct_temp_k = self.apu_duct.gas.temp_k();
+
         for i in 0..2 {
             let (heat, flux) = Self::apply_faults(&mut self.packs[i], inputs.ambient_pa, inputs.zone_air_k[BELLY_FAIRING_PACKS], dt, &faults.packs[i]);
             Self::credit(&mut out, BELLY_FAIRING_PACKS, heat, flux);
             out.pack_supply_pressure_pa[i] = self.packs[i].gas.pressure_pa();
+            out.pack_supply_temp_k[i] = self.packs[i].gas.temp_k();
         }
         for i in 0..2 {
             let zone = WING_LE[i];
             let (heat, flux) = Self::apply_faults(&mut self.wai[i], inputs.ambient_pa, inputs.zone_air_k[zone], dt, &faults.wai[i]);
             Self::credit(&mut out, zone, heat, flux);
             out.wai_duct_pressure_pa[i] = self.wai[i].gas.pressure_pa();
+            out.wai_duct_temp_k[i] = self.wai[i].gas.temp_k();
             out.wai_valve_open[i] = self.wai_valve_open[i];
         }
         for i in 0..4 {

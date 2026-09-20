@@ -1,0 +1,928 @@
+//! The live fire and ice-protection system: the nine detection zones,
+//! their combustion sources, the bottles that suppress them, the cargo
+//! smoke detectors, and every anti-ice surface -- all owned in one place,
+//! stepped every frame from [`Truth`], with each failure
+//! [`super::registry`] registers driving the exact model field that
+//! registry entry names.
+//!
+//! Before this file, `fire_loops`, `combustion`, `extinguishing`,
+//! `icing` and `anti_ice` were types with unit tests and no instance:
+//! `FIRE_DETECTED_ENG:1` did not exist, so `ENG 1 FIRE` could not fire,
+//! and no failure in the catalogue reached any of them.
+//!
+//! ## The causal chain this assembles
+//! A registered leak failure puts flammable fluid into a zone
+//! ([`combustion::ZoneSupply::fuel_available_kg_s`]); the zone's own
+//! ventilation air and an ignition source (a running engine's hot turbine
+//! case, a running APU) decide whether it lights; its heat release raises
+//! that zone's temperature; the two detection loops sense *that
+//! temperature* and declare the fire; the heat crossing a real inter-zone
+//! link can light a neighbour's own leak. Nothing anywhere sets a "fire"
+//! flag directly.
+//!
+//! ## How `Truth` drives it
+//! - `environment` (static air temperature, true airspeed, ambient
+//!   pressure, X-Plane's own cloud sample) gives the icing environment:
+//!   liquid water content and droplet size come from
+//!   `integration::weather_truth`'s own CS-25 Appendix C-shaped model of
+//!   the real cloud, not from a chosen number.
+//! - `engine_running` and `apu_running` are the ignition sources in the
+//!   engine and APU fire zones, and gate the engine fan-duct/APU
+//!   ventilation those zones are swept by.
+//! - `on_ground` + `apu_running` drive the one extinguishing path that
+//!   needs no cockpit action: the APU's automatic on-ground agent
+//!   discharge.
+//! - `environment.precipitation_on_aircraft_ratio` and `tas_ms` give the
+//!   windshield its real water catch rate (`catch = LWC_rain * TAS *
+//!   beta`), which is what the rain-removal jet has to shear off.
+//!
+//! ## Inputs this area needs that `Truth` does not carry yet
+//! Listed in the report; each is a cockpit control, not a physical
+//! quantity this module may invent:
+//! - **Fire/agent pushbuttons.** Without them the engine and cargo
+//!   bottles can never be commanded to fire, so only their *leak* faults
+//!   (and the APU's automatic ground discharge) are observable.
+//! - **Wing/nacelle anti-ice selection.** Held off, so the valve-stuck-
+//!   *closed* and duct-leak failures have no commanded flow to subtract
+//!   from; valve-stuck-*open* works, because that failure floors flow
+//!   regardless of command.
+//! - **Rain-removal selection.** Held off; the water film still
+//!   accumulates from real precipitation, but the jet's own fault has no
+//!   jet to degrade.
+//! - **Cabin/lavatory local temperature**, for the fusible-link
+//!   extinguisher.
+//! - **Cargo BULK**: `fire_loops::ZONES` has no bulk hold and no bulk
+//!   detector is registered, so `CARGO_BULK_SMOKE_DETECTED` is not
+//!   published here. That alert still reaches its trigger through
+//!   `thermal_zones`' contribution on the bulk hold's own smoke
+//!   concentration.
+
+use super::anti_ice::{BleedAntiIceFaults, BleedAntiIceSurface, ProbeHeater, ProbeHeaterFaults, RainRemoval, RainRemovalFaults, WindowHeat, WindowHeatFaults, NACELLE_ANTI_ICE, WINDOW_TARGET_C, WING_ANTI_ICE};
+use super::combustion::{Fluid, ZoneCombustion, ZoneSupply, HYDRAULIC_FLUID, JET_FUEL};
+use super::extinguishing::{Bottle, BottleFaults, CargoSuppressionSystem, LavatoryFaults, LavatoryProtection, OpticalSmokeDetector, SmokeDetectorFaults, ZoneConcentration};
+use super::fire_loops::{LoopFaults, LoopLogic, ZoneDetector};
+use super::icing::{IcingEnvironment, IcingOutputs, IcingSurface, NACELLE_INLET, WINDSHIELD, WING_LEADING_EDGE};
+use super::util::{air_dynamic_viscosity_pa_s, collection_efficiency_beta0, droplet_inertia_parameter, recovery_temperature_c};
+use crate::deep::api::{failure_id, Area as RegArea};
+use crate::deep::integration::weather_truth::{dominant_cloud, droplet_diameter_m_from_conditions, lwc_kg_m3_from_conditions};
+use crate::deep::live::{Faults, Truth};
+
+const ATA_FIRE: u16 = 26;
+const ATA_ICE: u16 = 30;
+
+/// Zone order, exactly `fire_loops::ZONES` and `registry::ZONES`.
+const ZONE_KEYS: [&str; 9] = ["ENG1", "ENG2", "ENG3", "ENG4", "APU", "MLG", "CARGO_FWD", "CARGO_AFT", "AVIONICS"];
+
+/// Per-zone maximum modelled leak rate at failure magnitude 1.0, kg/s --
+/// the same figures `registry::ZONE_MAX_LEAK_KG_S` documents, repeated
+/// here so the magnitude a failure means and the magnitude the model
+/// applies cannot drift.
+const ZONE_MAX_LEAK_KG_S: [f64; 9] = [0.05, 0.05, 0.05, 0.05, 0.03, 0.01, 0.02, 0.02, 0.005];
+
+/// Ventilation air each zone is swept by, kg/s -- the oxidiser supply that
+/// limits combustion and the flow that washes out smoke and suppression
+/// agent. These are the same GENERIC per-compartment ventilation flows
+/// `deep::thermal_zones::topology_a380` builds its own ventilation links
+/// with for these same compartments (nacelle 3.0, APU compartment 1.5,
+/// gear bay 1.2 with the doors open, cargo extract 0.30, avionics extract
+/// 0.35), reproduced rather than imported per BRIEF rule 2.
+const ZONE_VENTILATION_KG_S: [f64; 9] = [3.0, 3.0, 3.0, 3.0, 1.5, 1.2, 0.30, 0.30, 0.35];
+
+/// Free air volume of each zone, m^3: again the same GENERIC figures
+/// `topology_a380` uses (nacelle cowl 8, APU compartment 6, gear bay 15,
+/// cargo fwd 110, cargo aft 60, main avionics 12). Sets how fast a
+/// discharged bottle reaches its design concentration and how fast smoke
+/// builds up.
+const ZONE_VOLUME_M3: [f64; 9] = [8.0, 8.0, 8.0, 8.0, 6.0, 15.0, 110.0, 60.0, 12.0];
+
+/// Lumped thermal mass of each zone's contents/structure, J/K: the same
+/// GENERIC structure thermal masses `topology_a380` gives these
+/// compartments.
+const ZONE_THERMAL_MASS_J_K: [f64; 9] = [1.5e5, 1.5e5, 1.5e5, 1.5e5, 2.0e5, 4.0e5, 5.0e5, 3.0e5, 5.0e5];
+
+/// Sea-level air density, kg/m^3 (ICAO Doc 7488), used only to turn the
+/// ventilation mass flows above into the volume flows
+/// `ZoneConcentration`/`OpticalSmokeDetector` wash out with.
+const AIR_DENSITY_KG_M3: f64 = 1.225;
+
+/// Liquid water content of heavy rain, kg/m^3. A rain rate around
+/// 100 mm/h carries roughly 2 g of liquid water per cubic metre (standard
+/// rainfall-rate/water-content relation used in radar meteorology);
+/// `environment.precipitation_on_aircraft_ratio` (X-Plane's own 0..1
+/// wetness at the aircraft) scales it. Used only for the windshield's
+/// water catch rate.
+const HEAVY_RAIN_LWC_KG_M3: f64 = 2.0e-3;
+
+/// Turbulent-boundary-layer recovery factor, standard.
+const RECOVERY_FACTOR: f64 = 0.9;
+
+/// Which fluid leaks in which zone. Engine and APU zones sit among fuel
+/// and oil manifolds (`JET_FUEL`, the most easily ignited of the three);
+/// the gear bay, holds and avionics bay carry phosphate-ester hydraulic
+/// lines, whose much higher autoignition temperature (468 C, the reason
+/// transport hydraulics use it) is exactly why a leak there does not
+/// light on its own.
+const ZONE_FLUID: [Fluid; 9] = [JET_FUEL, JET_FUEL, JET_FUEL, JET_FUEL, JET_FUEL, HYDRAULIC_FLUID, HYDRAULIC_FLUID, HYDRAULIC_FLUID, HYDRAULIC_FLUID];
+
+/// Conductive links between fire zones, `(hot zone, cold zone, W/K)`, and
+/// the path by which one zone's fire can light the next one's own leak.
+/// Only genuinely adjacent pairs, with the conductances
+/// `topology_a380` already gives those same pairs of compartments
+/// (MainAvionics<->CargoFwd 20 W/K, BodyGearWell<->CargoAft 25 W/K). The
+/// four engines are metres of wing apart and are not linked.
+const ZONE_LINKS: [(usize, usize, f64); 2] = [(6, 8, 20.0), (5, 7, 25.0)];
+
+const PROBE_KEYS: [&str; 8] = ["PITOT1", "PITOT2", "PITOT3", "AOA1", "AOA2", "AOA3", "TAT1", "TAT2"];
+const WINDOW_KEYS: [&str; 2] = ["L", "R"];
+
+fn fire(n: u16) -> u64 {
+    failure_id(RegArea::FireIce, ATA_FIRE, n)
+}
+fn ice(n: u16) -> u64 {
+    failure_id(RegArea::FireIce, ATA_ICE, n)
+}
+fn on(b: bool) -> f64 {
+    if b {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// The atmospheric icing condition and the surface heat-transfer inputs
+/// every heated/unheated surface shares this tick.
+#[derive(Clone, Copy, Debug)]
+struct Conditions {
+    static_air_c: f64,
+    recovery_c: f64,
+    ambient_pressure_pa: f64,
+    tas_m_s: f64,
+    lwc_kg_m3: f64,
+    droplet_diameter_m: f64,
+}
+
+impl Conditions {
+    fn from(truth: &Truth) -> Self {
+        let cloud = truth.environment.weather.as_ref().and_then(dominant_cloud);
+        Self {
+            static_air_c: truth.environment.sat_c,
+            recovery_c: recovery_temperature_c(truth.environment.sat_c, truth.environment.tas_ms, RECOVERY_FACTOR),
+            ambient_pressure_pa: truth.environment.ambient_pressure_pa.max(1.0),
+            tas_m_s: truth.environment.tas_ms.max(0.0),
+            lwc_kg_m3: lwc_kg_m3_from_conditions(truth.environment.sat_c, cloud),
+            droplet_diameter_m: droplet_diameter_m_from_conditions(cloud),
+        }
+    }
+
+    /// Droplet collection efficiency at the stagnation point of a body of
+    /// this leading-edge size, in this cloud.
+    fn beta0(&self, characteristic_length_m: f64) -> f64 {
+        let mu = air_dynamic_viscosity_pa_s(self.static_air_c);
+        let k = droplet_inertia_parameter(self.droplet_diameter_m, self.tas_m_s, characteristic_length_m, mu);
+        collection_efficiency_beta0(k)
+    }
+
+    fn icing_environment(&self) -> IcingEnvironment {
+        IcingEnvironment {
+            lwc_kg_m3: self.lwc_kg_m3,
+            droplet_diameter_m: self.droplet_diameter_m,
+            static_air_c: self.static_air_c,
+            tas_m_s: self.tas_m_s,
+            ambient_pressure_pa: self.ambient_pressure_pa,
+        }
+    }
+}
+
+/// What one zone reported this tick.
+#[derive(Clone, Copy, Debug, Default)]
+struct ZoneReport {
+    temp_c: f64,
+    burning: bool,
+    burn_rate_kg_s: f64,
+    fire: bool,
+    loop_a_fault: bool,
+    loop_b_fault: bool,
+    agent_fraction: f64,
+}
+
+pub struct FireIceLive {
+    detectors: Vec<ZoneDetector>,
+    combustion: Vec<ZoneCombustion>,
+    concentration: Vec<ZoneConcentration>,
+    zones: [ZoneReport; 9],
+
+    /// Two bottles per engine, one for the APU (`registry`'s own split).
+    engine_bottles: Vec<[Bottle; 2]>,
+    engine_bottle_low: [[bool; 2]; 4],
+    engine_squib_discharged: [[bool; 2]; 4],
+    apu_bottle: Bottle,
+    apu_squib_discharged: bool,
+
+    cargo_suppression: Vec<CargoSuppressionSystem>,
+    cargo_smoke: Vec<OpticalSmokeDetector>,
+    cargo_smoke_alarm: [bool; 2],
+    lavatory: LavatoryProtection,
+
+    wing_anti_ice: Vec<BleedAntiIceSurface>,
+    wing_anti_ice_out: [super::anti_ice::BleedAntiIceOutputs; 2],
+    nacelle_anti_ice: Vec<BleedAntiIceSurface>,
+    nacelle_anti_ice_out: [super::anti_ice::BleedAntiIceOutputs; 4],
+    probes: Vec<ProbeHeater>,
+    probe_out: [super::anti_ice::ProbeHeaterOutputs; 8],
+    windows: Vec<WindowHeat>,
+    window_out: [super::anti_ice::WindowHeatOutputs; 2],
+    rain: Vec<RainRemoval>,
+    rain_film_kg_m2: [f64; 2],
+
+    wing_ice: Vec<IcingSurface>,
+    wing_ice_out: [IcingOutputs; 2],
+    nacelle_ice: Vec<IcingSurface>,
+    nacelle_ice_out: [IcingOutputs; 4],
+
+    names: VarNames,
+}
+
+struct VarNames {
+    fire_detected: [String; 9],
+    zone_temp_c: [String; 9],
+    zone_burning: [String; 9],
+    zone_agent: [String; 9],
+    loop_a_fault: [String; 9],
+    loop_b_fault: [String; 9],
+    bottle_low: [[String; 2]; 4],
+    squib: [[String; 2]; 4],
+    probe_fault: [String; 8],
+    probe_temp_c: [String; 8],
+    window_fault: [String; 2],
+    window_temp_c: [String; 2],
+    window_hot_spot_c: [String; 2],
+    window_film: [String; 2],
+    wing_valve_open: [String; 2],
+    wing_overheat: [String; 2],
+    wing_surface_c: [String; 2],
+    wing_ice_thickness: [String; 2],
+    wing_cl_loss: [String; 2],
+    nacelle_valve_open: [String; 4],
+    nacelle_overheat: [String; 4],
+    nacelle_surface_c: [String; 4],
+    nacelle_ice_thickness: [String; 4],
+    cargo_smoke_detected: [String; 2],
+    cargo_smoke_density: [String; 2],
+}
+
+impl VarNames {
+    fn new() -> Self {
+        let zone_name = |z: usize| {
+            // The four engine zones are addressed the way this crate
+            // already addresses per-engine variables (`FIRE_DETECTED_ENG:n`,
+            // the name `registry.rs`'s own trigger uses).
+            match z {
+                0..=3 => format!("ENG:{}", z + 1),
+                _ => ZONE_KEYS[z].to_string(),
+            }
+        };
+        Self {
+            fire_detected: std::array::from_fn(|z| format!("FIRE_DETECTED_{}", zone_name(z))),
+            zone_temp_c: std::array::from_fn(|z| format!("FIRE_ZONE_{}_TEMPERATURE_C", ZONE_KEYS[z])),
+            zone_burning: std::array::from_fn(|z| format!("FIRE_ZONE_{}_BURNING", ZONE_KEYS[z])),
+            zone_agent: std::array::from_fn(|z| format!("FIRE_ZONE_{}_AGENT_FRACTION", ZONE_KEYS[z])),
+            loop_a_fault: std::array::from_fn(|z| format!("FIRE_LOOP_A_{}_FAULT", ZONE_KEYS[z])),
+            loop_b_fault: std::array::from_fn(|z| format!("FIRE_LOOP_B_{}_FAULT", ZONE_KEYS[z])),
+            bottle_low: std::array::from_fn(|e| std::array::from_fn(|b| format!("FIRE_BOTTLE_ENG{}_{}_LOW_PRESSURE", e + 1, b + 1))),
+            squib: std::array::from_fn(|e| std::array::from_fn(|b| format!("FIRE_SQUIB_{}_ENG_{}_IS_DISCHARGED", b + 1, e + 1))),
+            probe_fault: std::array::from_fn(|p| format!("PROBE_HEAT_{}_FAULT", PROBE_KEYS[p])),
+            probe_temp_c: std::array::from_fn(|p| format!("PROBE_HEAT_{}_TEMPERATURE_C", PROBE_KEYS[p])),
+            window_fault: std::array::from_fn(|w| format!("WINDOW_HEAT_{}_FAULT", WINDOW_KEYS[w])),
+            window_temp_c: std::array::from_fn(|w| format!("WINDOW_HEAT_{}_TEMPERATURE_C", WINDOW_KEYS[w])),
+            window_hot_spot_c: std::array::from_fn(|w| format!("WINDOW_HEAT_{}_HOT_SPOT_C", WINDOW_KEYS[w])),
+            window_film: std::array::from_fn(|w| format!("WINDSHIELD_{}_WATER_FILM_KG_M2", WINDOW_KEYS[w])),
+            wing_valve_open: std::array::from_fn(|s| format!("ANTI_ICE_WING_{}_VALVE_OPEN", WINDOW_KEYS[s])),
+            wing_overheat: std::array::from_fn(|s| format!("ANTI_ICE_WING_{}_OVERHEAT", WINDOW_KEYS[s])),
+            wing_surface_c: std::array::from_fn(|s| format!("ANTI_ICE_WING_{}_SURFACE_C", WINDOW_KEYS[s])),
+            wing_ice_thickness: std::array::from_fn(|s| format!("ICE_WING_{}_THICKNESS_M", WINDOW_KEYS[s])),
+            wing_cl_loss: std::array::from_fn(|s| format!("ICE_WING_{}_CL_MAX_LOSS", WINDOW_KEYS[s])),
+            nacelle_valve_open: std::array::from_fn(|e| format!("ANTI_ICE_NACELLE{}_VALVE_OPEN", e + 1)),
+            nacelle_overheat: std::array::from_fn(|e| format!("ANTI_ICE_NACELLE{}_OVERHEAT", e + 1)),
+            nacelle_surface_c: std::array::from_fn(|e| format!("ANTI_ICE_NACELLE{}_SURFACE_C", e + 1)),
+            nacelle_ice_thickness: std::array::from_fn(|e| format!("ICE_NACELLE{}_THICKNESS_M", e + 1)),
+            cargo_smoke_detected: std::array::from_fn(|b| format!("CARGO_{}_SMOKE_DETECTED", ["FWD", "AFT"][b])),
+            cargo_smoke_density: std::array::from_fn(|b| format!("CARGO_{}_SMOKE_DENSITY_KG_M3", ["FWD", "AFT"][b])),
+        }
+    }
+}
+
+impl Default for FireIceLive {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FireIceLive {
+    /// Halon charge per engine/APU bottle, kg. **GENERIC**: no public
+    /// A380 figure. Sized against NFPA 12A's own 5% v/v design
+    /// concentration for the nacelle volume above (8 m^3 of air needs
+    /// about 2.5 kg of Halon 1301 at sea-level density to reach 5% by
+    /// volume), with margin for the ventilation washing through during
+    /// discharge.
+    const NACELLE_BOTTLE_CHARGE_KG: f64 = 5.0;
+    /// Bottle internal volume, m^3. **GENERIC**: liquid Halon 1301 at
+    /// about 1570 kg/m^3 needs roughly 3 litres for the charge above; a
+    /// 5 litre bottle leaves the nitrogen head space a
+    /// super-pressurized bottle needs.
+    const BOTTLE_VOLUME_M3: f64 = 0.005;
+    /// Cargo bottles are sized for the extended metered discharge
+    /// CS-25.858 requires across a diversion, into a much larger hold.
+    /// **GENERIC**, same reasoning as above applied to the 110/60 m^3
+    /// holds.
+    const CARGO_BOTTLE_CHARGE_KG: f64 = 30.0;
+    const CARGO_BOTTLE_VOLUME_M3: f64 = 0.03;
+    /// A cargo smoke detector's optical path length, m. **GENERIC**:
+    /// a ceiling-mounted photoelectric chamber's path is centimetres, but
+    /// the detector samples a duct drawing from the hold; 1 m is the
+    /// figure `extinguishing`'s own tests use.
+    const SMOKE_DETECTOR_PATH_M: f64 = 1.0;
+    /// A lavatory's own free volume, m^3. **GENERIC**.
+    const LAVATORY_VOLUME_M3: f64 = 2.0;
+
+    pub fn new() -> Self {
+        let start_c = 15.0;
+        Self {
+            // AND logic: a real fire-detection unit requires both loops to
+            // agree before declaring a fire, and falls back to whichever
+            // loop is still valid once the other faults
+            // (`fire_loops::ZoneDetector::evaluate`).
+            detectors: (0..9).map(|_| ZoneDetector::new(LoopLogic::And)).collect(),
+            combustion: (0..9)
+                .map(|z| ZoneCombustion::new(ZONE_FLUID[z], start_c, ZONE_THERMAL_MASS_J_K[z], ZONE_VENTILATION_KG_S[z] * super::util::CP_AIR))
+                .collect(),
+            concentration: (0..9).map(|z| ZoneConcentration::new(ZONE_VOLUME_M3[z])).collect(),
+            zones: [ZoneReport::default(); 9],
+
+            engine_bottles: (0..4).map(|_| [Bottle::new(Self::NACELLE_BOTTLE_CHARGE_KG, Self::BOTTLE_VOLUME_M3), Bottle::new(Self::NACELLE_BOTTLE_CHARGE_KG, Self::BOTTLE_VOLUME_M3)]).collect(),
+            engine_bottle_low: [[false; 2]; 4],
+            engine_squib_discharged: [[false; 2]; 4],
+            apu_bottle: Bottle::new(Self::NACELLE_BOTTLE_CHARGE_KG, Self::BOTTLE_VOLUME_M3),
+            apu_squib_discharged: false,
+
+            cargo_suppression: (0..2).map(|_| CargoSuppressionSystem::new(Self::CARGO_BOTTLE_CHARGE_KG, Self::CARGO_BOTTLE_VOLUME_M3)).collect(),
+            cargo_smoke: (0..2).map(|b| OpticalSmokeDetector::new(Self::SMOKE_DETECTOR_PATH_M, ZONE_VOLUME_M3[6 + b])).collect(),
+            cargo_smoke_alarm: [false; 2],
+            lavatory: LavatoryProtection::new(Self::LAVATORY_VOLUME_M3),
+
+            wing_anti_ice: (0..2).map(|_| BleedAntiIceSurface::new(WING_ANTI_ICE, start_c)).collect(),
+            wing_anti_ice_out: [Default::default(); 2],
+            nacelle_anti_ice: (0..4).map(|_| BleedAntiIceSurface::new(NACELLE_ANTI_ICE, start_c)).collect(),
+            nacelle_anti_ice_out: [Default::default(); 4],
+            probes: (0..8).map(|_| ProbeHeater::new(start_c)).collect(),
+            probe_out: [Default::default(); 8],
+            windows: (0..2).map(|_| WindowHeat::new(start_c)).collect(),
+            window_out: [Default::default(); 2],
+            rain: (0..2).map(|_| RainRemoval::new()).collect(),
+            rain_film_kg_m2: [0.0; 2],
+
+            wing_ice: (0..2).map(|_| IcingSurface::new(WING_LEADING_EDGE)).collect(),
+            wing_ice_out: [Default::default(); 2],
+            nacelle_ice: (0..4).map(|_| IcingSurface::new(NACELLE_INLET)).collect(),
+            nacelle_ice_out: [Default::default(); 4],
+
+            names: VarNames::new(),
+        }
+    }
+
+    fn loop_faults(faults: &Faults, zone: usize) -> (LoopFaults, LoopFaults) {
+        let base = zone as u16 * 4;
+        (
+            LoopFaults { open_circuit: faults.get(fire(base + 1)), short_circuit: faults.get(fire(base + 2)) },
+            LoopFaults { open_circuit: faults.get(fire(base + 3)), short_circuit: faults.get(fire(base + 4)) },
+        )
+    }
+
+    /// An external ignition source in this zone: a running engine's hot
+    /// turbine case in its own nacelle, a running APU in its bay. Nothing
+    /// else is a standing ignition source, which is exactly why a hold or
+    /// gear-bay leak only lights from heat crossing a link from a
+    /// neighbour already on fire.
+    fn ignition_source(truth: &Truth, zone: usize) -> bool {
+        match zone {
+            0..=3 => truth.engine_running[zone],
+            4 => truth.apu_running,
+            _ => false,
+        }
+    }
+
+    fn step_fire(&mut self, truth: &Truth, faults: &Faults, cond: &Conditions) {
+        let dt = truth.dt_s;
+        let ambient_c = cond.recovery_c;
+
+        // Inter-zone heat is computed from the temperatures every zone
+        // held at the start of this tick, so no zone can see half a frame
+        // (`live.rs`'s own ordering rule, applied inside the area too).
+        let before_c: [f64; 9] = std::array::from_fn(|z| self.combustion[z].temp_c());
+        let mut extra_w = [0.0_f64; 9];
+        for (a, b, ua) in ZONE_LINKS {
+            let q = super::combustion::conductive_link_w(ua, before_c[a], before_c[b]);
+            extra_w[a] -= q;
+            extra_w[b] += q;
+        }
+
+        // Agent delivered into each zone this tick, before combustion
+        // reads its suppression fraction.
+        let agent_in = self.step_bottles(truth, faults, cond);
+        for z in 0..9 {
+            let vent_m3_s = ZONE_VENTILATION_KG_S[z] / AIR_DENSITY_KG_M3;
+            self.concentration[z].step(agent_in[z], cond.static_air_c, cond.ambient_pressure_pa, vent_m3_s, dt);
+        }
+
+        for z in 0..9 {
+            let supply = ZoneSupply {
+                fuel_available_kg_s: faults.get(fire(100 + z as u16)) * ZONE_MAX_LEAK_KG_S[z],
+                air_available_kg_s: ZONE_VENTILATION_KG_S[z],
+                ignition_source: Self::ignition_source(truth, z),
+                suppression_fraction: self.concentration[z].suppression_fraction(),
+            };
+            let state = self.combustion[z].step(&supply, ambient_c, extra_w[z], dt);
+            let (fa, fb) = Self::loop_faults(faults, z);
+            // A continuous detection loop's reading is dominated by its
+            // hottest point; this model carries one lumped temperature per
+            // zone, so the hot spot is that temperature (a conservative
+            // reading -- a real flame's local temperature is higher than
+            // its compartment's average, so anything this declares, the
+            // real detector would declare sooner).
+            let status = self.detectors[z].evaluate(state.temp_c, state.temp_c, fa, fb);
+            self.zones[z] = ZoneReport {
+                temp_c: state.temp_c,
+                burning: state.burning,
+                burn_rate_kg_s: state.burn_rate_kg_s,
+                fire: status.fire,
+                loop_a_fault: status.loop_a_fault,
+                loop_b_fault: status.loop_b_fault,
+                agent_fraction: self.concentration[z].suppression_fraction(),
+            };
+        }
+
+        // Cargo optical smoke detection, off the same burn rate.
+        for b in 0..2 {
+            let zone = 6 + b;
+            let faults_det = SmokeDetectorFaults { lens_obscured: faults.get(fire(223 + b as u16)) };
+            let vent_m3_s = ZONE_VENTILATION_KG_S[zone] / AIR_DENSITY_KG_M3;
+            self.cargo_smoke_alarm[b] = self.cargo_smoke[b].step(self.zones[zone].burn_rate_kg_s, vent_m3_s, &faults_det, dt);
+        }
+
+        // Lavatory fusible link. `Truth` carries no cabin or lavatory
+        // local temperature (module doc), so the only temperature
+        // available to melt it is the outside air's -- the link is wired
+        // to the right model field and will behave correctly the moment a
+        // local temperature exists.
+        let lav_smoke = SmokeDetectorFaults::default();
+        let lav_link = LavatoryFaults { link_degraded: faults.get(fire(225)) };
+        self.lavatory.step(cond.static_air_c, 0.0, 0.01, &lav_smoke, &lav_link, dt);
+    }
+
+    /// Steps every bottle and returns the agent mass flow each zone
+    /// received, kg/s.
+    fn step_bottles(&mut self, truth: &Truth, faults: &Faults, cond: &Conditions) -> [f64; 9] {
+        let dt = truth.dt_s;
+        let ambient_c = cond.static_air_c;
+        let zone_pa = cond.ambient_pressure_pa;
+        let mut agent = [0.0_f64; 9];
+
+        for e in 0..4usize {
+            for b in 0..2usize {
+                let leak_id = fire(201 + (e as u16) * 4 + (b as u16) * 2);
+                let bottle_faults = BottleFaults { leak: faults.get(leak_id), squib_failure: faults.get(leak_id + 1) };
+                // No fire/agent pushbutton in `Truth` (module doc), so the
+                // squib is never commanded; the bottle still leaks, loses
+                // pressure and annunciates, which is the fault this area
+                // can express today.
+                let delivered = self.engine_bottles[e][b].step(ambient_c, false, zone_pa, &bottle_faults, dt);
+                agent[e] += delivered;
+                self.engine_bottle_low[e][b] = self.engine_bottles[e][b].is_low_pressure();
+                self.engine_squib_discharged[e][b] = self.engine_bottles[e][b].is_discharged();
+            }
+        }
+
+        // The APU's agent discharge is automatic on the ground -- the one
+        // extinguishing path that needs no crew action, and so the one
+        // this area can drive from `Truth` alone.
+        let apu_faults = BottleFaults { leak: faults.get(fire(217)), squib_failure: faults.get(fire(218)) };
+        let apu_command = self.zones[4].fire && truth.on_ground;
+        agent[4] += self.apu_bottle.step(ambient_c, apu_command, zone_pa, &apu_faults, dt);
+        self.apu_squib_discharged = self.apu_bottle.is_discharged();
+
+        for b in 0..2usize {
+            let zone = 6 + b;
+            let leak_id = fire(219 + (b as u16) * 2);
+            let cargo_faults = BottleFaults { leak: faults.get(leak_id), squib_failure: faults.get(leak_id + 1) };
+            let delivered = {
+                let (system, concentration) = (&mut self.cargo_suppression[b], &self.concentration[zone]);
+                system.step(ambient_c, false, zone_pa, concentration, &cargo_faults, dt)
+            };
+            agent[zone] += delivered;
+        }
+
+        agent
+    }
+
+    fn step_ice(&mut self, truth: &Truth, faults: &Faults, cond: &Conditions) {
+        let dt = truth.dt_s;
+
+        // -- Wing leading edges. The anti-ice valve command is not in
+        // `Truth` (module doc); a stuck-open valve floors flow regardless,
+        // which is why that failure still expresses itself.
+        let wing_beta = cond.beta0(WING_LEADING_EDGE.characteristic_length_m);
+        for s in 0..2usize {
+            let base = 1 + (s as u16) * 3;
+            let f = BleedAntiIceFaults {
+                valve_stuck_closed: faults.get(ice(base)),
+                valve_stuck_open: faults.get(ice(base + 1)),
+                duct_leak: faults.get(ice(base + 2)),
+            };
+            let out = self.wing_anti_ice[s].step(0.0, cond.static_air_c, cond.recovery_c, cond.lwc_kg_m3, wing_beta, cond.tas_m_s, cond.ambient_pressure_pa, &f, dt);
+            self.wing_anti_ice_out[s] = out;
+
+            // What the heated surface stops freezing is removed from the
+            // accretion the unheated Messinger balance would give, using
+            // last tick's impingement (the same one-frame lag `live.rs`
+            // documents between coupled models).
+            let natural_ff = self.wing_ice_out[s].freezing_fraction;
+            let removal = (self.wing_ice_out[s].impingement_kg_m2_s * (natural_ff - out.freezing_fraction)).max(0.0);
+            self.wing_ice_out[s] = self.wing_ice[s].step(&cond.icing_environment(), removal, dt);
+        }
+
+        // -- Nacelle inlets.
+        let nacelle_beta = cond.beta0(NACELLE_INLET.characteristic_length_m);
+        for e in 0..4usize {
+            let base = 7 + (e as u16) * 3;
+            let f = BleedAntiIceFaults {
+                valve_stuck_closed: faults.get(ice(base)),
+                valve_stuck_open: faults.get(ice(base + 1)),
+                duct_leak: faults.get(ice(base + 2)),
+            };
+            let out = self.nacelle_anti_ice[e].step(0.0, cond.static_air_c, cond.recovery_c, cond.lwc_kg_m3, nacelle_beta, cond.tas_m_s, cond.ambient_pressure_pa, &f, dt);
+            self.nacelle_anti_ice_out[e] = out;
+            let natural_ff = self.nacelle_ice_out[e].freezing_fraction;
+            let removal = (self.nacelle_ice_out[e].impingement_kg_m2_s * (natural_ff - out.freezing_fraction)).max(0.0);
+            self.nacelle_ice_out[e] = self.nacelle_ice[e].step(&cond.icing_environment(), removal, dt);
+        }
+
+        // -- Probe heaters: thermostatic and permanently energised, the
+        // real automatic behaviour (there is no probe-heat selection to
+        // read).
+        let probe_beta = cond.beta0(super::icing::PROBE.characteristic_length_m);
+        for p in 0..8usize {
+            let base = 19 + (p as u16) * 3;
+            let f = ProbeHeaterFaults {
+                heater_open_circuit: faults.get(ice(base)),
+                controller_fault: faults.get(ice(base + 1)),
+                sensor_fault: faults.get(ice(base + 2)),
+            };
+            self.probe_out[p] = self.probes[p].step(cond.static_air_c, cond.recovery_c, cond.lwc_kg_m3, probe_beta, cond.tas_m_s, cond.ambient_pressure_pa, &f, dt);
+        }
+
+        // -- Windshields: heated film, plus the water film the real
+        // precipitation lands on it and the rain-removal jet's shear.
+        let window_beta = cond.beta0(WINDSHIELD.characteristic_length_m);
+        let rain_catch_kg_m2_s = HEAVY_RAIN_LWC_KG_M3 * truth.environment.precipitation_on_aircraft_ratio.clamp(0.0, 1.0) * cond.tas_m_s * window_beta;
+        for w in 0..2usize {
+            let base = 43 + (w as u16) * 3;
+            let f = WindowHeatFaults {
+                film_defect: faults.get(ice(base)),
+                controller_fault: faults.get(ice(base + 1)),
+                sensor_fault: faults.get(ice(base + 2)),
+            };
+            self.window_out[w] = self.windows[w].step(cond.static_air_c, cond.recovery_c, cond.lwc_kg_m3, window_beta, cond.tas_m_s, cond.ambient_pressure_pa, &f, dt);
+
+            let rain_faults = RainRemovalFaults { system_fault: faults.get(ice(49 + w as u16)) };
+            // Jet velocity is a crew selection `Truth` does not carry
+            // (module doc): the film still accumulates from real rain.
+            self.rain_film_kg_m2[w] = self.rain[w].step(rain_catch_kg_m2_s, 0.0, 0.0, &rain_faults, dt);
+        }
+    }
+
+    /// A probe heater has failed when the probe is genuinely below
+    /// freezing and its heater is delivering nothing -- the condition all
+    /// three registered probe failures (open element, dead controller,
+    /// sensor stuck warm) produce, and that a healthy thermostatic heater
+    /// never does.
+    fn probe_fault(out: &super::anti_ice::ProbeHeaterOutputs) -> bool {
+        out.surface_c < 0.0 && out.power_w <= 0.0
+    }
+
+    /// A window heat fault: the film has overheated or damaged itself, or
+    /// the window is far below its target with no power going in.
+    fn window_fault(out: &super::anti_ice::WindowHeatOutputs) -> bool {
+        out.overheat_tripped || out.delaminated || out.cracked || (out.surface_c < WINDOW_TARGET_C - 20.0 && out.power_w <= 0.0)
+    }
+}
+
+impl crate::deep::live::Area for FireIceLive {
+    fn name(&self) -> &'static str {
+        "fire_ice"
+    }
+
+    fn tick(&mut self, truth: &Truth, faults: &Faults) {
+        let cond = Conditions::from(truth);
+        self.step_fire(truth, faults, &cond);
+        self.step_ice(truth, faults, &cond);
+    }
+
+    fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
+        let n = &self.names;
+        for z in 0..9 {
+            out(&n.fire_detected[z], on(self.zones[z].fire));
+            out(&n.zone_temp_c[z], self.zones[z].temp_c);
+            out(&n.zone_burning[z], on(self.zones[z].burning));
+            out(&n.zone_agent[z], self.zones[z].agent_fraction);
+            out(&n.loop_a_fault[z], on(self.zones[z].loop_a_fault));
+            out(&n.loop_b_fault[z], on(self.zones[z].loop_b_fault));
+        }
+        for e in 0..4 {
+            for b in 0..2 {
+                out(&n.bottle_low[e][b], on(self.engine_bottle_low[e][b]));
+                out(&n.squib[e][b], on(self.engine_squib_discharged[e][b]));
+            }
+        }
+        out("FIRE_SQUIB_1_APU_1_IS_DISCHARGED", on(self.apu_squib_discharged));
+        out("FIRE_BOTTLE_APU_LOW_PRESSURE", on(self.apu_bottle.is_low_pressure()));
+        out("LAVATORY_EXTINGUISHER_DISCHARGED", on(self.lavatory.is_discharged()));
+
+        for b in 0..2 {
+            out(&n.cargo_smoke_detected[b], on(self.cargo_smoke_alarm[b]));
+            out(&n.cargo_smoke_density[b], self.cargo_smoke[b].smoke_density_kg_m3());
+            out(&format!("CARGO_{}_AGENT_METERING", ["FWD", "AFT"][b]), on(self.cargo_suppression[b].is_metering()));
+        }
+
+        for s in 0..2 {
+            let o = &self.wing_anti_ice_out[s];
+            out(&n.wing_valve_open[s], on(o.bleed_delivered_kg_s > 0.0));
+            out(&n.wing_overheat[s], on(o.overheat));
+            out(&n.wing_surface_c[s], o.surface_c);
+            out(&n.wing_ice_thickness[s], self.wing_ice_out[s].ice_thickness_m);
+            out(&n.wing_cl_loss[s], self.wing_ice_out[s].cl_max_loss_fraction);
+        }
+        for e in 0..4 {
+            let o = &self.nacelle_anti_ice_out[e];
+            out(&n.nacelle_valve_open[e], on(o.bleed_delivered_kg_s > 0.0));
+            out(&n.nacelle_overheat[e], on(o.overheat));
+            out(&n.nacelle_surface_c[e], o.surface_c);
+            out(&n.nacelle_ice_thickness[e], self.nacelle_ice_out[e].ice_thickness_m);
+        }
+        for p in 0..8 {
+            out(&n.probe_fault[p], on(Self::probe_fault(&self.probe_out[p])));
+            out(&n.probe_temp_c[p], self.probe_out[p].surface_c);
+        }
+        for w in 0..2 {
+            out(&n.window_fault[w], on(Self::window_fault(&self.window_out[w])));
+            out(&n.window_temp_c[w], self.window_out[w].surface_c);
+            out(&n.window_hot_spot_c[w], self.window_out[w].hot_spot_c);
+            out(&n.window_film[w], self.rain_film_kg_m2[w]);
+        }
+    }
+}
+
+pub fn live_system() -> Box<dyn crate::deep::live::Area> {
+    Box::new(FireIceLive::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn ground_running_truth() -> Truth {
+        Truth {
+            dt_s: 1.0,
+            engine_running: [true; 4],
+            engine_n1_frac: [0.25; 4],
+            apu_running: true,
+            on_ground: true,
+            ac_bus_volts: [115.0; 4],
+            ..Truth::default()
+        }
+    }
+
+    fn icing_truth() -> Truth {
+        Truth {
+            dt_s: 1.0,
+            environment: crate::deep::integration::weather_truth::EnvironmentTruth {
+                sat_c: -10.0,
+                leading_edge_c: -5.0,
+                ambient_pressure_pa: 80_000.0,
+                tas_ms: 100.0,
+                precipitation_on_aircraft_ratio: 0.0,
+                weather: None,
+            },
+            altitude_ft: 6000.0,
+            on_ground: false,
+            ..Truth::default()
+        }
+    }
+
+    fn published(area: &dyn crate::deep::live::Area) -> BTreeMap<String, f64> {
+        let mut map = BTreeMap::new();
+        area.publish(&mut |name, value| {
+            map.insert(name.to_string(), value);
+        });
+        map
+    }
+
+    fn run(area: &mut dyn crate::deep::live::Area, truth: &Truth, faults: &Faults, ticks: usize) {
+        for _ in 0..ticks {
+            area.tick(truth, faults);
+        }
+    }
+
+    #[test]
+    fn every_variable_the_registry_triggers_on_is_actually_published() {
+        let area = live_system();
+        let map = published(area.as_ref());
+        let mut required: Vec<String> = vec!["FIRE_DETECTED_APU".into(), "FIRE_DETECTED_MLG".into(), "FIRE_SQUIB_1_APU_1_IS_DISCHARGED".into(), "WINDOW_HEAT_L_FAULT".into(), "WINDOW_HEAT_R_FAULT".into(), "ANTI_ICE_WING_L_OVERHEAT".into(), "ANTI_ICE_WING_R_OVERHEAT".into(), "ANTI_ICE_WING_L_VALVE_OPEN".into(), "ANTI_ICE_WING_R_VALVE_OPEN".into(), "CARGO_FWD_SMOKE_DETECTED".into(), "CARGO_AFT_SMOKE_DETECTED".into()];
+        for e in 1..=4 {
+            required.push(format!("FIRE_DETECTED_ENG:{e}"));
+            required.push(format!("ANTI_ICE_NACELLE{e}_OVERHEAT"));
+            required.push(format!("ANTI_ICE_NACELLE{e}_VALVE_OPEN"));
+            required.push(format!("FIRE_BOTTLE_ENG{e}_1_LOW_PRESSURE"));
+            required.push(format!("FIRE_BOTTLE_ENG{e}_2_LOW_PRESSURE"));
+            required.push(format!("FIRE_SQUIB_1_ENG_{e}_IS_DISCHARGED"));
+            required.push(format!("FIRE_SQUIB_2_ENG_{e}_IS_DISCHARGED"));
+        }
+        for zone in ZONE_KEYS {
+            required.push(format!("FIRE_LOOP_A_{zone}_FAULT"));
+            required.push(format!("FIRE_LOOP_B_{zone}_FAULT"));
+        }
+        for probe in ["PITOT1", "PITOT2", "PITOT3"] {
+            required.push(format!("PROBE_HEAT_{probe}_FAULT"));
+        }
+        for name in required {
+            assert!(map.contains_key(&name), "{name} is read by an ECAM trigger but never published");
+        }
+    }
+
+    #[test]
+    fn a_fuel_leak_in_a_running_engines_nacelle_ignites_and_is_declared_as_a_fire() {
+        // Failure 8_026_100 (ENG 1 fuel/oil/hydraulic leak feeding a
+        // fire), effect: "with an ignition source ... this fuel/air-limited
+        // leak sustains combustion and raises the zone's own temperature".
+        // ENG 1 FIRE triggers on FIRE_DETECTED_ENG:1.
+        let truth = ground_running_truth();
+        let mut area = live_system();
+        let armed = Faults::from_pairs([(fire(100), 1.0)]);
+        run(area.as_mut(), &truth, &armed, 300);
+        let map = published(area.as_ref());
+        assert_eq!(map["FIRE_ZONE_ENG1_BURNING"], 1.0, "a leak with air and a hot turbine case must light");
+        assert!(map["FIRE_ZONE_ENG1_TEMPERATURE_C"] > 200.0, "the zone must heat past the loops' trip temperature, got {}", map["FIRE_ZONE_ENG1_TEMPERATURE_C"]);
+        assert_eq!(map["FIRE_DETECTED_ENG:1"], 1.0, "and both loops must declare it");
+        assert_eq!(map["FIRE_DETECTED_ENG:2"], 0.0, "engine 2 has no leak");
+    }
+
+    #[test]
+    fn the_same_leak_without_a_running_engine_never_ignites() {
+        let mut truth = ground_running_truth();
+        truth.engine_running = [false; 4];
+        truth.apu_running = false;
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::from_pairs([(fire(100), 1.0)]), 300);
+        let map = published(area.as_ref());
+        assert_eq!(map["FIRE_ZONE_ENG1_BURNING"], 0.0, "with no ignition source the fuel just pools");
+        assert_eq!(map["FIRE_DETECTED_ENG:1"], 0.0);
+    }
+
+    #[test]
+    fn an_apu_fire_on_the_ground_fires_its_own_bottle_without_any_crew_action() {
+        let truth = ground_running_truth();
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::from_pairs([(fire(104), 1.0)]), 600);
+        let map = published(area.as_ref());
+        assert_eq!(map["FIRE_DETECTED_APU"], 1.0);
+        assert_eq!(map["FIRE_SQUIB_1_APU_1_IS_DISCHARGED"], 1.0, "the APU's ground discharge is automatic");
+        assert!(map["FIRE_ZONE_APU_AGENT_FRACTION"] > 0.0, "agent must actually reach the bay");
+    }
+
+    #[test]
+    fn a_shorted_loop_alone_is_rejected_but_a_shorted_loop_beside_a_failed_one_declares_a_false_fire() {
+        // Failure 8_026_002 (ENG 1 loop A short), effect: "loop reports
+        // fire_signal=true indistinguishably from a real fire; under OR
+        // logic (or once the other loop is also faulted) the zone is
+        // falsely declared on fire". With the unit's normal AND logic a
+        // single shorted loop must be rejected.
+        let mut truth = ground_running_truth();
+        truth.engine_running = [false; 4];
+        truth.apu_running = false;
+        let mut only_short = live_system();
+        run(only_short.as_mut(), &truth, &Faults::from_pairs([(fire(2), 1.0)]), 10);
+        assert_eq!(published(only_short.as_ref())["FIRE_DETECTED_ENG:1"], 0.0, "AND logic must reject a single disagreeing loop");
+
+        let mut short_and_open = live_system();
+        run(short_and_open.as_mut(), &truth, &Faults::from_pairs([(fire(2), 1.0), (fire(3), 1.0)]), 10);
+        let map = published(short_and_open.as_ref());
+        assert_eq!(map["FIRE_LOOP_B_ENG1_FAULT"], 1.0, "loop B open must read as a loop fault");
+        assert_eq!(map["FIRE_LOOP_A_ENG1_FAULT"], 0.0, "a short is not distinguishable from heat, so it is not a fault");
+        assert_eq!(map["FIRE_DETECTED_ENG:1"], 1.0, "with B faulted the unit trusts A alone, and A says fire");
+    }
+
+    #[test]
+    fn a_wing_anti_ice_valve_stuck_open_overheats_the_leading_edge_in_clear_air() {
+        // Failure 8_030_002 (L WING anti-ice valve stuck open), effect:
+        // "continues delivering full bleed heat once icing conditions/
+        // demand end, driving the skin/duct temperature into an overheat
+        // trip". WING A-ICE OVHT triggers on ANTI_ICE_WING_L_OVERHEAT.
+        let truth = Truth {
+            dt_s: 1.0,
+            environment: crate::deep::integration::weather_truth::EnvironmentTruth { sat_c: 15.0, leading_edge_c: 15.0, ambient_pressure_pa: 101_325.0, tas_ms: 100.0, precipitation_on_aircraft_ratio: 0.0, weather: None },
+            on_ground: false,
+            ..Truth::default()
+        };
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::from_pairs([(ice(2), 1.0)]), 400);
+        let map = published(area.as_ref());
+        assert_eq!(map["ANTI_ICE_WING_L_VALVE_OPEN"], 1.0, "a stuck-open valve flows regardless of command");
+        assert_eq!(map["ANTI_ICE_WING_L_OVERHEAT"], 1.0, "surface reached {} C", map["ANTI_ICE_WING_L_SURFACE_C"]);
+        assert_eq!(map["ANTI_ICE_WING_R_OVERHEAT"], 0.0, "the right wing's valve is healthy");
+    }
+
+    #[test]
+    fn a_probe_heater_controller_fault_leaves_the_probe_icing_and_annunciates() {
+        // Failure 8_030_020 (PITOT1 heater controller fault), effect:
+        // "heater never energises even in icing conditions; probe ices".
+        // PROBE/WINDOW HEAT triggers on PROBE_HEAT_PITOT1_FAULT.
+        let truth = icing_truth();
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::from_pairs([(ice(20), 1.0)]), 120);
+        let map = published(area.as_ref());
+        assert_eq!(map["PROBE_HEAT_PITOT1_FAULT"], 1.0);
+        assert!(map["PROBE_HEAT_PITOT1_TEMPERATURE_C"] < 0.0, "an unheated probe in icing air must sit below freezing, got {}", map["PROBE_HEAT_PITOT1_TEMPERATURE_C"]);
+        assert_eq!(map["PROBE_HEAT_PITOT2_FAULT"], 0.0, "the other probes are healthy and stay warm");
+        assert!(map["PROBE_HEAT_PITOT2_TEMPERATURE_C"] > 0.0);
+    }
+
+    #[test]
+    fn a_windshield_film_defect_burns_a_hot_spot_and_annunciates() {
+        // Failure 8_030_043 (L WINDSHIELD film defect), effect: "a severe
+        // defect drives the local hot spot past the delamination and crack
+        // damage thresholds". WINDSHIELD HEAT FAULT triggers on
+        // WINDOW_HEAT_L_FAULT.
+        let truth = icing_truth();
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::from_pairs([(ice(43), 0.9)]), 120);
+        let map = published(area.as_ref());
+        assert!(map["WINDOW_HEAT_L_HOT_SPOT_C"] > map["WINDOW_HEAT_L_TEMPERATURE_C"], "the defect must concentrate power into a hot spot");
+        assert_eq!(map["WINDOW_HEAT_L_FAULT"], 1.0);
+        assert_eq!(map["WINDOW_HEAT_R_FAULT"], 0.0);
+    }
+
+    #[test]
+    fn a_leaking_fire_bottle_falls_below_its_pressure_switch_with_no_fire_anywhere() {
+        // Failure 8_026_201 (ENG 1 fire bottle 1 leak), effect: "bottle
+        // mass/pressure fall over time; if not caught before use, delivers
+        // less agent (or none) when actually fired". ENG 1 FIRE AGENT LO PR
+        // triggers on FIRE_BOTTLE_ENG1_1_LOW_PRESSURE.
+        let mut truth = ground_running_truth();
+        truth.engine_running = [false; 4];
+        truth.apu_running = false;
+        truth.dt_s = 10.0;
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::from_pairs([(fire(201), 1.0)]), 4000); // ~11 h
+        let map = published(area.as_ref());
+        assert_eq!(map["FIRE_BOTTLE_ENG1_1_LOW_PRESSURE"], 1.0, "a full-severity leak must empty the bottle over hours");
+        assert_eq!(map["FIRE_BOTTLE_ENG1_2_LOW_PRESSURE"], 0.0, "the second bottle is healthy");
+        assert_eq!(map["FIRE_DETECTED_ENG:1"], 0.0, "a leaking bottle is not a fire");
+    }
+
+    #[test]
+    fn ice_accretes_on_an_unprotected_wing_in_a_real_cloud_and_costs_lift() {
+        // No failure: the environmental baseline the anti-ice systems
+        // exist to prevent, driven from the real cloud sample.
+        let mut truth = icing_truth();
+        truth.environment.weather = Some(crate::xp::WeatherSample {
+            clouds: [
+                crate::xp::WeatherCloudLayer { cloud_type: 1.0, coverage: 1.0, alt_base_m: 1000.0, alt_top_m: 4000.0 },
+                crate::xp::WeatherCloudLayer::default(),
+                crate::xp::WeatherCloudLayer::default(),
+            ],
+            ..Default::default()
+        });
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::default(), 1800);
+        let map = published(area.as_ref());
+        assert!(map["ICE_WING_L_THICKNESS_M"] > 0.0, "a stratus cloud at -10 C must accrete ice on an unheated leading edge");
+        assert!(map["ICE_WING_L_CL_MAX_LOSS"] > 0.0);
+    }
+
+    #[test]
+    fn a_cold_dark_aircraft_publishes_finite_values_and_a_zero_dt_frame_changes_nothing() {
+        let mut area = live_system();
+        let truth = Truth::default();
+        run(area.as_mut(), &truth, &Faults::default(), 100);
+        for (name, value) in published(area.as_ref()) {
+            assert!(value.is_finite(), "{name} went non-finite");
+            if name.starts_with("FIRE_DETECTED_") {
+                assert_eq!(value, 0.0, "{name} must be quiet on a cold aircraft");
+            }
+        }
+        let still = Truth { dt_s: 0.0, ..Truth::default() };
+        area.tick(&still, &Faults::default());
+        let before = published(area.as_ref());
+        area.tick(&still, &Faults::default());
+        assert_eq!(before, published(area.as_ref()));
+    }
+}
