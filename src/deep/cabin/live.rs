@@ -32,12 +32,15 @@
 //!
 //! ## What is not in `Truth` yet
 //!
-//! The cabin's own environment (cabin pressure and temperature, and the
-//! cabin-to-ambient differential three of these systems run on) belongs to
-//! the pressurisation/`thermal_zones` side and has no field in `Truth`;
-//! neither does anything the cabin crew or passengers *do* -- water drawn,
-//! toilets flushed, call buttons pressed, doors opened. They are collected
-//! in [`CabinCommands`], documented one by one.
+//! `Truth::cabin_pressure_pa`/`cabin_temp_k` now carry the cabin's own
+//! environment for real (`plugin.rs`'s own sourcing table: ambient plus
+//! FlyByWire's ARINC 429 cabin delta-pressure word, and one representative
+//! `A32NX_COND_MAIN_DECK_1_TEMP` zone), so this area reads them directly
+//! instead of the interim `CabinCommands` fields that used to stand in for
+//! them. What is still missing is anything the cabin crew or passengers
+//! *do* -- water drawn, toilets flushed, call buttons pressed, doors
+//! opened -- which stays collected in [`CabinCommands`], documented one by
+//! one.
 
 use crate::deep::api::Registry;
 use crate::deep::live::{Faults, Truth};
@@ -83,11 +86,6 @@ const SHOWERS_FITTED: bool = true;
 /// environment, and what the people in it are doing.
 #[derive(Clone, Copy, Debug)]
 pub struct CabinCommands {
-    /// Cabin pressure, Pa, and cabin temperature, K -- the pressurisation
-    /// and `thermal_zones` areas own these; `Truth` carries only the
-    /// *ambient* pressure outside.
-    pub cabin_pressure_pa: f64,
-    pub cabin_temp_k: f64,
     /// Potable water drawn by the galleys and the lavatories, l/s, and the
     /// number of showers requested. What the cabin actually consumes is a
     /// service-load input, not a physical state anything here can derive.
@@ -126,8 +124,6 @@ impl Default for CabinCommands {
     /// water and every door shut.
     fn default() -> Self {
         Self {
-            cabin_pressure_pa: 101_325.0,
-            cabin_temp_k: 297.0,
             galley_demand_l_s: 0.0,
             lav_demand_l_s: 0.0,
             shower_requests: 0,
@@ -357,7 +353,7 @@ impl crate::deep::live::Area for CabinLive {
     fn tick(&mut self, truth: &Truth, faults: &Faults) {
         let dt = truth.dt_s.max(0.0);
         let commercial_power = commercial_power_available(truth);
-        let cabin_diff_pa = (self.commands.cabin_pressure_pa - truth.environment.ambient_pressure_pa).max(0.0);
+        let cabin_diff_pa = (truth.cabin_pressure_pa - truth.environment.ambient_pressure_pa).max(0.0);
 
         // ---- Galleys -----------------------------------------------------
         let galley_faults = GalleyFaults {
@@ -410,8 +406,8 @@ impl crate::deep::live::Area for CabinLive {
         let water_inputs = WaterInputs {
             bleed_available: bleed_available(truth),
             compressor_commanded: self.commands.water_compressor_commanded,
-            cabin_pressure_pa: self.commands.cabin_pressure_pa,
-            cabin_temp_k: self.commands.cabin_temp_k,
+            cabin_pressure_pa: truth.cabin_pressure_pa,
+            cabin_temp_k: truth.cabin_temp_k,
             oat_c: truth.environment.sat_c,
             tas_mps: truth.environment.tas_ms,
             galley_demand_l_s: self.commands.galley_demand_l_s,
@@ -585,6 +581,39 @@ mod tests {
             live.tick(truth, faults);
         }
         published(live)
+    }
+
+    /// `truth.cabin_pressure_pa` now drives the cabin directly
+    /// (`CabinCommands` no longer carries it): the door seal leak scales
+    /// with `cabin_diff_pressure_pa = cabin_pressure_pa - ambient`
+    /// (`doors_slides.rs`'s own `orifice_flow_kg_s`), so a higher
+    /// commanded cabin pressure with a failed seal must leak faster --
+    /// proof this reads `Truth` every tick rather than a fixed interim
+    /// default.
+    #[test]
+    fn cabin_pressure_is_read_from_truth_not_a_fixed_default() {
+        let id = {
+            let live = CabinLive::new();
+            live.ids.door_seal
+        };
+        let faults = Faults::from_pairs([(id, 1.0)]);
+
+        let mut low = CabinLive::new();
+        let mut truth = powered_truth();
+        truth.cabin_pressure_pa = truth.environment.ambient_pressure_pa + 10_000.0;
+        let low_dp = run(&mut low, &truth, &faults, 1.0);
+
+        let mut high = CabinLive::new();
+        truth.cabin_pressure_pa = truth.environment.ambient_pressure_pa + 50_000.0;
+        let high_dp = run(&mut high, &truth, &faults, 1.0);
+
+        assert!(low_dp["CABIN_DOOR_SEAL_LEAK_KG_S:1"] > 0.0);
+        assert!(
+            high_dp["CABIN_DOOR_SEAL_LEAK_KG_S:1"] > low_dp["CABIN_DOOR_SEAL_LEAK_KG_S:1"],
+            "a higher Truth::cabin_pressure_pa must leak faster: {} vs {}",
+            low_dp["CABIN_DOOR_SEAL_LEAK_KG_S:1"],
+            high_dp["CABIN_DOOR_SEAL_LEAK_KG_S:1"]
+        );
     }
 
     #[test]
@@ -789,8 +818,8 @@ mod tests {
         let mut truth = powered_truth();
         truth.dt_s = 1.0;
         truth.on_ground = false;
+        truth.cabin_pressure_pa = 80_000.0;
         let mut live = CabinLive::new();
-        live.commands.cabin_pressure_pa = 80_000.0;
         // A flush valve stuck open is the registered way a tank fills
         // without anybody flushing.
         let id = live.ids.waste_valve_stuck_open[1];

@@ -117,12 +117,13 @@ const GND_SVC_FEEDER_OHM: f64 = OHM_PER_M_AWG_4 * 25.0;
 /// travelling, and is dead the rest of the flight. `loads.rs` gives every
 /// entry `commanded_on: true`, which is right for a continuously-running
 /// consumer and wrong for these six -- left on, they sit at 250 A each and
-/// collapse the essential DC bus for the whole flight.
-///
-/// Nothing in [`Truth`] says whether the gear is in transit, so the only
-/// state this layer can honestly assert is the one that holds at every
-/// instant `Truth` can describe: not travelling, therefore not drawing.
-/// See this area's report, which asks for a gear-in-transit field.
+/// collapse the essential DC bus for the whole flight. `ElectricalLive::new`
+/// forces them off as the correct cold-start default; from the second frame
+/// on, [`ElectricalLive::command_transit_loads`] drives them for real off
+/// `Controls::gear_door_commanded_open` (the door and, on this catalogue's
+/// simplified model, the leg it travels with are both "in transit" whenever
+/// that real, continuous commanded position sits away from either end
+/// stop).
 /// The continuous rating of whatever source feeds a bus directly, A --
 /// every figure re-cited from `sources.rs`'s own breaker ratings, which are
 /// themselves FBW-sourced. `0.0` for a bus with no source of its own (its
@@ -148,20 +149,21 @@ fn source_rating_a(bus: BusId) -> f64 {
 const TRANSIT_ONLY_ACTUATORS: [&str; 6] =
     ["gear-actuator-nose", "gear-actuator-left", "gear-actuator-right", "gear-door-actuator-nose", "gear-door-actuator-left", "gear-door-actuator-right"];
 
-/// The gap-closing pass's own transit-only/one-shot loads that this layer
-/// has no real `Truth` field to drive for real: an engine ignition exciter
-/// only fires during a start sequence or with continuous ignition
-/// selected, a fire-bottle squib fires once on a real discharge command, an
-/// APU start contactor is only energised through the APU's own start
-/// sequence, and a cargo door actuator draws only while the door is
-/// actually moving. None of "engine ignition selected", "APU starting",
-/// "fire bottle discharge commanded" or "cargo door commanded" exist on
-/// [`Truth`] yet, so -- exactly the same honest choice
-/// [`TRANSIT_ONLY_ACTUATORS`] above already makes, for the same reason --
-/// the only state this layer can assert is "not presently commanded",
-/// rather than inventing one of those inputs. See this area's report for
-/// the `Truth` fields that would let a future pass drive each of these for
-/// real instead of holding them permanently off.
+/// The gap-closing pass's own transit-only/one-shot loads. `Truth` did not
+/// carry a real command for any of these when they were first catalogued --
+/// an engine ignition exciter only fires during a start sequence, a
+/// fire-bottle squib fires once on a real discharge command, an APU start
+/// contactor is only energised through a real start sequence, and a cargo
+/// door actuator draws only while the door is actually moving -- so
+/// `ElectricalLive::new` forced every one of them off, the same honest
+/// choice [`TRANSIT_ONLY_ACTUATORS`] above made for the same reason.
+///
+/// `Truth::controls` now carries `starter_engaged`, the fire and agent
+/// pushbuttons and `apu_start_pb_on`, and `deep::cabin` publishes the cargo
+/// door's own commanded/actual position -- so
+/// [`ElectricalLive::command_transit_loads`] drives all 17 for real from the
+/// second frame on. This array still does its original job at construction
+/// (a correct cold-start default before that method has run once).
 const TRANSIT_ONLY_NO_TRUTH_INPUT: [&str; 17] = [
     "ignition-1a",
     "ignition-1b",
@@ -181,6 +183,30 @@ const TRANSIT_ONLY_NO_TRUTH_INPUT: [&str; 17] = [
     "cargo-door-fwd-actuator-ctl",
     "cargo-door-aft-actuator-ctl",
 ];
+
+/// Fallback equipment-bay temperature, C, for the one frame before
+/// `deep::thermal_zones` has published `THERMAL_ZONE_MAINAVIONICS_
+/// TEMPERATURE_C` at all. **GENERIC**: a ventilated avionics bay is
+/// designed around cabin-like conditions (the ECS supplies it from the same
+/// conditioned air), not ambient static air, so 20 C -- the low end of
+/// normal cabin comfort range -- is a far safer stand-in than SAT, which at
+/// cruise sits some 70 K colder than a real bay ever does.
+const EQUIPMENT_BAY_FALLBACK_C: f64 = 20.0;
+
+/// How far the cargo door's published commanded/actual position may differ,
+/// percent, before the actuator-control circuit is considered still
+/// driving. **GENERIC**: `deep::cabin::doors_slides`' own actuator settles
+/// well inside this at rest; wide enough that normal feedback noise never
+/// falsely holds the circuit live.
+const CARGO_DOOR_TRAVEL_MARGIN_PERCENT: f64 = 2.0;
+
+/// How far `Controls::gear_door_commanded_open` may sit from a fully
+/// closed/open end stop, as a fraction of travel, before the corresponding
+/// gear/gear-door actuator is considered in transit. **GENERIC**: small
+/// enough that a door parked at either stop reads unambiguously as "not
+/// travelling", wide enough to clear the settling noise a real actuator's
+/// position feedback carries at the stop.
+const GEAR_TRANSIT_MARGIN_FRACTION: f64 = 0.02;
 
 /// Power-budget hysteresis: the galley shed relay is commanded once the
 /// budget goes negative and released only once the margin has recovered
@@ -551,6 +577,20 @@ pub struct ElectricalLive {
     src_gpu: usize,
     src_rat: usize,
 
+    /// The 23 transit-only/one-shot loads this pass gives a real command to
+    /// (see [`Self::command_transit_loads`]): per-engine ignition exciter
+    /// lanes, the two engine fire bottles' squibs, the APU bottle's squibs,
+    /// the APU start contactor, the two cargo door actuator-control
+    /// circuits, and the six gear/gear-door actuators.
+    ignition_load: [[usize; 2]; 4],
+    eng_fire_squib: [[usize; 2]; 2],
+    apu_fire_squib: [usize; 2],
+    apu_start_contactor: usize,
+    cargo_door_ctl: [usize; 2],
+    /// `[nose, left, right]`, matching `Controls::gear_door_commanded_open`.
+    gear_actuator: [usize; 3],
+    gear_door_actuator: [usize; 3],
+
     /// Breakers this area opened because `deep::breakers` commanded it, so
     /// the command releasing can close them again (and a breaker this
     /// area's own element tripped is left alone).
@@ -727,6 +767,21 @@ impl ElectricalLive {
         let src_gpu = find_s(&net, "gpu");
         let src_rat = find_s(&net, "rat");
 
+        let find_l = |net: &Network, id: &str| net.load_index(id).unwrap_or_else(|| panic!("loads::build no longer builds load {id}"));
+        let ignition_load: [[usize; 2]; 4] = std::array::from_fn(|e| {
+            let n = e + 1;
+            [find_l(&net, &format!("ignition-{n}a")), find_l(&net, &format!("ignition-{n}b"))]
+        });
+        let eng_fire_squib: [[usize; 2]; 2] = std::array::from_fn(|bottle| {
+            let b = bottle + 1;
+            [find_l(&net, &format!("eng-fire-bottle-{b}-squib-1")), find_l(&net, &format!("eng-fire-bottle-{b}-squib-2"))]
+        });
+        let apu_fire_squib = [find_l(&net, "apu-fire-bottle-squib-1"), find_l(&net, "apu-fire-bottle-squib-2")];
+        let apu_start_contactor = find_l(&net, "apu-start-contactor");
+        let cargo_door_ctl = [find_l(&net, "cargo-door-fwd-actuator-ctl"), find_l(&net, "cargo-door-aft-actuator-ctl")];
+        let gear_actuator = [find_l(&net, "gear-actuator-nose"), find_l(&net, "gear-actuator-left"), find_l(&net, "gear-actuator-right")];
+        let gear_door_actuator = [find_l(&net, "gear-door-actuator-nose"), find_l(&net, "gear-door-actuator-left"), find_l(&net, "gear-door-actuator-right")];
+
         let (routed, unresolved) = route_failures(&net);
         debug_assert!(unresolved.is_empty(), "unrouted registered failures: {unresolved:?}");
 
@@ -761,6 +816,13 @@ impl ElectricalLive {
             src_bat,
             src_gpu,
             src_rat,
+            ignition_load,
+            eng_fire_squib,
+            apu_fire_squib,
+            apu_start_contactor,
+            cargo_door_ctl,
+            gear_actuator,
+            gear_door_actuator,
             externally_opened: vec![false; n_breakers],
             feeder_breaker,
             report: NetworkReport::default(),
@@ -942,18 +1004,20 @@ impl ElectricalLive {
 
         // A VFG is on line when its own GCU sees a healthy machine: excited
         // (`sources::Vfg::CUT_IN_SPEED_FRACTION`) and not tripped off by its
-        // own overload element.
+        // own overload element -- and the crew has not pulled its own GEN
+        // pushbutton, which is the GCU's own line contactor command, not a
+        // switch this model gets to assume is always in ENGAGED.
         let mut gen_on_line = [false; 4];
         for i in 0..4 {
             let tripped = self.wiring.vfg[i].overload_heat() >= 1.0;
-            gen_on_line[i] = truth.engine_running[i] && producing(&self.net, self.src_gen[i]) && !tripped;
+            gen_on_line[i] = truth.controls.eng_gen_pb_on[i] && truth.engine_running[i] && producing(&self.net, self.src_gen[i]) && !tripped;
             let idx = self.contactor.gen_line[i];
             self.net.contactors[idx].commanded_closed = gen_on_line[i];
         }
 
         let mut apu_on_line = false;
         for i in 0..2 {
-            let on = truth.apu_running && producing(&self.net, self.src_apu_gen[i]) && self.wiring.apu_gen[i].overload_heat() < 1.0;
+            let on = truth.controls.apu_gen_pb_on[i] && truth.apu_running && producing(&self.net, self.src_apu_gen[i]) && self.wiring.apu_gen[i].overload_heat() < 1.0;
             apu_on_line |= on;
             self.net.contactors[self.contactor.apu_gen_line[i]].commanded_closed = on;
         }
@@ -1028,10 +1092,16 @@ impl ElectricalLive {
         // so a dead essential bus can never drain the batteries through it.
         self.net.contactors[self.contactor.dc_tie_1_2].commanded_closed = tr_live[0] != tr_live[1];
         self.net.contactors[self.contactor.dc_bat_tie].commanded_closed = tr_live[2] || tr_live[0];
-        // The batteries sit permanently across their own battery/hot bus --
-        // that is what a hot bus is.
-        for &idx in &self.contactor.bat_direct {
-            self.net.contactors[idx].commanded_closed = true;
+        // The battery-direct contactor is the real BAT pushbutton's own
+        // contactor (`ContactorKind::BatteryDirect`) -- AUTO closes it onto
+        // the battery/hot bus, OFF opens it, exactly the real Airbus
+        // behaviour that a battery pushbutton switched off also drops its
+        // own hot bus (not merely the battery's contribution to the main DC
+        // network). `Controls::default`'s normal position is AUTO, so a
+        // cold aircraft with nobody touching the pushbuttons still has both
+        // hot buses alive.
+        for i in 0..2 {
+            self.net.contactors[self.contactor.bat_direct[i]].commanded_closed = truth.controls.bat_pb_auto[i];
         }
 
         // The ground/flight service buses carry cargo handling, service
@@ -1059,6 +1129,76 @@ impl ElectricalLive {
                     }
                 }
             }
+        }
+    }
+
+    /// The 17 avionics/pyro transit-only loads this pass gives a real
+    /// command, plus the 6 gear/gear-door actuators -- see this struct's
+    /// own field doc. Every one of the 23 now has a real signal behind it;
+    /// none remain permanently off.
+    fn command_transit_loads(&mut self, truth: &Truth) {
+        let c = &truth.controls;
+
+        // Ignition exciters: a real igniter fires high-tension sparks only
+        // while its own engine is actually being cranked -- the same
+        // `starter_engaged` condition `physics::engine`'s own starter model
+        // gates on internally (see `Controls::starter_engaged`'s own doc).
+        for eng in 0..4 {
+            let on = c.starter_engaged[eng];
+            self.net.loads[self.ignition_load[eng][0]].commanded_on = on;
+            self.net.loads[self.ignition_load[eng][1]].commanded_on = on;
+        }
+
+        // Engine fire bottle squibs: `ata26_extinguishing`'s own doc cites
+        // "a real wide-body cross-feed fire-extinguishing architecture" --
+        // bottle 1 is the first shot, bottle 2 the second, cross-fed to
+        // whichever engine's fire handle is pulled and whose crew is
+        // pressing that shot's AGENT pushbutton. A squib only has a path to
+        // fire once the handle has rotated the transfer valve open, so both
+        // are required, not the agent pushbutton alone.
+        for bottle in 0..2 {
+            let fired = (0..4).any(|eng| c.fire_pb_released[eng] && c.fire_agent_pb_pressed[eng][bottle]);
+            self.net.loads[self.eng_fire_squib[bottle][0]].commanded_on = fired;
+            self.net.loads[self.eng_fire_squib[bottle][1]].commanded_on = fired;
+        }
+
+        // APU fire bottle: one agent pushbutton, its two squibs redundant
+        // initiators on the same one-shot bottle, so both fire together.
+        let apu_fired = c.fire_pb_apu_released && c.fire_agent_pb_apu_pressed;
+        self.net.loads[self.apu_fire_squib[0]].commanded_on = apu_fired;
+        self.net.loads[self.apu_fire_squib[1]].commanded_on = apu_fired;
+
+        // APU start contactor: energised for exactly as long as the crew is
+        // holding a real start command.
+        self.net.loads[self.apu_start_contactor].commanded_on = c.apu_start_pb_on;
+
+        // Cargo door actuator control: this catalogue models one cargo door
+        // class (`registry.rs`'s own "registers one of each as the class"),
+        // and `deep::cabin` likewise publishes one channel for it
+        // (`CABIN_CARGO_DOOR_PERCENT:1`/`CABIN_CARGO_DOOR_CMD:1`, one frame
+        // behind through `Truth::published`), so both the forward and aft
+        // control circuits share it. The circuit draws while the door has
+        // not yet reached the target the cabin crew's own switch gave it --
+        // i.e. while it is actually travelling -- not merely while
+        // commanded, which is what a control circuit (as opposed to the
+        // door's own drive motor) genuinely does.
+        let cargo_pos = truth.published.get_or("CABIN_CARGO_DOOR_PERCENT:1", 0.0);
+        let cargo_cmd = truth.published.get_or("CABIN_CARGO_DOOR_CMD:1", 0.0);
+        let cargo_moving = (cargo_cmd - cargo_pos).abs() > CARGO_DOOR_TRAVEL_MARGIN_PERCENT;
+        self.net.loads[self.cargo_door_ctl[0]].commanded_on = cargo_moving;
+        self.net.loads[self.cargo_door_ctl[1]].commanded_on = cargo_moving;
+
+        // Gear and gear-door actuators: FlyByWire's own commanded door
+        // position (`Controls::gear_door_commanded_open`) is real and
+        // continuous; an intermediate value is the door -- and, on this
+        // catalogue's simplified one-actuator-per-leg model, the gear it
+        // travels with -- actually driving rather than parked at an end
+        // stop.
+        for i in 0..3 {
+            let pos = c.gear_door_commanded_open[i];
+            let in_transit = pos > GEAR_TRANSIT_MARGIN_FRACTION && pos < 1.0 - GEAR_TRANSIT_MARGIN_FRACTION;
+            self.net.loads[self.gear_door_actuator[i]].commanded_on = in_transit;
+            self.net.loads[self.gear_actuator[i]].commanded_on = in_transit;
         }
     }
 
@@ -1151,17 +1291,17 @@ impl Area for ElectricalLive {
         // 3. Sources first: every source's terminal for this frame, from
         //    `Truth` and last frame's measured feedback.
         //
-        //    `engine_speed_fraction` is the VFG's own *core* speed; `Truth`
-        //    carries only fan speed (`engine_n1_frac`), so that is what is
-        //    fed here -- see this area's report, which asks for an
-        //    `engine_n2_frac` field. It affects the generator's output
-        //    frequency, not its regulated voltage.
-        //    `gpu_plugged_in` has no `Truth` field either: ground power
-        //    cannot be modelled as connected until one exists, and inventing
-        //    one would be a fabricated input.
-        let gpu_plugged_in = false;
+        //    `engine_speed_fraction` is the VFG's own *core* speed, not the
+        //    fan: `Truth::engine_n2_frac` is what the generator's own
+        //    accessory-gearbox drive actually tracks, and it is what sets
+        //    the generator's output frequency (never its regulated
+        //    voltage) -- and, downstream of that, the direct-drive cabin/
+        //    avionics-bay fans' own affinity-law power
+        //    (`network::Load::frequency_multiplier`). Feeding fan speed
+        //    here (as this used to) fed the wrong shaft into both.
+        let gpu_plugged_in = truth.gpu_plugged_in;
         let inputs = WiringInputs {
-            engine_speed_fraction: truth.engine_n1_frac,
+            engine_speed_fraction: truth.engine_n2_frac,
             measured_gen_load_w: self.measured_gen_load_w,
             vfg_faults: sf.vfg,
             apu_speed_fraction: if truth.apu_running { 1.0 } else { 0.0 },
@@ -1176,15 +1316,23 @@ impl Area for ElectricalLive {
             ground_power_faults: sf.ground_power,
             airspeed_kt: truth.environment.tas_ms / 0.514_444,
             rat_faults: sf.rat,
-            // No `Truth` field carries an equipment-bay temperature; static
-            // air temperature is the only ambient available (see report).
-            ambient_c: truth.environment.sat_c,
+            // The main avionics/equipment bay's own published temperature
+            // (`deep::thermal_zones`, one frame behind through
+            // `Truth::published`), not static air: at cruise SAT is around
+            // -56 C, roughly 70 K colder than a ventilated avionics bay
+            // actually runs, which would every tick have made every TRU/
+            // VFG/battery thermal model think it was sitting in a walk-in
+            // freezer. Falls back to a GENERIC 20 C (a ventilated bay's own
+            // target range, not ambient) only until `thermal_zones` has
+            // published its first frame.
+            ambient_c: truth.published.get_or("THERMAL_ZONE_MAINAVIONICS_TEMPERATURE_C", EQUIPMENT_BAY_FALLBACK_C),
         };
         self.wiring.pre_step(&mut self.net, &inputs, dt);
 
         // 4. Contactor control against those fresh terminals, then the
         //    load-management shed decision, then the one solve.
         self.command_contactors(truth, gpu_plugged_in);
+        self.command_transit_loads(truth);
 
         let capacity_w = self.capacity_w(truth, gpu_plugged_in);
         let budget = power_budget(&self.net, capacity_w);
@@ -1303,6 +1451,10 @@ mod tests {
             on_ground: false,
             altitude_ft: 35_000.0,
             engine_n1_frac: [0.9; 4],
+            // The VFGs are now driven off core (N2) speed, not fan speed
+            // (see `ElectricalLive::tick`'s own doc) -- a flying engine's
+            // core sits well above idle too.
+            engine_n2_frac: [0.9; 4],
             engine_running: [true; 4],
             ..Truth::default()
         }
@@ -1504,17 +1656,70 @@ mod tests {
     /// The transit-only/one-shot loads this pass added (ignition exciters,
     /// fire-bottle squibs, the APU start contactor, cargo door actuator
     /// control) must be dead on an otherwise healthy, steady-state aircraft
-    /// -- `loads.rs` defaults every entry `commanded_on: true`, so this is
-    /// what proves `ElectricalLive::new`'s own override actually took, not
-    /// just that the raw catalogue looks right.
+    /// with nobody starting an engine, discharging a bottle, pressing START
+    /// or moving a cargo door -- `loads.rs` defaults every entry
+    /// `commanded_on: true`, so this is what proves `command_transit_loads`
+    /// genuinely reads their real commands rather than leaving them
+    /// (silently) on.
     #[test]
-    fn transit_only_loads_with_no_truth_input_stay_dead_on_a_steady_state_aircraft() {
+    fn transit_only_loads_stay_dead_on_a_steady_state_aircraft_with_nothing_commanding_them() {
         board::clear();
         let mut live = ElectricalLive::new();
         let published = run(&mut live, &flying_truth(), &Faults::default(), 20);
         for id in ["ignition-1a", "ignition-4b", "eng-fire-bottle-1-squib-1", "apu-fire-bottle-squib-2", "apu-start-contactor", "cargo-door-fwd-actuator-ctl", "cargo-door-aft-actuator-ctl"] {
-            assert_eq!(published[&format!("ELEC_LOAD_{id}_POWERED")], 0.0, "{id} has no Truth input yet and must stay dead, not silently on");
+            assert_eq!(published[&format!("ELEC_LOAD_{id}_POWERED")], 0.0, "{id} is not presently commanded and must stay dead, not silently on");
         }
+        board::clear();
+    }
+
+    /// The rule's own required test: an ignition exciter draws current only
+    /// while its engine is actually being started, and goes dead again the
+    /// instant the starter disengages -- not before the start, not for the
+    /// rest of the flight once the engine is running.
+    #[test]
+    fn an_ignition_exciter_draws_only_while_its_engine_is_being_started() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+
+        // A ground start: no engine generator is up yet, so the DC network
+        // this exciter sits on (`ata7x_engine`'s own `Dc1`/`Dc2`) needs the
+        // APU's generator, tied across the AC buses, to be live at all.
+        let mut cranking = flying_truth();
+        cranking.engine_running = [false; 4];
+        cranking.engine_n1_frac = [0.0; 4];
+        cranking.apu_running = true;
+        cranking.controls.starter_engaged[0] = true;
+        let during_start = run(&mut live, &cranking, &Faults::default(), 5);
+        assert_eq!(during_start["ELEC_LOAD_ignition-1a_POWERED"], 1.0, "exciter A must draw while engine 1 is being cranked");
+        assert_eq!(during_start["ELEC_LOAD_ignition-1b_POWERED"], 1.0, "exciter B must draw while engine 1 is being cranked");
+        assert_eq!(during_start["ELEC_LOAD_ignition-2a_POWERED"], 0.0, "engine 2's own exciter must be untouched by engine 1's start");
+
+        let mut running = flying_truth(); // starter_engaged defaults to false once started.
+        running.apu_running = true;
+        let after_start = run(&mut live, &running, &Faults::default(), 5);
+        assert_eq!(after_start["ELEC_LOAD_ignition-1a_POWERED"], 0.0, "a running engine's exciter must go dead once the starter disengages");
+        board::clear();
+    }
+
+    /// The rule's own required test: plugging in external power actually
+    /// energises the ground-service buses, which is exactly what
+    /// `command_contactors`'s own `gpu_line`/`ac_gnd_svc_feed` gating
+    /// promises and what `command_contactors`'s `tick` used to be unable to
+    /// do at all with `gpu_plugged_in` hardcoded `false`.
+    #[test]
+    fn ground_power_actually_energises_the_ground_service_buses() {
+        board::clear();
+        let cold_dark = Truth { on_ground: true, ..Truth::default() };
+        let mut unplugged = ElectricalLive::new();
+        let dark = run(&mut unplugged, &cold_dark, &Faults::default(), 20);
+        assert_eq!(dark["ELEC_AC_GND_FLT_SVC_BUS_IS_POWERED"], 0.0, "a cold, dark, unplugged aircraft must have no ground-service power");
+
+        board::clear();
+        let plugged_in = Truth { on_ground: true, gpu_plugged_in: true, ..Truth::default() };
+        let mut plugged = ElectricalLive::new();
+        let lit = run(&mut plugged, &plugged_in, &Faults::default(), 20);
+        assert_eq!(lit["ELEC_AC_GND_FLT_SVC_BUS_IS_POWERED"], 1.0, "a plugged-in GPU must actually energise the AC ground-service bus");
+        assert!(lit["ELEC_AC_GND_FLT_SVC_BUS_POTENTIAL"] > 100.0, "{}", lit["ELEC_AC_GND_FLT_SVC_BUS_POTENTIAL"]);
         board::clear();
     }
 
@@ -1650,6 +1855,42 @@ mod tests {
         let mut top: Vec<(&str, f64, f64)> = live.net.loads.iter().filter(|l| l.spec.bus == BusId::DcEss).map(|l| (l.spec.id, l.current_a, l.spec.rated_power_w)).collect();
         top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         println!("DC_ESS top loads {:?}", &top[..top.len().min(8)]);
+    }
+
+    /// Frame-cost measurement for this pass's own report: electrical is the
+    /// largest network in the crate (`route_failures`'s own test already
+    /// asserts over 1,000 routed failures), and this pass added a 23-load
+    /// `command_transit_loads` pass and a `truth.published` lookup every
+    /// tick, both new per-frame costs on top of the existing solve.
+    /// `#[ignore]`d like this file's other diagnostics -- run explicitly
+    /// with `cargo test -- --ignored` to see the number, never as part of
+    /// the normal suite (wall-clock timing is not a correctness assertion).
+    #[test]
+    #[ignore = "diagnostic"]
+    fn frame_cost() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let truth = flying_truth();
+        let faults = Faults::default();
+        // Warm up (first tick pays for lazily-built indices/allocations
+        // that a real running aircraft only pays once).
+        for _ in 0..30 {
+            live.tick(&truth, &faults);
+            let mut out = |_: &str, _: f64| {};
+            live.publish(&mut out);
+        }
+        let n = 2000;
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            live.tick(&truth, &faults);
+            let mut out = |_: &str, _: f64| {};
+            live.publish(&mut out);
+        }
+        let elapsed = start.elapsed();
+        let per_tick_us = elapsed.as_secs_f64() * 1_000_000.0 / n as f64;
+        println!("electrical: {per_tick_us:.1} us/tick over {n} ticks ({:.3} ms total)", elapsed.as_secs_f64() * 1000.0);
+        println!("budget at 60 Hz: 16667 us/frame for the whole plugin; at 30 Hz: 33333 us/frame");
+        board::clear();
     }
 
     #[test]

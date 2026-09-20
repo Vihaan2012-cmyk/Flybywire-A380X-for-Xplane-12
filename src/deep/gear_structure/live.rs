@@ -19,19 +19,38 @@
 //! `GearSystemInputs` already documents), brake stack cooling from
 //! `truth.environment.sat_c`, and ground contact from `truth.on_ground`.
 //!
-//! ## What is not in `Truth` yet
+//! ## Wired from `Truth` (2026-09-20 pass)
 //!
-//! Everything the gear needs that is *about the airframe's motion* rather
-//! than about its systems: aircraft mass, pitch attitude, groundspeed,
-//! per-leg touchdown sink speed and side load, and the four cockpit
-//! controls the gear obeys (lever, gravity extension, tiller, pedals,
-//! parking brake). They are collected in [`GearCommands`], documented one
-//! by one, rather than guessed from `Truth::on_ground` and
-//! `Truth::altitude_ft`. Mass is the one that cannot honestly default to
-//! zero -- an aircraft always weighs something -- so it defaults to the
-//! published A380-800 operating empty weight, i.e. the airframe with no
-//! fuel and no payload, which is exactly the state
-//! `deep::fuel::live`'s empty tanks describe.
+//! This area used to run entirely on one interim [`GearCommands`] struct
+//! for the airframe's motion and the cockpit controls the gear obeys, none
+//! of it ever actually set: `deep::live::Deep::tick` drives every area
+//! purely through the `Area` trait (`tick`/`publish`), so nothing in
+//! production ever called a concrete setter on this type, and it ran at
+//! [`GearCommands::default`]'s resting values forever. Most of that is
+//! real now, read straight out of `Truth`/`Truth::controls` in
+//! `inputs_from` every tick:
+//!
+//! * **Aircraft mass, pitch attitude and groundspeed** --
+//!   `Truth::aircraft_mass_kg`/`pitch_deg`/`groundspeed_m_s`.
+//! * **Per-leg ground contact and touchdown sink speed** --
+//!   `Truth::leg_on_ground`/`leg_touchdown_sink_speed_ms`, both new. This
+//!   area previously had only `Truth::on_ground`, one aircraft-wide flag
+//!   with **no sink speed at all** -- the single number a hard-landing
+//!   model is most sensitive to. `on_ground` is still ANDed in (no leg can
+//!   be on the ground while the aircraft is not), but the per-leg flag and
+//!   the real sink speed now drive the strut law directly.
+//! * **Gear lever, parking brake and brake pedals** --
+//!   `Truth::controls.gear_lever_down`/`parking_brake_on`/`brake_pedal_pos`.
+//!
+//! `GearCommands` now carries only what is genuinely still not on `Truth`:
+//! per-leg side load (no real per-leg lateral-load source exists anywhere
+//! in this port), the gravity-extension handle (no dataref found), and the
+//! tiller/rudder-pedal steering command (ditto). Mass in particular used
+//! to be the one field here that could not honestly default to zero -- an
+//! aircraft always weighs something -- so `GearCommands::default` used the
+//! published A380-800 operating empty weight; that default now lives on
+//! `Truth::default` instead (same figure, same citation), since mass is a
+//! `Truth` reading now, not an interim command.
 
 use crate::deep::api::Registry;
 use crate::deep::live::{Faults, Truth};
@@ -44,8 +63,10 @@ use super::{GearSystem, GearSystemFaults, GearSystemInputs, GearSystemOutputs, L
 
 /// A380-800 operating empty weight, kg. Airbus's own published Aircraft
 /// Characteristics figure is about 277 t for the -800; this is the
-/// airframe with neither fuel nor payload, which is what the live systems
-/// describe before the plugin tells them otherwise.
+/// airframe with neither fuel nor payload. Mass now comes straight from
+/// `Truth::aircraft_mass_kg` every tick (module doc); this constant is kept
+/// public as the same citation `Truth::default`'s own copy of it uses,
+/// rather than duplicated without attribution.
 pub const OEW_KG: f64 = 277_000.0;
 
 /// A380 hydraulic system nominal pressure, Pa (5000 psi, `docs/deep/
@@ -76,57 +97,29 @@ const STEER_KEY: [&str; 3] = ["nose", "l_body", "r_body"];
 // Inputs that `Truth` does not carry yet.
 // ---------------------------------------------------------------------------
 
-/// Everything the gear needs that is not in [`Truth`]: the airframe's own
-/// motion, and the cockpit controls the gear obeys.
+/// What the gear needs that is genuinely still not in [`Truth`] anywhere
+/// (see this module's own doc): per-leg side load, the gravity-extension
+/// handle, and the tiller/rudder-pedal steering command.
 #[derive(Clone, Copy, Debug)]
 pub struct GearCommands {
-    /// Current all-up mass, kg -- sets every leg's static reaction and the
-    /// overweight-landing check. Defaults to [`OEW_KG`].
-    pub mass_kg: f64,
-    /// Body pitch attitude, deg -- the tailstrike margin's other input.
-    pub pitch_deg: f64,
-    /// Groundspeed, m/s. Not `Truth::environment.tas_ms`: shimmy and brake
-    /// energy are about speed over the ground, and the two differ by the
-    /// wind.
-    pub groundspeed_ms: f64,
-    /// Per leg, in `LEG_KEY` order: whether *this* leg's wheels are on the
-    /// ground, the vertical closing speed at the instant they touch, and
-    /// the side load at its axle. `Truth::on_ground` is one aircraft-wide
-    /// flag, so it cannot express one main gear touching before the other,
-    /// and it carries no sink speed at all -- which is the single number a
-    /// hard-landing model is most sensitive to.
-    pub leg_on_ground: [bool; N_LEGS],
-    pub leg_sink_speed_ms: [f64; N_LEGS],
+    /// Side load at each leg's axle, N. `Truth` carries no per-leg lateral
+    /// load source (no real dataref for it was found anywhere in this
+    /// port).
     pub leg_side_load_n: [f64; N_LEGS],
-    /// Gear lever down, and the free-fall/gravity extension handle.
-    pub gear_lever_down: bool,
+    /// The free-fall/gravity extension handle. No real dataref found.
     pub gravity_extend_commanded: bool,
-    /// Nosewheel tiller/rudder-pedal steering command, deg.
+    /// Nosewheel tiller/rudder-pedal steering command, deg. No real
+    /// dataref found (`Truth::controls` has no tiller/pedal-steering
+    /// field).
     pub nose_steering_command_deg: f64,
-    /// Brake pedal deflection, 0..1 (or the autobrake's demand).
-    pub brake_pedal_left: f64,
-    pub brake_pedal_right: f64,
-    pub parking_brake_set: bool,
 }
 
 impl Default for GearCommands {
-    /// A parked aircraft: empty, stopped, gear down and locked, brakes
-    /// released.
+    /// No side load, gravity extension not commanded, wheels straight --
+    /// the resting values for the three inputs `Truth` still does not
+    /// carry.
     fn default() -> Self {
-        Self {
-            mass_kg: OEW_KG,
-            pitch_deg: 0.0,
-            groundspeed_ms: 0.0,
-            leg_on_ground: [true; N_LEGS],
-            leg_sink_speed_ms: [0.0; N_LEGS],
-            leg_side_load_n: [0.0; N_LEGS],
-            gear_lever_down: true,
-            gravity_extend_commanded: false,
-            nose_steering_command_deg: 0.0,
-            brake_pedal_left: 0.0,
-            brake_pedal_right: 0.0,
-            parking_brake_set: false,
-        }
+        Self { leg_side_load_n: [0.0; N_LEGS], gravity_extend_commanded: false, nose_steering_command_deg: 0.0 }
     }
 }
 
@@ -233,7 +226,12 @@ pub struct GearStructureLive {
     outputs: GearSystemOutputs,
     /// This frame's antiskid BITE report, one per braked wheel.
     antiskid_channel_fault: [bool; N_BRAKED_WHEELS],
-    /// Inputs `Truth` does not carry; see [`GearCommands`].
+    /// This tick's `Truth`-sourced gear lever and parking brake position,
+    /// kept because `Area::publish` takes no `Truth` of its own to read
+    /// them back from.
+    gear_lever_down: bool,
+    parking_brake_set: bool,
+    /// Inputs `Truth` still does not carry anywhere; see [`GearCommands`].
     pub commands: GearCommands,
 }
 
@@ -252,7 +250,15 @@ impl GearStructureLive {
         // zeroed struct: a parked aircraft's struts are compressed under
         // its own weight and its legs are down and locked.
         let outputs = system.step(&inputs_from(&truth, &commands), &GearSystemFaults::default());
-        Self { ids: Ids::resolve(), system, outputs, antiskid_channel_fault: [false; N_BRAKED_WHEELS], commands }
+        Self {
+            ids: Ids::resolve(),
+            system,
+            outputs,
+            antiskid_channel_fault: [false; N_BRAKED_WHEELS],
+            gear_lever_down: truth.controls.gear_lever_down,
+            parking_brake_set: truth.controls.parking_brake_on,
+            commands,
+        }
     }
 
     /// The full gear state this frame, for anything that needs more than
@@ -296,36 +302,41 @@ impl GearStructureLive {
     }
 }
 
-/// One frame's `GearSystemInputs` from what `Truth` carries plus what it
-/// does not.
+/// One frame's `GearSystemInputs` from what `Truth`/`Truth::controls` now
+/// carry, plus the three fields in `commands` that still do not exist
+/// anywhere in this port (see [`GearCommands`]).
 fn inputs_from(truth: &Truth, commands: &GearCommands) -> GearSystemInputs {
     let leg = |i: usize| LegTouchdownInputs {
         // `Truth::on_ground` is the aircraft-wide weight-on-wheels flag:
         // no leg can be on the ground while the aircraft is not, so the
         // two are ANDed rather than the per-leg flag simply overriding it.
-        on_ground: truth.on_ground && commands.leg_on_ground[i],
-        sink_speed_ms: commands.leg_sink_speed_ms[i],
+        // `leg_on_ground`/`leg_touchdown_sink_speed_ms` are both real now
+        // (module doc) -- previously `commands.leg_on_ground` defaulted to
+        // `[true; N_LEGS]` and `commands.leg_sink_speed_ms` to zero forever,
+        // since nothing in production ever set either.
+        on_ground: truth.on_ground && truth.leg_on_ground[i],
+        sink_speed_ms: truth.leg_touchdown_sink_speed_ms[i],
         side_load_n: commands.leg_side_load_n[i],
     };
     let fraction = |pa: f64| (pa / HYDRAULIC_NOMINAL_PA).clamp(0.0, 1.0);
     GearSystemInputs {
-        mass_kg: commands.mass_kg,
-        pitch_deg: commands.pitch_deg,
-        groundspeed_ms: commands.groundspeed_ms,
+        mass_kg: truth.aircraft_mass_kg,
+        pitch_deg: truth.pitch_deg,
+        groundspeed_ms: truth.groundspeed_m_s,
         ambient_c: truth.environment.sat_c,
         nose: leg(0),
         left_wing: leg(1),
         right_wing: leg(2),
         left_body: leg(3),
         right_body: leg(4),
-        gear_lever_down: commands.gear_lever_down,
+        gear_lever_down: truth.controls.gear_lever_down,
         gravity_extend_commanded: commands.gravity_extend_commanded,
         green_hydraulic_fraction: fraction(truth.hydraulic_pressure_pa[0]),
         yellow_hydraulic_fraction: fraction(truth.hydraulic_pressure_pa[1]),
         nose_steering_command_deg: commands.nose_steering_command_deg,
-        brake_pedal_left: commands.brake_pedal_left,
-        brake_pedal_right: commands.brake_pedal_right,
-        parking_brake_set: commands.parking_brake_set,
+        brake_pedal_left: truth.controls.brake_pedal_pos[0],
+        brake_pedal_right: truth.controls.brake_pedal_pos[1],
+        parking_brake_set: truth.controls.parking_brake_on,
         dt_s: truth.dt_s,
     }
 }
@@ -339,6 +350,8 @@ impl crate::deep::live::Area for GearStructureLive {
         let inputs = inputs_from(truth, &self.commands);
         let gear_faults = self.faults_from(faults);
         self.outputs = self.system.step(&inputs, &gear_faults);
+        self.gear_lever_down = truth.controls.gear_lever_down;
+        self.parking_brake_set = truth.controls.parking_brake_on;
 
         // The antiskid computer's own BITE: a channel that has lost this
         // much of its release authority fails its self-test and reports,
@@ -382,7 +395,7 @@ impl crate::deep::live::Area for GearStructureLive {
             out(&format!("ANTISKID_CHANNEL_FAULT:{n}"), b(self.antiskid_channel_fault[wheel]));
         }
 
-        out("PARK_BRAKE_SET", b(self.commands.parking_brake_set));
+        out("PARK_BRAKE_SET", b(self.parking_brake_set));
         out("PARK_BRAKE_HOLDING", b(o.parking_brake_holding));
         out("PARK_BRAKE_PRESS_PA", o.parking_brake_pressure_pa);
 
@@ -397,7 +410,7 @@ impl crate::deep::live::Area for GearStructureLive {
         // The lever position the gear system is actually acting on, so the
         // L/G GEAR NOT DOWNLOCKED procedure's "GEAR LEVER ... RECYCLE" line
         // reads back the same command the legs obeyed.
-        out("GEAR_LEVER_POSITION_REQUEST", b(self.commands.gear_lever_down));
+        out("GEAR_LEVER_POSITION_REQUEST", b(self.gear_lever_down));
 
         out("GEAR_WING_FATIGUE_INDEX", o.wing_fatigue_index);
     }
@@ -477,9 +490,9 @@ mod tests {
         let mut truth = rollout_truth();
         truth.dt_s = 0.1;
         truth.environment.sat_c = 15.0;
+        truth.groundspeed_m_s = 15.0; // taxi speed
 
         let mut live = GearStructureLive::new();
-        live.commands.groundspeed_ms = 15.0; // taxi speed
         let id = live.ids.dragging[0];
         let out = run(&mut live, &truth, &Faults::from_pairs([(id, 1.0)]), 600.0);
 
@@ -524,14 +537,13 @@ mod tests {
         // holding pressure".
         let mut truth = rollout_truth();
         truth.dt_s = 1.0;
+        truth.controls.parking_brake_on = true;
 
         let mut healthy = GearStructureLive::new();
-        healthy.commands.parking_brake_set = true;
         let healthy_out = run(&mut healthy, &truth, &Faults::default(), 600.0);
         assert_eq!(healthy_out.get("PARK_BRAKE_HOLDING"), Some(&1.0), "a healthy accumulator still holds after ten minutes");
 
         let mut leaking = GearStructureLive::new();
-        leaking.commands.parking_brake_set = true;
         let id = leaking.ids.parking_brake_leak;
         let leak_out = run(&mut leaking, &truth, &Faults::from_pairs([(id, 1.0)]), 36_000.0);
         assert_eq!(leak_out.get("PARK_BRAKE_SET"), Some(&1.0));
@@ -558,15 +570,14 @@ mod tests {
         let speed = 0.5 * (failed_critical + healthy_critical);
         let mut truth = rollout_truth();
         truth.dt_s = 0.02;
+        truth.groundspeed_m_s = speed;
 
         let mut healthy = GearStructureLive::new();
-        healthy.commands.groundspeed_ms = speed;
         healthy.commands.nose_steering_command_deg = 2.0;
         let healthy_out = run(&mut healthy, &truth, &Faults::default(), 20.0);
         assert_eq!(healthy_out.get("NW_STEER_SHIMMY_UNSTABLE"), Some(&0.0));
 
         let mut failed = GearStructureLive::new();
-        failed.commands.groundspeed_ms = speed;
         failed.commands.nose_steering_command_deg = 2.0;
         let id = failed.ids.shimmy[0];
         let failed_out = run(&mut failed, &truth, &Faults::from_pairs([(id, 1.0)]), 20.0);
@@ -580,9 +591,9 @@ mod tests {
         let speed = 0.5 * (failed_critical + healthy_critical);
         let mut truth = rollout_truth();
         truth.dt_s = 0.02;
+        truth.groundspeed_m_s = speed;
 
         let mut live = GearStructureLive::new();
-        live.commands.groundspeed_ms = speed;
         live.commands.nose_steering_command_deg = 20.0;
         let id = live.ids.shimmy[1]; // left body gear
         let out = run(&mut live, &truth, &Faults::from_pairs([(id, 1.0)]), 20.0);
@@ -609,6 +620,66 @@ mod tests {
             out["GEAR_LEG_COMPRESSION:2"]
         );
         assert_eq!(out["GEAR_STRUT_GAS_CHARGE_FRACTION:3"], 1.0, "the other legs are untouched");
+    }
+
+    #[test]
+    fn a_hard_touchdown_via_truth_consumes_more_gear_life_than_a_gentle_one() {
+        // `Truth::leg_touchdown_sink_speed_ms`/`leg_on_ground` are new
+        // (module doc): this area previously had only one aircraft-wide
+        // `on_ground` flag and no sink speed at all -- the single number a
+        // hard-landing model is most sensitive to, and `commands.
+        // leg_sink_speed_ms` defaulted to zero forever since nothing in
+        // production ever set it. This proves the real reading actually
+        // reaches the strut law, by landing the same leg at two different
+        // real sink speeds and checking the harder one costs more fatigue
+        // life (`strut.rs`'s own `fatigue_accumulates_more_from_a_harder_
+        // landing_than_a_gentle_one` proves the underlying law from a
+        // direct `Strut`; this proves the `Truth` wiring that reaches it).
+        //
+        // CS-25.473(a): design descent velocity not less than 10 fps
+        // (3.05 m/s) at design landing weight -- the same limit sink speed
+        // `strut.rs`'s own fatigue test cites, restated here since it is a
+        // private constant of that file.
+        const SINK_SPEED_LIMIT_MS: f64 = 3.05;
+
+        let left_wing_life_fraction = |sink_speed_ms: f64| -> f64 {
+            let mut live = GearStructureLive::new();
+            let mut truth = rollout_truth();
+            truth.dt_s = 0.02;
+
+            // Airborne first: `sink_speed_ms` is only read on the tick a
+            // leg's `on_ground` goes false -> true, so a genuine touchdown
+            // transient needs the leg in the air before it lands (matching
+            // `strut.rs`'s own `land` test helper).
+            truth.on_ground = false;
+            truth.leg_on_ground = [false; 5];
+            for _ in 0..50 {
+                live.tick(&truth, &Faults::default());
+            }
+
+            // Touch down on all five legs at once, at `sink_speed_ms`, and
+            // hold there while the transient settles.
+            truth.on_ground = true;
+            truth.leg_on_ground = [true; 5];
+            truth.leg_touchdown_sink_speed_ms = [sink_speed_ms; 5];
+            for _ in 0..500 {
+                live.tick(&truth, &Faults::default());
+            }
+
+            // Liftoff: closes out the ground-contact cycle and applies its
+            // Miner's-rule fatigue increment (`strut.rs`'s own `close_cycle`
+            // doc) -- without this the leg is still mid-cycle and the
+            // increment has not landed yet.
+            truth.on_ground = false;
+            truth.leg_on_ground = [false; 5];
+            live.tick(&truth, &Faults::default());
+
+            published(&live)["GEAR_STRUT_LIFE_FRACTION:2"] // left wing leg
+        };
+
+        let gentle = left_wing_life_fraction(SINK_SPEED_LIMIT_MS * 0.3);
+        let hard = left_wing_life_fraction(SINK_SPEED_LIMIT_MS * 0.95);
+        assert!(hard > gentle, "a harder real touchdown must consume more fatigue life than a gentle one: {hard} vs {gentle}");
     }
 
     #[test]

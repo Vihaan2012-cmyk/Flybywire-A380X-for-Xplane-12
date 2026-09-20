@@ -21,29 +21,46 @@
 //!    than re-deriving the numbering here -- so a failure added, removed
 //!    or reordered in `registry.rs` can never silently stop being wired.
 //!
-//! ## Inputs that are not on `Truth` yet
+//! ## Wired from `Truth` (2026-09-20 pass)
 //!
-//! Four inputs the model genuinely needs have no field on [`Truth`]. None
-//! of them is invented here; each has a setter the plugin calls, and until
-//! it does they sit at a value that is *honest about not knowing* rather
-//! than a plausible-looking constant:
+//! Three of the four inputs this model needed with no field on `Truth` are
+//! real now. As with every other deep area, `deep::live::Deep::tick` drives
+//! this one purely through the `Area` trait (`tick`/`publish`), so the old
+//! setters below were never called by anything in production; they are
+//! superseded, not merely supplemented, by reading `Truth` directly in
+//! `tick`.
 //!
-//! * **HP spool speed** ([`HydraulicsLive::set_engine_n3_frac`]). The EDP
-//!   is driven off the HP (N3) spool through the accessory gearbox, and
-//!   `Truth` carries only N1. Until the plugin supplies N3 (it already
-//!   publishes `ENGINE_N3:n` from this crate's own engine model), the
-//!   shaft speed is interpolated between this aircraft's own two cited
-//!   operating points -- see [`n3_frac_from_n1_frac`].
-//! * **Fire handle position** ([`HydraulicsLive::set_fire_handles`]).
-//! * **Consumer flow demand** ([`HydraulicsLive::set_demands`]) -- the
-//!   flow the flight controls, gear, brakes, steering, cargo doors and
-//!   reversers are actually drawing. `deep::flight_controls` knows its own
-//!   half of this, but the [`Area`] trait is tick-then-publish with no
-//!   channel between areas, so it has to arrive through the plugin.
-//! * **Heat-exchanger fuel flow** ([`HydraulicsLive::set_fuel`]). With no
-//!   fuel flow the only cooling path left is the passive bay loss, so the
-//!   circuit runs hotter than it should; it is deliberately left that way
-//!   rather than guessing an engine feed flow.
+//! * **HP spool speed** -- `truth.engine_n3_frac`. The EDP is driven off
+//!   the HP (N3) spool through the accessory gearbox; `Truth` used to
+//!   carry only N1, so the shaft speed was interpolated between this
+//!   aircraft's own two cited operating points instead (still available,
+//!   unused now, as [`n3_frac_from_n1_frac`] -- its own test keeps proving
+//!   that stand-in reproduces its two citations, in case anything ever
+//!   needs it again).
+//! * **Fire handle position** -- `truth.controls.fire_pb_released`, read
+//!   straight into [`EdpInputs::fire_handle_pulled`] every tick; the
+//!   registered fire-shutoff-valve failures finally have a healthy
+//!   counterpart (a handle that has *not* been pulled) to act against.
+//! * **Heat-exchanger fuel flow** -- `truth.engine_fuel_flow_kg_s`, summed
+//!   over the two engines that drive each circuit's pumps
+//!   ([`GREEN_PUMP_ENGINE_INDEX`]/[`YELLOW_PUMP_ENGINE_INDEX`]): the fluid
+//!   a circuit's own fuel/hydraulic heat exchanger can reach is the feed
+//!   flow of the engines it shares a gearbox with, not a third, unrelated
+//!   engine's. **Feed temperature is still not on `Truth`**
+//!   (`engine_commands.rs` reads a per-engine `feed_fuel_temp` internally
+//!   but it is never published) -- kept at the same interim 288.15 K
+//!   (15 C) `Truth::environment`'s own cold-aircraft default already uses,
+//!   documented here rather than invented as something more specific.
+//!
+//! **Consumer flow demand** is the one input still not read from
+//! `Truth`, but it is no longer completely absent either:
+//! `deep::flight_controls::live` now publishes its own half of it
+//! (`FCTL_{GREEN,YELLOW}_DEMAND_M3_S`) through `Truth::published`, and
+//! `tick` reads it back with `get_or(name, 0.0)` -- the mechanism
+//! `docs/deep/truth-requests.md`'s "Contract gap" section already
+//! describes for exactly this kind of cross-area read. Gear, brakes,
+//! steering, cargo-door and reverser demand are still zero: those areas
+//! do not yet publish a flow number of their own.
 
 use std::collections::BTreeMap;
 
@@ -89,19 +106,20 @@ const AC_BUS_LIVE_V: f64 = 100.0;
 /// Likewise for a 28 V DC bus.
 const DC_BUS_LIVE_V: f64 = 20.0;
 
-/// The HP spool fraction implied by an LP spool fraction, for as long as
-/// [`Truth`] carries only N1.
+/// The HP spool fraction implied by an LP spool fraction, kept for
+/// reference after `Truth::engine_n3_frac` went real
+/// (`docs/deep/truth-requests.md`'s 2026-09-20 pass) and this area's own
+/// `tick` stopped calling it.
 ///
-/// **This is a stand-in, not physics**: the real relationship between the
+/// **This was a stand-in, not physics**: the real relationship between the
 /// two spools is set by the engine's own working line, which this crate's
-/// `physics::engine` does model but `Truth` does not expose. It is a
+/// `physics::engine` does model but `Truth` used to not expose. It is a
 /// straight-line interpolation through this aircraft's own two cited
 /// operating points -- ground idle (15% N1 / 60% N3) and take-off (100% /
 /// 100%) -- extended to the origin below idle, chosen because those are
-/// the only two points on the curve that *are* public. It exists so the
-/// live circuit runs before `Truth` grows an `engine_n3_frac`, and
-/// [`HydraulicsLive::set_engine_n3_frac`] bypasses it entirely the moment
-/// the real value is available.
+/// the only two points on the curve that *are* public. Left in place, with
+/// its own test still proving it reproduces those two citations, in case a
+/// future caller ever needs an N1-only estimate again.
 pub fn n3_frac_from_n1_frac(n1_frac: f64) -> f64 {
     let n1_pct = n1_frac.clamp(0.0, 1.2) * 100.0;
     let n3_pct = if n1_pct <= IDLE_N1_PCT {
@@ -220,12 +238,10 @@ pub struct HydraulicsLive {
     green_out: CircuitOutputs,
     yellow_out: CircuitOutputs,
 
-    // Inputs `Truth` does not carry yet (see module doc).
-    engine_n3_frac: Option<[f64; 4]>,
-    fire_handle_pulled: [bool; 4],
-    green_demands: ConsumerDemands,
-    yellow_demands: ConsumerDemands,
-    fuel_kg_s: f64,
+    /// Engine feed fuel temperature into the heat exchangers, K. Still not
+    /// on `Truth` (see module doc); kept at the same interim cold-aircraft
+    /// value `Truth::environment`'s own default uses, and documented as
+    /// such rather than invented as something more specific.
     fuel_temp_k: f64,
 }
 
@@ -252,38 +268,8 @@ impl HydraulicsLive {
             electric_pump_ids,
             green_out: CircuitOutputs::default(),
             yellow_out: CircuitOutputs::default(),
-            engine_n3_frac: None,
-            fire_handle_pulled: [false; 4],
-            green_demands: ConsumerDemands::default(),
-            yellow_demands: ConsumerDemands::default(),
-            fuel_kg_s: 0.0,
             fuel_temp_k: 288.15,
         }
-    }
-
-    /// The real HP spool fraction per engine, once the plugin has it. It
-    /// already publishes `ENGINE_N3:n` (percent) from this crate's own
-    /// engine model; pass it as a fraction.
-    pub fn set_engine_n3_frac(&mut self, n3_frac: [f64; 4]) {
-        self.engine_n3_frac = Some(n3_frac);
-    }
-
-    /// Per engine, whether its firewall FIRE handle has been pulled (which
-    /// shuts that engine's two pumps' firewall shutoff valves).
-    pub fn set_fire_handles(&mut self, pulled: [bool; 4]) {
-        self.fire_handle_pulled = pulled;
-    }
-
-    /// This tick's consumer flow demand on each circuit, m^3/s.
-    pub fn set_demands(&mut self, green: ConsumerDemands, yellow: ConsumerDemands) {
-        self.green_demands = green;
-        self.yellow_demands = yellow;
-    }
-
-    /// Engine feed fuel available to the hydraulic/fuel heat exchangers.
-    pub fn set_fuel(&mut self, fuel_kg_s: f64, fuel_temp_k: f64) {
-        self.fuel_kg_s = fuel_kg_s.max(0.0);
-        self.fuel_temp_k = fuel_temp_k;
     }
 
     pub fn green(&self) -> &CircuitOutputs {
@@ -301,25 +287,35 @@ impl HydraulicsLive {
         [self.green_out.manifold_pressure_pa, self.yellow_out.manifold_pressure_pa]
     }
 
-    fn n3_frac(&self, truth: &Truth) -> [f64; 4] {
-        match self.engine_n3_frac {
-            Some(n3) => n3,
-            None => std::array::from_fn(|i| n3_frac_from_n1_frac(truth.engine_n1_frac[i])),
-        }
-    }
-
-    fn edp_inputs(&self, truth: &Truth, engine_index: [usize; 4]) -> [EdpInputs; 4] {
-        let n3 = self.n3_frac(truth);
+    fn edp_inputs(truth: &Truth, engine_index: [usize; 4]) -> [EdpInputs; 4] {
         std::array::from_fn(|pump| {
             let e = engine_index[pump];
             // A pump only turns while its engine's core is actually
             // rotating: a windmilling-but-unlit core still drives its
             // pumps, which is why this keys off N3 rather than off
             // `engine_running`, and why a shut-down engine's residual N3
-            // still delivers a little flow as it runs down.
-            let shaft_rpm = (n3[e].max(0.0) * N3_DESIGN_RPM * PUMP_N3_GEAR_RATIO).max(0.0);
-            EdpInputs { shaft_rpm, fire_handle_pulled: self.fire_handle_pulled[e] }
+            // still delivers a little flow as it runs down. `Truth::
+            // engine_n3_frac` is real now (`docs/deep/truth-requests.md`'s
+            // 2026-09-20 pass); the module doc's `n3_frac_from_n1_frac`
+            // stand-in is no longer read here at all.
+            let shaft_rpm = (truth.engine_n3_frac[e].max(0.0) * N3_DESIGN_RPM * PUMP_N3_GEAR_RATIO).max(0.0);
+            EdpInputs { shaft_rpm, fire_handle_pulled: truth.controls.fire_pb_released[e] }
         })
+    }
+
+    /// This tick's fuel flow available to one circuit's fuel/hydraulic heat
+    /// exchanger, kg/s: the sum of the feed flow of the two engines that
+    /// drive that circuit's own pumps (see module doc). Real per-engine
+    /// readings, combined the same way `pressurization_supply_fraction`
+    /// above already combines several real sources into one circuit-level
+    /// number -- not a fabricated figure, an aggregation of ones that are.
+    fn circuit_fuel_kg_s(truth: &Truth, engine_index: [usize; 4]) -> f64 {
+        // `engine_index` names each of the circuit's four pumps' engine,
+        // repeating each of the circuit's two engines twice (one entry per
+        // pump, `GREEN_PUMP_ENGINE_INDEX`/`YELLOW_PUMP_ENGINE_INDEX`'s own
+        // `[e, e, e2, e2]` shape) -- so summing entries 0 and 2 sums each
+        // engine's feed exactly once.
+        truth.engine_fuel_flow_kg_s[engine_index[0]] + truth.engine_fuel_flow_kg_s[engine_index[2]]
     }
 
     /// The bootstrap air supply available to a reservoir's pressurising
@@ -426,23 +422,30 @@ impl LiveArea for HydraulicsLive {
         let yellow_control = truth.dc_bus_volts[0] > DC_BUS_LIVE_V;
         let yellow_supply = [truth.ac_bus_volts[2], truth.ac_bus_volts[3]];
 
+        // `deep::flight_controls::live` publishes its own half of consumer
+        // flow demand (module doc); gear/brakes/steering/cargo-doors/
+        // reversers stay at `ConsumerDemands::default()`'s zero until
+        // their own areas publish a number too.
+        let green_demands = ConsumerDemands { flight_controls_m3_s: truth.published.get_or("FCTL_GREEN_DEMAND_M3_S", 0.0), ..ConsumerDemands::default() };
+        let yellow_demands = ConsumerDemands { flight_controls_m3_s: truth.published.get_or("FCTL_YELLOW_DEMAND_M3_S", 0.0), ..ConsumerDemands::default() };
+
         let green_inputs = CircuitInputs {
-            edp: self.edp_inputs(truth, GREEN_PUMP_ENGINE_INDEX),
+            edp: Self::edp_inputs(truth, GREEN_PUMP_ENGINE_INDEX),
             electric_pump_powered: green_supply.map(|v| green_control && v > AC_BUS_LIVE_V),
             electric_pump_bus_voltage_v: green_supply,
-            demands: self.green_demands,
-            fuel_kg_s: self.fuel_kg_s,
+            demands: green_demands,
+            fuel_kg_s: Self::circuit_fuel_kg_s(truth, GREEN_PUMP_ENGINE_INDEX),
             fuel_temp_k: self.fuel_temp_k,
             ambient_k,
             pressurization_supply_fraction: pressurization,
         };
 
         let yellow_inputs = CircuitInputs {
-            edp: self.edp_inputs(truth, YELLOW_PUMP_ENGINE_INDEX),
+            edp: Self::edp_inputs(truth, YELLOW_PUMP_ENGINE_INDEX),
             electric_pump_powered: yellow_supply.map(|v| yellow_control && v > AC_BUS_LIVE_V),
             electric_pump_bus_voltage_v: yellow_supply,
-            demands: self.yellow_demands,
-            fuel_kg_s: self.fuel_kg_s,
+            demands: yellow_demands,
+            fuel_kg_s: Self::circuit_fuel_kg_s(truth, YELLOW_PUMP_ENGINE_INDEX),
             fuel_temp_k: self.fuel_temp_k,
             ambient_k,
             pressurization_supply_fraction: pressurization,
@@ -481,6 +484,12 @@ mod tests {
         Truth {
             dt_s: 0.02,
             engine_n1_frac: [1.0; 4],
+            // Take-off power on the core too, not just the fan -- now that
+            // `tick` reads `engine_n3_frac` directly instead of deriving it
+            // from N1, a fixture claiming "four engines at take-off power"
+            // has to set both, or every engine-driven pump in these fixtures
+            // would see a stopped core regardless of N1.
+            engine_n3_frac: [1.0; 4],
             engine_running: [true; 4],
             ac_bus_volts: [115.0; 4],
             dc_bus_volts: [28.0; 2],
@@ -662,17 +671,129 @@ mod tests {
     }
 
     #[test]
-    fn a_supplied_hp_spool_speed_overrides_the_stand_in_entirely() {
-        let mut live = HydraulicsLive::new();
-        // N1 says take-off, N3 says the engines are stopped: the real
-        // value must win, so the pumps must not turn.
-        live.set_engine_n3_frac([0.0; 4]);
-        // The AC buses go too, so the only thing that could hold green
-        // pressure here is an engine-driven pump actually turning.
-        let stopped = Truth { ac_bus_volts: [0.0; 4], ..running_truth() };
-        let out = run(&mut live, &stopped, &Faults::default(), 30.0);
-        assert!(out["HYD_GREEN_EDP_1A_FLOW_L_MIN"].abs() < 1e-9);
+    fn an_engine_driven_pump_follows_core_speed_not_fan_speed() {
+        // The EDP is geared to the HP (N3) spool through the accessory
+        // gearbox, not the fan (N1) -- `Truth::engine_n3_frac` is real now
+        // (`docs/deep/truth-requests.md`'s 2026-09-20 pass) and `edp_inputs`
+        // reads it directly, with no more N1-derived stand-in in the loop.
+        // N1 says take-off, N3 says the core is stopped: the pump must not
+        // turn. The AC buses are dead too, so the only thing that could
+        // hold green pressure here is an engine-driven pump actually
+        // turning.
+        let n1_high_n3_stopped = Truth { engine_n3_frac: [0.0; 4], ac_bus_volts: [0.0; 4], ..running_truth() };
+        let out = run(&mut HydraulicsLive::new(), &n1_high_n3_stopped, &Faults::default(), 30.0);
+        assert!(out["HYD_GREEN_EDP_1A_FLOW_L_MIN"].abs() < 1e-9, "N1 alone must not turn an engine-driven pump: {}", out["HYD_GREEN_EDP_1A_FLOW_L_MIN"]);
         assert!(out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] < 100.0);
+
+        // The other way round: fan stopped, core still turning (a
+        // windmilling-but-unlit core, or simply N1 not yet spun up) -- the
+        // pump must turn anyway, on N3 alone. A pressure-compensated pump
+        // destrokes toward zero net flow once it has reached and is
+        // holding its regulated pressure with nothing drawing on it
+        // (`a_healthy_running_aircraft_...`'s own steady state shows the
+        // same thing), so the proof here is that pressure, not
+        // instantaneous flow.
+        let n1_stopped_n3_high =
+            Truth { dt_s: 0.02, engine_n1_frac: [0.0; 4], engine_n3_frac: [1.0; 4], ac_bus_volts: [0.0; 4], dc_bus_volts: [28.0; 2], ..Truth::default() };
+        let out = run(&mut HydraulicsLive::new(), &n1_stopped_n3_high, &Faults::default(), 30.0);
+        assert!(
+            out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] > 2900.0,
+            "N3 alone must still turn an engine-driven pump enough to hold service pressure: {:.0} psi",
+            out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"]
+        );
+    }
+
+    #[test]
+    fn pulling_a_fire_handle_shuts_that_engines_pump_unless_the_shutoff_valve_is_stuck() {
+        // `truth.controls.fire_pb_released` gives the registered
+        // fire-shutoff-valve failures a healthy counterpart to act
+        // against (module doc): without a real "handle pulled" signal the
+        // valve was never actually being commanded shut, so "stuck open"
+        // had nothing to disagree with.
+        //
+        // Isolated so engine 1's own two green pumps are the *only*
+        // possible green source, the same isolation style
+        // `seizing_every_green_engine_driven_pump_...` above already uses:
+        // AC power off (no electric pumps) and engine 2 stopped too, so
+        // there is nothing else that could be holding the pressure this
+        // test reads.
+        let mut truth = running_truth();
+        truth.ac_bus_volts = [0.0; 4];
+        truth.engine_n1_frac[1] = 0.0;
+        truth.engine_n3_frac[1] = 0.0;
+        truth.engine_running[1] = false;
+        truth.controls.fire_pb_released[0] = true; // engine 1's handle pulled
+
+        let healthy_valve = run(&mut HydraulicsLive::new(), &truth, &Faults::default(), 30.0);
+        assert!(
+            healthy_valve["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] < 2900.0,
+            "a healthy fire shutoff valve must close, leaving the circuit with no green source at all: {:.0} psi",
+            healthy_valve["HYD_GREEN_MANIFOLD_PRESSURE_PSI"]
+        );
+
+        let id = HydraulicsLive::new().green_ids.edp[0].fire_sov_stuck;
+        let stuck_open = run(&mut HydraulicsLive::new(), &truth, &Faults::from_pairs([(id, 1.0)]), 30.0);
+        assert!(
+            stuck_open["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] > 2900.0,
+            "a stuck-open valve must keep engine 1's pump delivering even with the handle pulled: {:.0} psi",
+            stuck_open["HYD_GREEN_MANIFOLD_PRESSURE_PSI"]
+        );
+    }
+
+    #[test]
+    fn engine_fuel_flow_now_cools_the_circuit_that_used_to_have_none() {
+        // Module doc: with no fuel flow the only cooling path was the
+        // passive bay loss, so the circuit ran hotter than it should.
+        // `Truth::engine_fuel_flow_kg_s` is real now; a circuit with real
+        // fuel flow through its heat exchanger must run cooler than the
+        // same circuit with none, everything else equal.
+        let mut hot = running_truth();
+        hot.dt_s = 0.5;
+        let mut cooled = hot.clone();
+        cooled.engine_fuel_flow_kg_s = [1.0; 4];
+
+        let hot_out = run(&mut HydraulicsLive::new(), &hot, &Faults::default(), 1800.0);
+        let cooled_out = run(&mut HydraulicsLive::new(), &cooled, &Faults::default(), 1800.0);
+        assert!(
+            cooled_out["HYD_GREEN_FLUID_TEMP_C"] < hot_out["HYD_GREEN_FLUID_TEMP_C"],
+            "real fuel flow through the heat exchanger must cool the circuit below the fuel-less baseline: {} vs {}",
+            cooled_out["HYD_GREEN_FLUID_TEMP_C"],
+            hot_out["HYD_GREEN_FLUID_TEMP_C"]
+        );
+    }
+
+    #[test]
+    fn flight_controls_demand_read_through_published_raises_flow_and_drops_pressure() {
+        // `deep::flight_controls::live` publishes `FCTL_GREEN_DEMAND_M3_S`;
+        // this proves `deep::hydraulics::live` actually reads it back
+        // through `Truth::published` (the cross-area mechanism this
+        // module's doc describes) rather than leaving every circuit
+        // permanently unloaded.
+        let truth = running_truth();
+        let mut unloaded = crate::deep::live::PublishedFrame::default();
+        let mut loaded = crate::deep::live::PublishedFrame::default();
+        // Comfortably past this circuit's own four-EDP capacity (~2.8 in^3
+        // x 3782 rpm each at full N3, ~11.6 L/s combined -- `pump.rs`'s own
+        // compensator curve and this area's `PUMP_N3_GEAR_RATIO`/
+        // `N3_DESIGN_RPM`), so the compensator cannot hide this demand
+        // behind its usual constant-pressure regulation the way a modest,
+        // within-capacity demand could.
+        loaded.0.insert("FCTL_GREEN_DEMAND_M3_S".to_string(), 0.02);
+
+        // A startup transient (both cases spike well above regulated
+        // pressure in the first second as the reservoir/accumulator prime)
+        // needs real time to settle before the steady-state effect of the
+        // demand itself is visible, hence the long run.
+        let mut idle = HydraulicsLive::new();
+        let mut loaded_live = HydraulicsLive::new();
+        let idle_out = run(&mut idle, &Truth { published: unloaded, ..truth.clone() }, &Faults::default(), 60.0);
+        let loaded_out = run(&mut loaded_live, &Truth { published: loaded, ..truth }, &Faults::default(), 60.0);
+        assert!(
+            loaded_out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] < idle_out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"],
+            "a real consumer demand must load the circuit, not leave it as optimistic as an unloaded one: {} vs {}",
+            loaded_out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"],
+            idle_out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"]
+        );
     }
 
     #[test]

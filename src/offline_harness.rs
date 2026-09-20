@@ -172,6 +172,14 @@ mod tests {
     /// differing by simulation noise).
     #[test]
     fn raising_generator_1_electrical_load_raises_engine_1_fuel_flow_through_the_gearbox_contract() {
+        // `failures::reset_all()` clears the process-wide failure state, so
+        // this must serialise against every other test that reads or writes
+        // it, exactly as `breakers`, `components` and `fuel_network`
+        // already do. Without the lock this reset lands in the middle of
+        // another test's arm-then-read and silently disarms it -- which is
+        // what it was doing to
+        // `breakers::bearing_wear_magnitude_predicts_current_by_the_back_emf_relation`.
+        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         crate::scenarios::reset_global_state();
         crate::failures::reset_all();
 

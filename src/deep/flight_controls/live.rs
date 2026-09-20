@@ -32,27 +32,55 @@
 //! rudders `[upper, lower]`, spoilers `[side][1..=8]`, THS nose-up
 //! degrees). See that method's own doc comment for the literal call.
 //!
-//! ## Inputs that are not on `Truth` yet
+//! ## Wired from `Truth` (2026-09-20 pass)
 //!
-//! Three, none of them faked here; each has a setter, and until the plugin
-//! calls it the model runs at a value that is honest about not knowing:
+//! Three inputs used to have no field on `Truth` and ran on an interim
+//! setter nothing in production ever called (`deep::live::Deep::tick`
+//! drives every area purely through the `Area` trait -- `tick`/`publish`
+//! -- so a concrete setter like the old `set_commands` was dead code
+//! outside this file's own tests). All three are real now:
 //!
-//! * **The commanded surface positions**
-//!   ([`FlightControlsLive::set_commands`]). This area models what a
-//!   surface *physically does* with the position FlyByWire's own PRIM/SEC
-//!   asked for; that command is not on `Truth`. Until it arrives every
-//!   surface is commanded to neutral, which means a jam at neutral looks
-//!   like a healthy surface -- a runaway, a disconnect, blow-back and
-//!   supply loss all still act, but a jam cannot be seen.
-//! * **Angle of attack** ([`FlightControlsLive::set_alpha_rad`]), which
-//!   `hinge_moment.rs` needs for the `Ch_alpha` term. Zero until supplied:
-//!   the `Ch_delta` (deflection) term, which is the larger one and the one
-//!   blow-back depends on, is unaffected.
-//! * **Ground-spoiler arming and go-around selection**
-//!   ([`FlightControlsLive::set_ground_spoiler_controls`]) -- cockpit
-//!   discretes, not aircraft state. With the lever unarmed the
-//!   ground-spoiler logic never deploys, so its own two failures cannot be
-//!   reached.
+//! * **The commanded surface positions** -- `truth.commanded_surfaces`.
+//!   This area models what a surface *physically does* with the position
+//!   FlyByWire's own PRIM/SEC asked for; until this landed every surface
+//!   was commanded to neutral, so a jam at neutral looked like a healthy
+//!   surface -- a runaway, a disconnect, blow-back and supply loss all
+//!   still acted, but a jam could not be seen. Read directly in `tick`
+//!   every frame now; `SurfaceCommands` (below) keeps only the fields
+//!   `Truth` still does not carry.
+//! * **Angle of attack** -- `truth.angle_of_attack_deg`, for
+//!   `hinge_moment.rs`'s `Ch_alpha` term.
+//! * **Ground-spoiler lever armed** -- `truth.controls.
+//!   ground_spoiler_lever_armed`. With the lever unarmed the ground-spoiler
+//!   logic could never deploy, so its own two failures were unreachable.
+//!
+//! ## Still not on `Truth`
+//!
+//! * **Go-around selected** ([`FlightControlsLive::set_go_around_selected`]).
+//!   No real TOGA-detent/go-around discrete was found on `Truth`'s existing
+//!   engine/FADEC reads (`docs/deep/truth-requests.md`); stays at its
+//!   default (`false`) until one is sourced.
+//! * **Rudder trim, flap, slat and droop-nose commands**
+//!   ([`FlightControlsLive::set_commands`], now carrying only these four
+//!   fields). FlyByWire's `HYD_*_DEFLECTION` Vars this area's own
+//!   `commanded_surfaces` reads do not cover these drive lines.
+//!
+//! ## Publishing hydraulic demand
+//!
+//! This area knows its own half of `deep::hydraulics`' consumer flow
+//! demand -- what the ailerons, elevators, rudders and spoilers are asking
+//! their circuit for this tick -- and `deep::hydraulics` currently runs
+//! every circuit unloaded (`docs/deep/truth-requests.md`'s "From hydraulics
+//! and flight controls" table). `publish` reports `FCTL_GREEN_DEMAND_M3_S`/
+//! `FCTL_YELLOW_DEMAND_M3_S`, the sum of `|rate| * arm_m * bore_area_m2`
+//! (piston velocity times piston area, the same orifice/geometry relation
+//! `actuator.rs::ActuatorGeometry::rate_limit_rad_s` already runs in
+//! reverse) over every actuator this tick's arbitration left `Active` on
+//! that circuit; a `Damping` actuator is hydraulically connected but not
+//! being driven to a new position, so it is not counted. THS and high-lift
+//! are not included: both draw off "whichever circuit is better" rather
+//! than a specific one (`tick`'s own `high_lift_supply`/THS handling), so
+//! there is no honest circuit split to publish for them yet.
 
 use std::collections::BTreeMap;
 
@@ -403,22 +431,11 @@ fn spoiler_is_green(index: usize) -> bool {
 // Inputs the plugin supplies.
 // ---------------------------------------------------------------------------
 
-/// What FlyByWire's own PRIM/SEC asked each surface to do this tick, in
-/// the same body-angle degrees `integration::flight_control_surfaces`
-/// converts to and from. All zero = every surface commanded to neutral and
-/// every high-lift device retracted.
+/// The commanded positions `Truth::commanded_surfaces` still does not carry
+/// (see this module's own doc): rudder trim and the three high-lift drive
+/// lines. All zero = rudder trim centred, every high-lift device retracted.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SurfaceCommands {
-    /// `[side][inward, middle, outward]`, degrees, positive TE up.
-    pub ailerons_deg: [[f64; 3]; 2],
-    /// `[side][inward, outward]`, degrees, positive TE up.
-    pub elevators_deg: [[f64; 2]; 2],
-    /// `[upper, lower]`, degrees.
-    pub rudders_deg: [f64; 2],
-    /// `[side][spoiler 1..=8]`, degrees up.
-    pub spoilers_deg: [[f64; 8]; 2],
-    /// Degrees, positive nose up.
-    pub ths_deg: f64,
     pub rudder_trim_deg: f64,
     /// One commanded position per high-lift device (both wings are
     /// commanded alike; asymmetry is a *consequence*, not a command).
@@ -503,11 +520,16 @@ pub struct FlightControlsLive {
     monitor_fault: BTreeMap<String, bool>,
     ground_spoiler_deployed: bool,
     high_lift_brake: [bool; 3],
+    /// This tick's flow demand, m^3/s, for `deep::hydraulics` to read
+    /// through `Truth::published` (see module doc).
+    green_demand_m3_s: f64,
+    yellow_demand_m3_s: f64,
 
-    // Inputs `Truth` does not carry yet (see module doc).
+    // Rudder trim / flap / slat / droop commands `Truth` still does not
+    // carry (see module doc); everything else the old interim fields held
+    // (surface commands, alpha, ground-spoiler lever armed) now comes
+    // straight out of `Truth` every `tick`.
     commands: SurfaceCommands,
-    alpha_rad: f64,
-    ground_spoiler_lever_armed: bool,
     go_around_selected: bool,
 }
 
@@ -577,35 +599,26 @@ impl FlightControlsLive {
             monitor_fault: BTreeMap::new(),
             ground_spoiler_deployed: false,
             high_lift_brake: [false; 3],
+            green_demand_m3_s: 0.0,
+            yellow_demand_m3_s: 0.0,
 
             commands: SurfaceCommands::default(),
-            alpha_rad: 0.0,
-            ground_spoiler_lever_armed: false,
             go_around_selected: false,
         }
     }
 
-    /// What FlyByWire's own pipeline asked for this tick. The plugin reads
-    /// the same normalised `HYD_*_DEFLECTION` variables
-    /// `integration::flight_control_surfaces::SurfaceOverrideWriter`
-    /// already caches identifiers for, converts them back to body degrees
-    /// with `flight_controls.rs`'s own `aileron_or_elevator_down_deg` /
-    /// `rudder_right_deg` / `spoiler_up_deg`, and passes them here.
+    /// The rudder trim / flap / slat / droop-nose commands `Truth` still
+    /// does not carry (see module doc).
     pub fn set_commands(&mut self, commands: SurfaceCommands) {
         self.commands = commands;
     }
 
-    /// Angle of attack at the tail/wing, radians, for `hinge_moment.rs`'s
-    /// `Ch_alpha` term.
-    pub fn set_alpha_rad(&mut self, alpha_rad: f64) {
-        self.alpha_rad = alpha_rad;
-    }
-
-    /// The two cockpit discretes the ground-spoiler logic needs: the
-    /// speedbrake lever armed for automatic deployment, and a go-around
-    /// selected.
-    pub fn set_ground_spoiler_controls(&mut self, lever_armed: bool, go_around_selected: bool) {
-        self.ground_spoiler_lever_armed = lever_armed;
+    /// Go-around selected, for the ground-spoiler logic's own
+    /// fails-to-retract path. No real discrete for this exists on `Truth`
+    /// yet (module doc); this is the one cockpit-discrete setter this area
+    /// still needs, kept separate from `set_commands` now that the lever
+    /// itself reads from `truth.controls.ground_spoiler_lever_armed`.
+    pub fn set_go_around_selected(&mut self, go_around_selected: bool) {
         self.go_around_selected = go_around_selected;
     }
 
@@ -649,7 +662,7 @@ impl FlightControlsLive {
         let tas = truth.environment.tas_ms.max(0.0);
         AeroInputs {
             dynamic_pressure_pa: 0.5 * rho * tas * tas,
-            alpha_rad: self.alpha_rad,
+            alpha_rad: truth.angle_of_attack_deg.to_radians(),
             mach: truth.environment.mach(),
             // `AeroInputs`' own documented default critical Mach; this area
             // has no A380-specific figure to put here.
@@ -698,7 +711,7 @@ impl FlightControlsLive {
         travel_span_rad: f64,
         aero: &AeroInputs,
         dt: f64,
-    ) -> (SurfaceOutput, bool) {
+    ) -> (SurfaceOutput, bool, [ActuatorMode; N]) {
         let (modes, _) = mode_for_surface(allocations, health, power);
         let pressures = Self::pressures(allocations, power);
         let actuator_faults = ids.actuator_faults(faults, travel_span_rad);
@@ -714,7 +727,36 @@ impl FlightControlsLive {
         let monitoring = monitor
             .step(out.angle_rad, &ids.transducer_faults(faults), &TransducerFaults::default(), TRANSDUCER_DISAGREE_RAD, dt)
             .monitoring_fault;
-        (out, monitoring)
+        (out, monitoring, modes)
+    }
+
+    /// This tick's hydraulic flow demand from one surface's `Active`
+    /// actuators, split by which circuit each draws from: piston velocity
+    /// (`|rate_rad_s| * arm_m`) times piston area, the same geometry
+    /// `actuator.rs::ActuatorGeometry::rate_limit_rad_s` already runs the
+    /// other way (rate from flow) -- see this module's own doc comment on
+    /// publishing demand. A `Damping` actuator is not being driven to a new
+    /// position and so is not counted; an EHA/EBHA actuator draws its own
+    /// motor-pump, not a central circuit, and is not counted either.
+    fn accumulate_flow_demand<const N: usize>(
+        allocations: &[ActuatorAllocation; N],
+        modes: [ActuatorMode; N],
+        rate_rad_s: f64,
+        geometry: ActuatorGeometry,
+        green_m3_s: &mut f64,
+        yellow_m3_s: &mut f64,
+    ) {
+        use super::allocation::PowerSource;
+        let flow = rate_rad_s.abs() * geometry.arm_m * geometry.bore_area_m2;
+        for i in 0..N {
+            if modes[i] == ActuatorMode::Active {
+                match allocations[i].options.first().map(|&(_, source)| source) {
+                    Some(PowerSource::Green) => *green_m3_s += flow,
+                    Some(PowerSource::Yellow) => *yellow_m3_s += flow,
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
@@ -736,6 +778,9 @@ impl LiveArea for FlightControlsLive {
         }
         let aero = self.aero(truth);
         let power = Self::power(truth);
+        let cmd = &truth.commanded_surfaces;
+        let mut green_demand_m3_s = 0.0_f64;
+        let mut yellow_demand_m3_s = 0.0_f64;
         // Computer availability: this area does not model the PRIM/SEC
         // power distribution (that is `deep::electrical`/
         // `deep::avionics_network`) and `Truth` names no per-computer bus,
@@ -754,7 +799,7 @@ impl LiveArea for FlightControlsLive {
 
         for side in 0..2 {
             for panel in 0..3 {
-                let (out, monitoring) = Self::step_surface(
+                let (out, monitoring, modes) = Self::step_surface(
                     &mut self.ailerons[side][panel],
                     &mut self.aileron_monitors[side][panel],
                     &self.aileron_ids[side][panel],
@@ -762,17 +807,18 @@ impl LiveArea for FlightControlsLive {
                     &health,
                     &power,
                     faults,
-                    self.commands.ailerons_deg[side][panel],
+                    cmd.ailerons_deg[side][panel],
                     aileron_span,
                     &aero,
                     dt,
                 );
+                Self::accumulate_flow_demand(&aileron_allocations[panel], modes, out.rate_rad_s, ActuatorGeometry::aileron(), &mut green_demand_m3_s, &mut yellow_demand_m3_s);
                 self.aileron_out[side][panel] = out;
                 self.angles.ailerons_deg[side][panel] = out.angle_rad.to_degrees();
                 self.monitor_fault.insert(bare(AILERON_COMPONENTS[side][panel]), monitoring);
             }
             for panel in 0..2 {
-                let (out, monitoring) = Self::step_surface(
+                let (out, monitoring, modes) = Self::step_surface(
                     &mut self.elevators[side][panel],
                     &mut self.elevator_monitors[side][panel],
                     &self.elevator_ids[side][panel],
@@ -780,11 +826,12 @@ impl LiveArea for FlightControlsLive {
                     &health,
                     &power,
                     faults,
-                    self.commands.elevators_deg[side][panel],
+                    cmd.elevators_deg[side][panel],
                     aileron_span,
                     &aero,
                     dt,
                 );
+                Self::accumulate_flow_demand(&elevator_allocations[panel], modes, out.rate_rad_s, ActuatorGeometry::elevator(), &mut green_demand_m3_s, &mut yellow_demand_m3_s);
                 self.elevator_out[side][panel] = out;
                 self.angles.elevators_deg[side][panel] = out.angle_rad.to_degrees();
                 self.monitor_fault.insert(bare(ELEVATOR_COMPONENTS[side][panel]), monitoring);
@@ -792,7 +839,7 @@ impl LiveArea for FlightControlsLive {
         }
 
         for panel in 0..2 {
-            let (out, monitoring) = Self::step_surface(
+            let (out, monitoring, modes) = Self::step_surface(
                 &mut self.rudders[panel],
                 &mut self.rudder_monitors[panel],
                 &self.rudder_ids[panel],
@@ -800,11 +847,12 @@ impl LiveArea for FlightControlsLive {
                 &health,
                 &power,
                 faults,
-                self.commands.rudders_deg[panel],
+                cmd.rudders_deg[panel],
                 rudder_span,
                 &aero,
                 dt,
             );
+            Self::accumulate_flow_demand(&rudder_allocations[panel], modes, out.rate_rad_s, ActuatorGeometry::rudder(), &mut green_demand_m3_s, &mut yellow_demand_m3_s);
             self.rudder_out[panel] = out;
             self.angles.rudders_deg[panel] = out.angle_rad.to_degrees();
             self.monitor_fault.insert(bare(RUDDER_COMPONENTS[panel]), monitoring);
@@ -822,7 +870,7 @@ impl LiveArea for FlightControlsLive {
         };
         let ground_spoiler_out = self.ground_spoiler.step(
             &GroundSpoilerInputs {
-                lever_armed: self.ground_spoiler_lever_armed,
+                lever_armed: truth.controls.ground_spoiler_lever_armed,
                 main_gear_wow: [on_ground; 2],
                 wheel_speed_kt: if on_ground { truth.environment.tas_ms * MS_TO_KT } else { 0.0 },
                 radio_alt_ft: if on_ground { 0.0 } else { truth.altitude_ft },
@@ -837,15 +885,16 @@ impl LiveArea for FlightControlsLive {
                 // Every A380 spoiler panel is ground-spoiler capable, so
                 // the ground-spoiler command drives each of them fully out
                 // unless the flight-spoiler command already asks for more.
-                let commanded_deg = self.commands.spoilers_deg[side][i].max(ground_spoiler_out.deploy_command * SPOILER_MAX_DEG);
+                let commanded_deg = cmd.spoilers_deg[side][i].max(ground_spoiler_out.deploy_command * SPOILER_MAX_DEG);
                 let source = if spoiler_is_green(i) { power.green } else { power.yellow };
                 // Panel 6 (index 5) is an EBHA: it keeps working off its
                 // own electrical motor-pump when its circuit is lost.
                 let supply = if i == 5 { source.max(power.eha) } else { source };
                 let ids = &self.spoiler_ids[side][i];
                 let actuator_faults = ids.actuator_faults(faults, spoiler_span);
+                let active = supply > 0.5;
                 let out = self.spoilers[side][i].step(
-                    [if supply > 0.5 { ActuatorMode::Active } else { ActuatorMode::Damping }],
+                    [if active { ActuatorMode::Active } else { ActuatorMode::Damping }],
                     commanded_deg.to_radians(),
                     [supply],
                     [actuator_faults],
@@ -853,6 +902,19 @@ impl LiveArea for FlightControlsLive {
                     &aero,
                     dt,
                 );
+                // Demand counts only while the *circuit itself* (not the
+                // panel-6 EBHA fallback) is what is actually active, so an
+                // EBHA holding panel 6 up on its own motor-pump does not
+                // show up as a phantom draw on the circuit it just lost.
+                if active && source > 0.5 {
+                    let geometry = ActuatorGeometry::spoiler();
+                    let flow = out.rate_rad_s.abs() * geometry.arm_m * geometry.bore_area_m2;
+                    if spoiler_is_green(i) {
+                        green_demand_m3_s += flow;
+                    } else {
+                        yellow_demand_m3_s += flow;
+                    }
+                }
                 let monitoring = self.spoiler_monitors[side][i]
                     .step(out.angle_rad, &ids.transducer_faults(faults), &TransducerFaults::default(), TRANSDUCER_DISAGREE_RAD, dt)
                     .monitoring_fault;
@@ -869,7 +931,7 @@ impl LiveArea for FlightControlsLive {
         // not the motors, holds position between inputs).
         let ths_allocations = ths_motors();
         let (mut ths_modes, _) = mode_for_surface(&ths_allocations, &health, &power);
-        let ths_command_rad = self.commands.ths_deg.to_radians();
+        let ths_command_rad = cmd.ths_deg.to_radians();
         if (ths_command_rad - self.ths.angle_rad()).abs() < 1.0e-4 {
             ths_modes = [ActuatorMode::Damping; 2];
         }
@@ -936,6 +998,9 @@ impl LiveArea for FlightControlsLive {
             target[0] = [left.inboard_angle_rad.to_degrees(), left.outboard_angle_rad.to_degrees()];
             target[1] = [right.inboard_angle_rad.to_degrees(), right.outboard_angle_rad.to_degrees()];
         }
+
+        self.green_demand_m3_s = green_demand_m3_s;
+        self.yellow_demand_m3_s = yellow_demand_m3_s;
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -987,6 +1052,12 @@ impl LiveArea for FlightControlsLive {
         }
 
         out("FCTL_GND_SPLR_DEPLOYED", f64::from(u8::from(self.ground_spoiler_deployed)));
+
+        // This tick's own half of `deep::hydraulics`' consumer flow demand
+        // (see module doc); `deep::hydraulics::live` reads these back
+        // through `Truth::published`, one frame behind.
+        out("FCTL_GREEN_DEMAND_M3_S", self.green_demand_m3_s);
+        out("FCTL_YELLOW_DEMAND_M3_S", self.yellow_demand_m3_s);
 
         for (component, fault) in &self.monitor_fault {
             out(&format!("FCTL_{component}_POSITION_MONITOR_FAULT"), f64::from(u8::from(*fault)));
@@ -1129,27 +1200,31 @@ mod tests {
     fn a_jammed_aileron_pins_at_its_jam_angle_while_its_neighbours_follow_the_command() {
         // Registered effect: "servo authority falls toward zero and a
         // strong resistive spring pins the surface near its jam angle".
+        //
+        // The command here comes from `Truth::commanded_surfaces` itself,
+        // not the old interim setter -- proving a *non-neutral* real
+        // command actually reaches the model (before this pass every
+        // surface was commanded to neutral, so a jam at neutral was
+        // indistinguishable from a healthy surface; see module doc).
         let live = ids();
         let faults = Faults::from_pairs([(live.aileron_ids[0][2].jam, 1.0)]);
-        let mut commands = SurfaceCommands::default();
+        let mut truth = parked_truth();
         for side in 0..2 {
-            commands.ailerons_deg[side] = [20.0; 3];
+            truth.commanded_surfaces.ailerons_deg[side] = [20.0; 3];
         }
 
-        let mut jammed = ids();
-        jammed.set_commands(commands);
-        let published = run(&mut jammed, &parked_truth(), &faults, 3.0);
+        let published = run(&mut ids(), &truth, &faults, 3.0);
 
         // `ail_l1` is the left *outward* panel (index 2 in this module's
         // inward-first order).
         assert!(
             published["FCTL_AIL_L1_DEFLECTION_DEG"].abs() < 1.0,
-            "the jammed panel must stay where it seized: {} deg",
+            "the jammed panel must stay where it seized, away from its non-neutral 20 deg command: {} deg",
             published["FCTL_AIL_L1_DEFLECTION_DEG"]
         );
         assert!(
             published["FCTL_AIL_L3_DEFLECTION_DEG"] > 18.0,
-            "its unjammed neighbour must still follow the command: {} deg",
+            "its unjammed neighbour must still follow the same non-neutral command: {} deg",
             published["FCTL_AIL_L3_DEFLECTION_DEG"]
         );
         assert_eq!(published["FCTL_AIL_L1_FAULT"], 1.0, "and the ECAM trigger variable must see it");
@@ -1182,17 +1257,11 @@ mod tests {
         // other actuators on the surface or the airload".
         let live = ids();
         let faults = Faults::from_pairs([(live.rudder_ids[0].supply_loss, 1.0)]);
-        let mut commands = SurfaceCommands::default();
-        commands.rudders_deg = [25.0, 25.0];
+        let mut truth = flying_truth();
+        truth.commanded_surfaces.rudders_deg = [25.0, 25.0];
 
-        let truth = flying_truth();
-        let mut healthy = ids();
-        healthy.set_commands(commands);
-        let healthy_out = run(&mut healthy, &truth, &Faults::default(), 4.0);
-
-        let mut starved = ids();
-        starved.set_commands(commands);
-        let starved_out = run(&mut starved, &truth, &faults, 4.0);
+        let healthy_out = run(&mut ids(), &truth, &Faults::default(), 4.0);
+        let starved_out = run(&mut ids(), &truth, &faults, 4.0);
 
         assert!(
             healthy_out["FCTL_RUD_UPPER_DEFLECTION_DEG"] > 15.0,
@@ -1218,11 +1287,9 @@ mod tests {
         // moment".
         let live = ids();
         let faults = Faults::from_pairs([(live.aileron_ids[1][0].disconnect, 1.0)]);
-        let mut commands = SurfaceCommands::default();
-        commands.ailerons_deg[1] = [20.0; 3];
-        let mut area = ids();
-        area.set_commands(commands);
-        let published = run(&mut area, &flying_truth(), &faults, 4.0);
+        let mut truth = flying_truth();
+        truth.commanded_surfaces.ailerons_deg[1] = [20.0; 3];
+        let published = run(&mut ids(), &truth, &faults, 4.0);
         assert!(
             published["FCTL_AIL_R3_DEFLECTION_DEG"].abs() < 3.0,
             "a sheared inward aileron weathervanes to neutral: {} deg",
@@ -1232,22 +1299,73 @@ mod tests {
     }
 
     #[test]
+    fn a_free_floating_surface_settles_off_neutral_when_alpha_is_real() {
+        // `hinge_moment.rs`'s `Ch_alpha` term used to see a permanently
+        // zero angle of attack (module doc), so only `Ch_delta` (deflection)
+        // ever moved a free-floating surface. A disconnected aileron's
+        // equilibrium is where `Ch_delta*delta + Ch_alpha*alpha == 0`; with
+        // nothing commanded (`delta` has no actuator torque pushing it
+        // anywhere else), a real, nonzero `truth.angle_of_attack_deg` must
+        // now move that equilibrium away from zero on its own.
+        let live = ids();
+        let faults = Faults::from_pairs([(live.aileron_ids[1][0].disconnect, 1.0)]);
+
+        let mut zero_alpha = flying_truth();
+        zero_alpha.angle_of_attack_deg = 0.0;
+        let without_alpha = run(&mut ids(), &zero_alpha, &faults, 6.0);
+        assert!(
+            without_alpha["FCTL_AIL_R3_DEFLECTION_DEG"].abs() < 1.0,
+            "with zero alpha and nothing commanded, a free-floating surface settles near neutral: {} deg",
+            without_alpha["FCTL_AIL_R3_DEFLECTION_DEG"]
+        );
+
+        let mut real_alpha = flying_truth();
+        real_alpha.angle_of_attack_deg = 10.0;
+        let with_alpha = run(&mut ids(), &real_alpha, &faults, 6.0);
+        assert!(
+            with_alpha["FCTL_AIL_R3_DEFLECTION_DEG"].abs() > 2.0,
+            "a real 10 deg angle of attack must move the free-floating surface's equilibrium away from neutral through Ch_alpha: {} deg",
+            with_alpha["FCTL_AIL_R3_DEFLECTION_DEG"]
+        );
+    }
+
+    #[test]
+    fn commanding_a_surface_publishes_a_nonzero_hydraulic_demand_that_settles_to_zero_at_rest() {
+        // `deep::hydraulics::live` reads `FCTL_{GREEN,YELLOW}_DEMAND_M3_S`
+        // back through `Truth::published` (module doc); this proves the
+        // publish side of that coupling actually reacts to a real command
+        // rather than reading zero forever.
+        let mut truth = parked_truth();
+        truth.commanded_surfaces.ailerons_deg[0] = [20.0; 3];
+        let mut moving = ids();
+        // One tick only: freshly commanded, the surfaces are moving hard,
+        // which is exactly when flow demand should be highest.
+        moving.tick(&truth, &Faults::default());
+        let mut published = BTreeMap::new();
+        moving.publish(&mut |name, value| {
+            published.insert(name.to_string(), value);
+        });
+        // Side 0's three ailerons split Green (inboard/outboard) and
+        // Yellow (midboard) per `allocation.rs`'s own priority-list wiring.
+        assert!(published["FCTL_GREEN_DEMAND_M3_S"] > 0.0, "a moving aileron must draw green flow: {}", published["FCTL_GREEN_DEMAND_M3_S"]);
+        assert!(published["FCTL_YELLOW_DEMAND_M3_S"] > 0.0, "and its midboard panel draws yellow: {}", published["FCTL_YELLOW_DEMAND_M3_S"]);
+
+        let rest = run(&mut ids(), &parked_truth(), &Faults::default(), 5.0);
+        assert!(rest["FCTL_GREEN_DEMAND_M3_S"].abs() < 1e-9, "a settled surface with nothing commanded draws no flow: {}", rest["FCTL_GREEN_DEMAND_M3_S"]);
+        assert!(rest["FCTL_YELLOW_DEMAND_M3_S"].abs() < 1e-9);
+    }
+
+    #[test]
     fn a_ths_ballscrew_jam_freezes_the_trim_where_it_seized() {
         // Registered effect: "trim freezes at the jam angle regardless of
         // motor command".
         let live = ids();
         let faults = Faults::from_pairs([(live.ths_ids.ballscrew_jam, 1.0)]);
-        let mut commands = SurfaceCommands::default();
-        commands.ths_deg = 8.0;
+        let mut truth = parked_truth();
+        truth.commanded_surfaces.ths_deg = 8.0;
 
-        let truth = parked_truth();
-        let mut healthy = ids();
-        healthy.set_commands(commands);
-        let healthy_out = run(&mut healthy, &truth, &Faults::default(), 20.0);
-
-        let mut jammed = ids();
-        jammed.set_commands(commands);
-        let jammed_out = run(&mut jammed, &truth, &faults, 20.0);
+        let healthy_out = run(&mut ids(), &truth, &Faults::default(), 20.0);
+        let jammed_out = run(&mut ids(), &truth, &faults, 20.0);
 
         assert!(healthy_out["FCTL_THS_DEFLECTION_DEG"] > 7.0, "a healthy THS reaches its trim: {} deg", healthy_out["FCTL_THS_DEFLECTION_DEG"]);
         // A seizure is a very stiff spring, not an infinitely stiff one:
@@ -1271,11 +1389,15 @@ mod tests {
         // effectiveness on landing".
         let live = ids();
         let faults = Faults::from_pairs([(live.ground_spoiler_ids[0], 1.0)]);
-        let truth = parked_truth();
+        // The lever comes straight from `truth.controls.
+        // ground_spoiler_lever_armed` now, not the old interim setter --
+        // with it unarmed (`parked_truth()`'s default), neither run below
+        // would deploy at all, which is exactly the "unreachable" gap this
+        // pass closes.
+        let mut truth = parked_truth();
+        truth.controls.ground_spoiler_lever_armed = true;
 
-        let mut armed = ids();
-        armed.set_ground_spoiler_controls(true, false);
-        let deployed = run(&mut armed, &truth, &Faults::default(), 4.0);
+        let deployed = run(&mut ids(), &truth, &Faults::default(), 4.0);
         assert_eq!(deployed["FCTL_GND_SPLR_DEPLOYED"], 1.0);
         assert!(
             deployed["FCTL_SPLR_L1_DEFLECTION_DEG"] > 45.0,
@@ -1283,9 +1405,7 @@ mod tests {
             deployed["FCTL_SPLR_L1_DEFLECTION_DEG"]
         );
 
-        let mut failed = ids();
-        failed.set_ground_spoiler_controls(true, false);
-        let stowed = run(&mut failed, &truth, &faults, 4.0);
+        let stowed = run(&mut ids(), &truth, &faults, 4.0);
         assert_eq!(stowed["FCTL_GND_SPLR_DEPLOYED"], 0.0);
         assert!(
             stowed["FCTL_SPLR_L1_DEFLECTION_DEG"] < 1.0,

@@ -14,34 +14,49 @@
 //! |---|---|
 //! | `dt_s`, ambient pressure/temperature, TAS | `Truth` directly |
 //! | `battery` | `Truth::dc_bus_volts` (see [`LiveApu::battery`]) |
-//! | `master_on`, `start_selected` | `Truth::apu_running` (see below) |
+//! | `master_on` | `Truth::controls.apu_master_sw_on` |
+//! | `start_selected` | `Truth::controls.apu_start_pb_on` |
+//! | `fire_loop_detected` | `Truth::published`'s `FIRE_DETECTED_APU` |
 //!
-//! Three inputs the machine genuinely needs are not in `Truth` yet, and
-//! nothing here invents them (`docs/deep/BRIEF.md` hard rule 3):
+//! `master_on`/`start_selected` used to both be taken from `Truth::
+//! apu_running` -- the plugin's own "the APU is commanded to run" flag --
+//! which meant the crew pressing START and the ECB's own decision that the
+//! start failed were the same bit. `Truth::controls.apu_master_sw_on`/
+//! `apu_start_pb_on` are the real MASTER SW and START pushbuttons now, named
+//! for exactly this module's own long-standing request, so they separate
+//! the two: the machine only *starts* on a real START pb press, and can now
+//! genuinely fail a start (hung/aborted) while the crew's own selection
+//! stays visible as a distinct signal.
 //!
-//! * **The overhead panel.** `Truth` carries `apu_running` but not the APU
-//!   MASTER SW and START pushbuttons, so both the master and the start
-//!   command are taken from `apu_running`. That is the plugin's own "the
-//!   APU is commanded to run" flag, so the machine starts when the aircraft
-//!   says the APU is started and shuts down when it says it is not -- but
-//!   the crew pressing START and the ECB's own decision that the start
-//!   failed are then the same bit. A `Truth::apu_master_sw_on` /
-//!   `Truth::apu_start_pb_on` pair would separate them.
+//! Fire detection is `deep::fire_ice`'s own loop, not modelled again here;
+//! this directory only confirms and acts on it. That area publishes the
+//! APU bay's own confirmed detection as `FIRE_DETECTED_APU` (`fire_ice::
+//! live`'s own `Names::fire_detected`), read here one frame behind through
+//! `Truth::published` -- the documented inter-area mechanism -- rather than
+//! the permanent `false` this module used to hold `fire_loop_detected` at.
+//! `fire_button_pushed` (the APU fire pushbutton itself, which commands the
+//! ground/automatic bottle discharge `fire_ice` already models) is
+//! `Truth::controls.fire_pb_apu_released` for the same reason.
+//!
+//! Two inputs the machine genuinely needs are still not in `Truth` (or
+//! published by any area) and nothing here invents them
+//! (`docs/deep/BRIEF.md` hard rule 3):
+//!
 //! * **Bleed demand.** The load compressor's customer demand comes from the
-//!   pneumatic ducts, which is another area; areas cannot read each other
-//!   (only `Truth` and `Faults`), so the demand is zero here. Zero is a
-//!   real operating state -- APU BLEED off, IGVs closed, surge valve open --
-//!   not a placeholder, but it is not the only one, and
-//!   `Truth::apu_bleed_demand_kg_s` would make the other ones reachable.
+//!   pneumatic ducts, which is another area; areas can read another area's
+//!   *published* output (`Truth::published`), but `deep::pneumatic_ducts`
+//!   does not publish a bleed demand figure today, so this stays zero. Zero
+//!   is a real operating state -- APU BLEED off, IGVs closed, surge valve
+//!   open -- not a placeholder, but it is not the only one, and either a
+//!   published pneumatic demand or `Truth::apu_bleed_demand_kg_s` would make
+//!   the other ones reachable.
 //! * **Generator electrical load.** `Truth::ac_bus_volts` says which AC
 //!   buses are alive but not how many watts the APU's two generators are
 //!   carrying, so both are modelled unloaded and neither can be driven into
-//!   its overload. `Truth::apu_generator_load_w: [f64; 2]` (plus whether
-//!   each GEN pushbutton is on) is what the APU GEN 1/2 FAULT alerts need.
-//! * **The APU bay fire loop.** Fire detection is the fire-protection
-//!   area's (`deep::fire_ice`) -- this directory models only the interface
-//!   that confirms and acts on it. With no `Truth::apu_fire_detected` the
-//!   loop input is false, so `APU_FIRE_LOOP_DETECTED` publishes 0.
+//!   its overload. `deep::electrical` computes this every tick internally
+//!   (`ElectricalLive::measured_apu_gen_load_w`) but does not publish it;
+//!   publishing it (or a `Truth::apu_generator_load_w: [f64; 2]`) would make
+//!   the APU GEN 1/2 FAULT alerts' overload path reachable.
 
 use super::apu::{Apu, Inputs, Outputs};
 use super::ecb::{ChannelFaults, EcbFaults, SensorFault};
@@ -202,19 +217,25 @@ impl Area for LiveApu {
             ambient_pressure_pa: truth.environment.ambient_pressure_pa,
             ambient_temperature_k: ambient_k,
             true_airspeed_mps: truth.environment.tas_ms,
-            // See the module docs: `Truth` has no overhead panel yet.
-            master_on: truth.apu_running,
-            start_selected: truth.apu_running,
+            // The real MASTER SW and START pushbuttons, not `apu_running`:
+            // see the module doc. The crew's own selection and the ECB's
+            // decision that a start failed are no longer the same bit.
+            master_on: truth.controls.apu_master_sw_on,
+            start_selected: truth.controls.apu_start_pb_on,
             battery: Self::battery(truth),
-            // See the module docs: no `Truth` bleed demand, no `Truth`
-            // generator load, no `Truth` fire-loop input.
+            // See the module docs: still no `Truth`/published bleed demand
+            // or generator load.
             bleed_demand_kg_s: 0.0,
             gen1_used: false,
             gen2_used: false,
             gen1_electrical_load_w: 0.0,
             gen2_electrical_load_w: 0.0,
-            fire_loop_detected: false,
-            fire_button_pushed: false,
+            // `deep::fire_ice`'s own confirmed APU bay detection, one frame
+            // behind through the documented published-frame mechanism (see
+            // the module doc). Absent (nothing published yet, e.g. the
+            // first frame) reads as no fire, never as a fabricated one.
+            fire_loop_detected: truth.published.get_or("FIRE_DETECTED_APU", 0.0) > 0.0,
+            fire_button_pushed: truth.controls.fire_pb_apu_released,
         };
 
         self.out = self.apu.step(&inputs, &Self::faults_from(faults));
@@ -273,13 +294,18 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    /// A ground truth with the battery bus alive and the APU commanded to
-    /// run -- everything this area can actually be given today.
+    /// A ground truth with the battery bus alive and the crew holding
+    /// MASTER SW and START on -- everything this area can actually be
+    /// given today. Deliberately does not set `Truth::apu_running` (the
+    /// plugin's own separate "is the APU actually running" flag, which
+    /// this live system no longer reads): the whole point of this pass is
+    /// that the crew's own selection and the machine's own state are two
+    /// different things now.
     fn running_truth() -> Truth {
         Truth {
             dt_s: 1.0 / 30.0,
-            apu_running: true,
             dc_bus_volts: [params::BATTERY_NOMINAL_OPEN_CIRCUIT_V; 2],
+            controls: crate::deep::live::Controls { apu_master_sw_on: true, apu_start_pb_on: true, ..crate::deep::live::Controls::default() },
             ..Truth::default()
         }
     }
@@ -332,7 +358,7 @@ mod tests {
     #[test]
     fn with_no_dc_bus_there_is_nothing_to_crank_with() {
         let mut area = LiveApu::new();
-        let truth = Truth { apu_running: true, ..Truth::default() };
+        let truth = Truth { controls: crate::deep::live::Controls { apu_master_sw_on: true, apu_start_pb_on: true, ..crate::deep::live::Controls::default() }, ..Truth::default() };
         let vars = run(&mut area, &truth, &Faults::default(), 300.0);
         assert!(vars["APU_N"] < 1.0, "{}", vars["APU_N"]);
         assert_eq!(vars["APU_AVAILABLE"], 0.0);
@@ -452,6 +478,61 @@ mod tests {
         assert_eq!(area.name(), "apu");
     }
 
+    /// The whole point of this pass: `truth.controls.apu_start_pb_on` is
+    /// what starts the machine now, not `Truth::apu_running` (the plugin's
+    /// own, separate "the APU is actually running" flag, which used to
+    /// double as the start command too).
+    #[test]
+    fn the_start_pushbutton_starts_the_apu_not_the_apu_running_flag() {
+        // `apu_running` claims the machine is already running, but nobody
+        // pressed START: master on, start pb off must leave it cold.
+        let mut not_started = LiveApu::new();
+        let truth = Truth {
+            apu_running: true,
+            dc_bus_volts: [params::BATTERY_NOMINAL_OPEN_CIRCUIT_V; 2],
+            controls: crate::deep::live::Controls { apu_master_sw_on: true, apu_start_pb_on: false, ..crate::deep::live::Controls::default() },
+            ..Truth::default()
+        };
+        let vars = run(&mut not_started, &truth, &Faults::default(), 120.0);
+        assert_eq!(vars["APU_N"], 0.0, "apu_running alone must not start the machine: {}", vars["APU_N"]);
+        assert_eq!(vars["APU_AVAILABLE"], 0.0);
+
+        // The reverse: `apu_running` says the machine is not running, but a
+        // real START pb press (with the battery bus alive) must still spin
+        // it up and bring it to governed speed.
+        let mut started = LiveApu::new();
+        let truth = Truth {
+            apu_running: false,
+            dc_bus_volts: [params::BATTERY_NOMINAL_OPEN_CIRCUIT_V; 2],
+            controls: crate::deep::live::Controls { apu_master_sw_on: true, apu_start_pb_on: true, ..crate::deep::live::Controls::default() },
+            ..Truth::default()
+        };
+        let vars = run(&mut started, &truth, &Faults::default(), 600.0);
+        assert!((vars["APU_N"] - params::GOVERNED_N_PERCENT).abs() < 1.0, "the real START pb must start and govern the machine: {}", vars["APU_N"]);
+        assert_eq!(vars["APU_AVAILABLE"], 1.0);
+    }
+
+    /// `deep::fire_ice`'s own confirmed APU bay detection now reaches this
+    /// area through `Truth::published`, replacing the permanent `false`
+    /// this module used to hold `fire_loop_detected` at.
+    #[test]
+    fn a_published_apu_fire_detection_is_confirmed_and_a_pushed_button_discharges_the_bottle() {
+        let mut area = LiveApu::new();
+        let mut truth = running_truth();
+        truth.controls.fire_pb_apu_released = true;
+        // `Truth::published` is one frame behind; seed it directly the way
+        // `Deep::tick` would after `deep::fire_ice` published a confirmed
+        // detection last frame.
+        let mut published_frame = BTreeMap::new();
+        published_frame.insert("FIRE_DETECTED_APU".to_string(), 1.0);
+        truth.published = crate::deep::live::PublishedFrame(published_frame);
+
+        let vars = run(&mut area, &truth, &Faults::default(), 5.0);
+        assert_eq!(vars["APU_FIRE_LOOP_DETECTED"], 1.0, "a published FIRE_DETECTED_APU must be confirmed here");
+        assert_eq!(vars["APU_FIRE_CONFIRMED"], 1.0);
+        assert!(vars["APU_FIRE_BOTTLE_PRESSURE"] < 1.0, "the fire pushbutton must actually discharge the bottle");
+    }
+
     #[test]
     fn nothing_published_is_ever_nan_through_a_whole_start_and_a_pause_sized_frame() {
         let mut area = LiveApu::new();
@@ -480,7 +561,7 @@ mod probe {
         for (label, id) in [("scv", ids::SCV_JAM), ("igv", ids::IGV_JAM), ("lcerode", ids::LOAD_COMPRESSOR_EROSION)] {
             for m in [0.5, 1.0] {
                 let mut a = LiveApu::new();
-                let t = Truth { dt_s: 1.0/30.0, apu_running: true, dc_bus_volts: [24.0; 2], ..Truth::default() };
+                let t = Truth { dt_s: 1.0/30.0, dc_bus_volts: [24.0; 2], controls: crate::deep::live::Controls { apu_master_sw_on: true, apu_start_pb_on: true, ..crate::deep::live::Controls::default() }, ..Truth::default() };
                 let f = Faults::from_pairs([(id, m)]);
                 let mut surged = false;
                 for _ in 0..18000 { a.tick(&t, &f);

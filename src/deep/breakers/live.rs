@@ -286,7 +286,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn flying_truth() -> Truth {
-        Truth { dt_s: 1.0 / 30.0, on_ground: false, engine_n1_frac: [0.9; 4], engine_running: [true; 4], ..Truth::default() }
+        Truth { dt_s: 1.0 / 30.0, on_ground: false, engine_n1_frac: [0.9; 4], engine_n2_frac: [0.9; 4], engine_n3_frac: [0.9; 4], engine_running: [true; 4], ..Truth::default() }
     }
 
     fn failure_id_for(component_suffix: &str, field: &str) -> u64 {
@@ -447,7 +447,7 @@ mod tests {
     /// arming *either* id has to weld the one real device.
     #[test]
     fn a_welded_breaker_does_not_open_on_an_overload_that_would_otherwise_trip_it() {
-        let truth = Truth { dt_s: 0.05, on_ground: false, engine_n1_frac: [0.9; 4], engine_running: [true; 4], ..Truth::default() };
+        let truth = Truth { dt_s: 0.05, on_ground: false, engine_n1_frac: [0.9; 4], engine_n2_frac: [0.9; 4], engine_n3_frac: [0.9; 4], engine_running: [true; 4], ..Truth::default() };
 
         let run = |id: &str, faults: &Faults| -> bool {
             board::clear();
@@ -539,7 +539,7 @@ mod cost {
     #[ignore = "timing"]
     fn per_tick_cost() {
         board::clear();
-        let truth = Truth { dt_s: 1.0 / 30.0, on_ground: false, engine_n1_frac: [0.9; 4], engine_running: [true; 4], ..Truth::default() };
+        let truth = Truth { dt_s: 1.0 / 30.0, on_ground: false, engine_n1_frac: [0.9; 4], engine_n2_frac: [0.9; 4], engine_n3_frac: [0.9; 4], engine_running: [true; 4], ..Truth::default() };
         let faults = Faults::default();
         let t0 = std::time::Instant::now();
         let mut elec = ElectricalLive::new();

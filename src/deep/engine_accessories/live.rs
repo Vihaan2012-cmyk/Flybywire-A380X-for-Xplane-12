@@ -35,12 +35,21 @@
 //!
 //! ## What is not in `Truth` yet
 //!
-//! `Truth` carries N1 and whether the engine is running, which is enough to
-//! know the fan is turning but not enough to drive a fuel system: the pumps
-//! are geared to N3, the FMU meters against a commanded fuel flow the
-//! governor computes, and the nozzles spray against combustor pressure.
-//! Those, the fuel's own inlet temperature and the cockpit's master/fire
-//! switches are in [`EngineAccessoryCommands`].
+//! `Truth` now carries `engine_n3_frac` (what both fuel pumps are actually
+//! geared to), `engine_n2_frac` and `engine_hp_port_pressure_pa` (the EEC's
+//! sensed N2 and P30), and `controls.engine_master_on`/`fire_pb_released`
+//! (what commands the HP shut-off valve) -- this pass reads all four
+//! instead of the interim [`EngineAccessoryCommands`] fields that used to
+//! stand in for them, which is why those fields are gone from that struct.
+//! Three inputs still have no real source: the fuel flow the governor is
+//! *commanding* (the compiled FADEC bus exposes a commanded N1, not a
+//! commanded Wf -- see `deep::live`'s own module doc and
+//! `docs/deep/truth-requests.md`), TGT (turbine gas temperature, sensed
+//! nowhere else in this port), and the fuel's own inlet temperature, which
+//! now falls back to `deep::fuel::live`'s own published feed-tank
+//! temperature (`FUEL_TANK_TEMP_C:n`, one frame behind, through
+//! `Truth::published`) rather than static air when nobody overrides it.
+//! Those three remain in [`EngineAccessoryCommands`].
 
 use crate::deep::api::Registry;
 use crate::deep::live::{Faults, Truth};
@@ -113,52 +122,51 @@ pub const UNCONSUMED_ATA: [u16; 9] = [26, 30, 71, 72, 74, 75, 77, 78, 80];
 // ---------------------------------------------------------------------------
 
 /// Everything this area needs that is not in [`Truth`].
+///
+/// `engine_n3_frac`, the EEC's sensed N2 (from `engine_n2_frac`) and P30
+/// (from `engine_hp_port_pressure_pa`), and the master/fire-handle command
+/// to the HP shut-off valve (from `controls.engine_master_on`/
+/// `fire_pb_released`) used to live here; `Truth` carries all of them for
+/// real now, so `EngineChain::step` reads them from `truth` directly and
+/// this struct keeps only what still has no source.
 #[derive(Clone, Copy, Debug)]
 pub struct EngineAccessoryCommands {
-    /// HP spool speed as a fraction of its design speed, per engine. The
-    /// accessory gearbox -- and so both fuel pumps -- is geared to N3, not
-    /// to the fan; `Truth` carries only `engine_n1_frac`, and inferring one
-    /// spool's speed from another's would be a second engine model.
-    pub engine_n3_frac: [f64; N_ENGINES],
-    /// IP spool speed, percent, and turbine gas temperature, K -- the EEC
-    /// senses both on each channel, so they have to be real values for the
-    /// channel-disagree monitor to mean anything.
-    pub engine_n2_percent: [f64; N_ENGINES],
+    /// Turbine gas temperature, K -- the EEC's fourth sensed parameter.
+    /// Sensed nowhere else in this port (TGT is measured downstream of the
+    /// LP turbine, a station none of this crate's engine model or `Truth`
+    /// publishes), so this stays a command rather than a `Truth` read.
     pub engine_tgt_k: [f64; N_ENGINES],
-    /// Compressor delivery (P30) pressure, Pa: what the burner nozzles
-    /// spray against, and the EEC's fifth sensed parameter.
-    pub engine_p30_pa: [f64; N_ENGINES],
     /// The fuel flow the engine's governor is commanding, kg/s. This is the
     /// output of the control law, not of this area's hardware; the FMU's
-    /// job is to deliver it.
+    /// job is to deliver it. The compiled FADEC bus exposes a commanded N1,
+    /// not a commanded Wf (see `deep::live`'s own module doc), so this
+    /// cannot be read from `Truth` without inventing one.
     pub wf_command_kg_s: [f64; N_ENGINES],
-    /// Fuel temperature at the engine's LP pump inlet, K -- the feed tank's
-    /// own bulk temperature, which `deep::fuel::live` computes but `Truth`
-    /// does not yet carry. `None` falls back to ambient static air
-    /// temperature, which is where a parked, cold-soaked aircraft's feed
-    /// fuel genuinely sits.
+    /// Fuel temperature at the engine's LP pump inlet, K -- an explicit
+    /// override for tests and for whatever eventually replaces the
+    /// published fallback below. `None` reads `deep::fuel::live`'s own
+    /// published feed-tank bulk temperature one frame back
+    /// (`FUEL_TANK_TEMP_C:n`, through `Truth::published`) and falls back
+    /// further to ambient static air only if fuel has not published yet
+    /// (a cold aircraft with no fuel area running), which is where a
+    /// parked, cold-soaked aircraft's feed fuel genuinely sits.
     pub fuel_inlet_k: Option<f64>,
-    /// The engine master switch and the fire handle, which between them
-    /// command the HP shut-off valve.
-    pub master_on: [bool; N_ENGINES],
-    pub fire_handle_pulled: [bool; N_ENGINES],
 }
 
 impl Default for EngineAccessoryCommands {
-    /// Four cold engines: nothing turning, nothing commanded, masters off.
+    /// Four cold engines: nothing commanded, no TGT reading yet.
     fn default() -> Self {
-        Self {
-            engine_n3_frac: [0.0; N_ENGINES],
-            engine_n2_percent: [0.0; N_ENGINES],
-            engine_tgt_k: [288.15; N_ENGINES],
-            engine_p30_pa: [101_325.0; N_ENGINES],
-            wf_command_kg_s: [0.0; N_ENGINES],
-            fuel_inlet_k: None,
-            master_on: [false; N_ENGINES],
-            fire_handle_pulled: [false; N_ENGINES],
-        }
+        Self { engine_tgt_k: [288.15; N_ENGINES], wf_command_kg_s: [0.0; N_ENGINES], fuel_inlet_k: None }
     }
 }
+
+/// `deep::fuel::live`'s own tank numbering (`FEED` order in that area's
+/// `feed_tank_index`, cited there as `flight_model.cfg`'s `Tank.2`/`Tank.5`/
+/// `Tank.6`/`Tank.9`): engine 1's feed tank is tank 2 in that 1-based
+/// numbering, and so on. Restated here rather than imported so this area
+/// keeps no dependency on `deep::fuel`'s internals -- only on the variable
+/// name it publishes.
+const FEED_TANK_NUMBER: [u32; N_ENGINES] = [2, 5, 6, 9];
 
 // ---------------------------------------------------------------------------
 // Failure ids.
@@ -267,6 +275,11 @@ struct EngineChain {
     /// Fuel actually reaching the manifold, kg/s: what the FMU metered,
     /// gated by the shut-off valve.
     delivered_kg_s: f64,
+    /// Whether the HP shut-off valve was commanded open this tick --
+    /// cached because `publish` (unlike `step`) has no access to `Truth`,
+    /// and the SOV-disagree monitor needs to compare against the same
+    /// target `step` actually drove the valve toward.
+    sov_commanded_open: bool,
 }
 
 impl EngineChain {
@@ -287,14 +300,22 @@ impl EngineChain {
             manifold: manifold::step(0.0, 101_325.0, &ManifoldFaults::default()),
             eec_state: EecState { selected: [0.0; N_EEC_PARAMS], disagree: [false; N_EEC_PARAMS], active: ActiveChannel::A, fuel_flow_disagree: false },
             delivered_kg_s: 0.0,
+            sov_commanded_open: false,
         }
     }
 
     /// One engine's chain, from the pylon to the burners.
     #[allow(clippy::too_many_arguments)]
     fn step(&mut self, eng: usize, truth: &Truth, faults: &Faults, commands: &EngineAccessoryCommands, dt: f64) {
-        let n3 = commands.engine_n3_frac[eng].max(0.0);
-        let fuel_k = commands.fuel_inlet_k.unwrap_or(truth.environment.sat_c + 273.15).max(1.0);
+        // The accessory gearbox -- both fuel pumps -- is geared to N3, not
+        // to the fan; `Truth` now carries the real HP spool speed.
+        let n3 = truth.engine_n3_frac[eng].max(0.0);
+        // `deep::fuel::live` publishes each feed tank's own bulk
+        // temperature one frame behind; a manual override (tests) wins,
+        // then that published reading, then ambient static air for a cold
+        // aircraft fuel has not run for yet.
+        let published_fuel_k = truth.published.get(&format!("FUEL_TANK_TEMP_C:{}", FEED_TANK_NUMBER[eng])).map(|c| c + 273.15);
+        let fuel_k = commands.fuel_inlet_k.or(published_fuel_k).unwrap_or(truth.environment.sat_c + 273.15).max(1.0);
         let inlet_pa = truth.environment.ambient_pressure_pa.max(0.0) + FEED_BOOST_RISE_PA;
         let wf_command = commands.wf_command_kg_s[eng].max(0.0);
 
@@ -329,10 +350,10 @@ impl EngineChain {
         self.fmu_state = self.fmu.step(wf_command, hp_supply_pa, self.hp.delivered_m3_s, &fmu_faults, dt);
 
         // ---- HP shut-off valve: open on the master switch unless the fire
-        // handle has been pulled.
+        // handle has been pulled. Both are now real cockpit controls.
         let sov_faults = ShutoffValveFaults { stuck: faults.get(self.ids.sov_stuck) };
-        let sov_commanded_open = commands.master_on[eng] && !commands.fire_handle_pulled[eng];
-        self.sov_position = self.sov.step(sov_commanded_open, &sov_faults, dt);
+        self.sov_commanded_open = truth.controls.engine_master_on[eng] && !truth.controls.fire_pb_released[eng];
+        self.sov_position = self.sov.step(self.sov_commanded_open, &sov_faults, dt);
         self.delivered_kg_s = self.fmu_state.metered_kg_s * self.sov_position;
 
         // ---- Flow transmitter, then the manifold it feeds.
@@ -340,8 +361,12 @@ impl EngineChain {
         let b = PickoffFaults { bias_frac_of_design: faults.get(self.ids.ft_b_bias), frozen: faults.get(self.ids.ft_b_frozen) };
         self.flow = self.transmitter.step(self.delivered_kg_s, &a, &b, dt);
 
+        // P30 (HP compressor delivery pressure) is the same station
+        // `Truth::engine_hp_port_pressure_pa` already reads unconditionally
+        // off this crate's own engine model's HP6 port.
+        let p30_pa = truth.engine_hp_port_pressure_pa[eng];
         let manifold_faults = ManifoldFaults { group_blockage: std::array::from_fn(|g| faults.get(self.ids.nozzle[g])) };
-        self.manifold = manifold::step(self.delivered_kg_s, commands.engine_p30_pa[eng], &manifold_faults);
+        self.manifold = manifold::step(self.delivered_kg_s, p30_pa, &manifold_faults);
 
         // ---- EEC.
         // One registered failure per (channel, parameter) covers both the
@@ -360,13 +385,7 @@ impl EngineChain {
             sensor_a: std::array::from_fn(|i| sensor(self.ids.eec_sensor_a[i])),
             sensor_b: std::array::from_fn(|i| sensor(self.ids.eec_sensor_b[i])),
         };
-        let true_values = [
-            truth.engine_n1_frac[eng] * 100.0,
-            commands.engine_n2_percent[eng],
-            n3 * 100.0,
-            commands.engine_tgt_k[eng],
-            commands.engine_p30_pa[eng],
-        ];
+        let true_values = [truth.engine_n1_frac[eng] * 100.0, truth.engine_n2_frac[eng] * 100.0, n3 * 100.0, commands.engine_tgt_k[eng], p30_pa];
         self.eec_state = self.eec.step(true_values, self.flow.channel_a_kg_s, self.flow.channel_b_kg_s, &eec_faults, dt);
     }
 
@@ -460,7 +479,7 @@ impl crate::deep::live::Area for EngineAccessoriesLive {
             out(&format!("A32NX_ENG_{n}_FMU_DP_PA"), chain.fmu_state.differential_pa);
 
             // ---- HP shut-off valve.
-            let sov_target = if self.commands.master_on[eng] && !self.commands.fire_handle_pulled[eng] { 1.0 } else { 0.0 };
+            let sov_target = if chain.sov_commanded_open { 1.0 } else { 0.0 };
             out(&format!("A32NX_ENG_{n}_HP_SOV_DISAGREE"), b((chain.sov_position - sov_target).abs() > SOV_DISAGREE_TOLERANCE));
             out(&format!("A32NX_ENG_{n}_HP_SOV_POSITION"), chain.sov_position);
 
@@ -508,7 +527,7 @@ pub fn live_system() -> Box<dyn crate::deep::live::Area> {
 mod tests {
     use super::*;
     use crate::deep::fuel::live::test_support::collect_vars;
-    use crate::deep::live::Area as _;
+    use crate::deep::live::{Area as _, Controls};
     use std::collections::BTreeMap;
 
     /// The fuel flow a Trent 972B-84 burns per engine at the gas path's own
@@ -530,19 +549,14 @@ mod tests {
             dt_s: 0.02,
             engine_running: [true; 4],
             engine_n1_frac: [0.85; 4],
+            engine_n2_frac: [0.88; 4],
+            engine_n3_frac: [0.9; 4],
+            engine_hp_port_pressure_pa: [2.5e6; 4],
             ac_bus_volts: [115.0; 4],
+            controls: Controls { engine_master_on: [true; 4], ..Controls::default() },
             ..Truth::default()
         };
-        let commands = EngineAccessoryCommands {
-            engine_n3_frac: [0.9; 4],
-            engine_n2_percent: [88.0; 4],
-            engine_tgt_k: [900.0; 4],
-            engine_p30_pa: [2.5e6; 4],
-            wf_command_kg_s: [DESIGN_WF_KG_S; 4],
-            fuel_inlet_k: Some(300.0),
-            master_on: [true; 4],
-            fire_handle_pulled: [false; 4],
-        };
+        let commands = EngineAccessoryCommands { engine_tgt_k: [900.0; 4], wf_command_kg_s: [DESIGN_WF_KG_S; 4], fuel_inlet_k: Some(300.0) };
         (truth, commands)
     }
 
@@ -680,8 +694,11 @@ mod tests {
     #[test]
     fn a_stuck_hp_shutoff_valve_cannot_follow_the_master_switch() {
         // registry.rs: "stuck open defeats a fire-handle shutdown, stuck
-        // closed flames the engine out".
-        let (truth, commands) = running();
+        // closed flames the engine out". The master switch and the fire
+        // handle are now real cockpit controls (`truth.controls.
+        // engine_master_on`/`fire_pb_released`), not `EngineAccessoryCommands`
+        // fields, so this test drives `Truth` directly.
+        let (mut truth, commands) = running();
         let mut live = EngineAccessoriesLive::new();
         live.commands = commands;
         let id = live.engines[0].ids.sov_stuck;
@@ -691,16 +708,17 @@ mod tests {
         let open = run(&mut live, &truth, &Faults::default(), 10.0);
         assert!(open["A32NX_ENG_1_HP_SOV_POSITION"] > 0.95);
         assert_eq!(open.get("A32NX_ENG_1_HP_SOV_DISAGREE"), Some(&0.0));
-        live.commands.fire_handle_pulled[0] = true;
+        truth.controls.fire_pb_released[0] = true;
         let shut = run(&mut live, &truth, &Faults::default(), 10.0);
         assert!(shut["A32NX_ENG_1_HP_SOV_POSITION"] < 0.05);
 
         // Seized open: the same fire handle now leaves it open and the
         // disagreement is reported.
+        let (mut truth, commands) = running();
         let mut live = EngineAccessoriesLive::new();
         live.commands = commands;
         run(&mut live, &truth, &Faults::default(), 10.0);
-        live.commands.fire_handle_pulled[0] = true;
+        truth.controls.fire_pb_released[0] = true;
         let seized = run(&mut live, &truth, &Faults::from_pairs([(id, 1.0)]), 10.0);
         assert!(seized["A32NX_ENG_1_HP_SOV_POSITION"] > 0.95, "a seized valve does not move");
         assert_eq!(seized.get("A32NX_ENG_1_HP_SOV_DISAGREE"), Some(&1.0));

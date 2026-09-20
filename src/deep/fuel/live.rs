@@ -28,17 +28,25 @@
 //! arithmetic for both terms, so the tank cools toward the skin with a time
 //! constant that falls out of its own fuel mass rather than being chosen.
 //!
+//! ## What drives the burn
+//!
+//! `Truth::engine_fuel_flow_kg_s` is `physics::engine`'s own real fuel flow
+//! into each combustor -- not a fan-speed guess -- and is what drains each
+//! feed tank now. Every tank starts loaded, too: [`FuelLive::new`] seeds
+//! the same FlyByWire FADEC default gallons the aircraft's own cold start
+//! uses (`crate::fuel::DEFAULT_GALLONS`) through [`FuelLive::load_tank`],
+//! since nothing else in this pass's scope calls it with X-Plane's live
+//! reading (see [`FuelLive::seed_default_fuel_load`]).
+//!
 //! ## What is not in `Truth` yet
 //!
-//! Five inputs this system genuinely needs have no field in [`Truth`]:
-//! how much fuel is in each tank, how fast each engine is burning it, the
-//! aircraft's pitch/bank and sustained accelerations, and whether the crew
-//! has selected jettison or cross-feed. They are collected in
-//! [`FuelCommands`] as one explicit, documented block rather than invented
-//! from what is available: `Truth::engine_n1_frac` is a fan speed, not a
-//! fuel flow, and deriving one from the other here would be a second,
-//! disagreeing engine model. The defaults are an aircraft that has not been
-//! fuelled and is not burning anything -- a real state, not a placeholder
+//! A handful of inputs this system genuinely needs still have no field in
+//! [`Truth`]: APU fuel burn, the aircraft's pitch/bank and sustained
+//! accelerations, and whether the crew has selected jettison or
+//! cross-feed. They are collected in [`FuelCommands`] as one explicit,
+//! documented block rather than invented from what is available. The
+//! defaults are an aircraft that is not burning APU fuel and has neither
+//! jettison nor cross-feed selected -- a real state, not a placeholder
 //! quantity.
 
 use crate::deep::api::{failure_id, Area, Registry};
@@ -138,11 +146,6 @@ const JETTISON_VALVE_TRAVEL_S: f64 = 5.0;
 /// level and has neither jettison nor cross-feed selected.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FuelCommands {
-    /// Per engine, the fuel actually being burned, kg/s. `Truth` carries
-    /// `engine_n1_frac`, which is a fan speed; turning that into a fuel
-    /// flow is the engine model's job, and doing it here would be a second
-    /// engine model that disagreed with it.
-    pub engine_fuel_flow_kg_s: [f64; N_ENGINES],
     /// APU fuel burn, kg/s -- the leak detector's balance is over every
     /// metered consumer, not just the engines (`leak::LeakDetector::update`).
     pub apu_fuel_flow_kg_s: f64,
@@ -387,7 +390,7 @@ impl Default for FuelLive {
 impl FuelLive {
     pub fn new() -> Self {
         let ambient_c = Truth::default().environment.sat_c;
-        Self {
+        let mut live = Self {
             ids: Ids::resolve(),
             tanks: ALL_TANKS.iter().map(|&t| TankState::new(t, ambient_c)).collect(),
             filter_blockage: [0.0; N_ENGINES],
@@ -411,6 +414,45 @@ impl FuelLive {
             indicated_fob_kg: 0.0,
             commands: FuelCommands::default(),
             fuel_type: FuelType::JetA1,
+        };
+        live.seed_default_fuel_load(ambient_c);
+        live
+    }
+
+    /// Seeds every tank from `crate::fuel::DEFAULT_GALLONS`: FlyByWire's own
+    /// FADEC cold-start default (`FuelConfiguration_A380X.h:31-43`, the same
+    /// per-tank gallons that module's own doc cites and `aircraft_presets.rs`'s
+    /// expedited-load path already reuses) rather than an invented number.
+    ///
+    /// This is the honest fix for "nothing seeds this system, so a live
+    /// aircraft starts with dry tanks": `deep::fuel` cannot read X-Plane's
+    /// own live tank quantities itself (areas depend on `Truth`/`Faults`
+    /// only, and neither carries a per-tank fuel mass -- see this module's
+    /// own doc and `docs/deep/truth-requests.md`), and the plugin wiring
+    /// that would call [`Self::load_tank`] with those live readings each
+    /// time the aircraft loads or is refuelled belongs to `plugin.rs`,
+    /// outside this pass's directory. Seeding the same real default the
+    /// aircraft's own FADEC uses is the closest honest substitute: a real,
+    /// cited aircraft default, not a fabricated fill level, and every tank
+    /// still responds correctly to a real `load_tank` call once the plugin
+    /// makes one (refuelling, or a future live-quantity sync, both already
+    /// exercised by this file's own tests).
+    ///
+    /// `DEFAULT_GALLONS`'s tank order (1..11, `FUEL_LEFT_OUTER_QTY.. FUEL_
+    /// TRIM_QTY`) is the same `flight_model.cfg` `Tank.N` numbering
+    /// `geometry::ALL_TANKS`/`TANK_SUFFIX` already use, confirmed by the
+    /// indices this crate's own default actually sets: feed tanks 1-4 only
+    /// (index 1, 4, 5, 8, zero-based -- `left_outer, feed_1, left_mid,
+    /// left_inner, feed_2, feed_3, right_inner, right_mid, feed_4, ...`),
+    /// exactly `Self::feed_tank_index`'s own four engines.
+    fn seed_default_fuel_load(&mut self, temp_c: f64) {
+        for (i, &tank) in ALL_TANKS.iter().enumerate() {
+            let gallons = crate::fuel::DEFAULT_GALLONS[i];
+            if gallons <= 0.0 {
+                continue;
+            }
+            let kg = gallons * geometry::GAL_TO_M3 * REFERENCE_DENSITY_15C_KG_M3;
+            self.load_tank(tank, kg, temp_c);
         }
     }
 
@@ -587,9 +629,11 @@ impl crate::deep::live::Area for FuelLive {
         }
 
         // ---- Burn --------------------------------------------------------
+        // `physics::engine`'s own real fuel flow, not a fan-speed guess: see
+        // this module's doc.
         for eng in 0..N_ENGINES {
             let idx = Self::feed_tank_index(eng);
-            let burn = self.commands.engine_fuel_flow_kg_s[eng].max(0.0) * dt;
+            let burn = truth.engine_fuel_flow_kg_s[eng].max(0.0) * dt;
             self.tanks[idx].mass_kg = (self.tanks[idx].mass_kg - burn).max(0.0);
         }
         if self.commands.apu_fuel_flow_kg_s > 0.0 {
@@ -641,7 +685,7 @@ impl crate::deep::live::Area for FuelLive {
         self.tick_jettison(truth, faults, dt);
 
         // ---- Leak detection ----------------------------------------------
-        let metered_flow = self.commands.engine_fuel_flow_kg_s.iter().map(|f| f.max(0.0)).sum::<f64>() + self.commands.apu_fuel_flow_kg_s.max(0.0);
+        let metered_flow = truth.engine_fuel_flow_kg_s.iter().map(|f| f.max(0.0)).sum::<f64>() + self.commands.apu_fuel_flow_kg_s.max(0.0);
         self.leak_detected = self.leak_detector.update(self.indicated_fob_kg, metered_flow, dt, LEAK_WINDOW_S, LEAK_THRESHOLD_KG, LEAK_CONFIRM_WINDOWS);
     }
 
@@ -1021,6 +1065,42 @@ mod tests {
         assert!(after < before, "a holed tank must actually lose fuel");
         assert!(out["FUEL_TANK_LEAK_KG_S:4"] > 0.0);
         assert!(out["FUEL_TOTAL_LEAK_KG_S"] > 0.0);
+    }
+
+    /// The whole point of this pass: a feed tank drains at the engine's
+    /// own real fuel flow (`Truth::engine_fuel_flow_kg_s`), not at a
+    /// derived, fan-speed-based guess, and the aircraft starts with fuel
+    /// on board in the first place instead of dry tanks.
+    #[test]
+    fn a_feed_tank_drains_at_the_engines_real_burn_from_a_seeded_load() {
+        let mut live = FuelLive::new();
+        let before = live.tank_mass_kg(Tank::Feed1);
+        assert!(before > 0.0, "a live aircraft must not start with dry tanks: {before} kg");
+
+        let mut truth = Truth::default();
+        truth.dt_s = 1.0;
+        truth.engine_running = [true; 4];
+        truth.engine_fuel_flow_kg_s = [1.0, 0.0, 0.0, 0.0];
+        for _ in 0..100 {
+            live.tick(&truth, &Faults::default());
+        }
+        let after = live.tank_mass_kg(Tank::Feed1);
+        assert!((before - after - 100.0).abs() < 1e-6, "feed 1 must lose exactly the commanded 1 kg/s burn: {before} -> {after}");
+        assert_eq!(live.tank_mass_kg(Tank::Feed2), before, "the other feed tanks, fed by engines with zero commanded flow, must be untouched");
+
+        // A fan spinning with no engine fuel flow reported must not burn
+        // anything -- this is not the fan-speed-derived guess it replaced.
+        let mut idle = FuelLive::new();
+        let idle_before = idle.tank_mass_kg(Tank::Feed2);
+        let mut idle_truth = Truth::default();
+        idle_truth.dt_s = 1.0;
+        idle_truth.engine_running = [true; 4];
+        idle_truth.engine_n1_frac = [0.9; 4];
+        idle_truth.engine_fuel_flow_kg_s = [0.0; 4];
+        for _ in 0..50 {
+            idle.tick(&idle_truth, &Faults::default());
+        }
+        assert_eq!(idle.tank_mass_kg(Tank::Feed2), idle_before, "N1 alone must not burn fuel; only the real Truth fuel flow does");
     }
 
     #[test]

@@ -606,7 +606,7 @@ mod tests {
     fn a_full_severity_avionics_bay_fire_opens_the_loads_routed_through_it() {
         use crate::deep::electrical::live::ElectricalLive;
         board::clear();
-        let truth = Truth { dt_s: 1.0 / 30.0, on_ground: false, engine_n1_frac: [0.9; 4], engine_running: [true; 4], ..Truth::default() };
+        let truth = Truth { dt_s: 1.0 / 30.0, on_ground: false, engine_n1_frac: [0.9; 4], engine_n2_frac: [0.9; 4], engine_n3_frac: [0.9; 4], engine_running: [true; 4], ..Truth::default() };
 
         let mut elec = ElectricalLive::new();
         let mut wire = WiringLive::new();
@@ -653,7 +653,7 @@ mod tests {
     fn a_deep_chafe_puts_real_arc_current_and_heat_onto_the_circuit_it_damages() {
         use crate::deep::electrical::live::ElectricalLive;
         board::clear();
-        let truth = Truth { dt_s: 1.0 / 30.0, on_ground: false, engine_n1_frac: [0.9; 4], engine_running: [true; 4], ..Truth::default() };
+        let truth = Truth { dt_s: 1.0 / 30.0, on_ground: false, engine_n1_frac: [0.9; 4], engine_n2_frac: [0.9; 4], engine_n3_frac: [0.9; 4], engine_running: [true; 4], ..Truth::default() };
         let mut elec = ElectricalLive::new();
         let mut wire = WiringLive::new();
 
