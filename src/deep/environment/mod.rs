@@ -24,6 +24,8 @@ pub mod dispatch;
 
 pub mod registry;
 
+pub mod live;
+
 pub(crate) mod rng;
 
 // Backlog complete; weather_cells.rs and dispatch.rs are the lead's

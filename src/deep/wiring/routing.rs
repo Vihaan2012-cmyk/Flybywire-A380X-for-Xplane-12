@@ -322,6 +322,15 @@ pub fn segregation_violations(net: &WireBundleNetwork) -> Vec<String> {
     out
 }
 
+/// Every catalogued circuit's own bus label, as [`catalogue`] assigns it
+/// (`"AC1"`, `"DC_ESS"`, ... -- the same labels
+/// `deep::electrical::network::BusId::label` uses). A consumer of this
+/// module needs it to know what voltage sits behind a fault on a given
+/// circuit, which the private catalogue is otherwise the only record of.
+pub fn circuit_buses() -> std::collections::HashMap<&'static str, &'static str> {
+    catalogue().into_iter().map(|e| (e.circuit, e.bus)).collect()
+}
+
 /// A circuit's side, from the catalogue's own bus assignment (used only by
 /// [`segregation_violations`]'s self-check; the network itself never needs
 /// to look this back up once built).

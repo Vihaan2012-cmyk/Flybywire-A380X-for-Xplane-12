@@ -10,8 +10,10 @@
 //! `htmlgauge00=A380X/MFD/mfd.html`), and each side dims with its own knob,
 //! so a screen has one dimming region per mesh.
 //!
-//! Left out: the OITs (not used), and SCREEN_ISIS_2, whose gauge FlyByWire
-//! has commented out. The EFB (`SCREEN_EFB`) is included, but XPHFBW does not
+//! Left out: SCREEN_ISIS_2, whose gauge FlyByWire has commented out. The two
+//! OITs (`SCREEN_OIT_LEFT`/`SCREEN_OIT_RIGHT`, the Onboard Information
+//! Terminals on the lateral consoles) are drawn, from FlyByWire's
+//! `A380X/OIT/oit.html` (docs/oit.md). The EFB (`SCREEN_EFB`) is included, but XPHFBW does not
 //! draw FlyByWire's own (unrendered) EFB gauge on it; the app's own study/
 //! settings UI is shown there instead (xphfbw_bridge_views.rs's
 //! `EFB_SCREEN`, app/src/views.rs's `spawn_efb_view`), since this port does
@@ -49,6 +51,13 @@ pub struct ScreenDef {
 const ESS: &str = "A32NX_ELEC_DC_ESS_BUS_IS_POWERED";
 const DC1: &str = "A32NX_ELEC_DC_1_BUS_IS_POWERED";
 const DC2: &str = "A32NX_ELEC_DC_2_BUS_IS_POWERED";
+// The OITs' own supplies (OitDisplayUnit.tsx's `DisplayUnitToDCBus`, with
+// shared/src/electrical.ts's bus names): the captain's terminal on AC 2 or
+// DC 2, the first officer's on AC ESS, the in-flight DC essential bus
+// (`108PH`) or DC 1.
+const AC2: &str = "A32NX_ELEC_AC_2_BUS_IS_POWERED";
+const AC_ESS: &str = "A32NX_ELEC_AC_ESS_BUS_IS_POWERED";
+const DC_ESS_IN_FLIGHT: &str = "A32NX_ELEC_108PH_BUS_IS_POWERED";
 
 const fn full(w: u32, h: u32, potentiometer: u32, buses: &'static [&'static str]) -> Dimming {
     Dimming { region: [0, 0, w, h], potentiometer, buses }
@@ -90,6 +99,26 @@ pub static SCREENS: &[ScreenDef] = &[
     // its own brightness setting into the page instead (app/ui/index.html's
     // "EFB brightness" slider, xphfbw.efbBrightness).
     ScreenDef { id: "SCREEN_EFB", title: "A380X EFB (XPHFBW)", width: 1430, height: 1000, dimming: &[] },
+    // The two OITs (panel.cfg's VCockpit19/20, `A380X/OIT/oit.html?Index=1`
+    // and `?Index=2`). Their brightness potentiometers are 78 and 79
+    // (OitSimvarPublisher.tsx's `potentiometerCaptain`/`potentiometerFo`);
+    // FlyByWire's model leaves the OIT knob (`KNOB_EFIS_CS_OIT`, mip.xml:79)
+    // a plain emissive with no code, so nothing there ever writes them —
+    // `oit.rs` is what drives them in this port (docs/oit.md).
+    ScreenDef {
+        id: "SCREEN_OIT_LEFT",
+        title: "A380X OIT (captain)",
+        width: 1333,
+        height: 1000,
+        dimming: &[full(1333, 1000, 78, &[AC2, DC2])],
+    },
+    ScreenDef {
+        id: "SCREEN_OIT_RIGHT",
+        title: "A380X OIT (first officer)",
+        width: 1333,
+        height: 1000,
+        dimming: &[full(1333, 1000, 79, &[AC_ESS, DC_ESS_IN_FLIGHT, DC1])],
+    },
 ];
 
 /// A screen by the id a stream names it with: case and a leading `$` do
@@ -126,13 +155,15 @@ mod tests {
         assert_eq!(find("$SCREEN_DU_PFDL"), Some(0));
         assert_eq!(find("$CLOCK").map(|i| SCREENS[i].id), Some("Clock"));
         assert_eq!(find("SCREEN_EFB").map(|i| SCREENS[i].id), Some("SCREEN_EFB"));
-        // Exactly the ids the converter writes (docs/team.md), now that the
-        // EFB is no longer in the converter's default `--skip-screens`.
+        // Exactly the ids the converter writes (docs/team.md), now that
+        // neither the EFB nor the OITs are in the converter's default
+        // `--skip-screens` (docs/oit.md).
         let mut ids: Vec<&str> = SCREENS.iter().map(|s| s.id).collect();
         ids.sort();
         let want = [
             "BAT", "Clock", "FCU", "RTPI", "SCREEN_DU_EWD", "SCREEN_DU_MFD", "SCREEN_DU_NDL", "SCREEN_DU_NDR", "SCREEN_DU_PFDL",
             "SCREEN_DU_PFDR", "SCREEN_DU_RMP_1", "SCREEN_DU_RMP_2", "SCREEN_DU_RMP_3", "SCREEN_DU_SD", "SCREEN_EFB", "SCREEN_ISIS_1",
+            "SCREEN_OIT_LEFT", "SCREEN_OIT_RIGHT",
         ];
         assert_eq!(ids, want);
         for s in SCREENS {

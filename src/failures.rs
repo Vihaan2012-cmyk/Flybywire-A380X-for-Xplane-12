@@ -1017,18 +1017,57 @@ pub fn mel_item(id: u64) -> Option<crate::mel::MelCategory> {
 }
 
 /// Every registered id's display name, from whichever catalogue has it.
-/// Every catalogued failure id: FlyByWire's, the computers', and the extra
-/// catalogue's.
+/// Every catalogued failure id: FlyByWire's, the computers', the extra
+/// catalogue's, and the `deep` areas'.
 pub fn all_ids() -> Vec<u64> {
     let mut ids: Vec<u64> = a380_failures().into_iter().map(|(id, _)| id).collect();
     ids.extend(COMPUTER_FAILURES.iter().map(|(id, _)| *id));
     ids.extend(extra::extra_failures().into_iter().map(|x| x.id));
+    ids.extend(deep_catalogue().keys().copied());
     ids.sort_unstable();
     ids.dedup();
     ids
 }
 
+/// What `deep::registry()` records about one of its failures, in the shape
+/// this module's own lookups want.
+pub struct DeepFailure {
+    pub name: String,
+    pub component: String,
+    pub effect: String,
+    pub magnitude: String,
+}
+
+/// Every failure the `deep` areas register, by id.
+///
+/// Built once and kept: `deep::registry()` assembles several thousand
+/// failure definitions across eighteen areas, which is far too much work to
+/// redo on every Study-page render or name lookup.
+fn deep_catalogue() -> &'static std::collections::BTreeMap<u64, DeepFailure> {
+    static CATALOGUE: std::sync::OnceLock<std::collections::BTreeMap<u64, DeepFailure>> = std::sync::OnceLock::new();
+    CATALOGUE.get_or_init(|| {
+        crate::deep::registry()
+            .failures
+            .into_iter()
+            .map(|f| (f.id, DeepFailure { name: f.name, component: f.component, effect: f.effect, magnitude: f.magnitude }))
+            .collect()
+    })
+}
+
+/// The ids the `deep` areas register, sorted.
+pub fn deep_ids() -> Vec<u64> {
+    deep_catalogue().keys().copied().collect()
+}
+
+/// What the `deep` areas record about `id`, if it is one of theirs.
+pub fn deep_failure(id: u64) -> Option<&'static DeepFailure> {
+    deep_catalogue().get(&id)
+}
+
 pub fn any_failure_name(id: u64) -> String {
+    if let Some(f) = deep_failure(id) {
+        return f.name.clone();
+    }
     extra::extra_failure_name(id).unwrap_or_else(|| failure_name(id))
 }
 
@@ -1041,6 +1080,14 @@ pub fn any_failure_name(id: u64) -> String {
 /// sticking -- described generically rather than inventing per-id prose
 /// this plugin cannot source.
 pub fn cause_description(id: u64) -> String {
+    // A deep failure states its own consequence in its registered `effect`,
+    // written against the physical quantity it perturbs, so it needs no
+    // generic prose. The magnitude's meaning goes with it: these are
+    // continuous 0..1 perturbations, not switches, and the crew's Study
+    // page should say what the number means.
+    if let Some(f) = deep_failure(id) {
+        return format!("{} Magnitude: {}.", f.effect, f.magnitude);
+    }
     if let Some(item) = extra::extra_failures().into_iter().find(|x| x.id == id) {
         return item.description;
     }
@@ -1057,6 +1104,9 @@ pub fn cause_description(id: u64) -> String {
 /// system reads it from, so a reader can see which workstream's model
 /// consumes it.
 pub fn affected_components(id: u64) -> Vec<String> {
+    if let Some(f) = deep_failure(id) {
+        return vec![f.component.clone()];
+    }
     if let Some(item) = extra::extra_failures().into_iter().find(|x| x.id == id) {
         let mut c = vec![item.name];
         if let extra::Effect::Hook { var, owner } = item.effect {
@@ -1379,8 +1429,19 @@ impl Failures {
         let computer_ids: Vec<u64> = COMPUTER_FAILURES.iter().map(|(id, _)| *id).collect();
         let extra_ids: Vec<u64> = extra::extra_failures().iter().map(|x| x.id).collect();
         with_state(|s| {
-            s.registered =
-                types.iter().map(|(id, _)| *id).chain(computer_ids.iter().copied()).chain(extra_ids.iter().copied()).collect();
+            // The `deep` areas' ids are registered here too, so the crew
+            // can arm them and they persist with the rest. They are
+            // deliberately *not* in `ids()`: that drives one X-Plane
+            // command and one dataref per id, and the deep catalogue would
+            // add several thousand of each. Deep failures are reached
+            // through the Study panel and the EFB, which run in process.
+            s.registered = types
+                .iter()
+                .map(|(id, _)| *id)
+                .chain(computer_ids.iter().copied())
+                .chain(extra_ids.iter().copied())
+                .chain(deep_ids())
+                .collect();
             s.active.clear();
             s.magnitudes.clear();
             // MSFS asks for the current set at start (FBW_FAILURE_REQUEST)

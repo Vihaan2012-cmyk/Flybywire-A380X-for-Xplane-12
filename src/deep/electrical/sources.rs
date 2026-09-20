@@ -206,6 +206,15 @@ impl ApuGenerator {
         Self { overload_heat: 0.0 }
     }
 
+    /// Normalised overload accumulator, `0.0..=1.0` (trips at 1.0) -- the
+    /// same read-back accessor [`Vfg::overload_heat`] already exposes, so a
+    /// caller that drives this machine through [`Wiring::pre_step`] (which
+    /// discards the returned [`VfgOutputs`]) can still see whether its own
+    /// overload element has tripped it off line.
+    pub fn overload_heat(&self) -> f64 {
+        self.overload_heat
+    }
+
     pub fn step(&mut self, inputs: ApuGeneratorInputs, faults: ApuGeneratorFaults, dt_s: f64) -> VfgOutputs {
         let running = inputs.apu_speed_fraction >= Self::CUT_IN_SPEED_FRACTION;
         let rated_apparent_power = Self::RATED_TRUE_POWER_W / Self::POWER_FACTOR;

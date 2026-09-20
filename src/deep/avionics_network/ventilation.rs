@@ -159,10 +159,23 @@ impl OverheatTrip {
         self.frac
     }
 
+    /// How close to its target the ramp has to get before it is taken to
+    /// have arrived. An exponential approach never reaches its target
+    /// exactly, and `faults::ModuleFaults::is_available` tests
+    /// `overheat_trip_frac < 1.0`: without this, a module baking in a
+    /// bay well past its trip temperature would sit at 0.999... for ever
+    /// and never actually drop off the network, which is the one thing
+    /// this supervisor exists to make happen. A real thermal supervisor
+    /// is a comparator that latches when it trips, not an asymptote.
+    const ARRIVED_EPSILON: f64 = 1e-6;
+
     pub fn step(&mut self, bay_temp_k: f64, dt_s: f64) -> f64 {
         let target = ((bay_temp_k - TRIP_TEMP_K) / TRIP_SPAN_K).clamp(0.0, 1.0);
         let dt = dt_s.max(0.0);
         self.frac = target + (self.frac - target) * (-dt / TRIP_TIME_CONSTANT_S).exp();
+        if (self.frac - target).abs() < Self::ARRIVED_EPSILON {
+            self.frac = target;
+        }
         self.frac
     }
 }
@@ -236,5 +249,31 @@ mod tests {
         assert!(!out.temp_k.is_nan());
         let mut trip = OverheatTrip::default();
         assert!(!trip.step(0.0, 0.0).is_nan());
+    }
+}
+
+#[cfg(test)]
+mod trip_tests {
+    use super::*;
+
+    #[test]
+    fn a_sustained_overheat_trips_fully_rather_than_approaching_one_for_ever() {
+        let mut trip = OverheatTrip::default();
+        // Well past the trip temperature plus the whole ramp span: the
+        // target is 1.0 and the supervisor must actually get there, since
+        // `faults::ModuleFaults::is_available` tests `< 1.0`.
+        let mut t = 0.0;
+        while trip.frac() < 1.0 && t < 600.0 {
+            trip.step(TRIP_TEMP_K + 2.0 * TRIP_SPAN_K, 0.5);
+            t += 0.5;
+        }
+        assert_eq!(trip.frac(), 1.0, "still ramping after {t} s");
+        // And it comes back the same way once the bay is cool again.
+        let mut t = 0.0;
+        while trip.frac() > 0.0 && t < 600.0 {
+            trip.step(SUPPLY_AIR_K, 0.5);
+            t += 0.5;
+        }
+        assert_eq!(trip.frac(), 0.0, "still un-tripping after {t} s");
     }
 }

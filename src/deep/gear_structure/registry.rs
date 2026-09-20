@@ -52,6 +52,7 @@ const LEGS: [LegSpec; 5] = [
 ];
 
 pub fn register(r: &mut Registry) {
+    reset_ids();
     register_struts(r);
     register_retractions(r);
     register_wheel_brakes(r);
@@ -344,10 +345,28 @@ fn register_ecam(r: &mut Registry) {
 
 /// Sequential id counter for `failure_id`'s low three digits, so this file
 /// never has to hand-number ~74 near-identical per-instance failures.
+///
+/// The counter is reset at the top of every [`register`] call rather than
+/// running for the life of the process. That matters now that `live.rs`
+/// resolves its failure ids by registering into a throw-away `Registry`:
+/// with a process-wide counter, a second `register` handed out a second,
+/// completely different set of ids, so the ids the live system consumed
+/// would not have been the ids the plugin's own `deep::registry()` arms in
+/// `Faults`. The numbering of the first call is unchanged.
 fn next_id() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static COUNTER: AtomicU16 = AtomicU16::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+    COUNTER.with(|c| {
+        let n = c.get();
+        c.set(n + 1);
+        n
+    })
+}
+
+thread_local! {
+    static COUNTER: std::cell::Cell<u16> = const { std::cell::Cell::new(1) };
+}
+
+fn reset_ids() {
+    COUNTER.with(|c| c.set(1));
 }
 
 #[cfg(test)]

@@ -86,8 +86,8 @@ const ZONE_AMBIENT_C: f64 = 24.0;
 /// GENERIC thresholds: a developing fault is reported "overheating" once
 /// the bundle passes this, and "smoke" (with the zone's own protection
 /// tripping it dead) at the higher one.
-const OVERHEAT_TEMP_C: f64 = 70.0;
-const SMOKE_TEMP_C: f64 = 110.0;
+pub const OVERHEAT_TEMP_C: f64 = 70.0;
+pub const SMOKE_TEMP_C: f64 = 110.0;
 
 /// Row range and seat-letter set used only to flavour a fault message
 /// (module doc: illustrative, not a real seat map).

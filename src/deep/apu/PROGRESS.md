@@ -258,3 +258,18 @@ glue (`read`/`write`, Vars) once the lead wires `pub mod apu;` into
    starter-vs-compressor-drag bug, this time for windmill torque + cold-oil
    drag interacting with that same tight light-off margin on a cold,
    high-altitude start -- not yet re-verified for this round's additions.
+
+- [done] Live system — `live.rs` (`live_system() -> Box<dyn deep::live::Area>`), `mod.rs` — `LiveApu` owns one `Apu`,
+  driven from `Truth` (ambient p/T, TAS, `dc_bus_volts` for the starter's supply, `apu_running` as the run command)
+  and from all 18 registered failure ids via new `registry::ids` constants. Publishes `APU_N`, `APU_EGT`,
+  `APU_OIL_PRESSURE_PSI`, `APU_LOAD_COMPRESSOR_SURGE`, `APU_GEN_1_OVERLOAD`, `APU_GEN_2_OVERLOAD`,
+  `APU_FIRE_LOOP_DETECTED` (every var this area's ECAM triggers name) plus 24 Study vars. Truth gaps named in
+  `live.rs`'s module doc: overhead panel (master/start pb), bleed demand, generator load, bay fire loop, battery
+  source resistance.
+- [done] Governor EGT limit — `governor.rs`, `power_section.rs` — the acceleration schedule is now solved on
+  `power_section::gas_path` (the authoritative compressor/combustor/Stodola chain, factored out of `step_once`),
+  iterated to a Stodola-consistent turbine pressure ratio, replacing the `1 + (pr_design-1)*n_frac` stand-in; a new
+  `EgtLimiter` closes the same limit on the ECB's measured EGT (min-select), which is what protects a degraded
+  machine the open-loop schedule cannot know about. `Apu::step` now sub-steps its whole control chain at 0.05 s
+  like `PowerSection::step` already did, so a half-second post-pause frame no longer overshoots governed speed.
+  Measured: governs 100.000% / 603 C at dt 1/30..0.5, healthy; the reported 77.6% governing did not reproduce.

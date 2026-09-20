@@ -200,6 +200,58 @@ impl Deep {
     pub fn area_names(&self) -> Vec<&'static str> {
         self.areas.iter().map(|a| a.name()).collect()
     }
+
+    /// Every variable name the areas publish, without stepping anything.
+    ///
+    /// `Plugin` calls this once at startup so it can resolve each name to a
+    /// `VariableIdentifier` there rather than in the frame loop: at 30-60 Hz
+    /// a per-name `Vars::get` would allocate the name and its `A32NX_`
+    /// prefix every frame, for every published value, forever.
+    ///
+    /// Publishing is a pure read of an area's own state (the trait takes
+    /// `&self`), so calling it on cold areas has no effect on them beyond
+    /// the values it reports, which are discarded here.
+    pub fn published_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for area in &self.areas {
+            area.publish(&mut |name, _| names.push(name.to_owned()));
+        }
+        names
+    }
+}
+
+/// Every area that has grown a live system, in the order they are stepped.
+///
+/// Each area publishes `pub fn live_system() -> Box<dyn Area>` from its own
+/// `src/deep/<area>/live.rs`; an area that has not grown one yet is simply
+/// absent from this list and is not stepped (see [`Deep`]'s own doc). This
+/// is the one place the list lives, so adding an area is one line here and
+/// nothing in `lib.rs` changes.
+///
+/// Ordering is deliberate only in that it is fixed: an area reads the
+/// previous frame's value of anything another area publishes, so no order
+/// here can be wrong (see this module's "Ordering" note). The list is
+/// alphabetical so that a new area has an obvious place to go.
+pub fn all_areas() -> Deep {
+    Deep::new()
+        .with_area(crate::deep::apu::live::live_system())
+        .with_area(crate::deep::avionics_network::live::live_system())
+        .with_area(crate::deep::breakers::live::live_system())
+        .with_area(crate::deep::cabin::live::live_system())
+        .with_area(crate::deep::electrical::live::live_system())
+        .with_area(crate::deep::engine_accessories::live::live_system())
+        .with_area(crate::deep::environment::live::live_system())
+        .with_area(crate::deep::fire_ice::live::live_system())
+        .with_area(crate::deep::flight_controls::live::live_system())
+        .with_area(crate::deep::fuel::live::live_system())
+        .with_area(crate::deep::gear_structure::live::live_system())
+        .with_area(crate::deep::hydraulics::live::live_system())
+        .with_area(crate::deep::pneumatic_ducts::live::live_system())
+        .with_area(crate::deep::sensors::live::live_system())
+        .with_area(crate::deep::thermal_zones::live::live_system())
+        .with_area(crate::deep::wiring::live::live_system())
+    // Every area under `deep/` has one now. A new area adds its own line
+    // here, alphabetically, and nothing else in the plugin changes.
 }
 
 #[cfg(test)]
@@ -256,6 +308,40 @@ mod tests {
     }
 
     #[test]
+    fn every_assembled_area_has_its_own_name_and_can_be_stepped_cold() {
+        // The assembly is a hand-kept list, so the two things that can go
+        // wrong with it are an area added twice and an area that cannot
+        // survive its first frame (dt clamped to a real value, a cold
+        // aircraft in real air, nothing armed).
+        let mut deep = all_areas();
+        let names = deep.area_names();
+        let unique: std::collections::BTreeSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "an area is listed twice in all_areas(): {names:?}");
+        let mut published = BTreeMap::new();
+        deep.tick(Truth::default(), &Faults::default(), &mut |name, value| {
+            assert!(value.is_finite(), "{name} published {value} on the first frame");
+            published.insert(name.to_owned(), value);
+        });
+    }
+
+    #[test]
+    fn published_names_are_what_the_areas_actually_publish() {
+        // The plugin resolves these to variable ids once at startup, so a
+        // name reported here that the areas never publish would be a dead
+        // variable, and one they publish but do not report would be
+        // resolved in the frame loop instead.
+        let deep = all_areas();
+        let reported: std::collections::BTreeSet<String> = deep.published_names().into_iter().collect();
+        let mut actual = std::collections::BTreeSet::new();
+        for area in &deep.areas {
+            area.publish(&mut |name, _| {
+                actual.insert(name.to_owned());
+            });
+        }
+        assert_eq!(reported, actual);
+    }
+
+    #[test]
     fn an_unarmed_failure_reads_healthy_and_magnitudes_are_bounded() {
         let f = Faults::from_pairs([(1, 2.5), (2, -1.0)]);
         assert_eq!(f.get(999), 0.0, "a failure nobody armed must read healthy, not absent");
@@ -265,3 +351,5 @@ mod tests {
         assert!(!Faults::default().any());
     }
 }
+
+

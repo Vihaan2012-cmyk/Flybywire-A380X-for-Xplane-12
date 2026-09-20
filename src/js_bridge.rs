@@ -1005,6 +1005,16 @@ fn native_ports() -> Vec<crate::js::msfs::SourcePatch> {
     // [ecam_patches] ECAM/FWS and instrument gaps (top50 #9, 16, 18-27, 36-40):
     // src/ecam_patches.rs.
     patches.extend(crate::ecam_patches::source_patches());
+    // [deep ecam bridge] Every deep area's registered `deep::api::EcamAlert`
+    // spliced into FlyByWire's own FWS tables, so an armed deep failure
+    // raises a real alert on the EWD with its title, its colour by level,
+    // its procedure lines and its INOP SYS/STATUS entries
+    // (src/deep/ecam/patches.rs, docs/deep/ecam_bridge.md). The registry is
+    // built here rather than threaded in: `native_ports` is called once per
+    // cockpit (including on a worker restart), never per frame, and
+    // building it here keeps `CockpitRecipe::make`'s closure free of a
+    // borrowed registry it would have to own and keep `Send`.
+    patches.extend(crate::deep::ecam::patches::source_patches(&crate::deep::registry().alerts));
     patches
 }
 

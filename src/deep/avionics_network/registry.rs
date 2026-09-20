@@ -54,7 +54,7 @@ fn module_kind_str(kind: ModuleKind) -> String {
 
 /// A key-safe form of a name with hyphens turned to underscores, for
 /// `EcamAlert`/Var keys.
-fn key_safe(name: &str) -> String {
+pub fn key_safe(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect()
 }
 

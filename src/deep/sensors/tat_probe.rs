@@ -47,7 +47,7 @@ const R_AIR: f64 = 287.052_87;
 /// than a pitot tube. GENERIC.
 const ELEMENT_DIAMETER_M: f64 = 0.006;
 const ELEMENT_EXPOSED_LENGTH_M: f64 = 0.04;
-const RATED_HEATER_W: f64 = 80.0;
+pub const RATED_HEATER_W: f64 = 80.0;
 const AIR_K_W_MK: f64 = 0.0206;
 const AIR_NU_M2_S: f64 = 1.13e-5;
 const AIR_PR: f64 = 0.72;

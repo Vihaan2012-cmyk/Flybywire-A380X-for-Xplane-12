@@ -45,7 +45,7 @@
 /// a large swept-wing transport), and the coefficient turning `qc` (impact
 /// pressure, a proxy for how much the local flow field around the port is
 /// being disturbed) and `(alpha - reference)` into a static pressure error.
-const REFERENCE_AOA_DEG: f64 = 2.5;
+pub const REFERENCE_AOA_DEG: f64 = 2.5;
 const POSITION_ERROR_COEFF: f64 = 0.0025;
 /// Small Mach-dependent term (local compressibility increases the port's
 /// sensitivity to flow angle at higher Mach): GENERIC.

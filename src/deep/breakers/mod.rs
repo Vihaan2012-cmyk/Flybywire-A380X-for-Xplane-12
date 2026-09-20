@@ -29,6 +29,7 @@
 //! compiles once the lead's build wires both areas in.
 
 pub mod catalog;
+pub mod live;
 pub mod registry;
 pub mod trip;
 

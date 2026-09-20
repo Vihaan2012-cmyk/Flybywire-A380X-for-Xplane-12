@@ -622,27 +622,28 @@ impl Displays {
         true
     }
 
-    /// The KCCU gesture: right-click the MFD to pop it out and give it
-    /// keyboard focus (so typing reaches it, [`mfd_keyboard_callback`]'s doc
-    /// comment), right-click again to give the focus back and hide the
-    /// popup. `has_keyboard_focus` (not local bookkeeping) decides which way
-    /// to go, so this stays correct even if the popup was closed some other
-    /// way (X-Plane's own popup chrome, Alt+F4, focus taken by another
-    /// device) since the last toggle.
-    fn toggle_mfd_keyboard(&mut self, index: usize) {
+    /// The KCCU gesture: right-click a keyboard screen (the MFD, or either
+    /// OIT) to pop it out and give it keyboard focus (so typing reaches it,
+    /// [`keyboard_callback`]'s doc comment), right-click again to give the
+    /// focus back and hide the popup. `has_keyboard_focus` (not local
+    /// bookkeeping) decides which way to go, so this stays correct even if
+    /// the popup was closed some other way (X-Plane's own popup chrome,
+    /// Alt+F4, focus taken by another device) since the last toggle.
+    fn toggle_keyboard(&mut self, index: usize) {
         let Some(api) = self.api else { return };
         let handle = self.screens[index].handle;
         if handle.is_null() {
             return;
         }
+        let id = self.screens[index].def.id;
         unsafe {
             if (api.has_keyboard_focus)(handle) != 0 {
                 api.release_keyboard_focus(handle);
-                log("MFD: keyboard focus released, popup hidden");
+                log(&format!("{id}: keyboard focus released, popup hidden"));
             } else {
                 (api.set_popup_visible)(handle, 1);
                 (api.take_keyboard_focus)(handle);
-                log("MFD: popped up and given keyboard focus (KCCU)");
+                log(&format!("{id}: popped up and given keyboard focus"));
             }
         }
     }
@@ -651,7 +652,7 @@ impl Displays {
     /// outside it, or X-Plane's own window manager moved focus elsewhere):
     /// hide it too, so a stray popup does not linger with no way to type
     /// into it. Safe to call whether or not the popup is even visible.
-    fn hide_mfd_popup(&mut self, index: usize) {
+    fn hide_popup(&mut self, index: usize) {
         let Some(api) = self.api else { return };
         let handle = self.screens[index].handle;
         if handle.is_null() {
@@ -888,8 +889,10 @@ pub fn start(xplm: &'static Xplm) {
             screen_right_touch: Some(right_touch_callback),
             screen_scroll: Some(scroll_callback),
             screen_cursor: Some(cursor_callback),
-            // The KCCU: only the MFD takes keyboard input (mfd_keyboard_callback's doc comment).
-            keyboard: (def.id == "SCREEN_DU_MFD").then_some(mfd_keyboard_callback as xp::AvionicsKey),
+            // Typed-into screens only (keyboard_callback's doc comment): the
+            // MFD through the KCCU, and the two OITs, which are
+            // keyboard-and-trackball terminals rather than touchscreens.
+            keyboard: HAS_KEYBOARD.contains(&def.id).then_some(keyboard_callback as xp::AvionicsKey),
             brightness: Some(brightness_callback),
             device_id: id.as_ptr(),
             device_name: title.as_ptr(),
@@ -954,10 +957,11 @@ unsafe extern "C" fn touch_callback(x: c_int, y: c_int, status: c_int, refcon: *
 
 unsafe extern "C" fn right_touch_callback(x: c_int, y: c_int, status: c_int, refcon: *mut c_void) -> c_int {
     let index = screen_of(refcon);
-    // The KCCU gesture (toggle_mfd_keyboard's doc comment): only the MFD,
-    // only on the initial press, and it does not also forward as a click.
-    if status == xp::MOUSE_DOWN && SCREENS.get(index).is_some_and(|d| d.id == "SCREEN_DU_MFD") {
-        let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.toggle_mfd_keyboard(index)));
+    // The keyboard gesture (toggle_keyboard's doc comment): only a screen
+    // that takes keystrokes, only on the initial press, and it does not also
+    // forward as a click.
+    if status == xp::MOUSE_DOWN && SCREENS.get(index).is_some_and(|d| HAS_KEYBOARD.contains(&d.id)) {
+        let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.toggle_keyboard(index)));
         return 1;
     }
     let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.mouse(index, x, y, status, 2)));
@@ -994,22 +998,30 @@ unsafe extern "C" fn brightness_callback(_rheo: f32, _ambient: f32, _bus: f32, _
     1.
 }
 
-/// The KCCU types into the MFD through this: `XPLMAvionicsKeyboard_f`
+/// The screens a physical keyboard types into, and so the only ones given
+/// an `XPLMAvionicsKeyboard_f` ([`start`]) and the right-click focus gesture
+/// ([`right_touch_callback`]): the MFD, whose keyboard is the KCCU, and the
+/// two OITs, which the real aircraft drives with a keyboard and trackball on
+/// the lateral console rather than by touch (docs/oit.md). Every other
+/// screen is a display, not an input device.
+const HAS_KEYBOARD: &[&str] = &["SCREEN_DU_MFD", "SCREEN_OIT_LEFT", "SCREEN_OIT_RIGHT"];
+
+/// The KCCU types into the MFD — and the console keyboard into an OIT —
+/// through this: `XPLMAvionicsKeyboard_f`
 /// (XPLMDisplay.h) fires "when your device is popped up and you've
 /// requested to capture the keyboard", i.e. only once
 /// `XPLMTakeAvionicsKeyboardFocus` has been called for this device's popup
 /// window — XPLM410 has no way to capture the keyboard for a device
-/// embedded in the 3D cockpit alone. [`right_touch_callback`] gives the MFD
-/// that popup and focus (right-click it; right-click again, or click away,
-/// gives the focus back — [`Displays::toggle_mfd_keyboard`]).
+/// embedded in the 3D cockpit alone. [`right_touch_callback`] gives the
+/// screen that popup and focus (right-click it; right-click again, or click
+/// away, gives the focus back — [`Displays::toggle_keyboard`]).
 ///
-/// Only registered on the MFD's device ([`start`]): the KCCU is the MFD's
-/// keyboard, not a general cockpit keyboard.
-unsafe extern "C" fn mfd_keyboard_callback(key: c_char, flags: c_int, vkey: c_char, refcon: *mut c_void, losing_focus: c_int) -> c_int {
+/// Only registered on the devices in [`HAS_KEYBOARD`] ([`start`]).
+unsafe extern "C" fn keyboard_callback(key: c_char, flags: c_int, vkey: c_char, refcon: *mut c_void, losing_focus: c_int) -> c_int {
     if losing_focus != 0 {
-        // hide_mfd_popup's doc comment: close the popup along with the
+        // hide_popup's doc comment: close the popup along with the
         // focus, however it was lost, so it never lingers unfocused.
-        let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.hide_mfd_popup(screen_of(refcon))));
+        let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.hide_popup(screen_of(refcon))));
         return 0;
     }
     let ch = key as u8 as u32;
@@ -1020,10 +1032,11 @@ unsafe extern "C" fn mfd_keyboard_callback(key: c_char, flags: c_int, vkey: c_ch
     static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     if LOGGED.fetch_add(1, Ordering::Relaxed) < 40 {
         log(&format!(
-            "input callback: key {:?} (vkey {}) flags {:#x} on the MFD, handled: {handled}",
+            "input callback: key {:?} (vkey {}) flags {:#x} on {}, handled: {handled}",
             char::from_u32(ch).filter(|_| ch != 0),
             vkey as u8,
-            flags
+            flags,
+            SCREENS.get(screen_of(refcon)).map_or("?", |d| d.id)
         ));
     }
     handled as c_int

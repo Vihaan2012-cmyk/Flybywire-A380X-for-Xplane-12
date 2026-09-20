@@ -82,3 +82,17 @@ registration (mandatory addendum) backfilled for each finished item.
   threshold and a battery/self-test fault would be the next physically
   grounded addition), and a passenger oxygen/cabin-crew-call cross-check
   with `oxygen.rs`'s existing mask-deployment state.
+
+## Live system (deep push, `live.rs`)
+
+- [done] `live.rs` — the area's live instance behind `crate::deep::live::Area`
+  (`live_system() -> Box<dyn Area>`), declared in this directory's `mod.rs`.
+  `tick` drives the real models from `deep::live::Truth` and applies every
+  failure `registry.rs` registers by reading `Faults::get(id)` into the exact
+  `model_field` that entry names; `publish` emits every variable this area's
+  ECAM triggers cite, plus the state behind them for the EFB Study pages.
+  Failure ids are resolved at construction by registering into a throw-away
+  `Registry` and looking each one up by component + `model_field`, so a
+  renumbering in `registry.rs` fails loudly instead of silently unhooking a
+  failure. Inputs `Truth` does not carry yet are collected in one documented
+  `...Commands` struct per area rather than invented.

@@ -1,0 +1,1494 @@
+//! The live electrical system: the one instance of the A380 per-load
+//! network that actually runs in the simulation.
+//!
+//! `network.rs`/`loads.rs`/`sources.rs`/`shedding.rs` are the physics and
+//! the catalogue; nothing owned an instance of any of it. This module is
+//! that instance, wired to `crate::deep::live`'s [`Area`] contract.
+//!
+//! ## Who owns the solve
+//!
+//! The electrical network, the ATA circuit-breaker catalogue
+//! (`deep::breakers`) and the wire-bundle model (`deep::wiring`) are one
+//! physical system, and it is solved **exactly once per frame, here**:
+//!
+//! * This area owns the whole resistive solve -- bus voltages, every load's
+//!   current, every feeder's current -- because `network::Network::step` is
+//!   the only model in the crate that has the topology to do it (buses,
+//!   sources, contactors, diodes, loads).
+//! * `deep::breakers` owns the *trip decision* for the 399-entry ELMS
+//!   catalogue. It cannot compute a current, so it reads the current its
+//!   breaker actually carried from this area's own published output, one
+//!   frame late, and publishes back `BKR_<id>_OPEN`. This area applies that
+//!   command to the matching `network::Breaker`'s contacts on the next
+//!   frame.
+//! * `deep::wiring` owns the harness: which circuit is chafed, burnt, open
+//!   or corroded, and what arc current that produces. It too reads this
+//!   area's published bus voltages, and publishes back per-circuit
+//!   severities, which this area folds into the matching load's own
+//!   `LoadFaults` -- so an arcing wire genuinely adds current to the circuit
+//!   it chafes into, and that current is what the breaker then sees.
+//!
+//! The one-frame lag on both couplings is the lag `crate::deep::live`'s own
+//! module doc documents as deliberate; at 30-60 Hz it is far below the time
+//! constant of an I^2t element (seconds), a TRU's thermal mass (minutes) or
+//! a chafe's own progression.
+//!
+//! ## The board
+//!
+//! Areas publish through a `FnMut(&str, f64)` closure and have no way to
+//! read a variable back. The three areas therefore exchange their coupling
+//! quantities through [`board`]: a thread-local snapshot written at
+//! `publish` time and read at the next frame's `tick`. It carries exactly
+//! the quantities that are also published as named variables (per-breaker
+//! current, per-breaker open command, bus voltage, per-circuit wiring
+//! severities) -- typed and indexed rather than string-keyed, because this
+//! is the largest network in the crate and 1,300 string lookups a frame is
+//! not free. `Deep::tick` ticks every area before publishing any, so the
+//! lag is exactly one frame regardless of the order the areas were added
+//! in.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use crate::deep::api::Registry;
+use crate::deep::live::{Area, Faults, Truth};
+
+use super::loads::{self, Catalog};
+use super::network::{BusId, Contactor, ContactorKind, FeedSource, Network, NetworkReport, ALL_BUS_IDS};
+use super::shedding::{power_budget, SheddingRelays, ShedInputs};
+use super::sources::{
+    ApuGeneratorFaults, BatteryFaults, GroundPowerFaults, RatFaults, StaticInverterFaults, TruFaults, VfgFaults, Wiring, WiringInputs,
+};
+
+// ---------------------------------------------------------------------
+// Ratings/limits this live layer needs in order to judge "is this source
+// in trouble", all re-cited from the modules that already derive them.
+
+/// `sources::Vfg::RATED_TRUE_POWER_W` (real, FBW-sourced:
+/// `alternating_current.rs:393`).
+const GEN_RATED_TRUE_POWER_W: f64 = 150_000.0;
+/// `sources::ApuGenerator::RATED_TRUE_POWER_W` (real, FBW-sourced:
+/// `Pw980ApuGenerator::MAXIMUM_LOAD_WATT`).
+const APU_GEN_RATED_TRUE_POWER_W: f64 = 120_000.0;
+/// `sources::GroundPower::RATED_APPARENT_POWER_VA` * its own `POWER_FACTOR`
+/// (both real, FBW-sourced: `external_power_source.rs`).
+const GPU_RATED_TRUE_POWER_W: f64 = 90_000.0 * 0.8;
+
+/// MIL-STD-704F steady-state 115 V AC utilisation limits (public standard):
+/// 108 V to 118 V. A generator control unit trips its generator off line
+/// when its own bus leaves that band -- the real under/over-voltage
+/// protection, not a scripted "GEN FAULT" flag.
+const AC_UNDERVOLTAGE_TRIP_V: f64 = 108.0;
+const AC_OVERVOLTAGE_TRIP_V: f64 = 118.0;
+
+/// The same 85%-of-nominal under-voltage margin `loads::min_operating_voltage`
+/// already derives and cites from MIL-STD-704F: below this a 28 V DC source
+/// is no longer holding its own bus up at all, which is what a TR FAULT or a
+/// BAT FAULT annunciates.
+fn dc_undervoltage_trip_v() -> f64 {
+    BusId::Dc1.nominal_voltage() * 0.85
+}
+
+/// NEC Chapter 9 Table 8 DC resistance, uncoated copper at 20 C, converted
+/// to ohm/m (the published table's own figures, divided by 304.8 m per
+/// 1000 ft -- the same table `deep::wiring::gauge` tabulates, quoted here
+/// rather than imported so this module keeps no cross-area dependency for a
+/// constant).
+const OHM_PER_M_AWG_4_0: f64 = 0.049_01 / 304.8;
+const OHM_PER_M_AWG_4: f64 = 0.248_5 / 304.8;
+
+/// A main AC bus tie: AWG 4/0 tie-bar cable between two Primary Power
+/// Centres. Run length is GENERIC (no public A380 wiring-diagram length
+/// exists) but sized the same way `wiring::routing::hop_length_m` sizes its
+/// own hops -- ~15 m between two power centres on an aircraft of this size.
+const AC_TIE_OHM: f64 = OHM_PER_M_AWG_4_0 * 15.0;
+/// An essential/shed feeder: lighter AWG 4 feeder cable, ~20 m from a main
+/// power centre to a secondary one.
+const ESS_FEEDER_OHM: f64 = OHM_PER_M_AWG_4 * 20.0;
+/// A DC tie/feeder between two DC busbars in the same equipment centre,
+/// AWG 4, ~15 m.
+const DC_FEEDER_OHM: f64 = OHM_PER_M_AWG_4 * 15.0;
+/// A ground-service feeder, AWG 4, ~25 m out to the service panel.
+const GND_SVC_FEEDER_OHM: f64 = OHM_PER_M_AWG_4 * 25.0;
+
+/// The catalogue's transit-only actuators: an electro-hydraulic gear or
+/// gear-door actuator draws its 2.1 kW only while the gear is actually
+/// travelling, and is dead the rest of the flight. `loads.rs` gives every
+/// entry `commanded_on: true`, which is right for a continuously-running
+/// consumer and wrong for these six -- left on, they sit at 250 A each and
+/// collapse the essential DC bus for the whole flight.
+///
+/// Nothing in [`Truth`] says whether the gear is in transit, so the only
+/// state this layer can honestly assert is the one that holds at every
+/// instant `Truth` can describe: not travelling, therefore not drawing.
+/// See this area's report, which asks for a gear-in-transit field.
+/// The continuous rating of whatever source feeds a bus directly, A --
+/// every figure re-cited from `sources.rs`'s own breaker ratings, which are
+/// themselves FBW-sourced. `0.0` for a bus with no source of its own (its
+/// feeder is then sized purely by the load it carries).
+fn source_rating_a(bus: BusId) -> f64 {
+    match bus {
+        // `sources::generator_rated_a`: 150 kW / 0.8 / 115 V.
+        BusId::Ac1 | BusId::Ac2 | BusId::Ac3 | BusId::Ac4 => 150_000.0 / 0.8 / 115.0,
+        // `sources::TRU_RATED_A`.
+        BusId::Dc1 | BusId::Dc2 | BusId::DcEss | BusId::DcApu => 200.0,
+        // `sources::Wiring::build`'s own battery breaker rating,
+        // `Battery::RATED_CAPACITY_AH * 4.0`.
+        BusId::DcBat | BusId::DcHot1 => 23.0 * 4.0,
+        // `sources::Rat::MAX_POWER_W` at 115 V -- the largest source that
+        // can ever feed the emergency bus.
+        BusId::AcEmer => 70_000.0 / 115.0,
+        // `sources::GroundPower::RATED_APPARENT_POWER_VA` at 115 V.
+        BusId::AcGndFltSvc => 90_000.0 / 115.0,
+        _ => 0.0,
+    }
+}
+
+const TRANSIT_ONLY_ACTUATORS: [&str; 6] =
+    ["gear-actuator-nose", "gear-actuator-left", "gear-actuator-right", "gear-door-actuator-nose", "gear-door-actuator-left", "gear-door-actuator-right"];
+
+/// Power-budget hysteresis: the galley shed relay is commanded once the
+/// budget goes negative and released only once the margin has recovered
+/// past 10% of available capacity. A plain Schmitt band -- without it a
+/// shed relay chatters at exactly the balance point, the same reason
+/// `network::Load` carries `UNDERVOLTAGE_RESTART_MARGIN`. GENERIC width
+/// (no published A380 ELMS threshold), stated as a fraction of capacity so
+/// it scales with whatever generation is actually on line.
+const SHED_RELEASE_MARGIN_FRACTION: f64 = 0.10;
+
+// ---------------------------------------------------------------------
+// The board: the typed, one-frame-late channel between the three areas.
+
+pub mod board {
+    use super::*;
+
+    /// Everything the three coupled areas hand each other. Indices are into
+    /// the canonical network built by [`topology`], which every area
+    /// resolves its own ids against once at construction.
+    #[derive(Default, Clone, Debug)]
+    pub struct Board {
+        /// Per network-breaker index: the current it carried, A. Written by
+        /// `deep::electrical`, read by `deep::breakers`.
+        pub breaker_current_a: Vec<f64>,
+        /// Per network-breaker index: 1.0 when `deep::breakers`' trip unit
+        /// holds this breaker open. Written by `deep::breakers`, read by
+        /// `deep::electrical`.
+        pub breaker_open_cmd: Vec<f64>,
+        /// Per bus index: last solved bus voltage, V. Written by
+        /// `deep::electrical`, read by `deep::wiring` (a wiring fault's arc
+        /// current depends on the voltage behind it).
+        pub bus_voltage: [f64; 17],
+        /// Per load index: severities `deep::wiring` derived for that
+        /// load's own feeder from harness damage. Written by
+        /// `deep::wiring`, read by `deep::electrical`, which folds them into
+        /// the matching `network::LoadFaults`.
+        pub load_short: Vec<f64>,
+        pub load_open: Vec<f64>,
+        pub load_high_resistance: Vec<f64>,
+    }
+
+    thread_local! {
+        static BOARD: RefCell<Board> = RefCell::new(Board::default());
+    }
+
+    pub fn with_board<R>(f: impl FnOnce(&Board) -> R) -> R {
+        BOARD.with(|b| f(&b.borrow()))
+    }
+
+    pub fn with_board_mut<R>(f: impl FnOnce(&mut Board) -> R) -> R {
+        BOARD.with(|b| f(&mut b.borrow_mut()))
+    }
+
+    /// Reset the board (tests only -- a fresh live system in a new thread
+    /// already starts clean, but a test that builds several in one thread
+    /// wants the previous one's last frame gone).
+    pub fn clear() {
+        with_board_mut(|b| *b = Board::default());
+    }
+
+    /// The canonical network's id-to-index mapping, built once per process.
+    ///
+    /// `deep::breakers` and `deep::wiring` have to name an electrical
+    /// breaker or load by its id; the solve indexes by position. Building
+    /// one throwaway network here (the identical construction order
+    /// `ElectricalLive::new` and `registry::register` both use) gives every
+    /// area the same mapping without any of them owning a second network.
+    pub struct Topology {
+        pub breaker_index: HashMap<&'static str, usize>,
+        pub load_index: HashMap<&'static str, usize>,
+        pub breaker_count: usize,
+        pub load_count: usize,
+    }
+
+    static TOPOLOGY: OnceLock<Topology> = OnceLock::new();
+
+    pub fn topology() -> &'static Topology {
+        TOPOLOGY.get_or_init(|| {
+            let mut net = Network::new();
+            loads::build(&mut net);
+            Wiring::build(&mut net, 15.0);
+            Topology {
+                breaker_index: net.breakers.iter().enumerate().map(|(i, b)| (b.id, i)).collect(),
+                load_index: net.loads.iter().enumerate().map(|(i, l)| (l.spec.id, i)).collect(),
+                breaker_count: net.breakers.len(),
+                load_count: net.loads.len(),
+            }
+        })
+    }
+}
+
+use board::topology;
+
+// ---------------------------------------------------------------------
+// Failure routing: every id `registry.rs` registers, resolved to the exact
+// model field that entry's `model_field` names.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadField {
+    OpenCircuit,
+    ShortToGround,
+    HighResistance,
+    Intermittent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    Load(usize, LoadField),
+    /// `(index, fails_to_trip?)` -- the two `network::BreakerFaults` fields.
+    BreakerFailsToTrip(usize),
+    BreakerNuisance(usize),
+    ContactorFailsToClose(usize),
+    ContactorWelded(usize),
+    Diode(usize),
+    Bus(usize),
+    VfgWinding(usize),
+    VfgRegulator(usize),
+    ApuGenWinding(usize),
+    ApuGenRegulator(usize),
+    Tru(usize),
+    BatteryCapacity(usize),
+    BatteryResistance(usize),
+    StaticInverter,
+    Rat,
+    Gpu,
+}
+
+/// Resolves `registry::register`'s own output into `(failure id, target)`
+/// pairs against a concrete network.
+///
+/// Deliberately derived from the registry itself rather than from a second
+/// hand-written numbering: `registry.rs` assigns its ids by walking the very
+/// same catalogue in the very same order, so re-deriving that walk here
+/// would be a copy that could silently drift. Reading the registry back
+/// cannot drift -- a load added to `loads.rs` appears in both at once, and
+/// this module's own test asserts every registered failure resolved.
+fn route_failures(net: &Network) -> (Vec<(u64, Target)>, Vec<String>) {
+    let mut reg = Registry::default();
+    super::registry::register(&mut reg);
+    let mut out = Vec::with_capacity(reg.failures.len());
+    let mut unresolved = Vec::new();
+
+    let source_index = |prefix: &str, comp: &str| -> Option<usize> {
+        let rest = comp.strip_prefix(prefix)?;
+        rest.parse::<usize>().ok().map(|n| n - 1)
+    };
+
+    for f in &reg.failures {
+        let Some((type_path, field)) = f.model_field.split_once(".faults.") else {
+            unresolved.push(f.model_field.clone());
+            continue;
+        };
+        let comp = f.component.as_str();
+        let target = match (type_path, field) {
+            ("deep::electrical::network::Load", field) => {
+                // Component id is `<ata>_elec.<load id>`.
+                let id = comp.split_once('.').map(|(_, rest)| rest).unwrap_or(comp);
+                let Some(&idx) = topology().load_index.get(id) else {
+                    unresolved.push(f.component.clone());
+                    continue;
+                };
+                let lf = match field {
+                    "open_circuit" => LoadField::OpenCircuit,
+                    "short_to_ground" => LoadField::ShortToGround,
+                    "high_resistance" => LoadField::HighResistance,
+                    "intermittent" => LoadField::Intermittent,
+                    _ => {
+                        unresolved.push(f.model_field.clone());
+                        continue;
+                    }
+                };
+                Target::Load(idx, lf)
+            }
+            ("deep::electrical::network::Breaker", field) => {
+                let id = comp.strip_prefix("24_elec.bkr.").unwrap_or(comp);
+                let Some(&idx) = topology().breaker_index.get(id) else {
+                    unresolved.push(f.component.clone());
+                    continue;
+                };
+                match field {
+                    "fails_to_trip" => Target::BreakerFailsToTrip(idx),
+                    "nuisance_trip" => Target::BreakerNuisance(idx),
+                    _ => {
+                        unresolved.push(f.model_field.clone());
+                        continue;
+                    }
+                }
+            }
+            ("deep::electrical::network::Contactor", field) => {
+                let id = comp.strip_prefix("24_elec.contactor.").unwrap_or(comp);
+                let Some(idx) = net.contactor_index(id) else {
+                    unresolved.push(f.component.clone());
+                    continue;
+                };
+                match field {
+                    "fails_to_close" => Target::ContactorFailsToClose(idx),
+                    "welded_closed" => Target::ContactorWelded(idx),
+                    _ => {
+                        unresolved.push(f.model_field.clone());
+                        continue;
+                    }
+                }
+            }
+            ("deep::electrical::network::Diode", _) => {
+                let id = comp.strip_prefix("24_elec.diode.").unwrap_or(comp);
+                let Some(idx) = net.diode_index(id) else {
+                    unresolved.push(f.component.clone());
+                    continue;
+                };
+                Target::Diode(idx)
+            }
+            ("deep::electrical::network::Bus", _) => {
+                let label = comp.strip_prefix("24_elec.bus.").unwrap_or(comp);
+                let Some(bus) = ALL_BUS_IDS.iter().find(|b| b.label() == label) else {
+                    unresolved.push(f.component.clone());
+                    continue;
+                };
+                Target::Bus(bus.index())
+            }
+            ("deep::electrical::sources::Vfg", field) => {
+                let Some(n) = source_index("24_elec.vfg-", comp) else {
+                    unresolved.push(f.component.clone());
+                    continue;
+                };
+                if field == "winding_degradation" {
+                    Target::VfgWinding(n)
+                } else {
+                    Target::VfgRegulator(n)
+                }
+            }
+            ("deep::electrical::sources::ApuGenerator", field) => {
+                let Some(n) = source_index("24_elec.apu-gen-", comp) else {
+                    unresolved.push(f.component.clone());
+                    continue;
+                };
+                if field == "winding_degradation" {
+                    Target::ApuGenWinding(n)
+                } else {
+                    Target::ApuGenRegulator(n)
+                }
+            }
+            ("deep::electrical::sources::Tru", _) => {
+                // `Wiring::tru`'s own array order (sources.rs `tr_names`).
+                let idx = match comp {
+                    "24_elec.tr-1" => 0,
+                    "24_elec.tr-2" => 1,
+                    "24_elec.tr-ess" => 2,
+                    "24_elec.tr-apu" => 3,
+                    _ => {
+                        unresolved.push(f.component.clone());
+                        continue;
+                    }
+                };
+                Target::Tru(idx)
+            }
+            ("deep::electrical::sources::Battery", field) => {
+                let Some(n) = source_index("24_elec.bat-", comp) else {
+                    unresolved.push(f.component.clone());
+                    continue;
+                };
+                if field == "capacity_fade" {
+                    Target::BatteryCapacity(n)
+                } else {
+                    Target::BatteryResistance(n)
+                }
+            }
+            ("deep::electrical::sources::StaticInverter", _) => Target::StaticInverter,
+            ("deep::electrical::sources::Rat", _) => Target::Rat,
+            ("deep::electrical::sources::GroundPower", _) => Target::Gpu,
+            _ => {
+                unresolved.push(f.model_field.clone());
+                continue;
+            }
+        };
+        out.push((f.id, target));
+    }
+    (out, unresolved)
+}
+
+/// The `deep::breakers` failure id that describes the *same physical
+/// channel* as this area's own `network::Breaker.faults.fails_to_trip`.
+///
+/// The two areas each catalogued the aircraft's breakers, so one physical
+/// device carries two ids for "the contacts have welded and it can no
+/// longer open": `24_elec.bkr.<id>`'s `fails_to_trip` here and
+/// `17_breakers.<id>`'s `contact_resistance` there. The live layer takes the
+/// larger of the two so the duplication cannot mask itself -- arming either
+/// id welds the one real breaker, rather than arming the ELMS one leaving
+/// this area's own (lower-rated, so always first to act) element free to
+/// isolate the fault anyway.
+fn welded_channel_pairs() -> Vec<(usize, u64)> {
+    let mut reg = Registry::default();
+    crate::deep::breakers::registry::register(&mut reg);
+    let mut out = Vec::new();
+    for f in &reg.failures {
+        if !f.model_field.contains("contact_resistance") {
+            continue;
+        }
+        let Some(id) = f.component.strip_prefix("17_breakers.") else { continue };
+        if let Some(&idx) = topology().breaker_index.get(id) {
+            out.push((idx, f.id));
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------
+
+/// Var-name tag for one bus, matching the names this area's `registry.rs`
+/// already cites in its ECAM triggers (`ELEC_AC_1_BUS_POTENTIAL`, ...) and
+/// the plugin's own existing `A32NX_ELEC_*` spelling (`src/study/elec.rs`).
+fn bus_tag(bus: BusId) -> &'static str {
+    match bus {
+        BusId::Ac1 => "AC_1",
+        BusId::Ac2 => "AC_2",
+        BusId::Ac3 => "AC_3",
+        BusId::Ac4 => "AC_4",
+        BusId::AcEss => "AC_ESS",
+        BusId::AcEssShed => "AC_ESS_SHED",
+        BusId::AcEmer => "AC_EMER",
+        BusId::AcGndFltSvc => "AC_GND_FLT_SVC",
+        BusId::Dc1 => "DC_1",
+        BusId::Dc2 => "DC_2",
+        BusId::DcEss => "DC_ESS",
+        BusId::DcEssShed => "DC_ESS_SHED",
+        BusId::DcBat => "DC_BAT",
+        BusId::DcHot1 => "DC_HOT_1",
+        BusId::DcHot2 => "DC_HOT_2",
+        BusId::DcApu => "DC_APU",
+        BusId::DcGndFltSvc => "DC_GND_FLT_SVC",
+    }
+}
+
+/// Pre-built variable names: `publish` runs every frame and must never
+/// format a string.
+struct Names {
+    bus_potential: Vec<String>,
+    bus_powered: Vec<String>,
+    bus_frequency: Vec<String>,
+    gen_fault: Vec<String>,
+    apu_gen_fault: Vec<String>,
+    tr_fault: Vec<String>,
+    bat_fault: Vec<String>,
+    bat_charge: Vec<String>,
+    breaker_current: Vec<String>,
+    breaker_closed: Vec<String>,
+    load_powered: Vec<String>,
+}
+
+pub struct ElectricalLive {
+    net: Network,
+    catalog: Catalog,
+    wiring: Wiring,
+    shedding: SheddingRelays,
+
+    routed: Vec<(u64, Target)>,
+    welded_pairs: Vec<(usize, u64)>,
+    faults_were_armed: bool,
+
+    names: Names,
+
+    // Cached indices.
+    contactor: ContactorIndices,
+    src_gen: [usize; 4],
+    src_apu_gen: [usize; 2],
+    src_tr: [usize; 4],
+    src_bat: [usize; 2],
+    src_gpu: usize,
+    src_rat: usize,
+
+    /// Breakers this area opened because `deep::breakers` commanded it, so
+    /// the command releasing can close them again (and a breaker this
+    /// area's own element tripped is left alone).
+    externally_opened: Vec<bool>,
+
+    /// One feeder breaker per bus, by bus index. `network::Network` measures
+    /// their current for us but has no concept of what opening one *does*;
+    /// in a real aircraft a feeder breaker sits in series with the bus's own
+    /// supply, so when one opens this layer opens every contactor feeding
+    /// that bus.
+    feeder_breaker: [usize; 17],
+
+    // Per-frame state for `publish`.
+    report: NetworkReport,
+    gen_fault: [bool; 4],
+    apu_gen_fault: [bool; 2],
+    tr_fault: [bool; 4],
+    bat_fault: [bool; 2],
+    bat_charge: [f64; 2],
+    galley_shed: bool,
+    commercial_shed: bool,
+    galley_shed_commanded: bool,
+    emergency_config: bool,
+    total_demand_w: f64,
+    capacity_w: f64,
+    rat_deployed: bool,
+
+    // Measured feedback for the next frame's source models.
+    measured_gen_load_w: [f64; 4],
+    measured_apu_gen_load_w: [f64; 2],
+    measured_tr_load_w: [f64; 4],
+    measured_battery_current_a: [f64; 2],
+}
+
+struct ContactorIndices {
+    gen_line: [usize; 4],
+    apu_gen_line: [usize; 2],
+    tr_line: [usize; 4],
+    static_inv_line: usize,
+    bat_direct: [usize; 2],
+    gpu_line: usize,
+    rat_line: usize,
+    ac_tie: [usize; 3],
+    ac_ess_feed_1: usize,
+    ac_ess_feed_4: usize,
+    ac_ess_shed: usize,
+    ac_emer_to_ess: usize,
+    dc_tie_1_2: usize,
+    dc_ess_feed_1: usize,
+    dc_ess_shed: usize,
+    dc_bat_tie: usize,
+    ac_gnd_svc_feed: usize,
+    dc_gnd_svc_feed: usize,
+}
+
+/// This area's live system, constructed cold.
+pub fn live_system() -> Box<dyn Area> {
+    Box::new(ElectricalLive::new())
+}
+
+impl Default for ElectricalLive {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ElectricalLive {
+    pub fn new() -> Self {
+        // Built in exactly the order `registry::register` builds it, so the
+        // failure ids it assigns line up with this network's own indices.
+        let mut net = Network::new();
+        let catalog = loads::build(&mut net);
+        let wiring = Wiring::build(&mut net, 15.0);
+
+        // The bus ties `sources::Wiring::build` does not lay down: it wires
+        // each source onto its own bus, but the A380's AC and DC
+        // distribution also has the tie/feed contactors that let a bus that
+        // has lost its own source be picked up from another, and the shed
+        // contactors that drop the ESS SHED buses in emergency
+        // configuration. Without them AC_ESS, AC_ESS_SHED, DC_ESS_SHED and
+        // the ground-service buses could never be energised at all.
+        // Bus-to-bus contactors are bidirectional in `network::relax`, which
+        // is what a real tie bar is.
+        let mut tie = |id: &'static str, kind: ContactorKind, from: BusId, to: BusId, ohm: f64| -> usize {
+            net.add_contactor(Contactor::new(id, kind, FeedSource::Bus(from), to, ohm))
+        };
+        let ac_tie = [
+            tie("ac-tie-1-2", ContactorKind::BusTie, BusId::Ac1, BusId::Ac2, AC_TIE_OHM),
+            tie("ac-tie-2-3", ContactorKind::BusTie, BusId::Ac2, BusId::Ac3, AC_TIE_OHM),
+            tie("ac-tie-3-4", ContactorKind::BusTie, BusId::Ac3, BusId::Ac4, AC_TIE_OHM),
+        ];
+        let ac_ess_feed_1 = tie("ac-ess-feed-1", ContactorKind::Feeder, BusId::Ac1, BusId::AcEss, ESS_FEEDER_OHM);
+        let ac_ess_feed_4 = tie("ac-ess-feed-4", ContactorKind::Feeder, BusId::Ac4, BusId::AcEss, ESS_FEEDER_OHM);
+        let ac_ess_shed = tie("ac-ess-shed", ContactorKind::Feeder, BusId::AcEss, BusId::AcEssShed, ESS_FEEDER_OHM);
+        let ac_emer_to_ess = tie("ac-emer-to-ess", ContactorKind::Feeder, BusId::AcEmer, BusId::AcEss, ESS_FEEDER_OHM);
+        let dc_tie_1_2 = tie("dc-tie-1-2", ContactorKind::BusTie, BusId::Dc1, BusId::Dc2, DC_FEEDER_OHM);
+        let dc_ess_feed_1 = tie("dc-ess-feed-1", ContactorKind::Feeder, BusId::Dc1, BusId::DcEss, DC_FEEDER_OHM);
+        let dc_ess_shed = tie("dc-ess-shed", ContactorKind::Feeder, BusId::DcEss, BusId::DcEssShed, DC_FEEDER_OHM);
+        let dc_bat_tie = tie("dc-bat-tie", ContactorKind::Feeder, BusId::DcEss, BusId::DcBat, DC_FEEDER_OHM);
+        let ac_gnd_svc_feed = tie("ac-gnd-svc-feed", ContactorKind::Feeder, BusId::Ac1, BusId::AcGndFltSvc, GND_SVC_FEEDER_OHM);
+        let dc_gnd_svc_feed = tie("dc-gnd-svc-feed", ContactorKind::Feeder, BusId::Dc2, BusId::DcGndFltSvc, GND_SVC_FEEDER_OHM);
+
+        // Transit-only actuators are dead unless something is driving them.
+        for id in TRANSIT_ONLY_ACTUATORS {
+            if let Some(i) = net.load_index(id) {
+                net.loads[i].commanded_on = false;
+            }
+        }
+
+        // One feeder breaker per bus. `network::Network::add_feeder_breaker`
+        // exists for exactly this and nothing used it: unlike a load's own
+        // breaker, a feeder breaker carries the *whole* bus -- every load on
+        // it plus that bus's own `short_to_ground` fault current -- which is
+        // what makes a busbar-to-structure short a clearable fault instead
+        // of something the generator simply feeds forever. (`registry.rs`'s
+        // own effect text for that failure already says "can overload
+        // whatever feeder/tie breaker protects it".)
+        //
+        // Rated the way any feeder is: above the connected load it has to
+        // carry, with the same 25% margin `loads::rated_current` applies to
+        // a load's own breaker, but never below the rating of the source
+        // behind it -- a feeder cannot be the weak point of its own
+        // generator's output.
+        let mut feeder_breaker = [0usize; 17];
+        for &bus in ALL_BUS_IDS.iter() {
+            let connected_a: f64 = net
+                .loads
+                .iter()
+                .filter(|l| l.spec.bus == bus)
+                .map(|l| l.spec.rated_power_w / (bus.nominal_voltage() * l.spec.power_factor.max(0.1)))
+                .sum();
+            let rated = (connected_a * 1.25).max(source_rating_a(bus));
+            let id: &'static str = Box::leak(format!("feeder-{}", bus.label()).into_boxed_str());
+            feeder_breaker[bus.index()] = net.add_feeder_breaker(super::network::Breaker::new(id, rated.max(5.0), bus), bus);
+        }
+
+        let find_c = |net: &Network, id: &str| net.contactor_index(id).unwrap_or_else(|| panic!("sources::Wiring::build no longer builds contactor {id}"));
+        let find_s = |net: &Network, id: &str| net.sources.iter().position(|s| s.id == id).unwrap_or_else(|| panic!("sources::Wiring::build no longer builds source {id}"));
+
+        let contactor = ContactorIndices {
+            gen_line: [find_c(&net, "gen-1-line"), find_c(&net, "gen-2-line"), find_c(&net, "gen-3-line"), find_c(&net, "gen-4-line")],
+            apu_gen_line: [find_c(&net, "apu-gen-1-line"), find_c(&net, "apu-gen-2-line")],
+            tr_line: [find_c(&net, "tr-1-line"), find_c(&net, "tr-2-line"), find_c(&net, "tr-ess-line"), find_c(&net, "tr-apu-line")],
+            static_inv_line: find_c(&net, "static-inv-line"),
+            bat_direct: [find_c(&net, "bat-1-direct"), find_c(&net, "bat-2-direct")],
+            gpu_line: find_c(&net, "gpu-line"),
+            rat_line: find_c(&net, "rat-line"),
+            ac_tie,
+            ac_ess_feed_1,
+            ac_ess_feed_4,
+            ac_ess_shed,
+            ac_emer_to_ess,
+            dc_tie_1_2,
+            dc_ess_feed_1,
+            dc_ess_shed,
+            dc_bat_tie,
+            ac_gnd_svc_feed,
+            dc_gnd_svc_feed,
+        };
+        let src_gen = [find_s(&net, "gen-1"), find_s(&net, "gen-2"), find_s(&net, "gen-3"), find_s(&net, "gen-4")];
+        let src_apu_gen = [find_s(&net, "apu-gen-1"), find_s(&net, "apu-gen-2")];
+        let src_tr = [find_s(&net, "tr-1"), find_s(&net, "tr-2"), find_s(&net, "tr-ess"), find_s(&net, "tr-apu")];
+        let src_bat = [find_s(&net, "bat-1"), find_s(&net, "bat-2")];
+        let src_gpu = find_s(&net, "gpu");
+        let src_rat = find_s(&net, "rat");
+
+        let (routed, unresolved) = route_failures(&net);
+        debug_assert!(unresolved.is_empty(), "unrouted registered failures: {unresolved:?}");
+
+        let names = Names {
+            bus_potential: ALL_BUS_IDS.iter().map(|&b| format!("ELEC_{}_BUS_POTENTIAL", bus_tag(b))).collect(),
+            bus_powered: ALL_BUS_IDS.iter().map(|&b| format!("ELEC_{}_BUS_IS_POWERED", bus_tag(b))).collect(),
+            bus_frequency: ALL_BUS_IDS.iter().map(|&b| format!("ELEC_{}_BUS_FREQUENCY", bus_tag(b))).collect(),
+            gen_fault: (1..=4).map(|n| format!("ELEC_GEN_{n}_FAULT")).collect(),
+            apu_gen_fault: (1..=2).map(|n| format!("ELEC_APU_GEN_{n}_FAULT")).collect(),
+            tr_fault: ["1", "2", "ESS", "APU"].iter().map(|s| format!("ELEC_TR_{s}_FAULT")).collect(),
+            bat_fault: (1..=2).map(|n| format!("ELEC_BAT_{n}_FAULT")).collect(),
+            bat_charge: (1..=2).map(|n| format!("ELEC_BAT_{n}_CHARGE_FRACTION")).collect(),
+            breaker_current: net.breakers.iter().map(|b| format!("ELEC_BKR_{}_CURRENT_A", b.id)).collect(),
+            breaker_closed: net.breakers.iter().map(|b| format!("ELEC_BKR_{}_CLOSED", b.id)).collect(),
+            load_powered: net.loads.iter().map(|l| format!("ELEC_LOAD_{}_POWERED", l.spec.id)).collect(),
+        };
+
+        let n_breakers = net.breakers.len();
+        Self {
+            net,
+            catalog,
+            wiring,
+            shedding: SheddingRelays::new(),
+            routed,
+            welded_pairs: welded_channel_pairs(),
+            faults_were_armed: false,
+            names,
+            contactor,
+            src_gen,
+            src_apu_gen,
+            src_tr,
+            src_bat,
+            src_gpu,
+            src_rat,
+            externally_opened: vec![false; n_breakers],
+            feeder_breaker,
+            report: NetworkReport::default(),
+            gen_fault: [false; 4],
+            apu_gen_fault: [false; 2],
+            tr_fault: [false; 4],
+            bat_fault: [false; 2],
+            bat_charge: [1.0; 2],
+            galley_shed: false,
+            commercial_shed: false,
+            galley_shed_commanded: false,
+            emergency_config: false,
+            total_demand_w: 0.0,
+            capacity_w: 0.0,
+            rat_deployed: false,
+            measured_gen_load_w: [0.0; 4],
+            measured_apu_gen_load_w: [0.0; 2],
+            measured_tr_load_w: [0.0; 4],
+            measured_battery_current_a: [0.0; 2],
+        }
+    }
+
+    /// Read-only access for tests and for whatever Study page wants the
+    /// whole solved network rather than the published summary.
+    pub fn network(&self) -> &Network {
+        &self.net
+    }
+
+    fn clear_model_faults(&mut self) {
+        for l in &mut self.net.loads {
+            l.faults = Default::default();
+        }
+        for b in &mut self.net.breakers {
+            b.faults = Default::default();
+        }
+        for c in &mut self.net.contactors {
+            c.faults = Default::default();
+        }
+        for d in &mut self.net.diodes {
+            d.faults = Default::default();
+        }
+        for b in &mut self.net.buses {
+            b.faults = Default::default();
+        }
+    }
+
+    /// Feeds every armed magnitude into the exact model field its
+    /// `FailureDef::model_field` names, and returns the source-side ones,
+    /// which `sources::Wiring` takes as arguments rather than owning.
+    fn apply_faults(&mut self, faults: &Faults) -> SourceFaults {
+        let mut sf = SourceFaults::default();
+        for i in 0..self.routed.len() {
+            let (id, target) = self.routed[i];
+            let m = faults.get(id);
+            if m <= 0.0 {
+                continue;
+            }
+            match target {
+                Target::Load(idx, field) => {
+                    let f = &mut self.net.loads[idx].faults;
+                    let slot = match field {
+                        LoadField::OpenCircuit => &mut f.open_circuit,
+                        LoadField::ShortToGround => &mut f.short_to_ground,
+                        LoadField::HighResistance => &mut f.high_resistance,
+                        LoadField::Intermittent => &mut f.intermittent,
+                    };
+                    *slot = slot.max(m);
+                }
+                Target::BreakerFailsToTrip(idx) => {
+                    let s = &mut self.net.breakers[idx].faults.fails_to_trip;
+                    *s = s.max(m);
+                }
+                Target::BreakerNuisance(idx) => {
+                    let s = &mut self.net.breakers[idx].faults.nuisance_trip;
+                    *s = s.max(m);
+                }
+                Target::ContactorFailsToClose(idx) => {
+                    let s = &mut self.net.contactors[idx].faults.fails_to_close;
+                    *s = s.max(m);
+                }
+                Target::ContactorWelded(idx) => {
+                    let s = &mut self.net.contactors[idx].faults.welded_closed;
+                    *s = s.max(m);
+                }
+                Target::Diode(idx) => {
+                    let s = &mut self.net.diodes[idx].faults.open_circuit;
+                    *s = s.max(m);
+                }
+                Target::Bus(idx) => {
+                    let s = &mut self.net.buses[idx].faults.short_to_ground;
+                    *s = s.max(m);
+                }
+                Target::VfgWinding(n) => sf.vfg[n].winding_degradation = sf.vfg[n].winding_degradation.max(m),
+                Target::VfgRegulator(n) => sf.vfg[n].regulator_drift = sf.vfg[n].regulator_drift.max(m),
+                Target::ApuGenWinding(n) => sf.apu_gen[n].winding_degradation = sf.apu_gen[n].winding_degradation.max(m),
+                Target::ApuGenRegulator(n) => sf.apu_gen[n].regulator_drift = sf.apu_gen[n].regulator_drift.max(m),
+                Target::Tru(n) => sf.tru[n].winding_degradation = sf.tru[n].winding_degradation.max(m),
+                Target::BatteryCapacity(n) => sf.battery[n].capacity_fade = sf.battery[n].capacity_fade.max(m),
+                Target::BatteryResistance(n) => sf.battery[n].resistance_growth = sf.battery[n].resistance_growth.max(m),
+                Target::StaticInverter => sf.static_inverter.efficiency_loss = sf.static_inverter.efficiency_loss.max(m),
+                Target::Rat => sf.rat.jammed = sf.rat.jammed.max(m),
+                Target::Gpu => sf.ground_power.weak_cart = sf.ground_power.weak_cart.max(m),
+            }
+        }
+        // One physical breaker, two catalogued ids: take the worse.
+        for i in 0..self.welded_pairs.len() {
+            let (idx, id) = self.welded_pairs[i];
+            let m = faults.get(id);
+            if m > 0.0 {
+                let s = &mut self.net.breakers[idx].faults.fails_to_trip;
+                *s = s.max(m);
+            }
+        }
+        sf
+    }
+
+    /// Folds `deep::wiring`'s per-circuit harness damage into the matching
+    /// load's own `LoadFaults` (see this module's doc: the wiring area owns
+    /// the harness, this one owns the solve).
+    fn apply_wiring_damage(&mut self) {
+        board::with_board(|b| {
+            let n = self.net.loads.len();
+            for i in 0..n.min(b.load_short.len()) {
+                let f = &mut self.net.loads[i].faults;
+                f.short_to_ground = f.short_to_ground.max(b.load_short[i]);
+            }
+            for i in 0..n.min(b.load_open.len()) {
+                let f = &mut self.net.loads[i].faults;
+                f.open_circuit = f.open_circuit.max(b.load_open[i]);
+            }
+            for i in 0..n.min(b.load_high_resistance.len()) {
+                let f = &mut self.net.loads[i].faults;
+                f.high_resistance = f.high_resistance.max(b.load_high_resistance[i]);
+            }
+        });
+    }
+
+    /// Applies `deep::breakers`' trip-unit decision to the contacts.
+    fn apply_breaker_commands(&mut self) {
+        board::with_board(|b| {
+            let n = self.net.breakers.len().min(b.breaker_open_cmd.len());
+            for i in 0..n {
+                let commanded_open = b.breaker_open_cmd[i] > 0.5;
+                if commanded_open {
+                    if !self.externally_opened[i] {
+                        self.net.breakers[i].pull();
+                        self.externally_opened[i] = true;
+                    }
+                } else if self.externally_opened[i] {
+                    // The trip unit has been reset; the contacts close again
+                    // (and their own thermal element cools, as a real bimetal
+                    // strip does once the current is gone).
+                    self.net.breakers[i].reset();
+                    self.externally_opened[i] = false;
+                }
+            }
+        });
+    }
+
+    /// One frame of generator/bus-tie control, run *after*
+    /// `Wiring::pre_step` has written this frame's source terminals, so
+    /// every close decision can be taken against the voltage the source
+    /// actually has rather than against last frame's guess.
+    ///
+    /// The one rule underneath all of it: **a source contactor never closes
+    /// onto a source that is not producing.** That is what a real GCU/BCL
+    /// does, and it matters here because `sources.rs` reduces a dead source
+    /// (an unexcited generator, a TRU with no AC input, an undeployed RAT)
+    /// to a 0 V Thevenin branch with near-zero internal resistance -- an
+    /// ideal short, not an open circuit. Closing onto one would clamp its
+    /// bus, and anything tied to that bus, to zero.
+    ///
+    /// Bus voltages, on the other hand, are necessarily last frame's: a
+    /// voltage-sensing relay cannot act on a voltage it has not yet
+    /// measured either.
+    fn command_contactors(&mut self, truth: &Truth, gpu_plugged_in: bool) {
+        let producing = |net: &Network, src: usize| net.sources[src].open_circuit_v > 0.0;
+
+        // A VFG is on line when its own GCU sees a healthy machine: excited
+        // (`sources::Vfg::CUT_IN_SPEED_FRACTION`) and not tripped off by its
+        // own overload element.
+        let mut gen_on_line = [false; 4];
+        for i in 0..4 {
+            let tripped = self.wiring.vfg[i].overload_heat() >= 1.0;
+            gen_on_line[i] = truth.engine_running[i] && producing(&self.net, self.src_gen[i]) && !tripped;
+            let idx = self.contactor.gen_line[i];
+            self.net.contactors[idx].commanded_closed = gen_on_line[i];
+        }
+
+        let mut apu_on_line = false;
+        for i in 0..2 {
+            let on = truth.apu_running && producing(&self.net, self.src_apu_gen[i]) && self.wiring.apu_gen[i].overload_heat() < 1.0;
+            apu_on_line |= on;
+            self.net.contactors[self.contactor.apu_gen_line[i]].commanded_closed = on;
+        }
+
+        // The four VFGs are not paralleled on the A380: each feeds its own
+        // bus. The ties close only when some AC bus has lost its own source
+        // *and* there is something left on the tie bar to feed it from --
+        // tying dead buses to each other would leave the tie bar with no
+        // reference at all.
+        let anchored = gen_on_line.iter().any(|&g| g) || apu_on_line || gpu_plugged_in;
+        let need_tie = anchored && (gen_on_line.iter().any(|&g| !g) || apu_on_line || gpu_plugged_in);
+        for &idx in &self.contactor.ac_tie {
+            self.net.contactors[idx].commanded_closed = need_tie;
+        }
+
+        // AC ESS: normally from AC1, alternate from AC4.
+        let ac1_live = self.net.bus(BusId::Ac1).voltage >= AC_UNDERVOLTAGE_TRIP_V;
+        let ac4_live = self.net.bus(BusId::Ac4).voltage >= AC_UNDERVOLTAGE_TRIP_V;
+        self.net.contactors[self.contactor.ac_ess_feed_1].commanded_closed = ac1_live;
+        self.net.contactors[self.contactor.ac_ess_feed_4].commanded_closed = !ac1_live && ac4_live;
+
+        // Emergency configuration: no main AC bus is alive at all.
+        let emergency = !ac1_live && !ac4_live && self.net.bus(BusId::Ac2).voltage < AC_UNDERVOLTAGE_TRIP_V && self.net.bus(BusId::Ac3).voltage < AC_UNDERVOLTAGE_TRIP_V;
+        self.emergency_config = emergency;
+
+        // The RAT deploys on a total loss of main AC generation in flight.
+        if emergency && !truth.on_ground {
+            self.wiring.rat.deploy();
+        }
+        self.rat_deployed = self.wiring.rat.deployed();
+
+        // The static inverter and the RAT feed the emergency AC bus, and
+        // that bus backs the ESS bus up, only once each is actually
+        // producing.
+        let inv_live = producing(&self.net, self.contactor_source(self.contactor.static_inv_line));
+        self.net.contactors[self.contactor.static_inv_line].commanded_closed = emergency && inv_live;
+        let rat_live = self.rat_deployed && producing(&self.net, self.src_rat);
+        self.net.contactors[self.contactor.rat_line].commanded_closed = rat_live;
+        self.net.contactors[self.contactor.ac_emer_to_ess].commanded_closed = emergency && (inv_live || rat_live);
+
+        // The shed buses drop in emergency configuration; that is what makes
+        // them shed buses.
+        self.net.contactors[self.contactor.ac_ess_shed].commanded_closed = !emergency;
+        self.net.contactors[self.contactor.dc_ess_shed].commanded_closed = !emergency;
+
+        // A TRU with no AC input rectifies nothing: its output is an open
+        // circuit, so its own feeder contactor opens rather than clamping
+        // its DC bus to zero.
+        let mut tr_live = [false; 4];
+        for i in 0..4 {
+            tr_live[i] = producing(&self.net, self.src_tr[i]);
+            self.net.contactors[self.contactor.tr_line[i]].commanded_closed = tr_live[i];
+        }
+        // The essential DC bus is normally carried by DC1 as well as its own
+        // TR -- the real Airbus arrangement, and the reason one TR's rating
+        // does not have to cover the whole essential load on its own.
+        self.net.contactors[self.contactor.dc_ess_feed_1].commanded_closed = tr_live[0];
+        // The DC tie picks a dead DC bus up from the live one; the battery
+        // bus is tied to DC ESS only while DC ESS is itself being held up,
+        // so a dead essential bus can never drain the batteries through it.
+        self.net.contactors[self.contactor.dc_tie_1_2].commanded_closed = tr_live[0] != tr_live[1];
+        self.net.contactors[self.contactor.dc_bat_tie].commanded_closed = tr_live[2] || tr_live[0];
+        // The batteries sit permanently across their own battery/hot bus --
+        // that is what a hot bus is.
+        for &idx in &self.contactor.bat_direct {
+            self.net.contactors[idx].commanded_closed = true;
+        }
+
+        // The ground/flight service buses carry cargo handling, service
+        // lighting and the cabin-servicing outlets; they are energised on
+        // the ground (from the cart, or from AC1 once a generator is
+        // running) and dead in flight, which is what makes them *ground*
+        // service buses.
+        self.net.contactors[self.contactor.gpu_line].commanded_closed = gpu_plugged_in && producing(&self.net, self.src_gpu);
+        self.net.contactors[self.contactor.ac_gnd_svc_feed].commanded_closed = truth.on_ground && ac1_live;
+        self.net.contactors[self.contactor.dc_gnd_svc_feed].commanded_closed = truth.on_ground && tr_live[1];
+
+        // A feeder breaker that has opened isolates its bus: it is in series
+        // with that bus's supply, so nothing may feed the bus through it
+        // until it is reset. This is the step `network::Network` cannot take
+        // on its own -- it measures a feeder breaker's current but has no
+        // model of what one being open means.
+        for bi in 0..17 {
+            if !self.net.breakers[self.feeder_breaker[bi]].closed {
+                let bus = ALL_BUS_IDS[bi];
+                for c in &mut self.net.contactors {
+                    // Either end: a bus-to-bus tie is one device, and
+                    // `network::relax` conducts through it both ways.
+                    if c.to == bus || c.from == FeedSource::Bus(bus) {
+                        c.commanded_closed = false;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The source index a source-fed contactor draws from.
+    fn contactor_source(&self, contactor: usize) -> usize {
+        match self.net.contactors[contactor].from {
+            FeedSource::Source(i) => i,
+            FeedSource::Bus(_) => unreachable!("contactor {contactor} is bus-fed, not source-fed"),
+        }
+    }
+
+    /// Available real generation capacity, W: what is actually on line.
+    fn capacity_w(&self, truth: &Truth, gpu_plugged_in: bool) -> f64 {
+        let mut cap = 0.0;
+        for i in 0..4 {
+            if self.net.contactors[self.contactor.gen_line[i]].commanded_closed && truth.engine_running[i] {
+                cap += GEN_RATED_TRUE_POWER_W;
+            }
+        }
+        for i in 0..2 {
+            if self.net.contactors[self.contactor.apu_gen_line[i]].commanded_closed && truth.apu_running {
+                cap += APU_GEN_RATED_TRUE_POWER_W;
+            }
+        }
+        if gpu_plugged_in {
+            cap += GPU_RATED_TRUE_POWER_W;
+        }
+        cap
+    }
+
+    /// The real branch current out of one source, A: its own Thevenin
+    /// branch, `(V_oc - V_bus) / (R_source + R_contactor)`, zero when its
+    /// contactor is open. Positive out of the source.
+    fn source_branch_current_a(&self, src: usize, contactor: usize) -> f64 {
+        let c = &self.net.contactors[contactor];
+        if !c.closed {
+            return 0.0;
+        }
+        let s = &self.net.sources[src];
+        let r = (c.resistance_ohm + s.resistance_ohm).max(1.0e-6);
+        (s.open_circuit_v - self.net.bus(c.to).voltage) / r
+    }
+
+    fn source_delivered_w(&self, src: usize, contactor: usize) -> f64 {
+        let i = self.source_branch_current_a(src, contactor);
+        if i <= 0.0 {
+            return 0.0;
+        }
+        i * self.net.bus(self.net.contactors[contactor].to).voltage
+    }
+}
+
+/// The source-side fault magnitudes, which `sources::Wiring` takes as
+/// arguments each tick rather than owning as state.
+#[derive(Default)]
+struct SourceFaults {
+    vfg: [VfgFaults; 4],
+    apu_gen: [ApuGeneratorFaults; 2],
+    tru: [TruFaults; 4],
+    battery: [BatteryFaults; 2],
+    static_inverter: StaticInverterFaults,
+    rat: RatFaults,
+    ground_power: GroundPowerFaults,
+}
+
+impl Area for ElectricalLive {
+    fn name(&self) -> &'static str {
+        "electrical"
+    }
+
+    fn tick(&mut self, truth: &Truth, faults: &Faults) {
+        let dt = truth.dt_s.max(0.0);
+
+        // 1. Faults: clear, then re-apply every armed magnitude into the
+        //    field its registry entry names. Skipped entirely on the common
+        //    frame where nothing at all is armed.
+        let armed = faults.any();
+        let sf = if armed || self.faults_were_armed {
+            self.clear_model_faults();
+            self.apply_faults(faults)
+        } else {
+            SourceFaults::default()
+        };
+        self.faults_were_armed = armed;
+
+        // 2. The other two areas' last frame.
+        self.apply_wiring_damage();
+        self.apply_breaker_commands();
+
+        // 3. Sources first: every source's terminal for this frame, from
+        //    `Truth` and last frame's measured feedback.
+        //
+        //    `engine_speed_fraction` is the VFG's own *core* speed; `Truth`
+        //    carries only fan speed (`engine_n1_frac`), so that is what is
+        //    fed here -- see this area's report, which asks for an
+        //    `engine_n2_frac` field. It affects the generator's output
+        //    frequency, not its regulated voltage.
+        //    `gpu_plugged_in` has no `Truth` field either: ground power
+        //    cannot be modelled as connected until one exists, and inventing
+        //    one would be a fabricated input.
+        let gpu_plugged_in = false;
+        let inputs = WiringInputs {
+            engine_speed_fraction: truth.engine_n1_frac,
+            measured_gen_load_w: self.measured_gen_load_w,
+            vfg_faults: sf.vfg,
+            apu_speed_fraction: if truth.apu_running { 1.0 } else { 0.0 },
+            measured_apu_gen_load_w: self.measured_apu_gen_load_w,
+            apu_gen_faults: sf.apu_gen,
+            tru_faults: sf.tru,
+            measured_tr_load_w: self.measured_tr_load_w,
+            battery_faults: sf.battery,
+            measured_battery_current_a: self.measured_battery_current_a,
+            static_inverter_faults: sf.static_inverter,
+            gpu_plugged_in,
+            ground_power_faults: sf.ground_power,
+            airspeed_kt: truth.environment.tas_ms / 0.514_444,
+            rat_faults: sf.rat,
+            // No `Truth` field carries an equipment-bay temperature; static
+            // air temperature is the only ambient available (see report).
+            ambient_c: truth.environment.sat_c,
+        };
+        self.wiring.pre_step(&mut self.net, &inputs, dt);
+
+        // 4. Contactor control against those fresh terminals, then the
+        //    load-management shed decision, then the one solve.
+        self.command_contactors(truth, gpu_plugged_in);
+
+        let capacity_w = self.capacity_w(truth, gpu_plugged_in);
+        let budget = power_budget(&self.net, capacity_w);
+        // Schmitt band, so the relay cannot chatter at the balance point.
+        self.galley_shed_commanded = if self.galley_shed_commanded {
+            budget.margin_w < capacity_w * SHED_RELEASE_MARGIN_FRACTION
+        } else {
+            budget.overloaded
+        };
+        let shed_inputs = ShedInputs { galley_shed_commanded: self.galley_shed_commanded, emergency_config_commanded: self.emergency_config };
+        let shed = self.shedding.step(&mut self.net, &self.catalog, &shed_inputs);
+        self.galley_shed = shed.galley_shed;
+        self.commercial_shed = shed.commercial_shed;
+        self.capacity_w = capacity_w;
+        self.total_demand_w = budget.total_demand_w;
+
+        self.report = self.net.step(dt);
+        for i in 0..4 {
+            self.measured_gen_load_w[i] = self.source_delivered_w(self.src_gen[i], self.contactor.gen_line[i]);
+        }
+        for i in 0..2 {
+            self.measured_apu_gen_load_w[i] = self.source_delivered_w(self.src_apu_gen[i], self.contactor.apu_gen_line[i]);
+            self.measured_battery_current_a[i] = self.source_branch_current_a(self.src_bat[i], self.contactor.bat_direct[i]);
+        }
+        for i in 0..4 {
+            self.measured_tr_load_w[i] = self.source_delivered_w(self.src_tr[i], self.contactor.tr_line[i]);
+        }
+        self.wiring.post_step(&self.net, &inputs, dt);
+
+        // 5. Protective annunciations, all read off the solved network.
+        let dc_trip = dc_undervoltage_trip_v();
+        for i in 0..4 {
+            let on_line = self.net.contactors[self.contactor.gen_line[i]].closed;
+            let bus_v = self.net.bus(self.net.contactors[self.contactor.gen_line[i]].to).voltage;
+            self.gen_fault[i] = self.wiring.vfg[i].overload_heat() >= 1.0 || (on_line && (bus_v < AC_UNDERVOLTAGE_TRIP_V || bus_v > AC_OVERVOLTAGE_TRIP_V));
+        }
+        for i in 0..2 {
+            let on_line = self.net.contactors[self.contactor.apu_gen_line[i]].closed;
+            let bus_v = self.net.bus(self.net.contactors[self.contactor.apu_gen_line[i]].to).voltage;
+            self.apu_gen_fault[i] = self.wiring.apu_gen[i].overload_heat() >= 1.0 || (on_line && (bus_v < AC_UNDERVOLTAGE_TRIP_V || bus_v > AC_OVERVOLTAGE_TRIP_V));
+        }
+        // A TR faults when it has an AC input but is no longer holding its
+        // own DC bus up -- the real TR FAULT condition.
+        let tr_ac_in = [BusId::Ac1, BusId::Ac2, BusId::AcEss, BusId::AcEss];
+        let tr_dc_out = [BusId::Dc1, BusId::Dc2, BusId::DcEss, BusId::DcApu];
+        for i in 0..4 {
+            let ac_powered = self.net.bus(tr_ac_in[i]).voltage > 90.0;
+            self.tr_fault[i] = ac_powered && self.net.bus(tr_dc_out[i]).voltage < dc_trip;
+        }
+        for i in 0..2 {
+            let (v, _r) = self.wiring.battery[i].terminal(sf.battery[i]);
+            self.bat_fault[i] = self.net.contactors[self.contactor.bat_direct[i]].closed && v < dc_trip;
+            self.bat_charge[i] = self.wiring.battery[i].charge_fraction(sf.battery[i]);
+        }
+    }
+
+    fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
+        for (i, bus) in self.net.buses.iter().enumerate() {
+            out(&self.names.bus_potential[i], bus.voltage);
+            out(&self.names.bus_powered[i], if self.report.bus_powered[i] { 1.0 } else { 0.0 });
+            out(&self.names.bus_frequency[i], bus.frequency_hz);
+        }
+        for i in 0..4 {
+            out(&self.names.gen_fault[i], if self.gen_fault[i] { 1.0 } else { 0.0 });
+            out(&self.names.tr_fault[i], if self.tr_fault[i] { 1.0 } else { 0.0 });
+        }
+        for i in 0..2 {
+            out(&self.names.apu_gen_fault[i], if self.apu_gen_fault[i] { 1.0 } else { 0.0 });
+            out(&self.names.bat_fault[i], if self.bat_fault[i] { 1.0 } else { 0.0 });
+            out(&self.names.bat_charge[i], self.bat_charge[i]);
+        }
+        // The registry's own ECAM trigger names one APU GEN fault, not two.
+        out("ELEC_APU_GEN_FAULT", if self.apu_gen_fault[0] || self.apu_gen_fault[1] { 1.0 } else { 0.0 });
+        out("ELEC_GALLEY_SHED_ACTIVE", if self.galley_shed { 1.0 } else { 0.0 });
+        out("ELEC_COMMERCIAL_SHED_ACTIVE", if self.commercial_shed { 1.0 } else { 0.0 });
+        out("ELEC_RAT_DEPLOYED", if self.rat_deployed { 1.0 } else { 0.0 });
+        out("ELEC_EMER_CONFIG_ACTIVE", if self.emergency_config { 1.0 } else { 0.0 });
+        out("ELEC_TOTAL_DEMAND_W", self.total_demand_w);
+        out("ELEC_AVAILABLE_CAPACITY_W", self.capacity_w);
+        out("ELEC_TOTAL_DELIVERED_W", self.report.total_power_w);
+
+        for (i, b) in self.net.breakers.iter().enumerate() {
+            out(&self.names.breaker_current[i], b.current_a);
+            out(&self.names.breaker_closed[i], if b.closed { 1.0 } else { 0.0 });
+        }
+        for (i, l) in self.net.loads.iter().enumerate() {
+            out(&self.names.load_powered[i], if l.powered { 1.0 } else { 0.0 });
+        }
+
+        // The typed side of the same data, for the two areas that read it
+        // back next frame (see this module's doc comment).
+        board::with_board_mut(|board| {
+            let n = self.net.breakers.len();
+            if board.breaker_current_a.len() != n {
+                board.breaker_current_a = vec![0.0; n];
+            }
+            for (i, b) in self.net.breakers.iter().enumerate() {
+                board.breaker_current_a[i] = b.current_a;
+            }
+            for (i, bus) in self.net.buses.iter().enumerate() {
+                board.bus_voltage[i] = bus.voltage;
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deep::live::Deep;
+    use std::collections::BTreeMap;
+
+    fn flying_truth() -> Truth {
+        Truth {
+            dt_s: 1.0 / 30.0,
+            on_ground: false,
+            altitude_ft: 35_000.0,
+            engine_n1_frac: [0.9; 4],
+            engine_running: [true; 4],
+            ..Truth::default()
+        }
+    }
+
+    fn run(live: &mut ElectricalLive, truth: &Truth, faults: &Faults, frames: usize) -> BTreeMap<String, f64> {
+        let mut published = BTreeMap::new();
+        for _ in 0..frames {
+            live.tick(truth, faults);
+            published.clear();
+            live.publish(&mut |n, v| {
+                published.insert(n.to_string(), v);
+            });
+        }
+        published
+    }
+
+    #[test]
+    fn every_registered_failure_resolves_to_a_real_model_field() {
+        let live = ElectricalLive::new();
+        let mut reg = Registry::default();
+        super::super::registry::register(&mut reg);
+        let (routed, unresolved) = route_failures(&live.net);
+        assert!(unresolved.is_empty(), "{} registered failures do not resolve: {:?}", unresolved.len(), &unresolved[..unresolved.len().min(10)]);
+        assert_eq!(routed.len(), reg.failures.len(), "every registered failure must be routed exactly once");
+        let mut ids: Vec<u64> = routed.iter().map(|(id, _)| *id).collect();
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "a failure id was routed twice");
+        assert!(routed.len() > 1_000, "expected the real catalogue, got {}", routed.len());
+    }
+
+    #[test]
+    fn four_running_engines_energise_every_main_ac_bus_and_the_dc_buses_behind_them() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let published = run(&mut live, &flying_truth(), &Faults::default(), 20);
+        for tag in ["AC_1", "AC_2", "AC_3", "AC_4", "AC_ESS", "DC_1", "DC_2", "DC_ESS"] {
+            let v = published[&format!("ELEC_{tag}_BUS_POTENTIAL")];
+            assert!(published[&format!("ELEC_{tag}_BUS_IS_POWERED")] == 1.0, "{tag} should be powered, it sits at {v} V");
+        }
+        assert!(published["ELEC_AC_1_BUS_POTENTIAL"] > 108.0);
+        assert!(published["ELEC_AC_1_BUS_FREQUENCY"] > 360.0, "a VFG's bus runs at its own variable frequency");
+        assert_eq!(published["ELEC_GEN_1_FAULT"], 0.0);
+    }
+
+    #[test]
+    fn a_cold_dark_aircraft_has_no_ac_at_all_but_its_hot_buses_stay_alive() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let published = run(&mut live, &Truth::default(), &Faults::default(), 10);
+        assert_eq!(published["ELEC_AC_1_BUS_IS_POWERED"], 0.0);
+        assert_eq!(published["ELEC_AC_2_BUS_IS_POWERED"], 0.0);
+        assert!(published["ELEC_DC_HOT_1_BUS_POTENTIAL"] > 20.0, "a battery-direct hot bus is live on a cold aircraft");
+    }
+
+    /// The failure this exercises is registered by `registry.rs` on the
+    /// `gen-1` VFG with the effect "terminal voltage sags harder under
+    /// load; a fully degraded machine may never reach rated voltage".
+    #[test]
+    fn arming_gen_1_winding_degradation_sags_its_own_bus_the_way_its_effect_says() {
+        board::clear();
+        let truth = flying_truth();
+
+        let mut healthy = ElectricalLive::new();
+        let before = run(&mut healthy, &truth, &Faults::default(), 30);
+
+        let id = {
+            let mut reg = Registry::default();
+            super::super::registry::register(&mut reg);
+            reg.failures
+                .iter()
+                .find(|f| f.component == "24_elec.vfg-1" && f.model_field.ends_with("winding_degradation"))
+                .expect("GEN 1 winding degradation must be registered")
+                .id
+        };
+
+        board::clear();
+        let mut degraded = ElectricalLive::new();
+        let after = run(&mut degraded, &truth, &Faults::from_pairs([(id, 1.0)]), 30);
+
+        assert!(
+            after["ELEC_AC_1_BUS_POTENTIAL"] < before["ELEC_AC_1_BUS_POTENTIAL"] - 0.05,
+            "a fully degraded stator must sag its own bus: {} V healthy vs {} V degraded",
+            before["ELEC_AC_1_BUS_POTENTIAL"],
+            after["ELEC_AC_1_BUS_POTENTIAL"]
+        );
+    }
+
+    /// `registry.rs`'s own effect for a bus `short_to_ground`: "collapses
+    /// the bus's own voltage and can overload whatever feeder/tie breaker
+    /// protects it".
+    #[test]
+    fn arming_an_ac_1_bus_short_collapses_that_bus_and_kills_the_loads_on_it() {
+        board::clear();
+        let truth = flying_truth();
+        let id = {
+            let mut reg = Registry::default();
+            super::super::registry::register(&mut reg);
+            reg.failures.iter().find(|f| f.component == "24_elec.bus.AC1").expect("the AC1 bus short must be registered").id
+        };
+        let mut live = ElectricalLive::new();
+        let healthy = run(&mut live, &truth, &Faults::default(), 20);
+        assert_eq!(healthy["ELEC_LOAD_cab-fan-1_POWERED"], 1.0, "CAB FAN 1 sits on AC1 and should be running");
+
+        board::clear();
+        let mut shorted = ElectricalLive::new();
+        // A 0.03 ohm busbar-to-structure short against a VFG's own ~0.002
+        // ohm source impedance is ~3.8 kA -- more than twice the feeder's
+        // rating, so its I^2t element takes several seconds to clear it.
+        let slow = Truth { dt_s: 0.05, ..truth };
+        let after = run(&mut shorted, &slow, &Faults::from_pairs([(id, 1.0)]), 400);
+        assert!(
+            after["ELEC_AC_1_BUS_POTENTIAL"] < healthy["ELEC_AC_1_BUS_POTENTIAL"] * 0.5,
+            "a bus short must end with the bus collapsed, not dented: {} V",
+            after["ELEC_AC_1_BUS_POTENTIAL"]
+        );
+        assert_eq!(after["ELEC_BKR_feeder-AC1_CLOSED"], 0.0, "the feeder breaker protecting AC1 is what clears it");
+        assert_eq!(after["ELEC_LOAD_cab-fan-1_POWERED"], 0.0, "a collapsed bus cannot run its own loads");
+    }
+
+    /// A breaker pulled (here through the board, exactly as
+    /// `deep::breakers`' trip unit does it) must take its load dead.
+    #[test]
+    fn a_pulled_breaker_takes_its_own_load_dead_and_releasing_it_brings_it_back() {
+        board::clear();
+        let truth = flying_truth();
+        let mut live = ElectricalLive::new();
+        run(&mut live, &truth, &Faults::default(), 10);
+        let idx = topology().breaker_index["cab-fan-1"];
+
+        board::with_board_mut(|b| {
+            b.breaker_open_cmd = vec![0.0; topology().breaker_count];
+            b.breaker_open_cmd[idx] = 1.0;
+        });
+        let opened = run(&mut live, &truth, &Faults::default(), 5);
+        assert_eq!(opened["ELEC_BKR_cab-fan-1_CLOSED"], 0.0);
+        assert_eq!(opened["ELEC_LOAD_cab-fan-1_POWERED"], 0.0, "a load behind an open breaker draws nothing");
+        assert_eq!(opened["ELEC_BKR_cab-fan-1_CURRENT_A"], 0.0);
+        assert_eq!(opened["ELEC_LOAD_cab-fan-2_POWERED"], 1.0, "its neighbour on another bus is untouched");
+
+        board::with_board_mut(|b| b.breaker_open_cmd[idx] = 0.0);
+        let closed = run(&mut live, &truth, &Faults::default(), 5);
+        assert_eq!(closed["ELEC_BKR_cab-fan-1_CLOSED"], 1.0);
+        assert_eq!(closed["ELEC_LOAD_cab-fan-1_POWERED"], 1.0);
+        board::clear();
+    }
+
+    #[test]
+    fn wiring_damage_published_onto_the_board_opens_the_load_it_names() {
+        board::clear();
+        let truth = flying_truth();
+        let mut live = ElectricalLive::new();
+        run(&mut live, &truth, &Faults::default(), 10);
+        let idx = topology().load_index["cab-fan-1"];
+        board::with_board_mut(|b| {
+            b.load_open = vec![0.0; topology().load_count];
+            b.load_open[idx] = 1.0;
+        });
+        let after = run(&mut live, &truth, &Faults::default(), 5);
+        assert_eq!(after["ELEC_LOAD_cab-fan-1_POWERED"], 0.0, "a burnt-through conductor carries nothing");
+        board::clear();
+    }
+
+    #[test]
+    fn losing_every_generator_in_flight_deploys_the_rat_and_raises_emergency_config() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let truth = Truth { dt_s: 1.0 / 30.0, on_ground: false, engine_n1_frac: [0.0; 4], engine_running: [false; 4], environment: crate::deep::integration::weather_truth::EnvironmentTruth { tas_ms: 150.0, ..Truth::default().environment }, ..Truth::default() };
+        let published = run(&mut live, &truth, &Faults::default(), 30);
+        assert_eq!(published["ELEC_EMER_CONFIG_ACTIVE"], 1.0);
+        assert_eq!(published["ELEC_RAT_DEPLOYED"], 1.0);
+        assert_eq!(published["ELEC_COMMERCIAL_SHED_ACTIVE"], 1.0, "emergency configuration sheds the commercial load");
+        assert_eq!(published["ELEC_AC_ESS_SHED_BUS_IS_POWERED"], 0.0, "the shed bus is what gets shed");
+    }
+
+    #[test]
+    fn it_plugs_into_deep_and_publishes_every_variable_its_ecam_triggers_read() {
+        board::clear();
+        let mut deep = Deep::new().with_area(live_system());
+        let mut published = BTreeMap::new();
+        deep.tick(flying_truth(), &Faults::default(), &mut |n, v| {
+            published.insert(n.to_string(), v);
+        });
+        for name in [
+            "ELEC_GEN_1_FAULT",
+            "ELEC_APU_GEN_FAULT",
+            "ELEC_TR_1_FAULT",
+            "ELEC_BAT_1_FAULT",
+            "ELEC_AC_1_BUS_POTENTIAL",
+            "ELEC_AC_1_BUS_IS_POWERED",
+            "ELEC_AC_2_BUS_IS_POWERED",
+            "ELEC_AC_3_BUS_IS_POWERED",
+            "ELEC_AC_4_BUS_IS_POWERED",
+            "ELEC_GALLEY_SHED_ACTIVE",
+            "ELEC_COMMERCIAL_SHED_ACTIVE",
+        ] {
+            assert!(published.contains_key(name), "{name} is read by an ECAM trigger but nobody publishes it");
+        }
+        assert_eq!(deep.area_names(), vec!["electrical"]);
+        board::clear();
+    }
+
+    #[test]
+    #[ignore = "diagnostic"]
+    fn diagnose() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let p = run(&mut live, &flying_truth(), &Faults::default(), 30);
+        println!("AC1 {} Hz {} demand {} cap {}", p["ELEC_AC_1_BUS_POTENTIAL"], p["ELEC_AC_1_BUS_FREQUENCY"], p["ELEC_TOTAL_DEMAND_W"], p["ELEC_AVAILABLE_CAPACITY_W"]);
+        println!("galley shed {} commercial {}", p["ELEC_GALLEY_SHED_ACTIVE"], p["ELEC_COMMERCIAL_SHED_ACTIVE"]);
+        let idx = topology().breaker_index["cab-fan-1"];
+        let b = &live.net.breakers[idx];
+        println!("cab-fan-1 bkr closed {} rated {} I {} heat {} cause {:?}", b.closed, b.rated_a, b.current_a, b.heat_fraction(), b.trip_cause);
+        let li = topology().load_index["cab-fan-1"];
+        println!("cab-fan-1 load powered {} I {} feed {:?}", live.net.loads[li].powered, live.net.loads[li].current_a, live.net.loads[li].active_feed);
+        let mut open: Vec<&str> = live.net.breakers.iter().filter(|b| !b.closed).map(|b| b.id).collect();
+        open.sort_unstable();
+        println!("open breakers ({}): {:?}", open.len(), &open[..open.len().min(30)]);
+        let dead: Vec<(&str, &str)> = live.net.loads.iter().filter(|l| !l.powered).map(|l| (l.spec.id, l.spec.bus.label())).collect();
+        println!("unpowered loads {} of {}: {:?}", dead.len(), live.net.loads.len(), dead);
+        for b in super::ALL_BUS_IDS {
+            let p: f64 = live.net.loads.iter().filter(|l| l.spec.bus == b).map(|l| l.spec.rated_power_w).sum();
+            let i: f64 = live.net.loads.iter().filter(|l| l.spec.bus == b).map(|l| l.current_a).sum();
+            println!("{:>16} = {:8.2} V  rated {:9.0} W  I {:8.1} A", b.label(), live.net.bus(b).voltage, p, i);
+        }
+        for c in &live.net.contactors {
+            println!("contactor {:>18} cmd {} closed {} -> {}", c.id, c.commanded_closed, c.closed, c.to.label());
+        }
+        let mut top: Vec<(&str, f64, f64)> = live.net.loads.iter().filter(|l| l.spec.bus == BusId::DcEss).map(|l| (l.spec.id, l.current_a, l.spec.rated_power_w)).collect();
+        top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        println!("DC_ESS top loads {:?}", &top[..top.len().min(8)]);
+    }
+
+    #[test]
+    fn nothing_produces_a_nan_at_rest_or_at_zero_dt() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let truth = Truth { dt_s: 0.0, ..Truth::default() };
+        let published = run(&mut live, &truth, &Faults::default(), 3);
+        for (name, v) in &published {
+            assert!(v.is_finite(), "{name} is {v}");
+        }
+    }
+}

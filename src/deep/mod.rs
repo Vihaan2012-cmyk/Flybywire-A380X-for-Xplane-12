@@ -17,6 +17,10 @@ pub mod gear_structure;
 pub mod hydraulics;
 pub mod integration;
 pub mod live;
+/// The plugin's own side of `live`: filling `Truth`, snapshotting `Faults`
+/// and turning a published name into a `Vars` write. Kept out of `live`
+/// itself so the contract stays free of `crate::Vars`/X-Plane.
+pub mod plugin;
 pub mod pneumatic_ducts;
 pub mod sensors;
 pub mod thermal_zones;

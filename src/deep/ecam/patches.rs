@@ -19,6 +19,19 @@ use crate::js::msfs::SourcePatch;
 
 const EWD: &str = "/Pages/VCockpit/Instruments/A380X/EWD/ewd.js";
 const SYSTEMS_HOST: &str = "/Pages/VCockpit/Instruments/A380X/SystemsHost/SystemsHost.js";
+/// The STATUS page (`panel.cfg` VCockpit04 `htmlgauge01`,
+/// `A380X/SDv2/sdv2.html`). This, not `SystemsHost.js`, is where an INOP
+/// SYS or STATUS "INFO" id becomes text: `FwsCore` publishes only the
+/// *keys* over the bus (`inopSysAllPhasesKeys`/`informationKeys`,
+/// `SystemsHost.js:179593-179610`) and `sdv2.js` resolves each one against
+/// its own `EcamInopSys`/`EcamInfos` (`sdv2.js:68632`, `:68650`, `:68653`,
+/// `:68677`). `SystemsHost.js` carries its own copies of both dicts but
+/// never reads either (`grep -c 'EcamInopSys' SystemsHost.js` = 1, the
+/// declaration), so merging into them there would display nothing -- see
+/// this module's `a_status_id_is_merged_where_it_is_actually_resolved`
+/// test and the note in `docs/deep/ecam_bridge.md`'s section 3, which
+/// this contradicts.
+const SDV2: &str = "/Pages/VCockpit/Instruments/A380X/SDv2/sdv2.js";
 
 /// Both `EWD.js` and `SystemsHost.js` hold their own compiled copy of
 /// `EcamAbnormalSensedProcedures` (each bundle inlines the shared TS
@@ -29,17 +42,20 @@ const SYSTEMS_HOST: &str = "/Pages/VCockpit/Instruments/A380X/SystemsHost/System
 /// line reaches every consumer in that bundle, including the alias.
 const PROC_SPREAD_FIND: &str = "  var EcamAbnormalSensedProcedures = __spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues({}, EcamAbnormalSensedAta212223), EcamAbnormalSensedAta24), EcamAbnormalSensedAta26), EcamAbnormalSensedAta27), EcamAbnormalSensedAta28), EcamAbnormalSensedAta2930), EcamAbnormalSensedAta313233), EcamAbnormalSensedAta34), EcamAbnormalSensedAta353642), EcamAbnormalSensedAta46495256), EcamAbnormalSensedAta70), EcamAbnormalSensedAta80Rest), EcamAbnormalSecondaryFailures);";
 
-/// The end of `SystemsHost.js`'s `EcamInopSys` dict (`var EcamInopSys =
-/// {...}`, plain id->text, read only while `FwsCore` resolves an
-/// `inopSysAllPhases()` key to display text before publishing it -- not
-/// needed in `EWD.js`/`SDv2.js`, neither of which reference `EcamInopSys`
-/// at all in this build).
+/// The end of `sdv2.js`'s `EcamInopSys` dict (`var EcamInopSys = {...}`,
+/// plain id->text): what the STATUS page's INOP SYS columns resolve each
+/// key the FWS publishes against (`sdv2.js:68650`/`:68653`/`:68677`).
+/// Occurs exactly once in `sdv2.js` (and once in `SystemsHost.js`, whose
+/// copy nothing reads -- see [`SDV2`]).
 const INOP_END_FIND: &str = "    700300003: \"\\x1B<4mENG 2+3 REVERSERs\"\n  };";
 
-/// The end of `SystemsHost.js`'s `EcamMemos` dict, same reasoning as
-/// `INOP_END_FIND` for STATUS-page "INFO" lines (`.status_line(...)`,
-/// `EwdAbnormalItem.info`, `FwsCore.ts:5714`).
-const MEMOS_END_FIND: &str = "    \"709000001\": \"\\x1B<3mIGNITION\"\n  };";
+/// The end of `sdv2.js`'s `EcamInfos` dict: what the STATUS page's "INFO"
+/// block resolves each `informationKeys` entry against (`sdv2.js:68632`),
+/// which is where an alert's `.status_line(...)` (`EwdAbnormalItem.info`)
+/// ends up. **Not** `EcamMemos`: that dict is the EWD/PFD memo list
+/// (`ewd.js:69005`, `pfd.js`), a different thing entirely, and `sdv2.js`
+/// does not reference it at all.
+const INFOS_END_FIND: &str = "    800200005: \"\\x1B<3mNO BRAKED PIVOT TURN\"\n  };";
 
 /// The very first line of `FwsCore.update(_deltaTime)`
 /// (`fwsUpdateThrottler` is declared and used only on `FwsCore`, so this
@@ -63,25 +79,28 @@ fn proc_patch(path: &str, replace: String) -> SourcePatch {
     }
 }
 
-/// Builds every `SourcePatch` for one set of registered alerts: one for
-/// `EWD.js`'s copy of `EcamAbnormalSensedProcedures`, and four for
-/// `SystemsHost.js` (the same procedures merge, `EcamInopSys`, `EcamMemos`,
-/// and the `FwsCore.update()` install/step). Empty input still returns all
-/// five, each merging in an empty object (`Object.assign(x, {})`) or
-/// installing an empty alert array, which is a harmless no-op -- so wiring
-/// this in costs nothing before any area has registered an alert.
+/// Builds every `SourcePatch` for one set of registered alerts: the
+/// procedures merge for each of the two bundles that hold their own copy
+/// of `EcamAbnormalSensedProcedures` (`EWD.js` renders the procedure,
+/// `SystemsHost.js` reads `items[i].sensed` while masking
+/// `whichItemsChecked`), the STATUS page's two text dicts in `sdv2.js`
+/// (`EcamInopSys`, `EcamInfos`), and the `FwsCore.update()` install/step
+/// in `SystemsHost.js`. Empty input still returns all five, each merging
+/// in an empty object (`Object.assign(x, {})`) or installing an empty
+/// alert array, which is a harmless no-op -- so wiring this in costs
+/// nothing before any area has registered an alert.
 pub fn source_patches(alerts: &[EcamAlert]) -> Vec<SourcePatch> {
     let assigned = ids::assign(alerts);
     let procedures_merge = codegen::procedures_merge_js(&assigned);
     let inop_merge = codegen::inop_merge_js(&assigned);
-    let memos_merge = codegen::info_merge_js(&assigned);
+    let infos_merge = codegen::info_merge_js(&assigned);
     let alerts_array = codegen::alerts_js_array(&assigned);
 
     let proc_replace = format!("{PROC_SPREAD_FIND}\n  Object.assign(EcamAbnormalSensedProcedures, {procedures_merge});");
 
     let inop_replace = format!("{INOP_END_FIND}\n  Object.assign(EcamInopSys, {inop_merge});");
 
-    let memos_replace = format!("{MEMOS_END_FIND}\n  Object.assign(EcamMemos, {memos_merge});");
+    let infos_replace = format!("{INFOS_END_FIND}\n  Object.assign(EcamInfos, {infos_merge});");
 
     // Guarded to run once per FwsCore instance: `SHIM_JS` defines
     // `installDeepEcam` (idempotent to redefine, but there is no reason to
@@ -98,16 +117,16 @@ pub fn source_patches(alerts: &[EcamAlert]) -> Vec<SourcePatch> {
         proc_patch(EWD, proc_replace.clone()),
         proc_patch(SYSTEMS_HOST, proc_replace),
         SourcePatch {
-            path: SYSTEMS_HOST.to_string(),
+            path: SDV2.to_string(),
             find: INOP_END_FIND.to_string(),
             replace: inop_replace,
-            reason: "deep ECAM bridge: merge injected alerts' INOP SYS text into EcamInopSys (docs/deep/ecam_bridge.md)".to_string(),
+            reason: "deep ECAM bridge: merge injected alerts' INOP SYS text into the STATUS page's EcamInopSys (docs/deep/ecam_bridge.md)".to_string(),
         },
         SourcePatch {
-            path: SYSTEMS_HOST.to_string(),
-            find: MEMOS_END_FIND.to_string(),
-            replace: memos_replace,
-            reason: "deep ECAM bridge: merge injected alerts' STATUS text into EcamMemos (docs/deep/ecam_bridge.md)".to_string(),
+            path: SDV2.to_string(),
+            find: INFOS_END_FIND.to_string(),
+            replace: infos_replace,
+            reason: "deep ECAM bridge: merge injected alerts' STATUS INFO text into the STATUS page's EcamInfos (docs/deep/ecam_bridge.md)".to_string(),
         },
         SourcePatch {
             path: SYSTEMS_HOST.to_string(),
@@ -132,7 +151,53 @@ mod tests {
         let patches = source_patches(&sample_alerts());
         assert_eq!(patches.len(), 5);
         assert_eq!(patches.iter().filter(|p| p.path == EWD).count(), 1);
-        assert_eq!(patches.iter().filter(|p| p.path == SYSTEMS_HOST).count(), 4);
+        assert_eq!(patches.iter().filter(|p| p.path == SYSTEMS_HOST).count(), 2);
+        assert_eq!(patches.iter().filter(|p| p.path == SDV2).count(), 2);
+    }
+
+    /// The development build every `find` above was copied from, the same
+    /// tree `ecam_patches.rs` targets. Absent on a machine that has not
+    /// built FlyByWire, which is why the test below skips rather than
+    /// fails there (`display/tests.rs`'s `have_package` does the same).
+    const BUILT_HTML_UI: &str = r"D:\fbw-aircraft\fbw-a380x\out\flybywire-aircraft-a380-842\html_ui";
+
+    #[test]
+    fn every_anchor_occurs_exactly_once_in_the_file_it_patches() {
+        // `js/msfs/mod.rs`'s `read_file` applies a patch only when its
+        // `find` matches exactly once, and logs an error and runs the file
+        // unchanged otherwise -- a silent no-op on the aircraft. Checking
+        // it here is the difference between finding that out in a test and
+        // finding it out by an alert never appearing.
+        let root = std::path::Path::new(BUILT_HTML_UI);
+        if !root.join("Pages/VCockpit/Instruments/A380X/SystemsHost/SystemsHost.js").is_file() {
+            return;
+        }
+        for p in source_patches(&sample_alerts()) {
+            let file = root.join(p.path.trim_start_matches('/'));
+            let text = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+            assert_eq!(text.matches(p.find.as_str()).count(), 1, "{} ({}): anchor must occur exactly once", p.path, p.reason);
+        }
+    }
+
+    #[test]
+    fn a_status_id_is_merged_where_it_is_actually_resolved() {
+        // `FwsCore` publishes INOP SYS and STATUS "INFO" as bare ids and
+        // the STATUS page (sdv2.js) is the only bundle in this build that
+        // turns one into text -- `SystemsHost.js` holds its own copies of
+        // `EcamInopSys`/`EcamInfos` and never reads either. Merging into
+        // the wrong bundle costs nothing at load and shows nothing on the
+        // aircraft, which is exactly the kind of silence a test has to
+        // catch.
+        let patches = source_patches(&sample_alerts());
+        let inop = patches.iter().find(|p| p.find == INOP_END_FIND).expect("the INOP SYS merge exists");
+        assert_eq!(inop.path, SDV2);
+        assert!(inop.replace.contains("Object.assign(EcamInopSys,"));
+        let infos = patches.iter().find(|p| p.find == INFOS_END_FIND).expect("the STATUS INFO merge exists");
+        assert_eq!(infos.path, SDV2);
+        assert!(infos.replace.contains("Object.assign(EcamInfos,"));
+        // EcamMemos is the EWD/PFD memo list, not the STATUS page: nothing
+        // this bridge emits may touch it.
+        assert!(patches.iter().all(|p| !p.replace.contains("EcamMemos")), "the STATUS lines are EcamInfos, not EcamMemos");
     }
 
     #[test]
@@ -155,7 +220,7 @@ mod tests {
             if p.find == update_find {
                 assert!(p.replace.contains("var __deepEcamAlerts = [];"), "an empty alert list must install an empty array: {}", p.replace);
             } else {
-                assert!(p.replace.ends_with("Object.assign(EcamAbnormalSensedProcedures, {});") || p.replace.ends_with("Object.assign(EcamInopSys, {});") || p.replace.ends_with("Object.assign(EcamMemos, {});"), "an empty alert list must merge an empty object: {}", p.replace);
+                assert!(p.replace.ends_with("Object.assign(EcamAbnormalSensedProcedures, {});") || p.replace.ends_with("Object.assign(EcamInopSys, {});") || p.replace.ends_with("Object.assign(EcamInfos, {});"), "an empty alert list must merge an empty object: {}", p.replace);
             }
         }
     }

@@ -4,30 +4,57 @@
 
 use crate::deep::api::*;
 
+/// Every failure id this area registers, by name, so `live.rs` can consume
+/// them without re-deriving the numbers (and so a renumbering here cannot
+/// silently detach a live fault input from its catalogue entry).
+pub mod ids {
+    use crate::deep::api::{failure_id, Area};
+
+    const ATA: u16 = 49;
+
+    pub const COMPRESSOR_EROSION: u64 = failure_id(Area::Apu, ATA, 1);
+    pub const TURBINE_DAMAGE: u64 = failure_id(Area::Apu, ATA, 2);
+    pub const LOAD_COMPRESSOR_EROSION: u64 = failure_id(Area::Apu, ATA, 3);
+    pub const IGV_JAM: u64 = failure_id(Area::Apu, ATA, 4);
+    pub const SCV_JAM: u64 = failure_id(Area::Apu, ATA, 5);
+    pub const STARTER_DEGRADATION: u64 = failure_id(Area::Apu, ATA, 6);
+    pub const IGNITER_FAILURE: u64 = failure_id(Area::Apu, ATA, 7);
+    pub const FCU_FAULT: u64 = failure_id(Area::Apu, ATA, 8);
+    pub const SPEED_SENSOR_FAULT: u64 = failure_id(Area::Apu, ATA, 9);
+    pub const OIL_LEAK: u64 = failure_id(Area::Apu, ATA, 10);
+    pub const INLET_DOOR_JAM: u64 = failure_id(Area::Apu, ATA, 11);
+    pub const GEN1_WEAR: u64 = failure_id(Area::Apu, ATA, 12);
+    pub const GEN1_OVERLOAD: u64 = failure_id(Area::Apu, ATA, 13);
+    pub const GEN2_WEAR: u64 = failure_id(Area::Apu, ATA, 14);
+    pub const GEN2_OVERLOAD: u64 = failure_id(Area::Apu, ATA, 15);
+    pub const EGT_SENSOR_FAULT: u64 = failure_id(Area::Apu, ATA, 16);
+    pub const FIRE_LOOP_FAILURE: u64 = failure_id(Area::Apu, ATA, 17);
+    pub const FIRE_SQUIB_FAILURE: u64 = failure_id(Area::Apu, ATA, 18);
+}
+
 pub fn register(r: &mut Registry) {
     const ATA: u16 = 49;
-    let fid = |n: u16| failure_id(Area::Apu, ATA, n);
 
     // ---- Failures ------------------------------------------------------
 
-    let compressor_erosion = fid(1);
-    let turbine_damage = fid(2);
-    let load_compressor_erosion = fid(3);
-    let igv_jam = fid(4);
-    let scv_jam = fid(5);
-    let starter_degradation = fid(6);
-    let igniter_failure = fid(7);
-    let fcu_fault = fid(8);
-    let speed_sensor_fault = fid(9);
-    let oil_leak = fid(10);
-    let inlet_door_jam = fid(11);
-    let gen1_wear = fid(12);
-    let gen1_overload = fid(13);
-    let gen2_wear = fid(14);
-    let gen2_overload = fid(15);
-    let egt_sensor_fault = fid(16);
-    let fire_loop_failure = fid(17);
-    let fire_squib_failure = fid(18);
+    let compressor_erosion = ids::COMPRESSOR_EROSION;
+    let turbine_damage = ids::TURBINE_DAMAGE;
+    let load_compressor_erosion = ids::LOAD_COMPRESSOR_EROSION;
+    let igv_jam = ids::IGV_JAM;
+    let scv_jam = ids::SCV_JAM;
+    let starter_degradation = ids::STARTER_DEGRADATION;
+    let igniter_failure = ids::IGNITER_FAILURE;
+    let fcu_fault = ids::FCU_FAULT;
+    let speed_sensor_fault = ids::SPEED_SENSOR_FAULT;
+    let oil_leak = ids::OIL_LEAK;
+    let inlet_door_jam = ids::INLET_DOOR_JAM;
+    let gen1_wear = ids::GEN1_WEAR;
+    let gen1_overload = ids::GEN1_OVERLOAD;
+    let gen2_wear = ids::GEN2_WEAR;
+    let gen2_overload = ids::GEN2_OVERLOAD;
+    let egt_sensor_fault = ids::EGT_SENSOR_FAULT;
+    let fire_loop_failure = ids::FIRE_LOOP_FAILURE;
+    let fire_squib_failure = ids::FIRE_SQUIB_FAILURE;
 
     r.failure(FailureDef {
         id: compressor_erosion,

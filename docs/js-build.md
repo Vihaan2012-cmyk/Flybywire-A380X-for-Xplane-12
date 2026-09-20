@@ -11,12 +11,16 @@ change what it does at runtime instead:
   lines.
 - **A patch file** under `tools/js-build/patches/`, applied to FlyByWire's
   TypeScript *before* their own build runs, for changes too large for a single
-  find/replace (new functions, multi-file changes). None of workstream D's
-  fixes needed this; `tools/js-build/patches/` does not exist yet because
-  nothing has used it. When something does, add the patch files there and a
-  `tools/js-build/apply-patches.sh` that applies them (e.g. via `patch` or
-  `git apply`) against `D:\fbw-aircraft` before the build below runs, and
-  reverts them after (FBW's sources must stay unmodified between runs).
+  find/replace (new functions, multi-file changes). `tools/js-build/patches/`
+  now holds `oit-performance-pages.patch` (docs/oit.md's T.O PERF/LDG PERF
+  work: two new page components and a shared real-data module, too large for
+  a `SourcePatch`), applied and reverted with
+  `tools/js-build/apply-patches.sh {apply,revert}`. Each patch here is a
+  `git diff` taken inside `D:\fbw-aircraft` (new files included via
+  `git add -N` before diffing) and applies with `git apply` from that repo's
+  root; run `apply` before `npm run build-a380x:instruments`, and `revert`
+  once that build has produced `fbw-a380x/out/.../html_ui` (FBW's sources
+  must stay unmodified between runs — never left applied).
 
 ## Where the build comes from
 

@@ -68,6 +68,21 @@ const MAGNETIC_TRIP_MULTIPLE: f64 = 10.0;
 /// categorically cannot do, reflected here by gating it on `kind == Sspc`.
 const ARC_FAULT_DI_DT_A_PER_S: f64 = 500.0;
 
+/// How long the arc signature has to persist before the SSPC acts on it, s.
+///
+/// A real arc-fault detector never trips on a single sample: an ordinary
+/// load switching on produces exactly the same one-sample current step as
+/// an arc strike (a 10 A circuit energising inside one 30 Hz simulation
+/// frame is a 300 A/s slope by itself), so every published arc-fault
+/// protocol requires the signature to be present across a number of line
+/// half-cycles before it counts -- UL 1699's own arc-fault test protocol is
+/// written in exactly those terms, and turn-on blanking is standard
+/// practice in the aerospace SSPC literature this module cites. GENERIC
+/// 0.1 s: at the A380's 360-800 Hz line frequency that is 70-160 half
+/// cycles, the same order the published protocols ask for, and long enough
+/// that no single energisation transient can ever reach it.
+const ARC_FAULT_CONFIRM_S: f64 = 0.1;
+
 /// SSPC time constant for the emulated I^2t curve: a microprocessor-timed
 /// curve is deliberately tighter/more repeatable than a bimetal's
 /// mechanical one (a real, documented SSPC advantage -- precise, consistent
@@ -77,6 +92,23 @@ const ARC_FAULT_DI_DT_A_PER_S: f64 = 500.0;
 /// datasheet.
 const SSPC_TAU_S: f64 = 8.0;
 const THERMAL_TAU_S: f64 = 20.0;
+
+/// How much tighter the SSPC's own emulated I^2t curve is set than a
+/// bimetal's, as a multiplier on the rate its accumulator fills at the same
+/// overload. A bimetal breaker is manufactured to a wide trip-time
+/// tolerance band and has to be set generously so the slow end of that band
+/// still protects the wire; a microprocessor-timed curve has no such band
+/// and is set close to the wire's real withstand, so it clears the same
+/// overload sooner (the documented SSPC advantage this module's own
+/// `an_sspc_trips_faster_than_a_thermal_breaker_at_the_same_overload`
+/// asserts). GENERIC 2x: the published tolerance band for this class of
+/// thermal part is roughly a factor of two wide.
+///
+/// Kept separate from [`SSPC_TAU_S`] on purpose: `tau` is the element's own
+/// cooling time constant, a physical property, and an electronic curve
+/// being *set tighter* is not the same statement as it *remembering
+/// longer*.
+const SSPC_CURVE_GAIN: f64 = 2.0;
 
 /// A real SSPC's own microprocessor logic latches into a maintenance-only
 /// lockout after repeated trips in a short window, rather than letting the
@@ -150,6 +182,11 @@ pub struct Breaker {
     rated_a: f64,
     heat: f64,
     prev_current_a: f64,
+    /// How long the arc-fault signature has been continuously present, s
+    /// (SSPC only). Reset the moment the signature goes away, so only a
+    /// sustained arc -- not a load switching on -- ever reaches
+    /// [`ARC_FAULT_CONFIRM_S`].
+    arc_signature_s: f64,
     pub closed: bool,
     pub trip_cause: TripCause,
     /// Running simulation clock this instance has been ticked for, s --
@@ -165,7 +202,7 @@ pub struct Breaker {
 
 impl Breaker {
     pub fn new(kind: BreakerKind, rated_a: f64) -> Self {
-        Self { kind, rated_a, heat: 0.0, prev_current_a: 0.0, closed: true, trip_cause: TripCause::None, elapsed_s: 0.0, trip_times_s: Vec::new(), locked_out: false }
+        Self { kind, rated_a, heat: 0.0, prev_current_a: 0.0, arc_signature_s: 0.0, closed: true, trip_cause: TripCause::None, elapsed_s: 0.0, trip_times_s: Vec::new(), locked_out: false }
     }
 
     /// Manual reset at the breaker's own physical panel position: always
@@ -182,6 +219,7 @@ impl Breaker {
         }
         self.closed = true;
         self.heat = 0.0;
+        self.arc_signature_s = 0.0;
         self.trip_cause = TripCause::None;
         Ok(())
     }
@@ -326,7 +364,9 @@ impl Breaker {
             return self.trip(TripCause::Magnetic);
         }
 
-        if self.kind == BreakerKind::Sspc && di_dt > ARC_FAULT_DI_DT_A_PER_S && current_a > effective_rated_a * 0.5 {
+        let arc_signature = self.kind == BreakerKind::Sspc && di_dt > ARC_FAULT_DI_DT_A_PER_S && current_a > effective_rated_a * 0.5;
+        self.arc_signature_s = if arc_signature { self.arc_signature_s + dt } else { 0.0 };
+        if self.arc_signature_s >= ARC_FAULT_CONFIRM_S {
             return self.trip(TripCause::ArcFault);
         }
 
@@ -336,8 +376,8 @@ impl Breaker {
         // thermal breaker (and of an SSPC's own emulated thermal model,
         // which real parts run for exactly this reason: compatibility with
         // downstream wiring's own I^2t withstand rating).
-        let tau_s = if self.kind == BreakerKind::Thermal { THERMAL_TAU_S } else { SSPC_TAU_S };
-        let heat_in = if ratio > 1.0 { ratio * ratio - 1.0 } else { 0.0 };
+        let (tau_s, gain) = if self.kind == BreakerKind::Thermal { (THERMAL_TAU_S, 1.0) } else { (SSPC_TAU_S, SSPC_CURVE_GAIN) };
+        let heat_in = if ratio > 1.0 { gain * (ratio * ratio - 1.0) } else { 0.0 };
         let cool = self.heat / tau_s;
         self.heat = (self.heat + (heat_in - cool) * dt).max(0.0);
 
@@ -464,20 +504,55 @@ mod tests {
     #[test]
     fn an_sspc_trips_on_a_fast_current_step_an_arc_fault_signature_even_below_its_thermal_curve() {
         let mut b = Breaker::new(BreakerKind::Sspc, 10.0);
-        // One steady tick to establish a baseline, then a very fast step.
+        // One steady tick to establish a baseline, then a chattering arc:
+        // the current slams between 2 A and 9 A every millisecond, which is
+        // the signature, held long enough to clear the confirmation window.
         assert!(!b.step(2.0, REFERENCE_AMBIENT_C, BreakerFaults::default(), 0.01));
-        let tripped = b.step(9.0, REFERENCE_AMBIENT_C, BreakerFaults::default(), 0.001);
+        let mut tripped = false;
+        for i in 0..1_000 {
+            // Both levels stay above half rated (the detector's own
+            // enable threshold) and below rated, so nothing here is a
+            // thermal overload -- only the slope between them.
+            let i_a = if i % 2 == 0 { 9.0 } else { 6.0 };
+            if b.step(i_a, REFERENCE_AMBIENT_C, BreakerFaults::default(), 0.001) {
+                tripped = true;
+                break;
+            }
+        }
         assert!(tripped);
         assert_eq!(b.trip_cause, TripCause::ArcFault);
+    }
+
+    #[test]
+    fn an_ordinary_load_switching_on_is_not_an_arc_fault() {
+        // A 10 A circuit energising with a 3x motor inrush inside one 30 Hz
+        // frame: a 900 A/s slope, far past the raw di/dt threshold, but one
+        // sample long. A real breaker does not open on that, and neither
+        // does this one.
+        let mut b = Breaker::new(BreakerKind::Sspc, 10.0);
+        assert!(!b.step(0.0, REFERENCE_AMBIENT_C, BreakerFaults::default(), 1.0 / 30.0));
+        // 0 -> 20 A inside one 30 Hz frame is a 600 A/s slope, past the raw
+        // di/dt threshold, but one sample long.
+        assert!(!b.step(20.0, REFERENCE_AMBIENT_C, BreakerFaults::default(), 1.0 / 30.0));
+        // ... and the inrush then decays smoothly back under rated, so
+        // neither the arc channel nor the thermal one ever accumulates.
+        let mut i_a = 20.0;
+        for _ in 0..120 {
+            i_a = 8.0 + (i_a - 8.0) * 0.5;
+            assert!(!b.step(i_a, REFERENCE_AMBIENT_C, BreakerFaults::default(), 1.0 / 30.0));
+        }
+        assert_eq!(b.trip_cause, TripCause::None);
+        assert!(b.closed);
     }
 
     #[test]
     fn a_thermal_breaker_never_detects_an_arc_fault_it_has_no_such_capability() {
         let mut b = Breaker::new(BreakerKind::Thermal, 10.0);
         assert!(!b.step(2.0, REFERENCE_AMBIENT_C, BreakerFaults::default(), 0.01));
-        let tripped = b.step(9.0, REFERENCE_AMBIENT_C, BreakerFaults::default(), 0.001);
-        // May or may not trip thermally this tick, but it must never be ArcFault.
-        if tripped {
+        // The same chattering arc that trips an SSPC above.
+        for i in 0..1_000 {
+            let i_a = if i % 2 == 0 { 9.0 } else { 6.0 };
+            b.step(i_a, REFERENCE_AMBIENT_C, BreakerFaults::default(), 0.001);
             assert_ne!(b.trip_cause, TripCause::ArcFault);
         }
     }

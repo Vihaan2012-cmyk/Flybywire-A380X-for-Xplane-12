@@ -37,6 +37,7 @@ use super::power_section::{self, PowerSection, PowerSectionFaults};
 use super::start_envelope::{self, FlightCondition};
 use super::starter::{self, StartPhase, Starter};
 
+#[derive(Clone, Copy, Debug)]
 pub struct Inputs {
     pub dt_s: f64,
     pub ambient_pressure_pa: f64,
@@ -90,6 +91,7 @@ pub struct Apu {
     power_section: PowerSection,
     load_compressor: LoadCompressor,
     governor: Governor,
+    egt_limiter: governor::EgtLimiter,
     starter: Starter,
     generators: Generators,
     oil: OilSystem,
@@ -110,6 +112,7 @@ impl Apu {
             power_section,
             load_compressor: LoadCompressor::new(),
             governor: Governor::new(max_fuel_flow),
+            egt_limiter: governor::EgtLimiter::new(max_fuel_flow),
             starter: Starter::new(),
             generators: Generators::new(),
             oil: OilSystem::new(ambient_temperature_k),
@@ -127,7 +130,32 @@ impl Apu {
         self.power_section.n_percent()
     }
 
+    /// The whole machine -- gas path, governor, EGT limiter, starter, ECB,
+    /// oil -- is a stiff control loop around a spool whose inertia is
+    /// 0.028 kg*m^2 against torques of order a hundred newton-metres, so
+    /// the caller's `dt` is subdivided the same way `power_section.rs`
+    /// already subdivides its own torque integration and for the same
+    /// reason (`docs/deep/BRIEF.md`: "sub-stepping where stiff"). Without
+    /// it, holding an acceleration-schedule fuel flow for a whole coarse
+    /// frame overshoots governed speed badly; X-Plane really does hand out
+    /// half-second frames after a pause, so this is not a hypothetical.
+    /// At a normal 30-60 Hz frame this is exactly one substep and costs
+    /// nothing.
+    const MAX_CONTROL_SUBSTEP_S: f64 = 0.05;
+
     pub fn step(&mut self, inputs: &Inputs, faults: &super::faults::ApuFaults) -> Outputs {
+        let total_dt = inputs.dt_s.max(0.0);
+        let substeps = (total_dt / Self::MAX_CONTROL_SUBSTEP_S).ceil().max(1.0) as u32;
+        let mut sub = *inputs;
+        sub.dt_s = total_dt / substeps as f64;
+        let mut out = Outputs::default();
+        for _ in 0..substeps {
+            out = self.step_once(&sub, faults);
+        }
+        out
+    }
+
+    fn step_once(&mut self, inputs: &Inputs, faults: &super::faults::ApuFaults) -> Outputs {
         let dt = inputs.dt_s.max(0.0);
         let n_percent = self.power_section.n_percent();
         let omega = self.power_section.omega_rad_s();
@@ -194,12 +222,20 @@ impl Apu {
 
         let egt_limit_c = governor::egt_limit_c(n_for_governor);
         let egt_limit_fuel = governor::egt_limit_fuel_flow_kg_s(
+            self.power_section.calibration(),
             n_for_governor,
-            inputs.ambient_temperature_k,
-            inputs.ambient_pressure_pa,
+            inlet_t_k,
+            inlet_p_pa * (1.0 - inlet_loss.clamp(0.0, 0.5)),
             egt_limit_c,
         );
-        let commanded_fuel = self.governor.step(n_for_governor, running, egt_limit_fuel, dt);
+        // The ECB's own indicated EGT (voted thermocouples, previous tick)
+        // closes the measured-temperature limiter; the governor takes the
+        // lower of that ceiling and the open-loop schedule's, the standard
+        // min-select arrangement (`governor.rs` module docs).
+        let measured_egt_c = ecb_out.egt_indicated_c.unwrap_or(self.power_section.egt_c());
+        let measured_ceiling = self.egt_limiter.step(measured_egt_c, egt_limit_c, running, dt);
+        let commanded_fuel =
+            self.governor.step(n_for_governor, running, egt_limit_fuel.min(measured_ceiling), dt);
         let actual_fuel = self.fuel_control.step(commanded_fuel, solenoid_open, &faults.fuel_control, dt);
 
         let gen1_load = if inputs.gen1_used { inputs.gen1_electrical_load_w } else { 0.0 };

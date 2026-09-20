@@ -60,3 +60,17 @@ switch `CPIOM-A1` attaches through). Final state: clean build, 0 warnings, all 5
 - A second, larger reference topology exercising more of FlyByWire's public CPIOM/IOM table
   (currently 5 of the ~22+8 real modules, chosen to cover every fault/consequence path at least
   once, not to be exhaustive).
+
+- [done] Live system — `live.rs` (`live_system() -> Box<dyn deep::live::Area>`), `mod.rs` — `LiveAvionicsNetwork`
+  owns both AFDX networks (8 switches and all cabling each), every switch port, every end system with its
+  partitions, both avionics bays' fans/valve/thermal node, one overheat supervisor per module, and the reference
+  function monitors. All 159 registered failure ids are consumed, resolved by failure name (`FaultIndex`).
+  Publishes `AFDX_NETWORK_A/B_AVAILABLE`, `AVNCS_MODULE_<name>_AVAILABLE` and `AVNCS_<bay>_AIRFLOW_FRAC` (every var
+  this area's ECAM triggers name) plus bay temperature, per-module overheat trip and pass fraction, and per-function
+  availability/age. Bus allocation (modules across the two DC buses, each bay's two fans across two AC buses) is
+  GENERIC — `Truth` has no avionics load allocation.
+- [fix] `ventilation.rs` — `OverheatTrip::step` approached 1.0 asymptotically and so never satisfied
+  `ModuleFaults::is_available`'s `< 1.0` test: a module baking in an uncooled bay could never actually drop off the
+  network. It now snaps to its target within 1e-6, which is what a latching comparator does.
+- [perf] `graph.rs` — `NetworkGraph` builds each side's adjacency once in `new` instead of rebuilding it inside
+  every path search; a live network re-runs those searches for every virtual link on every frame.

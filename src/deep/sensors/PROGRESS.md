@@ -243,3 +243,14 @@ module's own doc comment for why two exist):
   representative counts since real counts are cabin-configuration-dependent), and pitot/
   static probe position-error cross-coupling between left/right ports on the same system
   (currently modelled as independent ports rather than an averaged pair).
+
+- [done] Live system — `live.rs` (`live_system() -> Box<dyn deep::live::Area>`), `mod.rs` — `LiveSensors` owns the
+  real complement: 4 pitot probes, 8 static ports + 4 averaging lines, 3 AoA vanes, 2 TAT probes, 3 ADRs + the
+  3-way voter, 2 ice detectors, 3 radio altimeters with their tx/rx antennas, 3 GPS receivers with their antennas,
+  4x2 engine N1 speed pickups and the standby OAT probe. Failure ids are resolved from the real registry by
+  (component, model field) — `FaultIndex` — since this area's ids come from a counter, not constants. Publishes
+  `DEEP_ADR_VOTE_DISAGREE`, `DEEP_PITOT_1..4_HEATER_FAILED`, `DEEP_AOA_1..3_JAMMED`, `DEEP_TAT_1..2_HEATER_FAILED`,
+  `DEEP_RA_1..3_VALID`, `DEEP_GPS_1..3_VALID` (every var this area's ECAM triggers name) plus ~60 Study vars.
+  109 of 508 registered failures are consumed; the rest are the discrete instrumentation and the engine sensors
+  `Truth` has no quantity for yet — listed in `live.rs`'s module doc together with the `Truth` fields needed
+  (true AoA, cabin pressure, radio height, satellite visibility, engine N2/N3/TGT/fuel flow/vibration).

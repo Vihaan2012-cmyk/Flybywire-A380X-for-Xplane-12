@@ -33,9 +33,11 @@ const AFTER_DOM: &[(&str, &str)] = &[
 ];
 const DOM_STANDIN: (&str, &str) = ("msfs/dom_standin.js", include_str!("dom_standin.js"));
 
-/// Gauges not run: the EFB and OITs (out of scope), the popup, and WASM
-/// gauges, which are native modules rather than pages.
-pub const EXCLUDED_GAUGES: &[&str] = &["A380X/EFB/", "A380X/OIT/", "A380X/OITlegacy/", "A380X/popup/", "WasmInstrument/"];
+/// Gauges not run: the EFB (out of scope — the app draws its own on that
+/// mesh), the OITs' superseded *legacy* page, the popup, and WASM gauges,
+/// which are native modules rather than pages. The current OIT page
+/// (`A380X/OIT/oit.html`) does run (docs/oit.md).
+pub const EXCLUDED_GAUGES: &[&str] = &["A380X/EFB/", "A380X/OITlegacy/", "A380X/popup/", "WasmInstrument/"];
 
 /// One `htmlgaugeNN` line.
 #[derive(Clone, Debug, PartialEq)]

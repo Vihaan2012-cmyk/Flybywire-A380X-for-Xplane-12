@@ -110,3 +110,17 @@
 - The Vars listed above are still not wired to any real dataref (this workstream stayed self-contained per the
   brief's hard rules); that wiring, plus the runway-friction-condition input for the wheel dynamics, are the next
   most valuable items if continued.
+
+## Live system (deep push, `live.rs`)
+
+- [done] `live.rs` — the area's live instance behind `crate::deep::live::Area`
+  (`live_system() -> Box<dyn Area>`), declared in this directory's `mod.rs`.
+  `tick` drives the real models from `deep::live::Truth` and applies every
+  failure `registry.rs` registers by reading `Faults::get(id)` into the exact
+  `model_field` that entry names; `publish` emits every variable this area's
+  ECAM triggers cite, plus the state behind them for the EFB Study pages.
+  Failure ids are resolved at construction by registering into a throw-away
+  `Registry` and looking each one up by component + `model_field`, so a
+  renumbering in `registry.rs` fails loudly instead of silently unhooking a
+  failure. Inputs `Truth` does not carry yet are collected in one documented
+  `...Commands` struct per area rather than invented.

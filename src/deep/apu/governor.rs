@@ -14,22 +14,24 @@
 //! saturation -- the standard, simple anti-windup technique for a
 //! saturating actuator).
 //!
-//! The EGT-limit fuel schedule below is the acceleration-schedule concept
-//! every real FADEC/fuel control implements: cap the *commanded* fuel flow
-//! before it is ever issued, from a first-order estimate of what EGT it
-//! would produce, rather than issuing an unbounded command and clamping the
-//! symptom afterward. It uses the same isentropic turbine relation
-//! `turbine_flow::expand` uses, solved in reverse for the fuel flow that
-//! reaches the limit -- an *estimate* (it approximates the turbine pressure
-//! ratio a real Stodola solve would only know once the fuel flow itself is
-//! fixed, since that is exactly the unknown being solved for), used only as
-//! a protective ceiling; `power_section.rs`'s own Stodola-consistent chain
-//! is the authoritative physics that actually produces EGT.
+//! Fuel flow is limited two ways, exactly as a real FADEC/ECB limits it,
+//! and the governor takes the lower of the two (min-select):
+//!
+//! * [`egt_limit_fuel_flow_kg_s`] is the open-loop acceleration schedule --
+//!   cap the *commanded* fuel flow before it is ever issued, from what EGT
+//!   it would produce, rather than issuing an unbounded command and
+//!   clamping the symptom afterward. It is solved on
+//!   `power_section::gas_path`, the same chain that actually produces EGT,
+//!   iterated to a Stodola-consistent turbine pressure ratio, so the
+//!   schedule and the physics agree by construction.
+//! * [`EgtLimiter`] closes the same limit on *measured* EGT (the ECB's own
+//!   thermocouples), which is what protects a degraded machine the
+//!   speed-and-inlet-conditions schedule cannot know about.
 
 use super::combustor;
-use super::compressor_map;
 use super::gas;
 use super::params;
+use super::power_section;
 use super::turbine_flow;
 
 pub struct Governor {
@@ -94,7 +96,34 @@ impl Governor {
 /// `params::EGT_START_LIMIT_C` while below `params::SELF_SUSTAINING_N_PERCENT`
 /// (a real start's richer transient fuelling is allowed a higher transient
 /// limit), `params::EGT_RUNNING_LIMIT_C` once self-sustaining and governed.
+///
+/// Solved on the *same* gas path the power section runs
+/// (`power_section::gas_path`), closed on the Stodola-consistent turbine
+/// pressure ratio: guess the pressure ratio, invert the expansion for the
+/// turbine-inlet temperature that lands the turbine *exit* on the limit,
+/// burn for the fuel flow that reaches it, then re-derive the pressure
+/// ratio that fuel flow actually produces through Stodola's ellipse law,
+/// and repeat. The map is a strong contraction (the pressure ratio moves
+/// with the square root of turbine-inlet temperature, the temperature drop
+/// only logarithmically with the pressure ratio), so a fixed small number
+/// of passes converges to well inside a kelvin -- checked in this file's
+/// `the_schedule_lands_on_its_own_egt_limit` test, which runs the
+/// authoritative chain on the fuel flow the schedule returns and asserts it
+/// produces the limit temperature. The earlier first-order stand-in
+/// (`1 + (pr_design - 1) * n_frac`) could not: it over-estimated the
+/// pressure ratio at part speed, which over-estimated the temperature drop
+/// across the turbine and so under-estimated the EGT a given fuel flow
+/// would produce.
+///
+/// The schedule is evaluated on a *healthy* gas path, because a real fuel
+/// control's acceleration schedule is a fixed function of measured speed
+/// and inlet conditions -- it does not know the compressor is eroded. That
+/// is what the separate [`EgtLimiter`], which closes on the ECB's own
+/// thermocouples, is for.
+const SCHEDULE_PASSES: u32 = 5;
+
 pub fn egt_limit_fuel_flow_kg_s(
+    calibration: &power_section::Calibration,
     n_percent: f64,
     ambient_temperature_k: f64,
     ambient_pressure_pa: f64,
@@ -103,45 +132,96 @@ pub fn egt_limit_fuel_flow_kg_s(
     let n_frac = (n_percent / 100.0).max(0.02);
     let t1 = ambient_temperature_k.max(1.0);
     let p1 = ambient_pressure_pa.max(1.0);
-
-    let core_spec = compressor_map::Spec {
-        pr_design: params::CORE_PRESSURE_RATIO_DESIGN,
-        eta_design: params::CORE_COMPRESSOR_EFFICIENCY_DESIGN,
-        mdot_corrected_design_kg_s: params::CORE_MDOT_DESIGN_KG_S,
-        efficiency_falloff: params::CORE_COMPRESSOR_EFFICIENCY_FALLOFF,
-        surge_margin_design_frac: params::CORE_SURGE_MARGIN_DESIGN_FRAC,
-        surge_line_flatness: params::CORE_SURGE_LINE_FLATNESS,
-        choke_flow_multiple: params::CORE_CHOKE_FLOW_MULTIPLE,
-        erosion_efficiency_loss: 0.0,
-    };
-    let compressor = compressor_map::evaluate(
-        &core_spec,
-        t1,
-        p1,
-        n_frac,
-        params::CORE_MDOT_DESIGN_KG_S * n_frac,
-    );
-
-    // First-order estimate of the turbine pressure ratio at this speed
-    // (see module docs for why this is an estimate, not the authoritative
-    // Stodola solve).
-    let pr_design = params::turbine_pressure_ratio_design();
-    let pr_estimate = (1.0 + (pr_design - 1.0) * n_frac).max(1.0 + 1e-6);
-
-    let turbine_spec = turbine_flow::Spec {
-        eta_design: params::TURBINE_EFFICIENCY_DESIGN,
-        efficiency_falloff: params::TURBINE_EFFICIENCY_FALLOFF,
-    };
-    let eta = turbine_flow::efficiency(&turbine_spec, pr_estimate / pr_design);
-
+    let healthy = power_section::PowerSectionFaults::default();
     let limit_k = (limit_c + 273.15).max(t1 + 1.0);
-    let temp_ratio_isentropic =
-        gas::temperature_ratio_from_pressure_ratio(1.0 / pr_estimate, gas::GAMMA_GAS);
-    let drop_fraction = ((1.0 - temp_ratio_isentropic) * eta).clamp(0.0, 0.95);
-    // tt_out = tt4 * (1 - drop_fraction)  =>  tt4 = tt_out / (1 - drop_fraction)
-    let tt4_target = limit_k / (1.0 - drop_fraction);
 
-    combustor::fuel_flow_for_target_tt4_kg_s(compressor.mdot_kg_s, compressor.tt_out_k, tt4_target)
+    // The compressor's own operating point does not depend on the fuel
+    // flow being solved for, so it is evaluated once outside the loop.
+    let probe = power_section::gas_path(calibration, &healthy, t1, p1, n_frac, 0.0);
+    let mdot_air = probe.compressor.mdot_kg_s;
+    let tt3 = probe.compressor.tt_out_k;
+    let pr_design = calibration.turbine_pressure_ratio_design.max(1.0 + 1e-6);
+
+    let mut pressure_ratio = pr_design;
+    let mut fuel = 0.0;
+    for _ in 0..SCHEDULE_PASSES {
+        let eta = turbine_flow::efficiency(&calibration.turbine_spec, pressure_ratio / pr_design);
+        let temp_ratio_isentropic =
+            gas::temperature_ratio_from_pressure_ratio(1.0 / pressure_ratio, gas::GAMMA_GAS);
+        let drop_fraction = ((1.0 - temp_ratio_isentropic) * eta).clamp(0.0, 0.95);
+        // tt_out = tt4 * (1 - drop_fraction)  =>  tt4 = tt_out / (1 - drop_fraction)
+        let tt4_target = limit_k / (1.0 - drop_fraction);
+        fuel = combustor::fuel_flow_for_target_tt4_kg_s(mdot_air, tt3, tt4_target);
+        pressure_ratio = power_section::gas_path(calibration, &healthy, t1, p1, n_frac, fuel)
+            .turbine_pressure_ratio
+            .max(1.0 + 1e-6);
+    }
+    fuel.max(0.0)
+}
+
+/// The EGT limiter a real FADEC/ECB runs alongside the open-loop
+/// acceleration schedule: it has thermocouples, so it does not have to
+/// trust a schedule to know how hot the turbine actually is. It trims a
+/// fuel-flow ceiling down whenever *measured* EGT is above the applicable
+/// limit and lets it recover to unrestricted when it is below, and the
+/// governor takes the lower of this ceiling and the schedule's
+/// (min-select, the standard arrangement).
+///
+/// This is what makes a degraded machine behave: an eroded compressor or a
+/// damaged turbine runs hotter on the same fuel, the schedule (which is a
+/// function of speed and inlet conditions only) does not know that, and
+/// without a measured-temperature loop nothing would stop the governor
+/// burning whatever it takes to hold 100% N until the hard EGT trip fires.
+/// With it the machine droops off governed speed instead, which is what a
+/// real APU does.
+pub struct EgtLimiter {
+    ceiling_kg_s: f64,
+    max_output_kg_s: f64,
+    gain_kg_s_per_k_s: f64,
+}
+
+impl EgtLimiter {
+    /// GENERIC gain, stated as an authority rather than fitted: a sustained
+    /// 100 K overtemperature walks the ceiling across the whole metering
+    /// range in 2 s. That is slow compared with the speed governor (so the
+    /// two loops do not fight), slow enough to stay stable even at the
+    /// coarsest tick this model is asked to run at, and fast compared with
+    /// how long the turbine can sit above its running limit before the hard
+    /// trip at `params::EGT_TRIP_C`, 200 K higher.
+    const AUTHORITY_BAND_K: f64 = 100.0;
+    const AUTHORITY_TIME_S: f64 = 2.0;
+
+    pub fn new(max_output_kg_s: f64) -> Self {
+        let max = max_output_kg_s.max(0.0);
+        Self {
+            ceiling_kg_s: max,
+            max_output_kg_s: max,
+            gain_kg_s_per_k_s: max / (Self::AUTHORITY_BAND_K * Self::AUTHORITY_TIME_S),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.ceiling_kg_s = self.max_output_kg_s;
+    }
+
+    pub fn ceiling_kg_s(&self) -> f64 {
+        self.ceiling_kg_s
+    }
+
+    /// `measured_egt_c` is the ECB's own indicated EGT (its voted
+    /// thermocouples -- a biased or failed sensor therefore biases this
+    /// loop exactly as it would a real one), `limit_c` the applicable
+    /// limit.
+    pub fn step(&mut self, measured_egt_c: f64, limit_c: f64, running: bool, dt_s: f64) -> f64 {
+        if !running {
+            self.reset();
+            return self.ceiling_kg_s;
+        }
+        let error_k = limit_c - measured_egt_c;
+        self.ceiling_kg_s = (self.ceiling_kg_s + self.gain_kg_s_per_k_s * error_k * dt_s.max(0.0))
+            .clamp(0.0, self.max_output_kg_s);
+        self.ceiling_kg_s
+    }
 }
 
 /// Picks the applicable EGT limit for the current speed (see module docs).
@@ -156,6 +236,10 @@ pub fn egt_limit_c(n_percent: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cal() -> power_section::Calibration {
+        power_section::calibrate()
+    }
 
     #[test]
     fn not_running_commands_zero_fuel_and_resets_the_integral() {
@@ -205,8 +289,8 @@ mod tests {
 
     #[test]
     fn the_egt_limit_schedule_allows_more_fuel_as_speed_rises_toward_governed() {
-        let low = egt_limit_fuel_flow_kg_s(20.0, 288.15, 101_325.0, params::EGT_START_LIMIT_C);
-        let high = egt_limit_fuel_flow_kg_s(90.0, 288.15, 101_325.0, params::EGT_START_LIMIT_C);
+        let low = egt_limit_fuel_flow_kg_s(&cal(), 20.0, 288.15, 101_325.0, params::EGT_START_LIMIT_C);
+        let high = egt_limit_fuel_flow_kg_s(&cal(), 90.0, 288.15, 101_325.0, params::EGT_START_LIMIT_C);
         assert!(high > low, "{low} {high}");
         assert!(low.is_finite() && high.is_finite());
     }
@@ -214,9 +298,9 @@ mod tests {
     #[test]
     fn the_running_limit_is_stricter_than_the_start_limit_at_the_same_speed() {
         let start_allowed =
-            egt_limit_fuel_flow_kg_s(90.0, 288.15, 101_325.0, params::EGT_START_LIMIT_C);
+            egt_limit_fuel_flow_kg_s(&cal(), 90.0, 288.15, 101_325.0, params::EGT_START_LIMIT_C);
         let running_allowed =
-            egt_limit_fuel_flow_kg_s(90.0, 288.15, 101_325.0, params::EGT_RUNNING_LIMIT_C);
+            egt_limit_fuel_flow_kg_s(&cal(), 90.0, 288.15, 101_325.0, params::EGT_RUNNING_LIMIT_C);
         assert!(running_allowed < start_allowed);
     }
 
@@ -226,9 +310,67 @@ mod tests {
         assert_eq!(egt_limit_c(params::SELF_SUSTAINING_N_PERCENT + 1.0), params::EGT_RUNNING_LIMIT_C);
     }
 
+    /// The point of solving the schedule on `power_section::gas_path`: run
+    /// the authoritative chain on the fuel flow the schedule hands back and
+    /// it must actually land on the limit temperature. The first-order
+    /// pressure-ratio stand-in this replaced missed it by tens of kelvin at
+    /// part speed, in the unconservative direction.
+    #[test]
+    fn the_schedule_lands_on_its_own_egt_limit() {
+        let cal = cal();
+        let healthy = power_section::PowerSectionFaults::default();
+        for n in [30.0, 50.0, 70.0, 85.0, 100.0f64] {
+            for (t1, p1) in [(288.15, 101_325.0), (243.15, 70_000.0), (313.15, 101_325.0)] {
+                let limit_c = egt_limit_c(n);
+                let fuel = egt_limit_fuel_flow_kg_s(&cal, n, t1, p1, limit_c);
+                let egt_k = power_section::gas_path(&cal, &healthy, t1, p1, n / 100.0, fuel)
+                    .expansion
+                    .tt_out_k;
+                assert!(
+                    (egt_k - 273.15 - limit_c).abs() < 1.0,
+                    "n={n} t1={t1} p1={p1}: schedule fuel {fuel:.6} kg/s gives {:.1} C, limit {limit_c} C",
+                    egt_k - 273.15
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cold_day_allows_more_fuel_before_the_same_egt_limit_than_a_hot_one() {
+        let cal = cal();
+        let cold = egt_limit_fuel_flow_kg_s(&cal, 100.0, 253.15, 101_325.0, params::EGT_RUNNING_LIMIT_C);
+        let hot = egt_limit_fuel_flow_kg_s(&cal, 100.0, 313.15, 101_325.0, params::EGT_RUNNING_LIMIT_C);
+        assert!(cold > hot, "cold {cold} hot {hot}");
+    }
+
+    #[test]
+    fn the_measured_egt_limiter_is_wide_open_below_the_limit_and_closes_above_it() {
+        let mut l = EgtLimiter::new(0.1);
+        assert_eq!(l.ceiling_kg_s(), 0.1);
+        // Comfortably cool: it stays at the metering valve's own ceiling.
+        for _ in 0..100 {
+            l.step(500.0, params::EGT_RUNNING_LIMIT_C, true, 0.05);
+        }
+        assert_eq!(l.ceiling_kg_s(), 0.1);
+        // 100 K over the limit walks it shut inside the stated authority
+        // time, and never below zero.
+        let mut t = 0.0;
+        while l.ceiling_kg_s() > 0.0 && t < 30.0 {
+            l.step(params::EGT_RUNNING_LIMIT_C + 100.0, params::EGT_RUNNING_LIMIT_C, true, 0.05);
+            t += 0.05;
+        }
+        assert!(t <= EgtLimiter::AUTHORITY_TIME_S + 0.1, "took {t} s to close");
+        assert_eq!(l.ceiling_kg_s(), 0.0);
+        // Shutting down re-opens it, so the next start is not begun against
+        // a ceiling left over from the last run.
+        l.step(1000.0, params::EGT_RUNNING_LIMIT_C, false, 0.05);
+        assert_eq!(l.ceiling_kg_s(), 0.1);
+    }
+
     #[test]
     fn zero_or_near_zero_speed_never_produces_nan_in_the_schedule() {
-        let f = egt_limit_fuel_flow_kg_s(0.0, 288.15, 101_325.0, params::EGT_START_LIMIT_C);
+        let f = egt_limit_fuel_flow_kg_s(&cal(), 0.0, 288.15, 101_325.0, params::EGT_START_LIMIT_C);
         assert!(f.is_finite() && f >= 0.0);
     }
 }
+

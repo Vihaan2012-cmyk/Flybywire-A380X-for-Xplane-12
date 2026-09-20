@@ -44,7 +44,7 @@
 use super::rng::Rng;
 
 /// Representative upper range limit, ft. GENERIC (see module docs).
-const MAX_RANGE_FT: f64 = 2500.0;
+pub const MAX_RANGE_FT: f64 = 2500.0;
 /// Below this height, multipath is at its worst (closest reflected-path
 /// geometry); above it, decays to a small residual. GENERIC.
 const MULTIPATH_REFERENCE_HEIGHT_FT: f64 = 50.0;

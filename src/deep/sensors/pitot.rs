@@ -51,7 +51,7 @@ use std::f64::consts::PI;
 const PROBE_DIAMETER_M: f64 = 0.013;
 const PROBE_EXPOSED_LENGTH_M: f64 = 0.15;
 /// Rated heater power, W. GENERIC.
-const RATED_HEATER_W: f64 = 350.0;
+pub const RATED_HEATER_W: f64 = 350.0;
 /// Target surface temperature the heater holds against convective/water-catch
 /// cooling: the certification-relevant floor, just above freezing.
 const TARGET_SURFACE_C: f64 = 0.0;

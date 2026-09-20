@@ -63,7 +63,7 @@ pub const WATER_SPECIFIC_HEAT_J_KGK: f64 = 4186.0;
 /// Water's latent heat of fusion, J/kg (standard).
 pub const ICE_LATENT_HEAT_J_KG: f64 = 334_000.0;
 /// Pascals per psi (exact).
-const PSI_TO_PA: f64 = 6894.757;
+pub const PSI_TO_PA: f64 = 6894.757;
 
 /// GENERIC tank usable capacity, litres (module doc).
 pub const TANK_CAPACITY_L: f64 = 800.0;

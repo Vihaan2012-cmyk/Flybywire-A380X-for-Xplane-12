@@ -59,7 +59,7 @@ const UPWASH_FACTOR: f64 = 1.10;
 const VANE_TAU_S: f64 = 0.15;
 /// Heater rating, W. GENERIC: an AoA vane is much smaller than a pitot tube,
 /// so its heater is rated lower.
-const RATED_HEATER_W: f64 = 60.0;
+pub const RATED_HEATER_W: f64 = 60.0;
 /// Vane frontal/wetted area exposed to icing, m^2. GENERIC (a small vane).
 const VANE_AREA_M2: f64 = 0.01;
 /// Ice mass that jams the vane's hinge, kg. GENERIC.

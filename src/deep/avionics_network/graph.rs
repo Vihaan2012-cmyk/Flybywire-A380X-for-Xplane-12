@@ -86,19 +86,29 @@ impl PortLoad {
 
 pub struct NetworkGraph<'t> {
     topology: &'t NetworkTopology,
+    /// Each side's adjacency, built once here rather than rebuilt inside
+    /// every path search: the cabling does not change while the aircraft
+    /// is flying (a *failed* cable is a fault on an edge that still
+    /// exists, which is `edge_usable`'s business, not the adjacency's),
+    /// and a live network re-runs these searches for every virtual link
+    /// on every frame.
+    adjacency: [HashMap<NodeId, Vec<NodeId>>; 2],
 }
 impl<'t> NetworkGraph<'t> {
     pub fn new(topology: &'t NetworkTopology) -> Self {
-        Self { topology }
+        let adjacency = NetworkSide::BOTH.map(|side| {
+            let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+            for (a, b) in topology.edges(side) {
+                adj.entry(a).or_default().push(b);
+                adj.entry(b).or_default().push(a);
+            }
+            adj
+        });
+        Self { topology, adjacency }
     }
 
-    fn adjacency(&self, side: NetworkSide) -> HashMap<NodeId, Vec<NodeId>> {
-        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        for (a, b) in self.topology.edges(side) {
-            adj.entry(a).or_default().push(b);
-            adj.entry(b).or_default().push(a);
-        }
-        adj
+    fn adjacency(&self, side: NetworkSide) -> &HashMap<NodeId, Vec<NodeId>> {
+        &self.adjacency[side.index()]
     }
 
     fn node_up(&self, side: NetworkSide, node: NodeId, faults: &NetworkFaults) -> bool {

@@ -16,6 +16,7 @@
 //! - [`registry`]: registers this area's failures, components and ECAM
 //!   alerts with `crate::deep::api::Registry` (`Area::Electrical`).
 
+pub mod live;
 pub mod loads;
 pub mod network;
 pub mod registry;

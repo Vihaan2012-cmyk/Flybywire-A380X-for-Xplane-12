@@ -119,6 +119,22 @@ fn motor_spec(id: &'static str, name: &'static str, ata: u16, bus: BusId, watts:
 /// own speed) -- on the A380 this is genuinely only the direct-drive
 /// recirculation/extraction/cooling fans, not any inverter/controller-fed
 /// pump or valve actuator.
+/// The line frequency a direct-drive motor fed from the A380's own
+/// variable-frequency AC system is rated at, Hz.
+///
+/// Derived, not chosen: `sources::Vfg` produces 360-800 Hz across its
+/// engine's own speed range, and for a centrifugal fan the affinity law
+/// makes shaft power scale with the cube of that frequency. A motor on such
+/// a bus therefore has to carry its nameplate at the **top** of the band --
+/// the point at which it draws the most -- or it would be in a permanent
+/// 6-7x overload at cruise and burn out (or trip its own breaker) on every
+/// flight. The nameplate point is thus `Vfg::FREQ_MAX_HZ`, 800 Hz, and the
+/// same machine draws proportionally less at every lower engine speed.
+/// (400 Hz, the figure this entry carried before, is the *constant*-
+/// frequency aircraft standard, which is exactly what a variable-frequency
+/// aircraft does not have.)
+const VF_MOTOR_RATED_FREQUENCY_HZ: f64 = 800.0;
+
 fn frequency_sensitive_motor_spec(id: &'static str, name: &'static str, ata: u16, bus: BusId, watts: f64, power_factor: f64, inrush_multiple: f64, inrush_duration_s: f64, rated_frequency_hz: f64, basis: &'static str) -> LoadSpec {
     let mut spec = motor_spec(id, name, ata, bus, watts, power_factor, inrush_multiple, inrush_duration_s, basis);
     spec.rated_frequency_hz = rated_frequency_hz;
@@ -223,7 +239,7 @@ fn ata21(net: &mut Network, cat: &mut Catalog) {
         // the VFG's own variable (360-800 Hz) output frequency, rated here
         // at a nominal 400 Hz reference point (GENERIC; no A380-specific
         // fan-motor nameplate is public).
-        let spec = frequency_sensitive_motor_spec(id, name, 21, bus, 500.0, 0.85, 3.0, 1.0, 400.0, "breakers.rs::ata21 CAB FAN 1-4 (500 W typical large-transport recirculation fan motor, typical/derived); real bus from a380_systems/air_conditioning/mod.rs CabinFan::new; frequency-sensitive direct-drive induction motor, fan affinity laws vs the VFG's own variable output frequency");
+        let spec = frequency_sensitive_motor_spec(id, name, 21, bus, 500.0, 0.85, 3.0, 1.0, VF_MOTOR_RATED_FREQUENCY_HZ, "breakers.rs::ata21 CAB FAN 1-4 (500 W typical large-transport recirculation fan motor, typical/derived); real bus from a380_systems/air_conditioning/mod.rs CabinFan::new; frequency-sensitive direct-drive induction motor, fan affinity laws vs the VFG's own variable output frequency, nameplate at VF_MOTOR_RATED_FREQUENCY_HZ");
         let a = rated_current(&spec);
         add(net, cat, LoadCategory::Other, spec, a);
     }
@@ -299,7 +315,7 @@ fn ata21(net: &mut Network, cat: &mut Catalog) {
     // a real, necessary ATA21 consumer for any avionics-bay LRU set this
     // size): two redundant fans, GENERIC typical avionics-bay blower rating.
     for (id, name, bus) in [("avionics-fan-1", "AVIONICS BAY FAN 1", BusId::AcEss), ("avionics-fan-2", "AVIONICS BAY FAN 2", BusId::AcEssShed), ("avionics-fan-3", "AVIONICS BAY FAN 3", BusId::Ac1), ("avionics-fan-4", "AVIONICS BAY FAN 4", BusId::Ac2)] {
-        let spec = frequency_sensitive_motor_spec(id, name, 21, bus, 300.0, 0.85, 3.0, 1.0, 400.0, "GENERIC: typical avionics-bay cooling blower motor (300 W), not individually named in breakers.rs but required to ventilate the LRU set it protects; direct-drive induction motor, frequency-sensitive");
+        let spec = frequency_sensitive_motor_spec(id, name, 21, bus, 300.0, 0.85, 3.0, 1.0, VF_MOTOR_RATED_FREQUENCY_HZ, "GENERIC: typical avionics-bay cooling blower motor (300 W), not individually named in breakers.rs but required to ventilate the LRU set it protects; direct-drive induction motor, frequency-sensitive, nameplate at VF_MOTOR_RATED_FREQUENCY_HZ");
         add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
     }
 }

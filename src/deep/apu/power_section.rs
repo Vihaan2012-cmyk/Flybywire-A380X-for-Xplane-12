@@ -152,6 +152,84 @@ pub fn calibrate() -> Calibration {
     }
 }
 
+/// One evaluation of the authoritative steady gas-path chain at a given
+/// operating point: compressor map -> combustor energy balance -> Stodola
+/// turbine. [`PowerSection::step`] integrates the spool's torque balance
+/// around exactly this, and `governor.rs`'s EGT-limit fuel schedule solves
+/// this same chain for the fuel flow that lands on the limit -- so the
+/// schedule and the physics cannot disagree about what a given fuel flow
+/// does, which is what a separate first-order stand-in for the turbine
+/// pressure ratio could not guarantee.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GasPath {
+    pub compressor: compressor_map::Point,
+    pub combustion: Combustion,
+    pub expansion: turbine_flow::Expansion,
+    /// The turbine pressure ratio Stodola's law requires to pass this flow.
+    pub turbine_pressure_ratio: f64,
+}
+
+/// See [`GasPath`]. `n_frac` is spool speed as a fraction of rated,
+/// `t1_k`/`p1_pa` the compressor's own inlet total conditions (already
+/// reduced by whatever inlet loss the door/ice/obstruction imposes).
+pub fn gas_path(
+    calibration: &Calibration,
+    faults: &PowerSectionFaults,
+    t1_k: f64,
+    p1_pa: f64,
+    n_frac: f64,
+    fuel_flow_kg_s: f64,
+) -> GasPath {
+    let n = n_frac.max(0.0);
+    let t1 = t1_k.max(1.0);
+    let p1 = p1_pa.max(1.0);
+    let core_spec = calibration.core_spec.degraded(faults.compressor_efficiency_loss);
+    // Erosion costs the compressor *flow capacity* as well as
+    // efficiency: worn blading has lost chord and gained tip clearance,
+    // so at the same corrected speed its throat passes less corrected
+    // flow. Gas-path-analysis practice treats the two as running
+    // together for erosion -- roughly one for one, a percent of
+    // isentropic efficiency per percent of flow capacity (Kurz, R. &
+    // Brun, K., "Degradation in Gas Turbine Systems", J. Eng. Gas
+    // Turbines Power 123 (2001), 70-77, which tabulates exactly this
+    // pairing for compressor fouling and erosion). This is the term that
+    // makes an eroded core run *hotter* on the same metered fuel: less
+    // air through the same combustor is a richer mixture, a higher
+    // turbine-inlet temperature and a higher EGT. The efficiency loss on
+    // its own cannot do that -- Euler work, and with it compressor-exit
+    // temperature, is set by blade speed, not by efficiency.
+    let flow_capacity_frac = (1.0 - faults.compressor_efficiency_loss.clamp(0.0, 1.0)).max(0.3);
+    let requested_corrected = params::CORE_MDOT_DESIGN_KG_S * n * flow_capacity_frac;
+    let compressor = compressor_map::evaluate(&core_spec, t1, p1, n, requested_corrected);
+
+    let combustion = combustor::burn(
+        compressor.mdot_kg_s,
+        fuel_flow_kg_s.max(0.0),
+        compressor.tt_out_k,
+        compressor.pt_out_pa,
+    );
+
+    let turbine_spec = calibration.turbine_spec.degraded(faults.turbine_efficiency_loss);
+    let corrected_flow_turbine =
+        gas::corrected_flow_kg_s(combustion.mdot_gas_kg_s, combustion.tt4_k, combustion.pt4_pa);
+    let turbine_pressure_ratio = turbine_flow::pressure_ratio_for_flow(
+        corrected_flow_turbine,
+        calibration.turbine_capacity_coefficient,
+    );
+    let pr_frac_of_design =
+        turbine_pressure_ratio / calibration.turbine_pressure_ratio_design.max(1.0 + 1e-6);
+    let expansion = turbine_flow::expand(
+        &turbine_spec,
+        combustion.tt4_k,
+        combustion.pt4_pa,
+        combustion.mdot_gas_kg_s,
+        turbine_pressure_ratio,
+        pr_frac_of_design,
+    );
+
+    GasPath { compressor, combustion, expansion, turbine_pressure_ratio }
+}
+
 pub struct Inputs {
     pub ambient_pressure_pa: f64,
     pub ambient_temperature_k: f64,
@@ -196,6 +274,13 @@ impl PowerSection {
             n_percent: 0.0,
             egt_k: ambient_temperature_k.max(1.0),
         }
+    }
+
+    /// The design-point calibration this spool was built with -- read by
+    /// `governor.rs` so its EGT-limit schedule solves the *same* gas path
+    /// (see [`gas_path`]) rather than a separately parameterised copy.
+    pub fn calibration(&self) -> &Calibration {
+        &self.calibration
     }
 
     pub fn n_percent(&self) -> f64 {
@@ -267,48 +352,16 @@ impl PowerSection {
             * (1.0 - inputs.inlet_pressure_loss_frac.clamp(0.0, 0.5));
         let t1 = inputs.ambient_temperature_k.max(1.0);
 
-        let core_spec = self.calibration.core_spec.degraded(faults.compressor_efficiency_loss);
-        // Erosion costs the compressor *flow capacity* as well as
-        // efficiency: worn blading has lost chord and gained tip clearance,
-        // so at the same corrected speed its throat passes less corrected
-        // flow. Gas-path-analysis practice treats the two as running
-        // together for erosion -- roughly one for one, a percent of
-        // isentropic efficiency per percent of flow capacity (Kurz, R. &
-        // Brun, K., "Degradation in Gas Turbine Systems", J. Eng. Gas
-        // Turbines Power 123 (2001), 70-77, which tabulates exactly this
-        // pairing for compressor fouling and erosion). This is the term that
-        // makes an eroded core run *hotter* on the same metered fuel: less
-        // air through the same combustor is a richer mixture, a higher
-        // turbine-inlet temperature and a higher EGT. The efficiency loss on
-        // its own cannot do that -- Euler work, and with it compressor-exit
-        // temperature, is set by blade speed, not by efficiency.
-        let flow_capacity_frac = (1.0 - faults.compressor_efficiency_loss.clamp(0.0, 1.0)).max(0.3);
-        let requested_corrected = params::CORE_MDOT_DESIGN_KG_S * n_frac * flow_capacity_frac;
-        let compressor = compressor_map::evaluate(&core_spec, t1, p1, n_frac, requested_corrected);
-
-        let combustion = combustor::burn(
-            compressor.mdot_kg_s,
-            inputs.fuel_flow_kg_s.max(0.0),
-            compressor.tt_out_k,
-            compressor.pt_out_pa,
+        let gp = gas_path(
+            &self.calibration,
+            faults,
+            t1,
+            p1,
+            n_frac,
+            inputs.fuel_flow_kg_s,
         );
-
-        let turbine_spec = self.calibration.turbine_spec.degraded(faults.turbine_efficiency_loss);
-        let corrected_flow_turbine =
-            gas::corrected_flow_kg_s(combustion.mdot_gas_kg_s, combustion.tt4_k, combustion.pt4_pa);
-        let turbine_pr = turbine_flow::pressure_ratio_for_flow(
-            corrected_flow_turbine,
-            self.calibration.turbine_capacity_coefficient,
-        );
-        let pr_frac_of_design = turbine_pr / self.calibration.turbine_pressure_ratio_design.max(1.0 + 1e-6);
-        let expansion = turbine_flow::expand(
-            &turbine_spec,
-            combustion.tt4_k,
-            combustion.pt4_pa,
-            combustion.mdot_gas_kg_s,
-            turbine_pr,
-            pr_frac_of_design,
-        );
+        let compressor = gp.compressor;
+        let expansion = gp.expansion;
 
         let compressor_torque_nm = if omega > 1.0 { compressor.power_w / omega } else { 0.0 };
         let turbine_torque_nm = if omega > 1.0 { expansion.shaft_power_w / omega } else { 0.0 };

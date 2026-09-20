@@ -87,6 +87,7 @@ pub mod engine_sensors;
 pub mod float_level;
 pub mod gps;
 pub mod ice_detector;
+pub mod live;
 pub mod pitot;
 pub mod radio_altimeter;
 pub mod registry;

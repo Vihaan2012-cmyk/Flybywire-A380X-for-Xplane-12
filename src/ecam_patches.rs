@@ -17,12 +17,16 @@
 
 use crate::js::msfs::SourcePatch;
 
+/// The Electronic Checklist's own patches: the ECAM control panel's inputs and
+/// the normal-checklist sensing (`docs/ecl.md`).
+mod ecl;
+
 const SYSTEMS_HOST: &str = "/Pages/VCockpit/Instruments/A380X/SystemsHost/SystemsHost.js";
 const MFD: &str = "/Pages/VCockpit/Instruments/A380X/MFD/mfd.js";
 const PFD: &str = "/Pages/VCockpit/Instruments/A380X/PFD/pfd.js";
 
 pub fn source_patches() -> Vec<SourcePatch> {
-    vec![
+    let mut patches = vec![
         inst_005_takeoff_speeds_check(),
         ecam_010_reverser_inop(),
         ecam_010_gen_inop(),
@@ -33,7 +37,9 @@ pub fn source_patches() -> Vec<SourcePatch> {
         ecam_015_rudder_fault(),
         ecam_014_engines_off_and_on_ground_uses_core_speed(),
         inst_009_pfd_spoiler_indication_max_of_all_panels(),
-    ]
+    ];
+    patches.extend(ecl::source_patches());
+    patches
 }
 
 /// #9 / INST-005 (FmcAircraftInterface.ts:635): the FMS's own V-speeds-too-low

@@ -25,6 +25,7 @@ pub mod retraction;
 pub mod steering;
 pub mod strut;
 pub mod structure;
+pub mod live;
 
 /// Standard gravity, m/s^2 (exact SI definition).
 pub const G_MS2: f64 = 9.806_65;
@@ -159,6 +160,17 @@ pub struct LegOutput {
     pub uplocked: bool,
     pub downlocked: bool,
     pub stuck_locked: bool,
+    /// What the leg's own lock proximity sensors *report*, which a
+    /// `RetractionFaults::sensor_lies` fault detaches from the true
+    /// `uplocked`/`downlocked` above. Carried out of the leg so the
+    /// cockpit indication and the physical state can be published as the
+    /// two separate variables the L/G GEAR DISAGREE alert compares
+    /// (`registry.rs`'s `SENSED_GEAR_*` / `GEAR_*` pair).
+    pub sensed_uplocked: bool,
+    pub sensed_downlocked: bool,
+    /// The leg's door position, 0 shut .. 1 fully open -- the interlock
+    /// that has to clear before the leg itself can travel.
+    pub door_position: f64,
 }
 
 pub struct GearSystemOutputs {
@@ -173,6 +185,19 @@ pub struct GearSystemOutputs {
     pub parking_brake_holding: bool,
     pub wing_fatigue_index: f64,
     pub nose_wheel_angle_deg: f64,
+    /// Carbon heat-sink wear budget consumed per braked wheel, 0 new .. 1
+    /// worn out (`brakes::BrakeWheelOutputs::wear_fraction`).
+    pub brake_wheel_wear_fraction: [f64; 16],
+    pub brake_wheel_skidding: [bool; 16],
+    /// The three steerable positions' own shimmy state and, for the two
+    /// body legs, their commanded rear-axle angle -- each carries its own
+    /// `SteeringActuator` and its own `shimmy_unstable`, so a body-gear
+    /// shimmy is visible independently of the nosewheel's
+    /// (`registry.rs`'s own regression test makes the same point about the
+    /// ECAM trigger).
+    pub nose_steer_shimmy_unstable: bool,
+    pub body_steer_angle_deg: [f64; 2],
+    pub body_steer_shimmy_unstable: [bool; 2],
 }
 
 pub struct GearSystem {
@@ -255,7 +280,18 @@ impl GearSystem {
     }
 
     fn leg_output(s: &strut::StrutOutputs, r: &retraction::RetractionOutputs) -> LegOutput {
-        LegOutput { force_n: s.force_n, compression_frac: s.compression_frac, collapsed: s.collapsed, gear_position: r.gear_position, uplocked: r.uplocked, downlocked: r.downlocked, stuck_locked: r.stuck_locked }
+        LegOutput {
+            force_n: s.force_n,
+            compression_frac: s.compression_frac,
+            collapsed: s.collapsed,
+            gear_position: r.gear_position,
+            uplocked: r.uplocked,
+            downlocked: r.downlocked,
+            stuck_locked: r.stuck_locked,
+            sensed_uplocked: r.sensed_uplocked,
+            sensed_downlocked: r.sensed_downlocked,
+            door_position: r.door_position,
+        }
     }
 
     fn note_leg_events(&mut self, name: &str, s: &strut::StrutOutputs, r: &retraction::RetractionOutputs) {
@@ -358,9 +394,14 @@ impl GearSystem {
         }
         let body_command = steering::body_steering_angle_deg(nose_steer_out.base_angle_deg, inputs.groundspeed_ms);
         let lb_steer_in = steering::SteeringInputs { commanded_angle_deg: body_command, groundspeed_ms: inputs.groundspeed_ms, dt_s: dt };
-        self.left_body_steering.step(&lb_steer_in, &faults.left_body_steering);
+        let lb_steer_out = self.left_body_steering.step(&lb_steer_in, &faults.left_body_steering);
         let rb_steer_in = steering::SteeringInputs { commanded_angle_deg: body_command, groundspeed_ms: inputs.groundspeed_ms, dt_s: dt };
-        self.right_body_steering.step(&rb_steer_in, &faults.right_body_steering);
+        let rb_steer_out = self.right_body_steering.step(&rb_steer_in, &faults.right_body_steering);
+        for (name, out) in [("left body", &lb_steer_out), ("right body", &rb_steer_out)] {
+            if out.shimmy_unstable {
+                self.events.push(format!("{name} gear shimmy tendency active"));
+            }
+        }
 
         // Brakes: 16 wheels, `LEG_WHEEL_INDICES`' layout (even group index
         // = left, odd = right). Each wheel's normal load is its owning
@@ -375,6 +416,8 @@ impl GearSystem {
         let leg_wheel_count = [4.0_f64, 4.0, 6.0, 6.0];
         let mut brake_temps = [0.0_f64; 16];
         let mut brake_fire = [false; 16];
+        let mut brake_wear = [0.0_f64; 16];
+        let mut brake_skidding = [false; 16];
         for (leg, wheels) in LEG_WHEEL_INDICES.iter().enumerate() {
             let commanded = if leg % 2 == 0 { inputs.brake_pedal_left } else { inputs.brake_pedal_right };
             let on_ground = leg_on_ground[leg];
@@ -383,6 +426,8 @@ impl GearSystem {
                 let wi = brakes::BrakeWheelInputs { commanded, on_ground, normal_load_n, groundspeed_ms: inputs.groundspeed_ms, ambient_c: inputs.ambient_c, dt_s: dt };
                 let out = self.brake_wheels[wheel].step(&wi, &faults.wheel_brakes[wheel]);
                 brake_temps[wheel] = out.stack_temp_c;
+                brake_wear[wheel] = out.wear_fraction;
+                brake_skidding[wheel] = out.skidding;
                 if out.fire {
                     brake_fire[wheel] = true;
                     self.events.push(format!("wheel {} brake fire", wheel + 1));
@@ -407,6 +452,11 @@ impl GearSystem {
             parking_brake_holding: parking_holding,
             wing_fatigue_index: self.wing_fatigue.fatigue_index,
             nose_wheel_angle_deg: nose_steer_out.angle_deg,
+            brake_wheel_wear_fraction: brake_wear,
+            brake_wheel_skidding: brake_skidding,
+            nose_steer_shimmy_unstable: nose_steer_out.shimmy_unstable,
+            body_steer_angle_deg: [lb_steer_out.angle_deg, rb_steer_out.angle_deg],
+            body_steer_shimmy_unstable: [lb_steer_out.shimmy_unstable, rb_steer_out.shimmy_unstable],
         }
     }
 

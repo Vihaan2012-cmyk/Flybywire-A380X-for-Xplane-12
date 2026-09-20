@@ -6,9 +6,10 @@
 //!   dicts at module-load time in the compiled bundle(s) that hold them:
 //!   [`procedures_merge_js`] (`EcamAbnormalSensedProcedures`, title/items
 //!   text, needed in both `EWD.js` and `SystemsHost.js`), [`inop_merge_js`]
-//!   and [`info_merge_js`] (`EcamInopSys`/`EcamMemos`, STATUS/INOP SYS line
-//!   text, needed only in `SystemsHost.js`). None of these touch `SimVar`
-//!   or `FwsCore`.
+//!   and [`info_merge_js`] (`EcamInopSys`/`EcamInfos`, INOP SYS and STATUS
+//!   "INFO" line text, needed only in `sdv2.js`, the STATUS page, which is
+//!   the only bundle in this build that resolves either id to text). None
+//!   of these touch `SimVar` or `FwsCore`.
 //! - **Behaviour data**, [`alerts_js_array`]: the `DEEP_ECAM_ALERTS` array
 //!   `deep_ecam_bridge.js`'s `installDeepEcam` reads at runtime to build
 //!   FlyByWire's `EwdAbnormalItem` (trigger/checked/shown state) for each
@@ -100,7 +101,7 @@ fn num(v: f64) -> String {
 }
 
 /// Derives ids for an alert's STATUS/INOP SYS lines from its own id: these
-/// key `EcamInopSys`/`EcamMemos`, dicts FlyByWire indexes by (string) key
+/// key `EcamInopSys`/`EcamInfos`, dicts FlyByWire indexes by (string) key
 /// with no format requirement beyond uniqueness. `alert_id * 1000` reserves
 /// a disjoint block of 1000 per alert (two different alerts' blocks can
 /// never overlap, since their ids already differ by at least 1 and each
@@ -166,10 +167,11 @@ pub fn inop_merge_js(assigned: &[Assigned<'_>]) -> String {
     format!("{{{}}}", out.join(","))
 }
 
-/// The object literal `Object.assign(EcamMemos, ...)` merges in: one
+/// The object literal `Object.assign(EcamInfos, ...)` merges in: one
 /// `id: 'TEXT'` entry per alert's `.status_line(...)` line, read by
-/// FlyByWire's STATUS page "INFO" section the same way its own memo ids are
-/// (`FwsCore.ts:5714`, `pushKeyUnique(value.info, ...)`).
+/// FlyByWire's STATUS page "INFO" section the same way its own info ids are
+/// (`FwsCore.ts:5714`, `pushKeyUnique(value.info, ...)`, whose keys
+/// `sdv2.js:68632` resolves against `EcamInfos`).
 pub fn info_merge_js(assigned: &[Assigned<'_>]) -> String {
     let mut out = Vec::new();
     for a in assigned {

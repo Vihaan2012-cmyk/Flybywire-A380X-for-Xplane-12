@@ -16,13 +16,19 @@
 
 /// Gauge URLs left out of the panel.cfg-driven views (js::msfs::
 /// EXCLUDED_GAUGES, which a `--features js` test below cross-checks this
-/// against): the OITs, the popup, and WASM gauges, which are native modules
-/// rather than pages a browser can load, and the EFB, whose gauge XPHFBW does
-/// not draw at all (this port never rendered it — even were it excluded
-/// here). [`EFB_SCREEN`] gets its own hand-made view instead of one from this
-/// list (app/src/views.rs's `spawn_efb_view`): the app's own study/settings
-/// UI, not FlyByWire's.
-pub const EXCLUDED_GAUGES: &[&str] = &["A380X/EFB/", "A380X/OIT/", "A380X/OITlegacy/", "A380X/popup/", "WasmInstrument/"];
+/// against): the OITs' *legacy* page, the popup, and WASM gauges, which are
+/// native modules rather than pages a browser can load, and the EFB, whose
+/// gauge XPHFBW does not draw at all (this port never rendered it — even
+/// were it excluded here). [`EFB_SCREEN`] gets its own hand-made view
+/// instead of one from this list (app/src/views.rs's `spawn_efb_view`): the
+/// app's own study/settings UI, not FlyByWire's.
+///
+/// `A380X/OIT/` is *not* excluded (docs/oit.md): panel.cfg's two OIT
+/// sections list `A380X/OIT/oit.html` first and `A380X/OITlegacy/` second,
+/// so each OIT view is the current OIS page and the legacy one stays out,
+/// exactly as the MFD view takes `A380X/MFD/mfd.html` over the terronnd
+/// WASM gauge that precedes it.
+pub const EXCLUDED_GAUGES: &[&str] = &["A380X/EFB/", "A380X/OITlegacy/", "A380X/popup/", "WasmInstrument/"];
 
 /// The EFB screen's device id (the converted cockpit mesh's material,
 /// `SCREEN_EFB`; docs/screens.md, display/screens.rs's `SCREENS`), and the
@@ -191,6 +197,39 @@ Window00=Main Panel
         assert_eq!(views[2], ViewDef { index: 2, section: "VCockpit05".into(), gauge_url: "A380X/MFD/mfd.html".into(), width: 1646, height: 1024, screen: "SCREEN_DU_MFD".into() });
     }
 
+    /// panel.cfg's two OIT sections, verbatim (VCockpit19/20): each lists
+    /// the current OIS page first and the superseded legacy one second, so
+    /// the view is the current page and the legacy one never runs.
+    #[test]
+    fn each_oit_view_is_the_current_page_not_the_legacy_one() {
+        const OIT_CFG: &str = r#"
+[VCockpit19]
+size_mm=1333,1000
+pixel_size=1333,1000
+texture=$SCREEN_OIT_LEFT
+htmlgauge00=A380X/OIT/oit.html?Index=1, 0,0,1333,1000
+htmlgauge01=A380X/OITlegacy/oitlegacy.html, 0,0,1333,1000
+
+[VCockpit20]
+size_mm=1333,1000
+pixel_size=1333,1000
+texture=$SCREEN_OIT_RIGHT
+htmlgauge00=A380X/OIT/oit.html?Index=2, 0,0,1333,1000
+htmlgauge01=A380X/OITlegacy/oitlegacy.html, 0,0,1333,1000
+"#;
+        let views = view_list(OIT_CFG);
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].gauge_url, "A380X/OIT/oit.html?Index=1");
+        assert_eq!(views[0].screen, OIT_LEFT_SCREEN);
+        assert_eq!((views[0].width, views[0].height), (1333, 1000));
+        assert_eq!(views[1].gauge_url, "A380X/OIT/oit.html?Index=2");
+        assert_eq!(views[1].screen, OIT_RIGHT_SCREEN);
+        // Both are screens the plugin makes a device for, in SCREEN_ORDER.
+        for v in &views {
+            assert!(SCREEN_ORDER.contains(&v.screen.as_str()), "{} is not in SCREEN_ORDER", v.screen);
+        }
+    }
+
     #[test]
     fn an_empty_panel_cfg_has_no_views() {
         assert_eq!(view_list(""), Vec::new());
@@ -236,4 +275,12 @@ pub const SCREEN_ORDER: &[&str] = &[
     "SCREEN_DU_RMP_2",
     "SCREEN_DU_RMP_3",
     EFB_SCREEN,
+    OIT_LEFT_SCREEN,
+    OIT_RIGHT_SCREEN,
 ];
+
+/// The two OIT screens' device ids (panel.cfg's `$SCREEN_OIT_LEFT` and
+/// `$SCREEN_OIT_RIGHT`, VCockpit19/20), appended to [`SCREEN_ORDER`] so no
+/// screen already in it changes index.
+pub const OIT_LEFT_SCREEN: &str = "SCREEN_OIT_LEFT";
+pub const OIT_RIGHT_SCREEN: &str = "SCREEN_OIT_RIGHT";

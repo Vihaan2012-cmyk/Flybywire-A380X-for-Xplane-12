@@ -880,6 +880,11 @@ struct Plugin {
     /// settings" aircraft menu entry (docs/briefs/xphfbw-js-bridge.md,
     /// "Custom datarefs and commands").
     xphfbw_datarefs: xphfbw_datarefs::XphfbwDatarefs,
+    /// The deep-systems areas (`src/deep`), stepped once per frame with
+    /// this tick's `Truth` and the armed deep failures, publishing what the
+    /// ECAM triggers and the Study pages read. See `deep::plugin`'s module
+    /// doc for where every `Truth` field comes from.
+    deep: deep::plugin::DeepLayer,
 }
 
 /// The datarefs behind [`prim::SimReadings`].
@@ -1191,6 +1196,16 @@ impl Plugin {
             }
             host
         });
+        // [slot new: deep] The deep-systems areas. Resolves every variable
+        // id it reads and writes here, once, and builds the deep failure
+        // catalogue's id set once, so its per-frame work is reads, writes
+        // and the areas' own physics (deep/plugin.rs, "Frame cost").
+        let deep = deep::plugin::DeepLayer::new(&mut vars, Some(xplm));
+        log(&format!(
+            "deep: {} live area(s) wired in: {}",
+            deep.area_names().len(),
+            if deep.area_names().is_empty() { "none yet".to_owned() } else { deep.area_names().join(", ") }
+        ));
         let computed = Computed {
             yaw_moi: vars.get("TOTAL WEIGHT YAW MOI".to_owned()),
             pitch_moi: vars.get("TOTAL WEIGHT PITCH MOI".to_owned()),
@@ -1284,6 +1299,8 @@ impl Plugin {
             #[cfg(feature = "js")]
             xphfbw,
             xphfbw_datarefs: xphfbw_datarefs::XphfbwDatarefs::new(),
+            // [slot init: deep]
+            deep,
         }
     }
 
@@ -1527,6 +1544,18 @@ impl Plugin {
             // pressure switch's input, docs/physics/fire.md).
             fuel.update(&mut self.vars, xplm, delta, &self.circuits);
         }
+        crate::perf::lap("tick-after-systems: deep");
+        // [slot tick-after-systems: deep] The deep-systems areas
+        // (src/deep). After the systems tick, so this frame's FlyByWire bus
+        // potentials, hydraulic section pressures and APU state are
+        // current; after engine_commands, so the bleed ports are this
+        // frame's physics::engine output; and after the failure block
+        // above, so a random/scripted failure armed this frame reaches the
+        // areas on the frame it is armed rather than the next one. The
+        // areas' own published values are read back by the ECAM bridge's
+        // triggers and the Study pages next frame (deep/live.rs's
+        // "Ordering" note).
+        self.deep.tick(&mut self.vars, Some(xplm), delta);
         crate::perf::lap("tick-after-systems: lights");
         // [slot tick-after-systems: lights] After the systems, so the buses'
         // ELEC_*_BUS_IS_POWERED are this tick's.
