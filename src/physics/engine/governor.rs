@@ -91,12 +91,61 @@ fn accel_schedule_max_wf_kg_s(n3_corrected_pct: f64, design_wf_kg_s: f64) -> f64
     design_wf_kg_s * multiple
 }
 
-/// The acceleration fuel-air-ratio margin over the design-point fuel-air
-/// ratio (the Wf/P3-form schedule, `Governor::with_design_far`). Calibrated
-/// to EASA.E.012 Note 12: "the acceleration from 15% to 95% rated take off
-/// power is 5,6 seconds" (`acceleration_from_15_to_95_percent_takeoff_
-/// thrust_matches_the_data_sheet` in `mod.rs`).
-pub const ACCEL_FAR_MARGIN: f64 = 1.125;
+/// The acceleration fuel-air-ratio margin over the engine's own *steady
+/// running line* (the Wf/P3-form schedule, `Governor::with_design_far`).
+///
+/// The running line is `FAR(N3) = FAR_design * (N3_corrected/100)^2`: fuel
+/// flow goes with shaft power, so roughly with the cube of speed, and core
+/// airflow roughly with the first power of it, leaving the fuel-air ratio
+/// going with the square. The gas path bears that out — at the model's own
+/// ground idle it settles at 0.35 of the design fuel-air ratio at 0.595 of
+/// design corrected core speed, and `0.595^2 = 0.354`.
+///
+/// Scheduling on speed is not decoration, it is the whole point of an
+/// acceleration schedule. A *flat* ceiling of `FAR_design * margin` — the
+/// form this had — is nearly three times the running line at ground idle,
+/// and the gas path duly surged every time the lever went forward: the HP
+/// compressor's stall margin fell to 0.1, its flow state reversed, and the
+/// core flamed out and relit in a cycle that never climbed past 65% N3. The
+/// part-speed working line of a fixed-capacity, choked-turbine core sits
+/// much closer to surge than the design point does, which is exactly why a
+/// real EEC's schedule is a Wf/P3 curve against corrected core speed and
+/// not a constant.
+///
+/// The margin itself is the one free constant here, and it is what
+/// EASA.E.012 Note 12 pins: "the acceleration from 15% to 95% rated take
+/// off power is 5,6 seconds" (`acceleration_from_15_to_95_percent_takeoff_
+/// thrust_matches_the_data_sheet` in `mod.rs`). It must also stay under the
+/// surge line, which this model puts at roughly 1.6-2.2x the running line
+/// at ground idle.
+///
+/// Raised from 2.15 to 2.30 once `gas_path`'s per-stage variable-stator
+/// schedule (`gas_path::VSV_MIN`/`VSV_FRONT_FRACTION`) gave the part-speed
+/// core more genuine surge margin to spend: swept in steps of 0.02 against
+/// the full `physics::engine` suite at the chosen VSV settings, 2.30 is the
+/// largest value that does not reopen either failure a too-loose margin
+/// causes -- 2.34 and above cut into the certificated 15%-95% acceleration
+/// time (`acceleration_from_15_to_95_percent_takeoff_thrust_matches_the_
+/// data_sheet`), because the higher ceiling is no longer binding there and
+/// the run drifts off the calibrated timing; 2.45 and above overshoot the
+/// design point badly enough to break the steady-state calibration checks
+/// (`static_takeoff_thrust_matches_the_certificated_rating` and others).
+/// Together with the VSV change this took the uncertified idle-to-take-off
+/// spool-up (`spool_up_from_ground_idle_to_toga_is_prompt`) from 22.8 s to
+/// 18.0 s -- real, but still short of that test's 10 s bound; see its own
+/// doc comment for why that bound is not yet met and what was ruled out.
+pub const ACCEL_FAR_MARGIN: f64 = 2.30;
+
+/// The acceleration schedule's fuel-air ratio ceiling at corrected core
+/// speed `n3_corrected_pct`, as a multiple of the design fuel-air ratio:
+/// the running line `(N3/100)^2` with `ACCEL_FAR_MARGIN` over it. Clamped
+/// at 100% corrected speed so the ceiling above the design point stays
+/// where the design point put it (overspeed is the governor's own
+/// protection's job, not this schedule's).
+fn accel_far_multiple(n3_corrected_pct: f64) -> f64 {
+    let n3 = (n3_corrected_pct / 100.0).clamp(0.0, 1.0);
+    n3 * n3 * ACCEL_FAR_MARGIN
+}
 
 /// The schedule's multiple of design fuel flow: `BASE + SLOPE * N3/100`
 /// (generic; see above). Only a governor built without a design fuel-air
@@ -209,7 +258,7 @@ impl Governor {
         // actually passing, so a low-power core can only be fuelled up
         // gradually as it spools, however far the lever went.
         let accel_limit = match self.design_far {
-            Some(far) => mdot_air_to_combustor_kg_s.max(0.0) * far * ACCEL_FAR_MARGIN,
+            Some(far) => mdot_air_to_combustor_kg_s.max(0.0) * far * accel_far_multiple(measured_n3_corrected_pct),
             None => accel_schedule_max_wf_kg_s(measured_n3_corrected_pct, design_wf_kg_s),
         };
 

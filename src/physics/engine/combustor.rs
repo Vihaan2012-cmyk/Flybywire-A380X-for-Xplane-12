@@ -13,8 +13,23 @@ pub struct Combustion {
     pub mdot_gas_kg_s: f64,
 }
 
-/// Energy balance: `mdot_fuel * LHV * eta_b + mdot_air * cp_air * Tt3 =
-/// (mdot_air + mdot_fuel) * cp_air * Tt4`, solved for Tt4. Both sides use
+/// Energy balance: `mdot_fuel * LHV * eta_b + (mdot_air + mdot_fuel) *
+/// cp_air * Tt3 = (mdot_air + mdot_fuel) * cp_air * Tt4`, solved for Tt4 —
+/// equivalently `Tt4 = Tt3 + Q / (mdot_gas * cp)`.
+///
+/// The fuel stream carries its own sensible enthalpy in, at the combustor
+/// inlet total temperature: it has come through the fuel/oil heat
+/// exchanger and the burner feed arms in the hot casing, so it arrives far
+/// nearer `Tt3` than absolute zero. Omitting that term — the form this
+/// balance had before — is equivalent to injecting the fuel at 0 K. That is
+/// invisible at a normal fuel/air ratio (0.025 of the mass flow), but it
+/// sends `Tt4` to *zero kelvin* the moment the airflow does: with
+/// `mdot_air = 0` and fuel still flowing there is no oxygen, so
+/// `heat_released` is zero, and the balance then divides no enthalpy at all
+/// by the fuel's own mass. A combustor with no air passing through it sits
+/// at the temperature of what is in it, and those 0 K station temperatures
+/// were propagating through the turbines into the gas path's plenums as
+/// NaN. Both sides use
 /// air's specific heat, not the hot-gas value the downstream turbines use
 /// (`turbine.rs`'s `CP_GAS`): using two different heat capacities across
 /// the same energy balance would leave `Tt4 != Tt3` at zero fuel flow, an
@@ -50,8 +65,8 @@ pub fn burn(mdot_air_kg_s: f64, mdot_fuel_kg_s: f64, tt3_k: f64, pt3_pa: f64) ->
         tt3_k
     } else {
         let heat_released = burnt_fuel * LHV_JET_A1_J_KG * COMBUSTOR_EFFICIENCY;
-        let heat_in_air = mdot_air * CP_AIR * tt3_k;
-        (heat_released + heat_in_air) / (mdot_gas * CP_AIR)
+        let heat_in = mdot_gas * CP_AIR * tt3_k;
+        (heat_released + heat_in) / (mdot_gas * CP_AIR)
     };
     Combustion { tt4_k: tt4, pt4_pa: pt3_pa * (1.0 - COMBUSTOR_PRESSURE_LOSS_FRAC), mdot_gas_kg_s: mdot_gas }
 }
@@ -95,8 +110,19 @@ mod tests {
         let mdot_fuel = 2.0;
         let tt3 = 650.0;
         let c = burn(mdot_air, mdot_fuel, tt3, 1_000_000.0);
-        let energy_in = mdot_fuel * LHV_JET_A1_J_KG * COMBUSTOR_EFFICIENCY + mdot_air * CP_AIR * tt3;
+        // Both streams enter at Tt3: the air, and the fuel with its own
+        // sensible enthalpy (see `burn`'s docs — the fuel is not injected
+        // at 0 K).
+        let energy_in = mdot_fuel * LHV_JET_A1_J_KG * COMBUSTOR_EFFICIENCY + (mdot_air + mdot_fuel) * CP_AIR * tt3;
         let energy_out = c.mdot_gas_kg_s * CP_AIR * c.tt4_k;
         assert!((energy_in - energy_out).abs() / energy_in < 1e-9);
+    }
+
+    #[test]
+    fn with_no_air_at_all_the_combustor_sits_at_its_inlet_temperature() {
+        // Nothing to burn the fuel in, so no heat release — and nothing
+        // that can take the gas to 0 K either.
+        let c = burn(0.0, 0.5, 700.0, 400_000.0);
+        assert!((c.tt4_k - 700.0).abs() < 1e-9, "{}", c.tt4_k);
     }
 }
