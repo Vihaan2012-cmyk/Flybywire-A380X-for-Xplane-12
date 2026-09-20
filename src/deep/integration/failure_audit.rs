@@ -686,6 +686,12 @@ pub fn worker_threads() -> usize {
 /// one short run; only a dead one pays for the whole profile set, which is
 /// why the cheap, most-likely profiles come first.
 pub fn sweep(failures: &[FailureDef], progress: &mut (dyn FnMut(usize, usize, usize) + Send)) -> Vec<Verdict> {
+    sweep_over(&profiles(), failures, progress)
+}
+
+/// [`sweep`] over a chosen profile list -- a short one for the fast,
+/// always-on test, the full one for the sweep.
+pub fn sweep_over(profiles: &[Profile], failures: &[FailureDef], progress: &mut (dyn FnMut(usize, usize, usize) + Send)) -> Vec<Verdict> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let threads = worker_threads();
@@ -703,12 +709,11 @@ pub fn sweep(failures: &[FailureDef], progress: &mut (dyn FnMut(usize, usize, us
                 let dead = &dead;
                 let progress = &progress;
                 scope.spawn(move || {
-                    let profiles = profiles();
                     let baselines: Vec<Baseline> = profiles.iter().map(|p| baseline(&(p.truth)(), &reference_faults(), p.frames)).collect();
                     let truths: Vec<Truth> = profiles.iter().map(|p| (p.truth)()).collect();
                     let mut mine = Vec::with_capacity(slice.len());
                     for f in slice {
-                        let v = verdict_for(f, &profiles, &baselines, &truths);
+                        let v = verdict_for(f, profiles, &baselines, &truths);
                         if !v.is_live() {
                             dead.fetch_add(1, Ordering::Relaxed);
                         }
@@ -1039,13 +1044,17 @@ mod tests {
         let mut seen: std::collections::BTreeSet<String> = Default::default();
         let mut sample: Vec<FailureDef> = Vec::new();
         for f in &r.failures {
-            let key = format!("{:?}/{}", f.area, f.ata);
-            if seen.insert(key) {
+            if seen.insert(format!("{:?}", f.area)) {
                 sample.push(f.clone());
             }
         }
+        // Two profiles, not the whole set: this runs on every `cargo
+        // test`, and the point of it is that the harness still reaches
+        // every area, not that it exhausts the state space. The ignored
+        // full sweep is what does that.
+        let quick = vec![Profile { name: "cruise", truth: cruise, frames: 8 }, Profile { name: "all_commands_exercised", truth: all_commands_exercised, frames: 16 }];
         let t0 = Instant::now();
-        let verdicts = sweep(&sample, &mut |_, _, _| {});
+        let verdicts = sweep_over(&quick, &sample, &mut |_, _, _| {});
         let live = verdicts.iter().filter(|v| v.is_live()).count();
         let mut areas_all_dead: BTreeMap<String, (usize, usize)> = BTreeMap::new();
         for v in &verdicts {
@@ -1055,14 +1064,14 @@ mod tests {
                 e.1 += 1;
             }
         }
-        println!("AUDIT sample {} of {} areas*ata live {}/{} in {:.1} s", sample.len(), r.failures.len(), live, verdicts.len(), t0.elapsed().as_secs_f64());
+        println!("AUDIT sample {} areas of {} registered failures: live {}/{} in {:.1} s", sample.len(), r.failures.len(), live, verdicts.len(), t0.elapsed().as_secs_f64());
         for (a, (t, l)) in &areas_all_dead {
             println!("AUDIT   {a:<20} live {l:>3} / {t:>3}");
         }
         for v in verdicts.iter().filter(|v| !v.is_live()) {
             println!("AUDIT   dead sample {} {:?} ata{} {} | {} | {}", v.id, v.area, v.ata, v.name, v.component, v.model_field);
         }
-        assert!(live * 2 >= verdicts.len(), "over half the per-area sample moves nothing published: {live} of {}", verdicts.len());
+        assert!(live * 2 >= verdicts.len(), "over half the one-per-area sample moves nothing published: {live} of {}", verdicts.len());
     }
 
     /// What a handful of diagnostic variables actually read in each
@@ -1197,30 +1206,42 @@ mod tests {
                 wanted.entry(*id).or_default().extend(vars.iter().cloned());
             }
         }
-        let profiles = profiles();
-        let baselines: Vec<Baseline> = profiles.iter().map(|p| baseline(&(p.truth)(), &reference_faults(), p.frames)).collect();
-        let truths: Vec<Truth> = profiles.iter().map(|p| (p.truth)()).collect();
-
-        let mut inert: Vec<(u64, Vec<String>)> = Vec::new();
         let total = wanted.len();
-        for (n, (id, vars)) in wanted.iter().enumerate() {
-            if n % 200 == 0 {
-                println!("AUDIT cause-check {n}/{total}");
-            }
-            let mut reached = false;
-            'search: for (p, _) in profiles.iter().enumerate() {
-                for m in MAGNITUDES {
-                    let d = diff_against(&baselines[p], &truths[p], &armed_with(*id, m));
-                    if d.changed.iter().any(|&i| vars.contains(bare(&baselines[p].names[i]))) {
-                        reached = true;
-                        break 'search;
-                    }
-                }
-            }
-            if !reached {
-                inert.push((*id, vars.iter().cloned().collect()));
-            }
-        }
+        let work: Vec<(u64, std::collections::BTreeSet<String>)> = wanted.into_iter().collect();
+        let threads = worker_threads();
+        let chunk = work.len().div_ceil(threads).max(1);
+        println!("AUDIT cause-check {total} failures named by an alert, {threads} workers");
+        let mut inert: Vec<(u64, Vec<String>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = work
+                .chunks(chunk)
+                .map(|slice| {
+                    scope.spawn(move || {
+                        let profiles = profiles();
+                        let baselines: Vec<Baseline> = profiles.iter().map(|p| baseline(&(p.truth)(), &reference_faults(), p.frames)).collect();
+                        let truths: Vec<Truth> = profiles.iter().map(|p| (p.truth)()).collect();
+                        let mut mine: Vec<(u64, Vec<String>)> = Vec::new();
+                        for (id, vars) in slice {
+                            let mut reached = false;
+                            'search: for p in 0..profiles.len() {
+                                for m in MAGNITUDES {
+                                    let d = diff_against(&baselines[p], &truths[p], &armed_with(*id, m));
+                                    if d.changed.iter().any(|&i| vars.contains(bare(&baselines[p].names[i]))) {
+                                        reached = true;
+                                        break 'search;
+                                    }
+                                }
+                            }
+                            if !reached {
+                                mine.push((*id, vars.iter().cloned().collect()));
+                            }
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            handles.into_iter().flat_map(|h| h.join().expect("a cause-check worker panicked")).collect()
+        });
+        inert.sort_by_key(|(id, _)| *id);
         println!("AUDIT failures named as a cause of some alert: {total} | that never move any of that alert's trigger variables: {}", inert.len());
         let mut text = String::new();
         for (id, vars) in &inert {

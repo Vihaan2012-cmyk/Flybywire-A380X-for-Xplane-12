@@ -978,3 +978,4 @@ mod tests {
         assert!(apply_action(r#"{"kind":"resetBreaker"}"#).is_err(), "missing id");
     }
 }
+
