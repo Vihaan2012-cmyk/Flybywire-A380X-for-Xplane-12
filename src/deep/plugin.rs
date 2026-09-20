@@ -27,12 +27,74 @@
 //! | `ac_bus_volts[i]` | `A32NX_ELEC_AC_{1..4}_BUS_POTENTIAL`, FlyByWire's own electrical system |
 //! | `dc_bus_volts[i]` | `A32NX_ELEC_DC_{1,2}_BUS_POTENTIAL`, ditto |
 //! | `hydraulic_pressure_pa[i]` | `A32NX_HYD_{GREEN,YELLOW}_SYSTEM_1_SECTION_PRESSURE` (psi), FlyByWire's own hydraulic system |
+//! | `engine_n2_frac[i]`, `engine_n3_frac[i]` | `ENGINE_N2:n` / `ENGINE_N3:n`, divided by 100 -- the same `physics::engine` output as N1, written by `engine_commands.rs` right after it |
+//! | `engine_hp_port_pressure_pa[i]`, `engine_hp_port_temp_k[i]` | `ENGINE_HP_PORT_{PRESSURE_PA,TEMP_K}:n`, unconditionally (unlike `engine_bleed_*` above, which already picks IP8 or HP6 by which port is bled) |
+//! | `engine_fuel_flow_kg_s[i]` | `ENGINE_FUEL_DEMAND_KG_S:n`, `physics::engine`'s own `fuel_flow_kg_s` output in SI (the same number `ENGINE_FF:n` publishes ×3600 for the cockpit) |
+//! | `gpu_plugged_in` | any of `A32NX_EXT_PWR_AVAIL:{1..4}` != 0, the same real, plugin-managed Var `efb.rs`'s ground-power control and cold-start setting already write |
+//! | `controls.*` | see [`Controls`]'s own doc for each field; sources are in this file's `Ids`/`Refs` construction below, grep for the field name |
+//! | `commanded_surfaces.*` | the 29 `HYD_*_DEFLECTION` Vars `flight_controls.rs::FlightControls::new` also resolves (`flight_controls.rs:260-269`), converted to degrees with that file's own public `aileron_or_elevator_down_deg`/`rudder_right_deg`/`spoiler_up_deg` -- read here *before* `flight_controls.rs`/`deep::flight_controls`'s own `SurfaceOverrideWriter` run this tick (`deep.tick` is called before `self.flight_controls.update` in `lib.rs`), so this is FlyByWire's own commanded position, not last tick's physical output |
+//! | `aircraft_mass_kg` | `sim/flightmodel/weight/m_total` (kg), X-Plane's own total mass |
+//! | `pitch_deg` | `sim/flightmodel/position/theta`, X-Plane's own pitch (positive nose up) |
+//! | `groundspeed_m_s` | `sim/flightmodel/position/groundspeed` (m/s) |
+//! | `angle_of_attack_deg` | `sim/flightmodel/position/alpha`, the X-Plane SDK's own AoA dataref |
+//! | `radio_height_ft` | `sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot`, the same dataref `prim.rs`'s own `h_radio_ft` reads |
+//! | `leg_on_ground[i]` | `A32NX_LGCIU_1_{NOSE,LEFT,RIGHT}_GEAR_COMPRESSED` (FlyByWire's own primary LGCIU): nose to the nose leg, left to both `l_wing`/`l_body` and right to both `r_wing`/`r_body` -- this port's sensors do not separate wing from body gear on the same side, so both legs on a side read the one real sensor together, ANDed with `on_ground` |
+//! | `leg_touchdown_sink_speed_ms[i]` | held from `sim/flightmodel/position/local_vy` (m/s, X-Plane's OpenGL-frame vertical speed, negated and floored at 0) at the frame `leg_on_ground[i]` last went false -> true; 0.0 while airborne or already settled, computed in [`DeepLayer`] across frames since it is an edge, not a reading |
+//! | `cabin_pressure_pa` | `environment.ambient_pressure_pa` + the ARINC 429 `A32NX_PRESS_CPC_1_CABIN_DELTA_PRESSURE` word (psi), FlyByWire's own primary cabin pressure controller |
+//! | `cabin_temp_k` | `A32NX_COND_MAIN_DECK_1_TEMP` (C) + 273.15: one representative cabin zone of the fifteen (`COND_{CKPT,MAIN_DECK_1..8,UPPER_DECK_1..7,CARGO_FWD,CARGO_BULK}_TEMP` all exist and are real; `Truth` carries one rather than fifteen, see `docs/deep/truth-requests.md` |
+//! | `sun_elevation_deg` | `sim/graphics/scenery/sun_pitch_degrees`, X-Plane's own sun position |
+//!
+//! ### `Truth::controls`, field by field
+//!
+//! | `Controls` field | Source |
+//! |---|---|
+//! | `fire_pb_released[i]` | `A32NX_FIRE_BUTTON_ENG{n}`, the engine fire pushbutton `FirePushButton` publishes (`fire_and_smoke_protection.rs`) |
+//! | `fire_pb_apu_released` | `A32NX_FIRE_BUTTON_APU`, ditto for the APU |
+//! | `fire_agent_pb_pressed[i][b]` | `A32NX_OVHD_FIRE_AGENT_{1,2}_ENG_{n}_IS_PRESSED`, each bottle's own `MomentaryPushButton` |
+//! | `fire_agent_pb_apu_pressed` | `A32NX_OVHD_FIRE_AGENT_1_APU_1_IS_PRESSED` |
+//! | *(cargo-bay fire/agent pushbuttons)* | **unsourced** -- `fire_and_smoke_protection.rs` models 8 engine bottles and 1 APU bottle only; no field added rather than one with nothing behind it |
+//! | `wing_anti_ice_selected` | `A32NX_BUTTON_OVHD_ANTI_ICE_WING_POSITION` != 0, the wing anti-ice pushbutton's own raw position (`pneumatic.rs`'s `WingAntiIcePushButton`) |
+//! | `nacelle_anti_ice_selected[i]` | `A32NX_BUTTON_OVHD_ANTI_ICE_ENG_{n}_POSITION` != 0 |
+//! | `engine_bleed_pb_auto[i]` | `A32NX_OVHD_PNEU_ENG_{n}_BLEED_PB_IS_AUTO` != 0 |
+//! | `apu_bleed_pb_on` | `A32NX_OVHD_APU_BLEED_PB_IS_ON` != 0 |
+//! | `cross_bleed_selector` | `A32NX_KNOB_OVHD_AIRCOND_XBLEED_Position`, raw (0 SHUT / 1 AUTO / 2 OPEN, `CrossBleedValveSelectorMode`'s own discriminants) |
+//! | `pack_pb_on[i]` | `A32NX_OVHD_COND_PACK_{1,2}_PB_IS_ON` != 0 |
+//! | `starter_engaged[i]` | recomputed from the same real reads `physics::engine`'s own `phys_inputs.starter_engaged` uses: `GENERAL ENG STARTER:n` (master), `TURB ENG IGNITION SWITCH EX1:n` (igniter == 2), `ENGINE_STATE:n` (Starting/Restarting) and `ENGINE_TIMER:n` (>= 1.7 s) -- `engine_commands.rs:445-448`'s own formula, not a new source |
+//! | *(rain removal selection)* | **unsourced** -- no rain-removal pushbutton exists in this port; `controls.rain_removal_selected` stays at its `Controls::default()` value (off) every tick |
+//! | `gear_door_commanded_open` | `[A32NX_GEAR_DOOR_CENTER_POSITION, ..._LEFT_POSITION, ..._RIGHT_POSITION]`, FlyByWire's own (undamaged) door actuator output `handling.rs` already mirrors onto X-Plane's gear animation |
+//! | `gear_lever_down` | `A32NX_GEAR_HANDLE_POSITION` >= 0.5 |
+//! | `parking_brake_on` | `A32NX_PARK_BRAKE_LEVER_POS` >= 0.5 |
+//! | `brake_pedal_pos` | `sim/cockpit2/controls/{left,right}_brake_ratio`, X-Plane's own raw pedal-input datarefs (before antiskid/autobrake modify them -- `BRAKE {LEFT,RIGHT} FORCE FACTOR` is the commanded force *after* that, which is what X-Plane's brakes actually receive, not what the crew's feet are doing) |
+//! | `engine_master_on[i]` | `GENERAL ENG STARTER:n` != 0, the same reading `engine_commands.rs`'s own `master`/`fuel_valve_open` uses |
+//! | `eng_gen_pb_on[i]` | `A32NX_OVHD_ELEC_ENG_GEN_{n}_PB_IS_ON` != 0 |
+//! | `apu_gen_pb_on[i]` | `A32NX_OVHD_ELEC_APU_GEN_{1,2}_PB_IS_ON` != 0 |
+//! | `bat_pb_auto[i]` | `A32NX_OVHD_ELEC_BAT_{1,2}_PB_IS_AUTO` != 0 |
+//! | `ground_spoiler_lever_armed` | `sim/cockpit2/controls/speedbrake_ratio`, through `prim::SimReadings::spoilers_from_xplane` (< -0.25 is armed) -- the exact same function and dataref `Prims::read` already uses, so this can never disagree with what the FCU/PRIMs themselves see |
+//! | *(manual galley-shed pushbutton)* | **not added** -- `deep::electrical`'s own load-management already computes an automatic `galley_shed_commanded` from the power budget; no real *manual* shed switch was found in this port, and duplicating the automatic one under a different name would invite the two to drift |
+//! | `apu_master_sw_on` | `A32NX_OVHD_APU_MASTER_SW_PB_IS_ON` != 0 (named for `deep::apu::live`'s own doc comment asking for exactly this) |
+//! | `apu_start_pb_on` | `A32NX_OVHD_APU_START_PB_IS_ON` != 0 |
 //!
 //! Nothing here derives a value it cannot read. Where a dataref is missing
 //! (an older SDK target, or the offline harness) the reading degrades to
 //! the field's documented `Truth::default()` value rather than to zero --
 //! `ambient_pressure_pa` in particular, since several areas divide by it
 //! and zero is a vacuum, not a missing reading.
+//!
+//! The plain `!= 0.0`/`>= 0.5` boolean reads in `Controls` cannot do that
+//! same degradation -- a boolean has no spare sentinel the way a pressure
+//! or temperature does, so "never written" and "explicitly commanded off"
+//! read identically, as 0.0. This is already true of `apu_running`/
+//! `engine_running` above and was never a problem, because FlyByWire's own
+//! compiled systems always write every LVar named here during the same
+//! tick's earlier "systems" phase (`lib.rs`'s tick order), before `deep`
+//! ever runs -- the gap is only real in a synthetic harness (like this
+//! file's own `rig()`) that never runs that phase at all, where a handful
+//! of these (`engine_bleed_pb_auto`, `pack_pb_on`, `eng_gen_pb_on`,
+//! `apu_gen_pb_on`, `bat_pb_auto`, `gear_lever_down`, `parking_brake_on`)
+//! would then read `false` rather than `Controls::default()`'s documented
+//! *on* position. Recorded here rather than worked around, since inventing
+//! a graceful default for a boolean with no unwritten-sentinel would be
+//! its own small fabrication.
 //!
 //! ## Frame cost
 //!
@@ -57,13 +119,30 @@
 //!   in the active set, and `Faults::get` returns `0.0` for an id that is
 //!   not in the snapshot -- but it is one lock per frame instead of
 //!   thousands.
+//!
+//! This pass adds roughly 90 more `VariableIdentifier` reads per frame (29
+//! surface deflections, ~40 `Controls` fields across 4 engines plus the
+//! non-per-engine ones, a handful of engine/cabin/airframe scalars) and 8
+//! more `Option<DataRef>` reads through `Xplm::get_f`/`get_i` -- all
+//! resolved once in `DeepLayer::new`, same as every existing field, so the
+//! added per-frame cost is that many more `Vars::read`/`Xplm::get_f` calls
+//! (each an array index plus a float read, no allocation, no lock) and a
+//! five-element loop for the touchdown-edge capture. Measured against the
+//! ~180 reads `truth()` already made before this pass (four engines' worth
+//! of `EngineIds` plus the bus/hydraulic scalars), this is roughly a 50%
+//! increase in `truth()`'s own read count, not a new order of magnitude;
+//! `Deep::tick`'s own area-stepping cost, not `truth()`, is what dominates
+//! a 30-60 Hz frame budget.
 
 use std::collections::{BTreeSet, HashMap};
 
 use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
 use crate::deep::integration::weather_truth::{EnvironmentTruth, WeatherTruthReader};
-use crate::deep::live::{Deep, Faults, Truth};
+use crate::deep::live::{CommandedSurfaces, Deep, Faults, Truth};
+use crate::fadec::EngineState;
+use crate::flight_controls::{aileron_or_elevator_down_deg, rudder_right_deg, spoiler_up_deg};
+use crate::prim::SimReadings;
 use crate::xp::{DataRef, Xplm};
 use crate::Vars;
 
@@ -100,6 +179,8 @@ const ENGINE_STATE_ON: f64 = 1.0;
 /// The variables one engine contributes to [`Truth`].
 struct EngineIds {
     n1_pct: VariableIdentifier,
+    n2_pct: VariableIdentifier,
+    n3_pct: VariableIdentifier,
     state: VariableIdentifier,
     ip_port_pressure_pa: VariableIdentifier,
     ip_port_temp_k: VariableIdentifier,
@@ -110,18 +191,121 @@ struct EngineIds {
     /// 0`, so the same test picks the same port's pressure/temperature
     /// here and the two can never disagree.
     hp_valve_open: VariableIdentifier,
+    fuel_flow_demand_kg_s: VariableIdentifier,
+    /// `Controls`' per-engine fields: fire pushbutton, both agent
+    /// pushbuttons, nacelle anti-ice selection, engine bleed pushbutton,
+    /// the engine generator pushbutton, and the four raw reads
+    /// `starter_engaged` is recomputed from (see `plugin.rs`'s own
+    /// sourcing table).
+    fire_pb_released: VariableIdentifier,
+    fire_agent_pb_pressed: [VariableIdentifier; 2],
+    nacelle_anti_ice_position: VariableIdentifier,
+    bleed_pb_auto: VariableIdentifier,
+    eng_gen_pb_on: VariableIdentifier,
+    master: VariableIdentifier,
+    igniter: VariableIdentifier,
+    timer: VariableIdentifier,
 }
 
 impl EngineIds {
     fn new(vars: &mut Vars, n: usize) -> Self {
         Self {
             n1_pct: vars.get(format!("ENGINE_N1:{n}")),
+            n2_pct: vars.get(format!("ENGINE_N2:{n}")),
+            n3_pct: vars.get(format!("ENGINE_N3:{n}")),
             state: vars.get(format!("ENGINE_STATE:{n}")),
             ip_port_pressure_pa: vars.get(format!("ENGINE_IP_PORT_PRESSURE_PA:{n}")),
             ip_port_temp_k: vars.get(format!("ENGINE_IP_PORT_TEMP_K:{n}")),
             hp_port_pressure_pa: vars.get(format!("ENGINE_HP_PORT_PRESSURE_PA:{n}")),
             hp_port_temp_k: vars.get(format!("ENGINE_HP_PORT_TEMP_K:{n}")),
             hp_valve_open: vars.get(format!("PNEU_ENG_{n}_HP_VALVE_OPEN")),
+            fuel_flow_demand_kg_s: vars.get(format!("ENGINE_FUEL_DEMAND_KG_S:{n}")),
+            fire_pb_released: vars.get(format!("FIRE_BUTTON_ENG{n}")),
+            fire_agent_pb_pressed: [1, 2].map(|b| vars.get(format!("OVHD_FIRE_AGENT_{b}_ENG_{n}_IS_PRESSED"))),
+            nacelle_anti_ice_position: vars.get(format!("BUTTON_OVHD_ANTI_ICE_ENG_{n}_POSITION")),
+            bleed_pb_auto: vars.get(format!("OVHD_PNEU_ENG_{n}_BLEED_PB_IS_AUTO")),
+            eng_gen_pb_on: vars.get(format!("OVHD_ELEC_ENG_GEN_{n}_PB_IS_ON")),
+            master: vars.get(format!("GENERAL ENG STARTER:{n}")),
+            igniter: vars.get(format!("TURB ENG IGNITION SWITCH EX1:{n}")),
+            timer: vars.get(format!("ENGINE_TIMER:{n}")),
+        }
+    }
+}
+
+/// The 29 `HYD_*_DEFLECTION` Vars `flight_controls.rs::FlightControls::new`
+/// also resolves (`flight_controls.rs:258-269`), read independently here so
+/// `deep::live` never depends on `flight_controls.rs`'s own private `Ids`.
+/// `vars.get` on an already-resolved name returns the same
+/// `VariableIdentifier`, so this costs nothing extra at runtime, just a
+/// second, harmless resolution at startup.
+struct SurfaceIds {
+    ailerons: [[VariableIdentifier; 3]; 2],
+    elevators: [[VariableIdentifier; 2]; 2],
+    rudders: [VariableIdentifier; 2],
+    spoilers: [[VariableIdentifier; 8]; 2],
+    ths: VariableIdentifier,
+}
+
+impl SurfaceIds {
+    fn new(vars: &mut Vars) -> Self {
+        const SIDES: [&str; 2] = ["LEFT", "RIGHT"];
+        Self {
+            ailerons: SIDES.map(|side| ["INWARD", "MIDDLE", "OUTWARD"].map(|part| vars.get(format!("HYD_AIL_{side}_{part}_DEFLECTION")))),
+            elevators: SIDES.map(|side| ["INWARD", "OUTWARD"].map(|part| vars.get(format!("HYD_ELEV_{side}_{part}_DEFLECTION")))),
+            rudders: ["UPPER", "LOWER"].map(|which| vars.get(format!("HYD_{which}_RUD_DEFLECTION"))),
+            spoilers: SIDES.map(|side| std::array::from_fn(|i| vars.get(format!("HYD_SPOILER_{}_{side}_DEFLECTION", i + 1)))),
+            ths: vars.get("HYD_FINAL_THS_DEFLECTION".to_owned()),
+        }
+    }
+}
+
+/// The non-per-engine [`Controls`] fields' variables, resolved once.
+struct ControlIds {
+    fire_pb_apu_released: VariableIdentifier,
+    fire_agent_pb_apu_pressed: VariableIdentifier,
+    wing_anti_ice_position: VariableIdentifier,
+    apu_bleed_pb_on: VariableIdentifier,
+    cross_bleed_selector: VariableIdentifier,
+    pack_pb_on: [VariableIdentifier; 2],
+    /// `[nose, left, right]`.
+    gear_door_position: [VariableIdentifier; 3],
+    gear_handle_position: VariableIdentifier,
+    park_brake_lever_pos: VariableIdentifier,
+    apu_gen_pb_on: [VariableIdentifier; 2],
+    bat_pb_auto: [VariableIdentifier; 2],
+    apu_master_sw_on: VariableIdentifier,
+    apu_start_pb_on: VariableIdentifier,
+    /// `A32NX_EXT_PWR_AVAIL:{1..4}`, for `Truth::gpu_plugged_in`.
+    ext_pwr_avail: [VariableIdentifier; 4],
+    /// `A32NX_LGCIU_1_{NOSE,LEFT,RIGHT}_GEAR_COMPRESSED`, for
+    /// `Truth::leg_on_ground`.
+    lgciu_gear_compressed: [VariableIdentifier; 3],
+    /// ARINC 429 cabin delta pressure and one representative cabin zone
+    /// temperature, for `Truth::cabin_pressure_pa`/`cabin_temp_k`.
+    cabin_delta_pressure: VariableIdentifier,
+    cabin_temp_c: VariableIdentifier,
+}
+
+impl ControlIds {
+    fn new(vars: &mut Vars) -> Self {
+        Self {
+            fire_pb_apu_released: vars.get("FIRE_BUTTON_APU".to_owned()),
+            fire_agent_pb_apu_pressed: vars.get("OVHD_FIRE_AGENT_1_APU_1_IS_PRESSED".to_owned()),
+            wing_anti_ice_position: vars.get("BUTTON_OVHD_ANTI_ICE_WING_POSITION".to_owned()),
+            apu_bleed_pb_on: vars.get("OVHD_APU_BLEED_PB_IS_ON".to_owned()),
+            cross_bleed_selector: vars.get("KNOB_OVHD_AIRCOND_XBLEED_Position".to_owned()),
+            pack_pb_on: [1, 2].map(|n| vars.get(format!("OVHD_COND_PACK_{n}_PB_IS_ON"))),
+            gear_door_position: ["CENTER", "LEFT", "RIGHT"].map(|s| vars.get(format!("GEAR_DOOR_{s}_POSITION"))),
+            gear_handle_position: vars.get("GEAR_HANDLE_POSITION".to_owned()),
+            park_brake_lever_pos: vars.get("PARK_BRAKE_LEVER_POS".to_owned()),
+            apu_gen_pb_on: [1, 2].map(|n| vars.get(format!("OVHD_ELEC_APU_GEN_{n}_PB_IS_ON"))),
+            bat_pb_auto: [1, 2].map(|n| vars.get(format!("OVHD_ELEC_BAT_{n}_PB_IS_AUTO"))),
+            apu_master_sw_on: vars.get("OVHD_APU_MASTER_SW_PB_IS_ON".to_owned()),
+            apu_start_pb_on: vars.get("OVHD_APU_START_PB_IS_ON".to_owned()),
+            ext_pwr_avail: [1, 2, 3, 4].map(|n| vars.get(format!("EXT_PWR_AVAIL:{n}"))),
+            lgciu_gear_compressed: ["NOSE", "LEFT", "RIGHT"].map(|s| vars.get(format!("LGCIU_1_{s}_GEAR_COMPRESSED"))),
+            cabin_delta_pressure: vars.get("PRESS_CPC_1_CABIN_DELTA_PRESSURE".to_owned()),
+            cabin_temp_c: vars.get("COND_MAIN_DECK_1_TEMP".to_owned()),
         }
     }
 }
@@ -135,6 +319,8 @@ struct Ids {
     dc_bus_potential: [VariableIdentifier; 2],
     /// Green and yellow, in `Truth::hydraulic_pressure_pa`'s order.
     hydraulic_pressure_psi: [VariableIdentifier; 2],
+    surfaces: SurfaceIds,
+    controls: ControlIds,
 }
 
 /// The X-Plane datarefs [`Truth`] is filled from, found once.
@@ -147,6 +333,30 @@ struct Refs {
     /// `physics/adirs.rs:1522` and `physics/damage.rs:432` read and
     /// `lib.rs`'s `"SIM ON GROUND"` mapping is built on.
     on_ground: Option<DataRef>,
+    /// `sim/flightmodel/weight/m_total`, kg.
+    mass_kg: Option<DataRef>,
+    /// `sim/flightmodel/position/theta`, degrees, positive nose up.
+    pitch_deg: Option<DataRef>,
+    /// `sim/flightmodel/position/groundspeed`, m/s.
+    groundspeed_m_s: Option<DataRef>,
+    /// `sim/flightmodel/position/alpha`, degrees.
+    alpha_deg: Option<DataRef>,
+    /// `sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot`,
+    /// the same dataref `prim.rs`'s own `h_radio_ft` reads.
+    radio_height_ft: Option<DataRef>,
+    /// `sim/flightmodel/position/local_vy`, m/s, X-Plane's OpenGL-frame
+    /// vertical speed (positive up) -- for touchdown sink-speed capture.
+    local_vy_m_s: Option<DataRef>,
+    /// `sim/graphics/scenery/sun_pitch_degrees`.
+    sun_pitch_deg: Option<DataRef>,
+    /// `sim/cockpit2/controls/speedbrake_ratio`, the same dataref
+    /// `Prims::read` uses for `SimReadings::spoilers_armed` -- reused here,
+    /// through the same `prim::SimReadings::spoilers_from_xplane`, so the
+    /// two can never disagree about whether the lever is armed.
+    speedbrake_ratio: Option<DataRef>,
+    /// `sim/cockpit2/controls/{left,right}_brake_ratio`, X-Plane's own raw
+    /// pedal-input datarefs.
+    brake_pedal: [Option<DataRef>; 2],
 }
 
 /// A published name resolved to the variable it writes.
@@ -215,6 +425,14 @@ pub struct DeepLayer {
     /// acceleration, moves under a tenth of a knot in that time.
     environment: EnvironmentTruth,
     since_weather_s: f64,
+    /// Per leg (`nose, l_wing, r_wing, l_body, r_body`), last tick's
+    /// `Truth::leg_on_ground`, so `truth()` can see the false -> true edge
+    /// that means "just touched down" rather than a level that is already
+    /// true every subsequent frame on the ground.
+    prev_leg_on_ground: [bool; 5],
+    /// The sink speed captured at each leg's last such edge, held until it
+    /// next lifts off. See `Truth::leg_touchdown_sink_speed_ms`.
+    held_sink_speed_ms: [f64; 5],
 }
 
 /// How often the weather/atmosphere read above is taken. See
@@ -238,10 +456,21 @@ impl DeepLayer {
             ac_bus_potential: [1, 2, 3, 4].map(|n| vars.get(format!("ELEC_AC_{n}_BUS_POTENTIAL"))),
             dc_bus_potential: [1, 2].map(|n| vars.get(format!("ELEC_DC_{n}_BUS_POTENTIAL"))),
             hydraulic_pressure_psi: ["GREEN", "YELLOW"].map(|c| vars.get(format!("HYD_{c}_SYSTEM_1_SECTION_PRESSURE"))),
+            surfaces: SurfaceIds::new(vars),
+            controls: ControlIds::new(vars),
         };
         let refs = Refs {
             elevation_m: xplm.and_then(|x| x.find("sim/flightmodel/position/elevation")),
             on_ground: xplm.and_then(|x| x.find("sim/flightmodel/failures/onground_any")),
+            mass_kg: xplm.and_then(|x| x.find("sim/flightmodel/weight/m_total")),
+            pitch_deg: xplm.and_then(|x| x.find("sim/flightmodel/position/theta")),
+            groundspeed_m_s: xplm.and_then(|x| x.find("sim/flightmodel/position/groundspeed")),
+            alpha_deg: xplm.and_then(|x| x.find("sim/flightmodel/position/alpha")),
+            radio_height_ft: xplm.and_then(|x| x.find("sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot")),
+            local_vy_m_s: xplm.and_then(|x| x.find("sim/flightmodel/position/local_vy")),
+            sun_pitch_deg: xplm.and_then(|x| x.find("sim/graphics/scenery/sun_pitch_degrees")),
+            speedbrake_ratio: xplm.and_then(|x| x.find("sim/cockpit2/controls/speedbrake_ratio")),
+            brake_pedal: ["left", "right"].map(|s| xplm.and_then(|x| x.find(&format!("sim/cockpit2/controls/{s}_brake_ratio")))),
         };
         Self {
             deep,
@@ -254,6 +483,10 @@ impl DeepLayer {
             // Due immediately, so the first frame reads for real rather
             // than handing the areas the default atmosphere.
             since_weather_s: f64::MAX,
+            // A cold aircraft is parked, so every leg starts down; see
+            // `Truth::default`'s own `leg_on_ground: [true; 5]`.
+            prev_leg_on_ground: [true; 5],
+            held_sink_speed_ms: [0.0; 5],
         }
     }
 
@@ -294,11 +527,19 @@ impl DeepLayer {
         let environment = self.environment;
 
         let mut engine_n1_frac = [0.0; 4];
+        let mut engine_n2_frac = [0.0; 4];
+        let mut engine_n3_frac = [0.0; 4];
         let mut engine_running = [false; 4];
         let mut engine_bleed_pressure_pa = default.engine_bleed_pressure_pa;
         let mut engine_bleed_temp_k = default.engine_bleed_temp_k;
+        let mut engine_hp_port_pressure_pa = default.engine_hp_port_pressure_pa;
+        let mut engine_hp_port_temp_k = default.engine_hp_port_temp_k;
+        let mut engine_fuel_flow_kg_s = [0.0; 4];
+        let mut controls = default.controls;
         for (i, e) in self.ids.engines.iter().enumerate() {
             engine_n1_frac[i] = vars.read(&e.n1_pct) / 100.0;
+            engine_n2_frac[i] = vars.read(&e.n2_pct) / 100.0;
+            engine_n3_frac[i] = vars.read(&e.n3_pct) / 100.0;
             engine_running[i] = vars.read(&e.state) == ENGINE_STATE_ON;
             // `engine_commands.rs:466`: the IP port feeds the customer
             // bleed unless the HP valve is open.
@@ -318,6 +559,36 @@ impl DeepLayer {
             if temp > 0.0 {
                 engine_bleed_temp_k[i] = temp;
             }
+            // The HP6 port unconditionally, unlike the pair above (see
+            // `Truth::engine_hp_port_pressure_pa`'s own doc).
+            let hp_pressure = vars.read(&e.hp_port_pressure_pa);
+            let hp_temp = vars.read(&e.hp_port_temp_k);
+            if hp_pressure > 0.0 {
+                engine_hp_port_pressure_pa[i] = hp_pressure;
+            }
+            if hp_temp > 0.0 {
+                engine_hp_port_temp_k[i] = hp_temp;
+            }
+            engine_fuel_flow_kg_s[i] = vars.read(&e.fuel_flow_demand_kg_s);
+
+            controls.fire_pb_released[i] = vars.read(&e.fire_pb_released) != 0.0;
+            controls.fire_agent_pb_pressed[i] = e.fire_agent_pb_pressed.map(|id| vars.read(&id) != 0.0);
+            controls.nacelle_anti_ice_selected[i] = vars.read(&e.nacelle_anti_ice_position) != 0.0;
+            controls.engine_bleed_pb_auto[i] = vars.read(&e.bleed_pb_auto) != 0.0;
+            controls.eng_gen_pb_on[i] = vars.read(&e.eng_gen_pb_on) != 0.0;
+            let master = vars.read(&e.master) != 0.0;
+            controls.engine_master_on[i] = master;
+            // `physics::engine::mod.rs`'s own `phys_inputs.starter_engaged`
+            // formula (`engine_commands.rs:445-448`), recomputed from the
+            // same real reads rather than duplicated as a second Var: the
+            // igniter selector at IGN START/CRANK (2), the FADEC's own
+            // state machine in Starting or Restarting, and past the
+            // start-selector dead time.
+            let igniter = vars.read(&e.igniter).round() as i32;
+            let state = EngineState::from(vars.read(&e.state));
+            let timer = vars.read(&e.timer);
+            controls.starter_engaged[i] =
+                master && igniter == 2 && matches!(state, EngineState::Starting | EngineState::Restarting) && timer >= 1.7;
         }
 
         let (apu_bleed_psi, apu_bleed_ssm) = unpack_arinc(vars.read(&self.ids.apu_bleed_air_pressure));
@@ -330,17 +601,108 @@ impl DeepLayer {
             environment.ambient_pressure_pa
         };
 
+        {
+            let c = &self.ids.controls;
+            controls.fire_pb_apu_released = vars.read(&c.fire_pb_apu_released) != 0.0;
+            controls.fire_agent_pb_apu_pressed = vars.read(&c.fire_agent_pb_apu_pressed) != 0.0;
+            controls.wing_anti_ice_selected = vars.read(&c.wing_anti_ice_position) != 0.0;
+            controls.apu_bleed_pb_on = vars.read(&c.apu_bleed_pb_on) != 0.0;
+            controls.cross_bleed_selector = vars.read(&c.cross_bleed_selector);
+            controls.pack_pb_on = c.pack_pb_on.map(|id| vars.read(&id) != 0.0);
+            controls.gear_door_commanded_open = c.gear_door_position.map(|id| vars.read(&id));
+            controls.gear_lever_down = vars.read(&c.gear_handle_position) >= 0.5;
+            controls.parking_brake_on = vars.read(&c.park_brake_lever_pos) >= 0.5;
+            controls.brake_pedal_pos = std::array::from_fn(|i| f(self.refs.brake_pedal[i]).unwrap_or(0.0).clamp(0.0, 1.0));
+            controls.apu_gen_pb_on = c.apu_gen_pb_on.map(|id| vars.read(&id) != 0.0);
+            controls.bat_pb_auto = c.bat_pb_auto.map(|id| vars.read(&id) != 0.0);
+            controls.apu_master_sw_on = vars.read(&c.apu_master_sw_on) != 0.0;
+            controls.apu_start_pb_on = vars.read(&c.apu_start_pb_on) != 0.0;
+            // `rain_removal_selected` has no real source in this port (see
+            // this module's `Controls` sourcing table) and is left at
+            // `default.controls`'s value, already copied in above.
+        }
+        // `sim/cockpit2/controls/speedbrake_ratio`, through the exact
+        // function `Prims::read` uses for `SimReadings::spoilers_armed`, so
+        // the two can never disagree about whether the lever is armed.
+        controls.ground_spoiler_lever_armed =
+            f(self.refs.speedbrake_ratio).map_or(default.controls.ground_spoiler_lever_armed, |ratio| SimReadings::spoilers_from_xplane(ratio).0);
+
+        let gpu_plugged_in = self.ids.controls.ext_pwr_avail.iter().any(|id| vars.read(id) != 0.0);
+
+        let s = &self.ids.surfaces;
+        let commanded_surfaces = CommandedSurfaces {
+            ailerons_deg: s.ailerons.map(|side| side.map(|id| aileron_or_elevator_down_deg(vars.read(&id)))),
+            elevators_deg: s.elevators.map(|side| side.map(|id| aileron_or_elevator_down_deg(vars.read(&id)))),
+            rudders_deg: s.rudders.map(|id| rudder_right_deg(vars.read(&id))),
+            spoilers_deg: s.spoilers.map(|side| side.map(|id| spoiler_up_deg(vars.read(&id)))),
+            ths_deg: vars.read(&s.ths),
+        };
+
+        let aircraft_mass_kg = f(self.refs.mass_kg).filter(|m| *m > 0.0).unwrap_or(default.aircraft_mass_kg);
+        let pitch_deg = f(self.refs.pitch_deg).unwrap_or(default.pitch_deg);
+        let groundspeed_m_s = f(self.refs.groundspeed_m_s).unwrap_or(default.groundspeed_m_s);
+        let angle_of_attack_deg = f(self.refs.alpha_deg).unwrap_or(default.angle_of_attack_deg);
+        let radio_height_ft = f(self.refs.radio_height_ft).unwrap_or(default.radio_height_ft);
+
+        // Per-leg ground contact: the primary LGCIU's real sensors, ANDed
+        // with the aircraft-wide flag the same way `Truth::on_ground`'s own
+        // consumers already do ("no leg can be on the ground while the
+        // aircraft is not"). Wing and body share the one real sensor on
+        // their side (see this module's sourcing table).
+        let on_ground_now = self
+            .refs
+            .on_ground
+            .and_then(|d| xplm.map(|x| x.get_i(d) != 0))
+            .unwrap_or(default.on_ground);
+        let lc = &self.ids.controls.lgciu_gear_compressed;
+        let (nose, left, right) = (vars.read(&lc[0]) != 0.0, vars.read(&lc[1]) != 0.0, vars.read(&lc[2]) != 0.0);
+        let leg_on_ground = [nose, left, right, left, right].map(|compressed| compressed && on_ground_now);
+
+        // Touchdown sink speed: capture the aircraft's own vertical speed
+        // on the false -> true edge of each leg, hold it until that leg
+        // next lifts off. `local_vy` is positive up; a touchdown is a
+        // descent, so this is its magnitude, floored at 0 for a leg that
+        // never actually had a downward speed (e.g. it was already on the
+        // ground at the previous frame's edge, which cannot happen here
+        // since this only fires on the edge itself, but the floor keeps
+        // the field from ever reading a spurious negative).
+        let local_vy = f(self.refs.local_vy_m_s).unwrap_or(0.0);
+        let descent_speed_m_s = (-local_vy).max(0.0);
+        let mut leg_touchdown_sink_speed_ms = self.held_sink_speed_ms;
+        for i in 0..5 {
+            let just_touched_down = leg_on_ground[i] && !self.prev_leg_on_ground[i];
+            if just_touched_down {
+                leg_touchdown_sink_speed_ms[i] = descent_speed_m_s;
+            } else if !leg_on_ground[i] {
+                leg_touchdown_sink_speed_ms[i] = 0.0;
+            }
+        }
+        self.prev_leg_on_ground = leg_on_ground;
+        self.held_sink_speed_ms = leg_touchdown_sink_speed_ms;
+
+        // Cabin pressure: ambient plus FlyByWire's own primary cabin
+        // pressure controller's ARINC 429 delta-pressure word (psi).
+        let (cabin_delta_psi, cabin_delta_ssm) = unpack_arinc(vars.read(&self.ids.controls.cabin_delta_pressure));
+        let cabin_pressure_pa = if cabin_delta_ssm == SSM_NORMAL_OPERATION {
+            environment.ambient_pressure_pa + cabin_delta_psi * PSI_TO_PA
+        } else {
+            default.cabin_pressure_pa
+        };
+        let cabin_temp_c = vars.read(&self.ids.controls.cabin_temp_c);
+        // 0 K would be a reading nobody has published yet, not a real cabin
+        // temperature (see this file's own convention for `engine_bleed_
+        // temp_k` above).
+        let cabin_temp_k = if cabin_temp_c > -273.15 { cabin_temp_c + 273.15 } else { default.cabin_temp_k };
+
+        let sun_elevation_deg = f(self.refs.sun_pitch_deg).unwrap_or(default.sun_elevation_deg);
+
         Truth {
             dt_s,
             // `Deep::tick` replaces this with the previous frame's values
             // before it steps anything; the plugin never fills it.
             published: Default::default(),
             altitude_ft: f(self.refs.elevation_m).map_or(default.altitude_ft, |m| m * crate::M_TO_FT),
-            on_ground: self
-                .refs
-                .on_ground
-                .and_then(|d| xplm.map(|x| x.get_i(d) != 0))
-                .unwrap_or(default.on_ground),
+            on_ground: on_ground_now,
             environment,
             engine_n1_frac,
             engine_running,
@@ -351,6 +713,24 @@ impl DeepLayer {
             ac_bus_volts: std::array::from_fn(|i| vars.read(&self.ids.ac_bus_potential[i])),
             dc_bus_volts: std::array::from_fn(|i| vars.read(&self.ids.dc_bus_potential[i])),
             hydraulic_pressure_pa: std::array::from_fn(|i| vars.read(&self.ids.hydraulic_pressure_psi[i]) * PSI_TO_PA),
+            engine_n2_frac,
+            engine_n3_frac,
+            engine_hp_port_pressure_pa,
+            engine_hp_port_temp_k,
+            engine_fuel_flow_kg_s,
+            gpu_plugged_in,
+            controls,
+            commanded_surfaces,
+            aircraft_mass_kg,
+            pitch_deg,
+            groundspeed_m_s,
+            angle_of_attack_deg,
+            radio_height_ft,
+            leg_on_ground,
+            leg_touchdown_sink_speed_ms,
+            cabin_pressure_pa,
+            cabin_temp_k,
+            sun_elevation_deg,
         }
     }
 

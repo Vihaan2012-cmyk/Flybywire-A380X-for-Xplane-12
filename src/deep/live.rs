@@ -119,10 +119,239 @@ pub struct Truth {
     pub dc_bus_volts: [f64; 2],
     /// Hydraulic system pressures, green and yellow, Pa.
     pub hydraulic_pressure_pa: [f64; 2],
+    /// Per engine, 1-4: intermediate-pressure (N2) and high-pressure (N3)
+    /// spool speed, each as a fraction of that spool's own design speed --
+    /// the same convention `engine_n1_frac` already uses. Hydraulic
+    /// engine-driven pumps and engine fuel pumps are geared to the HP
+    /// spool, not the fan, and a VFG's output frequency tracks core (N3)
+    /// speed; `engine_n1_frac` alone cannot stand in for either. This
+    /// crate's own `physics::engine` already computes both every tick,
+    /// immediately alongside N1 (`engine_commands.rs`'s `vars.write(&e.n2,
+    /// ...)`/`(&e.n3, ...)`, right after the N1 write `engine_n1_frac`
+    /// already cites).
+    pub engine_n2_frac: [f64; 4],
+    pub engine_n3_frac: [f64; 4],
+    /// Per engine: the HP compressor exit (HP6) port, *always* -- unlike
+    /// `engine_bleed_pressure_pa`/`_temp_k` above, which already carry
+    /// whichever of IP8/HP6 is actually feeding the customer bleed this
+    /// tick and so read as IP8 (a much cooler, lower-pressure tap) whenever
+    /// the HP valve is shut. The HP6 stuck-valve failure and the
+    /// precooler's own cooling duty both need the HP6 reading *even when*
+    /// the engine is being bled from IP8, which is why this is a separate
+    /// pair of fields rather than a flag on the existing one. Same source
+    /// as the port-selection logic `engine_bleed_pressure_pa` already
+    /// documents (`physics::engine`'s own HP6 output, `engine_commands.rs`'s
+    /// `e.hp_port_pressure`/`e.hp_port_temp`), just read unconditionally.
+    pub engine_hp_port_pressure_pa: [f64; 4],
+    pub engine_hp_port_temp_k: [f64; 4],
+    /// Per engine: real fuel flow into the combustor, kg/s --
+    /// `physics::engine`'s own `EngineOutputs::fuel_flow_kg_s`, the same
+    /// number `ENGINE_FF:n` (kg/h) and `ENGINE_FUEL_DEMAND_KG_S:n` (kg/s)
+    /// already publish every tick. There is no separate *commanded* Wf,
+    /// N2, TGT or P30 in this port to carry alongside it: the compiled
+    /// FADEC bus (`fbw_controllers::BaseEec`) only exposes a commanded
+    /// *N1* (`AUTOTHRUST_N1_COMMANDED:n`, already real and readable by any
+    /// area that wants a target to compare N1 against) -- N2/N3, TGT
+    /// (EGT) and fuel flow are this model's *response* to that command,
+    /// not independently commanded setpoints, so a "commanded" version of
+    /// them would be invented. See `docs/deep/truth-requests.md` for this
+    /// noted as unsourced rather than guessed.
+    pub engine_fuel_flow_kg_s: [f64; 4],
+    /// External (ground) power plugged in and available at the aircraft's
+    /// receptacle -- any of its four connections. `deep::electrical` has
+    /// wanted this since `sources.rs`/`live.rs` were written (its own
+    /// `command_contactors` carries a `let gpu_plugged_in = false;` with a
+    /// comment asking for exactly this field). Sourced from `EXT_PWR_AVAIL:
+    /// {1..4}`, the same real, plugin-managed Var the EFB's own ground-power
+    /// control (`efb.rs::any_ext_pwr_available`) and the cold-start setting
+    /// already read and write -- not an X-Plane-native dataref, but a real
+    /// state this plugin is the sole authority over, same tier as
+    /// `on_ground`.
+    pub gpu_plugged_in: bool,
+    /// What the crew has selected on the overhead, pedestal and centre
+    /// panels. See [`Controls`] for each field's real source.
+    pub controls: Controls,
+    /// What PRIM/SEC commanded each flight-control surface to, this tick,
+    /// before any physical fault: FlyByWire's own (undamaged) actuator
+    /// model's output, read back from the same `HYD_*_DEFLECTION` Vars
+    /// `deep::flight_controls`'s `SurfaceOverrideWriter` will later override
+    /// (`deep::live`'s own tick order runs before that override, so this
+    /// reads FlyByWire's command, never the deep model's own physical
+    /// output from a moment ago). See [`CommandedSurfaces`].
+    pub commanded_surfaces: CommandedSurfaces,
+    /// The aircraft's own mass and motion, real X-Plane readings. Mass in
+    /// particular cannot honestly default to zero -- see [`Truth::default`].
+    pub aircraft_mass_kg: f64,
+    /// Pitch attitude, degrees, positive nose up (`sim/flightmodel/
+    /// position/theta`'s own native sign; `lib.rs`'s MSFS-compatibility
+    /// `"PLANE PITCH DEGREES"` mapping negates the same dataref to match
+    /// MSFS's opposite convention, which is why that sign looks flipped
+    /// there and not here).
+    pub pitch_deg: f64,
+    pub groundspeed_m_s: f64,
+    /// Angle of attack, degrees (`sim/flightmodel/position/alpha`, the
+    /// X-Plane SDK's own AoA dataref).
+    pub angle_of_attack_deg: f64,
+    pub radio_height_ft: f64,
+    /// Per leg, in `deep::gear_structure`'s own `nose, l_wing, r_wing,
+    /// l_body, r_body` order: whether that leg's wheels are on the ground
+    /// this tick, and the aircraft's own vertical speed (m/s, positive
+    /// down) at the instant that leg last transitioned from airborne to on
+    /// the ground -- held at that value until the leg next lifts off, 0.0
+    /// while it has never yet touched down this flight. `on_ground` above
+    /// is one aircraft-wide flag with no sink speed at all, which is the
+    /// single number a hard-landing model is most sensitive to; see
+    /// `gear_structure::live`'s own module doc for exactly this gap.
+    pub leg_on_ground: [bool; 5],
+    pub leg_touchdown_sink_speed_ms: [f64; 5],
+    /// Cabin pressure, Pa, and one representative cabin zone's temperature,
+    /// K. See `plugin.rs`'s sourcing table for why these are a single
+    /// number each rather than per-zone.
+    pub cabin_pressure_pa: f64,
+    pub cabin_temp_k: f64,
+    /// The sun's elevation above the horizon, degrees (negative below it).
+    /// `ThermalNetwork::step` takes a solar flux and every zone carries a
+    /// sun-exposure fraction; `fire_ice`'s live system passes 0 today
+    /// rather than inventing a flux, per its own module doc. Elevation
+    /// (not irradiance itself) is what is real and X-Plane-native; an area
+    /// wanting a flux still has to turn this into one itself (clear-sky
+    /// irradiance is a function of elevation and the atmosphere this Var
+    /// does not carry), which is why this is elevation, not an invented
+    /// W/m^2 number.
+    pub sun_elevation_deg: f64,
     /// What every area published last frame. Empty on the first frame and
     /// whenever an area has not published a name yet, so read it through
     /// `get`/`get_or` and never assume a zero means anything.
     pub published: PublishedFrame,
+}
+
+/// Cockpit control state: what the crew has selected, not what the systems
+/// are doing about it. Grouped separately from `Truth`'s other fields
+/// because this is the largest single block of them (docs/deep/
+/// truth-requests.md's "Cockpit control state" section) and because every
+/// one of them is a switch or lever position rather than a physical
+/// quantity -- keeping them together makes that distinction visible at the
+/// call site (`truth.controls.parking_brake_on`, not thirty more fields
+/// flattened onto `Truth` itself).
+///
+/// Every field's real source (or, where none exists in this port, its
+/// documented default and why) is in `plugin.rs`'s own sourcing table.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Controls {
+    /// Engine fire pushbutton, per engine: `true` once pulled ("released").
+    pub fire_pb_released: [bool; 4],
+    pub fire_pb_apu_released: bool,
+    /// Fire agent (extinguisher bottle) pushbutton, per engine and bottle
+    /// (1st/2nd shot): `true` while pressed.
+    pub fire_agent_pb_pressed: [[bool; 2]; 4],
+    pub fire_agent_pb_apu_pressed: bool,
+    /// No real cargo-bay fire pushbutton or agent pushbutton exists in this
+    /// port (`fire_and_smoke_protection.rs` models 8 engine bottles and 1
+    /// APU bottle, no cargo ones) -- left out entirely rather than adding a
+    /// field with nothing real behind it. See `docs/deep/truth-requests.md`.
+    pub wing_anti_ice_selected: bool,
+    pub nacelle_anti_ice_selected: [bool; 4],
+    pub engine_bleed_pb_auto: [bool; 4],
+    pub apu_bleed_pb_on: bool,
+    /// The cross-bleed selector knob's raw position: 0 = SHUT, 1 = AUTO,
+    /// 2 = OPEN (`CrossBleedValveSelectorMode`'s own discriminants). A
+    /// single knob controls all three cross-bleed valves.
+    pub cross_bleed_selector: f64,
+    pub pack_pb_on: [bool; 2],
+    /// Whether each engine's pneumatic starter is actually engaged this
+    /// tick: master on, igniter at IGN START/CRANK, and the FADEC's own
+    /// state machine past the start-selector dead time -- the same
+    /// condition `physics::engine::mod.rs`'s own `phys_inputs.starter_
+    /// engaged` computes internally for the physical engine model, just
+    /// exposed here for `pneumatic_ducts`' start-duct failures too.
+    pub starter_engaged: [bool; 4],
+    /// No real rain-removal pushbutton exists in this port either; held at
+    /// its normal (off) position. `[left, right]` windshield jets.
+    pub rain_removal_selected: [bool; 2],
+    /// Commanded gear door position, `[nose, left, right]`, FlyByWire's own
+    /// actuator output: 0.0 closed .. 1.0 fully open.
+    pub gear_door_commanded_open: [f64; 3],
+    /// `true` when the gear lever is selected down.
+    pub gear_lever_down: bool,
+    pub parking_brake_on: bool,
+    /// `[left, right]` brake pedal deflection, 0.0 released .. 1.0 full.
+    pub brake_pedal_pos: [f64; 2],
+    pub engine_master_on: [bool; 4],
+    pub eng_gen_pb_on: [bool; 4],
+    /// `[1, 2]`: the A380's two APU generator pushbuttons.
+    pub apu_gen_pb_on: [bool; 2],
+    /// `[1, 2]`: the two battery pushbuttons' AUTO/OFF position.
+    pub bat_pb_auto: [bool; 2],
+    /// `true` when the ground-spoiler/speedbrake lever is in the ARMED
+    /// detent (X-Plane's own handle convention: pulled past the aft stop).
+    /// No real manual galley-shed pushbutton exists in this port either;
+    /// `deep::electrical`'s own load-management already computes an
+    /// automatic `galley_shed_commanded` from the power budget, which is
+    /// not this field's job to duplicate (see `docs/deep/
+    /// truth-requests.md`).
+    pub ground_spoiler_lever_armed: bool,
+    pub apu_master_sw_on: bool,
+    pub apu_start_pb_on: bool,
+}
+
+impl Default for Controls {
+    /// A cold aircraft, parked: masters and starters off, guards down,
+    /// selections off, the gear down with its doors closed, the parking
+    /// brake set -- the same resting state `Truth::default` documents for
+    /// everything else. Generator, battery and pack pushbuttons default to
+    /// their one normal *on/auto* position (matching `aspects.rs`'s own
+    /// "the pushbuttons are built on... so the switches start on here too"
+    /// for the generators), since that is a real switch position, not the
+    /// absence of one.
+    fn default() -> Self {
+        Self {
+            fire_pb_released: [false; 4],
+            fire_pb_apu_released: false,
+            fire_agent_pb_pressed: [[false; 2]; 4],
+            fire_agent_pb_apu_pressed: false,
+            wing_anti_ice_selected: false,
+            nacelle_anti_ice_selected: [false; 4],
+            engine_bleed_pb_auto: [true; 4],
+            apu_bleed_pb_on: false,
+            cross_bleed_selector: 1.0, // AUTO
+            pack_pb_on: [true; 2],
+            starter_engaged: [false; 4],
+            rain_removal_selected: [false; 2],
+            gear_door_commanded_open: [0.0; 3],
+            gear_lever_down: true,
+            parking_brake_on: true,
+            brake_pedal_pos: [0.0; 2],
+            engine_master_on: [false; 4],
+            eng_gen_pb_on: [true; 4],
+            apu_gen_pb_on: [true; 2],
+            bat_pb_auto: [true; 2],
+            ground_spoiler_lever_armed: false,
+            apu_master_sw_on: false,
+            apu_start_pb_on: false,
+        }
+    }
+}
+
+/// One flight-control surface set's commanded position, degrees, in the
+/// same per-panel layout `flight_controls::Actuators`/`SurfaceOverrideWriter
+/// ::PhysicalSurfaces` already use -- so `deep::flight_controls` can diff
+/// this against its own physical output panel-for-panel, with no
+/// re-blending. Sign and travel conventions match `flight_controls.rs`'s
+/// own documented ones exactly (trailing edge up/down, rudder right,
+/// spoiler up): see `plugin.rs` for the conversion.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CommandedSurfaces {
+    /// `[side][inward, middle, outward]`, degrees, positive trailing edge up.
+    pub ailerons_deg: [[f64; 3]; 2],
+    /// `[side][inward, outward]`, degrees, positive trailing edge up.
+    pub elevators_deg: [[f64; 2]; 2],
+    /// `[upper, lower]`, degrees, FlyByWire's own rudder body sign (not
+    /// X-Plane's positive-right convention -- see `flight_controls.rs`).
+    pub rudders_deg: [f64; 2],
+    /// `[side][spoiler 1..=8]`, degrees up, 0..50.
+    pub spoilers_deg: [[f64; 8]; 2],
+    /// Degrees, positive nose up.
+    pub ths_deg: f64,
 }
 
 impl Default for Truth {
@@ -151,6 +380,32 @@ impl Default for Truth {
             ac_bus_volts: [0.0; 4],
             dc_bus_volts: [0.0; 2],
             hydraulic_pressure_pa: [0.0; 2],
+            engine_n2_frac: [0.0; 4],
+            engine_n3_frac: [0.0; 4],
+            engine_hp_port_pressure_pa: [101_325.0; 4],
+            engine_hp_port_temp_k: [288.15; 4],
+            engine_fuel_flow_kg_s: [0.0; 4],
+            gpu_plugged_in: false,
+            controls: Controls::default(),
+            commanded_surfaces: CommandedSurfaces::default(),
+            // A380-800 operating empty weight, kg (Airbus's own published
+            // Aircraft Characteristics figure is about 277 t for the -800:
+            // the airframe with neither fuel nor payload). Mass is the one
+            // field here that cannot honestly default to zero -- an
+            // aircraft always weighs something -- and this is the same
+            // resting state `deep::fuel::live`'s empty tanks and
+            // `deep::gear_structure::live`'s own identically-cited constant
+            // already describe.
+            aircraft_mass_kg: 277_000.0,
+            pitch_deg: 0.0,
+            groundspeed_m_s: 0.0,
+            angle_of_attack_deg: 0.0,
+            radio_height_ft: 0.0,
+            leg_on_ground: [true; 5],
+            leg_touchdown_sink_speed_ms: [0.0; 5],
+            cabin_pressure_pa: 101_325.0,
+            cabin_temp_k: 288.15,
+            sun_elevation_deg: 0.0,
             published: PublishedFrame::default(),
         }
     }
