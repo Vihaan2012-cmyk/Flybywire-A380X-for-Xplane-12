@@ -472,6 +472,7 @@ pub struct Engine {
     ip: Spool,
     hp: Spool,
     governor: Governor,
+    gas: gas_path::GasPath,
     egt_lag_c: f64,
     hot: hot_section::HotSection,
     oil: oil::OilSystem,
@@ -524,11 +525,13 @@ pub fn idle_engine() -> Engine {
 impl Engine {
     pub fn new() -> Self {
         let design = design_point();
+        let gas = gas_path::GasPath::new();
         Self {
             lp: Spool::new(params::inertia::i_lp()),
             ip: Spool::new(params::inertia::i_ip()),
             hp: Spool::new(params::inertia::i_hp()),
-            governor: Governor::with_design_far(design.wf_design_kg_s / design.mdot_core_design_kg_s.max(1e-6)),
+            governor: Governor::with_design_far(gas.design.wf_kg_s / gas.design.mdot_core_kg_s.max(1e-6)),
+            gas,
             design,
             egt_lag_c: 15.0,
             hot: hot_section::HotSection::new(T_REF_K),
@@ -540,7 +543,7 @@ impl Engine {
     /// The calibrated design-point fuel flow, kg/s. Exposed for tests and
     /// for `docs/physics/engine.md`'s validation table.
     pub fn design_wf_kg_s(&self) -> f64 {
-        self.design.wf_design_kg_s
+        self.gas.design.wf_kg_s
     }
 
     /// Uncorrected percent of design RPM for a spool's current speed.
@@ -557,6 +560,9 @@ impl Engine {
             self.egt_lag_c = ambient_t - 273.15;
             self.hot = hot_section::HotSection::new(ambient_t);
             self.oil = oil::OilSystem::new(ambient_t);
+            if self.hp.rpm <= 0.0 && self.ip.rpm <= 0.0 && self.lp.rpm <= 0.0 {
+                self.gas.rest(ambient_p);
+            }
         }
 
         // The same freestream total-temperature correction ("theta2") this
@@ -573,33 +579,12 @@ impl Engine {
         let n2_corr = n2_pct / correction;
         let n3_corr = n3_pct / correction;
 
-        // ---- Gas path (quasi-steady at this frame's spool speeds) ------
-        // Core mass flow is defined by the HP compressor's own corrected
-        // flow (`hpc_flow_defining`), not the fan's: the pneumatic starter
-        // turns the HP spool, so the core must be able to flow air (and so
-        // light off) before the fan — on a separate shaft, only driven once
-        // there is combustion power — has to be turning at all. See
-        // `evaluate_design_gas_path`'s docs for the same choice at the
-        // design point. The fan's small contribution to pre-compressing
-        // the core-bound stream is neglected (documented simplification).
-        //
-        // Computed before the governor below (not after, as a simpler
-        // draft of this model once had it) because the governor's fuel
-        // command must itself be capped by how much core air is actually
-        // reaching the combustor this frame (`governor.rs`'s module docs):
-        // early in a start the fan lags the core badly, and an N1-error-only
-        // fuel law would otherwise schedule far more fuel than the still-
-        // small core flow at low N3 could burn.
-        let s2 = inlet::station2(ambient_p, ambient_t, inputs.mach);
-        // Continuous compressor degradation (`failures` 72_004 "compressor
-        // stall", via `engine_commands.rs`): a stalled/damaged HP compressor
-        // loses both pressure-rise efficiency and corrected-flow capacity.
-        // Applied to the HP compressor's own `Spec` each frame (a cheap
-        // struct copy, not a design-point recalibration) since it is the
-        // HP compressor that defines core mass flow in this model -- a flow
-        // capacity loss here is what lets the failure actually starve the
-        // combustor and both downstream turbines of mass flow, the real
-        // physical route, rather than a scripted thrust or EGT penalty.
+        // ---- Degradation and bleed ----------------------------------------
+        // Continuous gas-path degradation (`failures` 72_004 "compressor
+        // stall", 72_008 "turbine blade damage", via `engine_commands.rs`):
+        // the HP compressor's stages lose efficiency and annulus flow
+        // capacity, the turbines efficiency. The consequences (less flow,
+        // less margin to stall, hotter turbines) come out of the gas path.
         let eta_loss = crate::invariants::check(
             "engine.compressor_efficiency_loss_fraction",
             inputs.compressor_efficiency_loss_fraction,
@@ -612,44 +597,31 @@ impl Engine {
             crate::invariants::Bound::Range(0.0, 1.0),
             "compressor flow capacity loss fraction must be 0..1",
         );
-        let hpc_spec = compressor::Spec {
-            efficiency_loss_fraction: eta_loss,
-            mdot_corrected_design_kg_s: self.design.hpc.mdot_corrected_design_kg_s * (1.0 - flow_loss).max(0.05),
-            ..self.design.hpc
-        };
-        let fan = compressor::stage(&self.design.fan, s2.tt_k, s2.pt_pa, n1_corr / 100.0); // bypass-only flow
-        let ipc_thermo = compressor::stage_fixed_flow(&self.design.ipc, s2.tt_k, s2.pt_pa, n2_corr / 100.0, 0.0);
-        let hpc_flow_defining = compressor::stage(&hpc_spec, ipc_thermo.tt_out_k, ipc_thermo.pt_out_pa, n3_corr / 100.0);
-        let mdot_core = hpc_flow_defining.mdot_kg_s;
-        let mdot_bypass = fan.mdot_kg_s;
-        // Customer bleed taken at IP8 is still compressed by the IP
-        // compressor but leaves before the HP compressor, which swallows
-        // its own flow regardless: the IP spool works harder, the core
-        // keeps its air. At HP6 both compressors have done their work on it
-        // and the combustor goes without.
+        let turbine_loss = crate::invariants::check(
+            "engine.turbine_efficiency_loss_fraction",
+            inputs.turbine_efficiency_loss_fraction,
+            crate::invariants::Bound::Range(0.0, 1.0),
+            "turbine efficiency loss fraction must be 0..1",
+        );
+        // Customer bleed taken at IP8 leaves the IP-HP duct: the IP
+        // compressor still compressed it, the HP compressor never sees it.
+        // At HP6 it leaves the combustor casing after both compressors'
+        // work, and the burner goes without it.
         let bleed = inputs.bleed_extraction_kg_s.max(0.0);
         let (ip_bleed, hp_bleed) = if inputs.bleed_from_ip_port { (bleed, 0.0) } else { (0.0, bleed) };
-        let w24 = mdot_core + ip_bleed;
-        let ipc = compressor::stage_fixed_flow(&self.design.ipc, s2.tt_k, s2.pt_pa, n2_corr / 100.0, w24);
-        let hpc = compressor::stage_fixed_flow(&hpc_spec, ipc.tt_out_k, ipc.pt_out_pa, n3_corr / 100.0, mdot_core);
 
-        // Bleed extraction happens after the HP compressor (typical real
-        // bleed port location), before the combustor. A real engine would
-        // surge/flame out if bled past some point, which this
-        // reduced-order model does not separately represent, but the flow
-        // must never go negative or exactly to zero (a division hazard
-        // downstream); floored at a small fraction of whatever core flow
-        // actually exists right now (not a fixed minimum), so a stopped
-        // core still has a stopped, not merely reduced, combustor.
-        let mdot_to_combustor = (mdot_core - hp_bleed).max(0.02 * mdot_core);
-
+        // ---- Fuel ------------------------------------------------------------
+        // The air reaching the burner is the HP compressor's flow state
+        // (`gas_path`), less HP6 bleed: what the governor's fuel-air limits
+        // are scheduled on.
+        let mdot_to_combustor = (self.gas.state.m_hpc - hp_bleed).max(0.0);
         let wf = self.governor.step(
             inputs.target_n1_corrected_pct,
             n1_corr,
             n3_corr,
             inputs.fuel_valve_open,
             mdot_to_combustor,
-            self.design.wf_design_kg_s,
+            self.gas.design.wf_kg_s,
             dt.max(1e-4),
         );
         // The start and its handover, one piece. A real FADEC fuels the
@@ -673,228 +645,72 @@ impl Engine {
                 * correction;
             let scheduled = (crate::fadec::polynomial::start_ff(n3_pct, fbw_idle_n3, idle_ff_kg_h) / 3600.0)
                 .min(mdot_to_combustor * MAX_COMBUSTOR_FUEL_AIR_RATIO);
-            self.governor.track(scheduled, n1_corr, self.design.wf_design_kg_s);
+            self.governor.track(scheduled, n1_corr, self.gas.design.wf_kg_s);
             scheduled
         } else {
             wf
         };
-        // Flame-out: a combustor holds its flame only with the pressure
-        // rise the compressor gives at light-off speed (engines.cfg's
-        // min_n2_for_combustion, `MIN_N3_FOR_COMBUSTION_PCT`) or more; below
-        // that (no compression left, e.g. a destroyed HP compressor) the
-        // flame goes out and the core runs down instead of unloading and
-        // overspeeding on whatever gas still gets through.
-        // The burner pressure is also capped by the flow: the HP turbine's
-        // choked guide vanes hold pt4 in proportion to the mass flow through
-        // them (pt4 ~ mdot * sqrt(Tt) / choked flow capacity). With the core's
-        // flow collapsed, no compressor pressure upstream can be held.
-        let flow_held_pa = self.design.pt4_design_pa * (mdot_to_combustor / self.design.mdot_core_design_kg_s.max(1e-6))
-            * (hpc.tt_out_k / self.design.tt3_design_k.max(1.0)).sqrt();
-        let burner_pa = hpc.pt_out_pa.min(flow_held_pa.max(ambient_p));
-        let wf = if burner_pa / ambient_p < self.design.burner_pr_min { 0.0 } else { wf };
-        let comb = combustor::burn(mdot_to_combustor, wf, hpc.tt_out_k, hpc.pt_out_pa);
-        // Continuous turbine degradation (`failures` 72_008, "turbine blade
-        // damage"): less efficient expansion, read here because the energy
-        // closure below needs it.
-        let turbine_loss = crate::invariants::check(
-            "engine.turbine_efficiency_loss_fraction",
-            inputs.turbine_efficiency_loss_fraction,
-            crate::invariants::Bound::Range(0.0, 1.0),
-            "turbine efficiency loss fraction must be 0..1",
+        // Flame-out: a combustor holds its flame only with the pressure rise
+        // the compressor gives at light-off speed (engines.cfg's
+        // min_n2_for_combustion, `MIN_N3_FOR_COMBUSTION_PCT`) or more, read
+        // from the combustor plenum's own pressure; with no compression left
+        // (a destroyed HP compressor, a stopped core) the flame goes out.
+        let wf = if self.gas.state.p3 / ambient_p < self.design.burner_pr_min || mdot_to_combustor <= 0.0 { 0.0 } else { wf };
+
+        // ---- Gas path (`gas_path`): stage-stacked compressors with duct
+        // inertia, plenum pressures, choked and Stodola turbines, nozzles.
+        let gp = self.gas.step(
+            &gas_path::Inputs {
+                ambient_pressure_pa: ambient_p,
+                ambient_temp_k: ambient_t,
+                mach: inputs.mach,
+                true_airspeed_m_s: inputs.true_airspeed_m_s,
+                wf_kg_s: wf,
+                lp_rpm: self.lp.rpm,
+                ip_rpm: self.ip.rpm,
+                hp_rpm: self.hp.rpm,
+                ip_bleed_kg_s: ip_bleed,
+                hp_bleed_kg_s: hp_bleed,
+                hpc_efficiency: 1.0 - eta_loss,
+                hpc_flow_capacity: (1.0 - flow_loss).max(0.05),
+                turbine_efficiency: 1.0 - turbine_loss,
+            },
+            dt,
         );
 
-        // ---- Turbine torque: fixed design shaft torque scaled by (a) how
-        // far actual combustion power is from the design point and (b) how
-        // far actual core mass flow is from the design point, then
-        // converted to the power this frame's gas-path calculations need
-        // via this frame's *actual* spool speed (module docs: torque, not
-        // power, is what stays well-behaved as a spool's speed approaches
-        // zero). The mass-flow factor is what couples the spools: a real
-        // turbine's extractable power requires mass actually flowing
-        // through it (power = mdot * cp * delta_T, and delta_T is roughly
-        // fixed by pressure ratio, so extractable power scales with mdot).
-        // Without it, gearbox/bleed extraction slowing the HP spool would
-        // have no effect on the IP/LP spools' own torque balance at all,
-        // missing the brief's "generator load imposes drag on the core,
-        // which affects fuel consumption" yardstick — the FADEC's N1
-        // governor would simply find the same fuel flow gives the same N1
-        // regardless of HP loading, since the two are otherwise
-        // decoupled here (each spool's compressor demand only depends on
-        // its own speed, not on another spool's).
-        let combustion_power_now = wf * LHV_JET_A1_J_KG * COMBUSTOR_EFFICIENCY;
-        let accessory_w = (inputs.gearbox_elec_load_w + inputs.gearbox_hyd_load_w).max(0.0);
-        // What the turbines can take from the gas: the whole expansion from
-        // the combustor exit down to ambient, at the hot section's own
-        // efficiency (`turbine::max_power_w`). This is the real bound, and it
-        // includes the work the compressors already put into the air, not
-        // only the heat the fuel just added -- which is why a running engine
-        // needs far less fuel than its shaft power alone would suggest.
-        let eta_hpt = ETA_HPT_DESIGN * (1.0 - turbine_loss);
-        let eta_ipt = ETA_IPT_DESIGN * (1.0 - turbine_loss);
-        let eta_mean = (ETA_HPT_DESIGN + ETA_IPT_DESIGN + ETA_LPT_DESIGN) / 3.0 * (1.0 - turbine_loss);
-        let available_w = turbine::max_power_w(comb.tt4_k, comb.pt4_pa, comb.mdot_gas_kg_s, ambient_p, eta_mean, GAMMA_GAS);
-
-        // What the spools are asking for right now: each compressor's own
-        // `mdot * specific work`, plus the accessories hanging off the HP
-        // gearbox. A turbine's first duty is to drive its own compressor.
-        let demand_hp_w = hpc.power_w / MECH_EFFICIENCY + accessory_w;
-        let demand_ip_w = ipc.power_w / MECH_EFFICIENCY;
-        let demand_lp_w = fan.power_w / MECH_EFFICIENCY;
-        let demand_w = demand_hp_w + demand_ip_w + demand_lp_w;
-
-        // How the gas's work is shared between the three turbines. The HP and
-        // IP turbines' downstream nozzle guide vanes stay choked across the
-        // working range, so each runs at close to its design pressure ratio
-        // and its specific work follows its own inlet temperature (the
-        // standard choked-turbine result, e.g. Saravanamuttoo et al., Gas
-        // Turbine Theory, off-design matching of free-turbine and multi-spool
-        // engines). The LP turbine, exhausting to the nozzle, takes whatever
-        // expansion is left down to ambient -- which is what shrinks at low
-        // power, and why a real core idles fast while its fan idles slow.
-        // Every turbine is also bounded by what the gas can give before
-        // reaching ambient (`turbine::max_power_w`).
-        let gas = comb.mdot_gas_kg_s;
-        let choked = |tt_in: f64, pt_in: f64, pr_design: f64, eta: f64| {
-            let work = gas * gas::CP_GAS * eta * tt_in * (1.0 - pr_design.powf((GAMMA_GAS - 1.0) / GAMMA_GAS));
-            work.min(turbine::max_power_w(tt_in, pt_in, gas, ambient_p, eta, GAMMA_GAS)).max(0.0)
-        };
-        let p_hpt = choked(comb.tt4_k, comb.pt4_pa, self.design.pr_hpt_design, eta_hpt);
-        let hpt_exit = turbine::expand(comb.tt4_k, comb.pt4_pa, gas, p_hpt, eta_hpt, GAMMA_GAS);
-        let p_ipt = choked(hpt_exit.tt_out_k, hpt_exit.pt_out_pa, self.design.pr_ipt_design, eta_ipt);
-        let ipt_exit = turbine::expand(hpt_exit.tt_out_k, hpt_exit.pt_out_pa, gas, p_ipt, eta_ipt, GAMMA_GAS);
-        let p_lpt = turbine::max_power_w(ipt_exit.tt_out_k, ipt_exit.pt_out_pa, gas, ambient_p, ETA_LPT_DESIGN, GAMMA_GAS)
-            * self.design.lpt_expansion_fraction;
-        // Below choking (a start, very low power) the guide vanes unchoke and
-        // the turbines no longer hold fixed pressure ratios: the gas's work
-        // goes where the spools are drawing it -- each gets its compressor's
-        // current demand, and any surplus is shared in the design split so
-        // every spool accelerates, the fan included. (With the choked split
-        // alone the HP and IP turbines took the whole small expansion, the
-        // fan sat near 0% until the core had built pressure, and the core ran
-        // well past idle before the fan caught up: ~900 C at the handover.)
-        // Blended by how far the combustor sits below the HP guide vanes'
-        // critical pressure ratio, ((gamma+1)/2)^(gamma/(gamma-1)) ~ 1.85.
-        let critical = ((GAMMA_GAS + 1.0) / 2.0).powf(GAMMA_GAS / (GAMMA_GAS - 1.0));
-        // Fully choked only once there is pressure enough for both core
-        // turbines at their design ratios with the last row still at its
-        // critical ratio: critical / (pr_hpt * pr_ipt) of ambient.
-        let choked_pr = critical / (self.design.pr_hpt_design * self.design.pr_ipt_design).max(1e-3);
-        let unchoked = ((choked_pr - comb.pt4_pa / ambient_p) / (choked_pr - 1.0)).clamp(0.0, 1.0);
-        let (p_hpt, p_ipt, p_lpt) = if unchoked > 0.0 {
-            // Surplus shared by what each turbine can take at its current
-            // speed: each turbine's share of the torque holds roughly at its
-            // design split, so its share of the power grows with its own
-            // speed -- a spool barely turning takes little, and the core,
-            // which the starter has already spun up, takes most. (A small
-            // speed floor lets a stopped fan start windmilling at all.)
-            // Weighting by design power alone let the fan run ahead of the
-            // core and starve it (22% N1 at 57% N3, a 150 s start); weighting
-            // by speed squared left the fan behind and overshot the core
-            // (94% N3, 874 C). Torque-proportional: idle in ~76 s at sea
-            // level, ~86 s at 5,000 ft ISA+30, peak EGT ~430-500 C.
-            let weight = |p_design: f64, n_frac: f64| p_design * n_frac.max(0.1);
-            let w_hp = weight(self.design.p_hpt_design_w, n3_pct / 100.0);
-            let w_ip = weight(self.design.p_ipt_design_w, n2_pct / 100.0);
-            let w_lp = weight(self.design.p_lpt_design_w, n1_pct / 100.0);
-            let w_total = (w_hp + w_ip + w_lp).max(1e-9);
-            let (d_hp, d_ip, d_lp) = if available_w >= demand_w {
-                // Not all of it goes to the shafts: the design point's own
-                // split between the last turbine and the jet
-                // (`lpt_expansion_fraction`) leaves the rest in the gas for
-                // the exhaust, or the engine would idle with no core thrust.
-                let surplus = (available_w - demand_w) * self.design.lpt_expansion_fraction;
-                (
-                    demand_hp_w + surplus * w_hp / w_total,
-                    demand_ip_w + surplus * w_ip / w_total,
-                    demand_lp_w + surplus * w_lp / w_total,
-                )
-            } else if demand_w > 1.0 {
-                let k = available_w / demand_w;
-                (demand_hp_w * k, demand_ip_w * k, demand_lp_w * k)
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-            (
-                p_hpt * (1.0 - unchoked) + d_hp * unchoked,
-                p_ipt * (1.0 - unchoked) + d_ip * unchoked,
-                p_lpt * (1.0 - unchoked) + d_lp * unchoked,
-            )
-        } else {
-            (p_hpt, p_ipt, p_lpt)
-        };
-        let _ = eta_mean;
-        let torque_hpt = self.hp.torque_from_power(p_hpt);
-        let torque_ipt = self.ip.torque_from_power(p_ipt);
-        let torque_lpt = self.lp.torque_from_power(p_lpt);
-
-        // Continuous turbine degradation (`failures` 72_008 "turbine blade
-        // damage"): reduces isentropic efficiency on the two hot-section
-        // stages nearest the combustor, the real locus of overtemperature
-        // blade damage. A less efficient expansion needs a bigger pressure
-        // drop for the same shaft work (`turbine.rs`'s own
-        // `lower_efficiency_needs_a_bigger_pressure_drop_for_the_same_work`),
-        // which is what raises EGT and pressure loss downstream -- not a
-        // scripted EGT bump.
-        let hpt = turbine::expand(comb.tt4_k, comb.pt4_pa, comb.mdot_gas_kg_s, p_hpt, eta_hpt, GAMMA_GAS);
-        let ipt = turbine::expand(hpt.tt_out_k, hpt.pt_out_pa, comb.mdot_gas_kg_s, p_ipt, eta_ipt, GAMMA_GAS);
-        // EGT probe: interstage, between the IP and LP turbines (the Trent
-        // family's own EGT measurement plane), before the final LP turbine
-        // expansion.
-        // The gas reaches it having exchanged heat with the hot section's
-        // metal (`hot_section`): cooler while the metal warms up, hotter
-        // over metal still hot from the last run. With little or no flow
-        // the probe settles to the metal around it.
-        let exchange = self.hot.step(comb.tt4_k, ipt.tt_out_k, comb.mdot_gas_kg_s, self.design.mdot_core_design_kg_s, ambient_t, dt);
+        // ---- TGT: the IP-LP interstage (the Trent's TGT plane), through the
+        // hot section's metal (`hot_section`): cooler while the metal warms,
+        // hotter over metal still hot from the last run; with little or no
+        // flow the probe settles to the metal around it.
+        let exchange = self.hot.step(gp.tt4_k, gp.tt45_k, gp.mdot_gas_kg_s, self.gas.design.mdot_core_kg_s, ambient_t, dt);
         let egt_raw_c = exchange.probe_target_k - 273.15;
         let egt_tau_s = 1.5; // typical thermocouple first-order response, generic
         self.egt_lag_c += (egt_raw_c - self.egt_lag_c) * (1.0 - (-dt / egt_tau_s).exp());
+        let net_thrust_n = gp.net_thrust_n;
 
-        let lpt = turbine::expand(exchange.tgt_gas_k, ipt.pt_out_pa, comb.mdot_gas_kg_s, p_lpt, ETA_LPT_DESIGN, GAMMA_GAS);
-
-        // ---- Nozzles: core (hot) and bypass (cold) streams -------------
-        let core = nozzle::thrust(comb.mdot_gas_kg_s, lpt.tt_out_k, lpt.pt_out_pa, ambient_p, inputs.true_airspeed_m_s, GAMMA_GAS, R_GAS);
-        let pt13 = fan.pt_out_pa * (1.0 - BYPASS_DUCT_LOSS_FRAC);
-        let bypass = nozzle::thrust(mdot_bypass, fan.tt_out_k, pt13, ambient_p, inputs.true_airspeed_m_s, GAMMA_AIR, R_AIR);
-        let net_thrust_n = core.thrust_n + bypass.thrust_n;
-
-        // ---- Spool torque balance and integration ----------------------
-        // Compressor demand is still converted from power via
-        // `torque_from_power` (with its small-omega floor): that power
-        // already tapers to zero as this spool's own speed does (it is
-        // this spool's *own* corrected-flow-driven power, not a
-        // design-scaled constant), so the floor is only ever a safety net,
-        // never load-bearing, unlike it would be for the turbine terms.
+        // ---- Spools: each turbine's power through its shaft against its
+        // compressor's, the HP spool also carrying the accessory gearbox, the
+        // starter and bearing friction.
         //
-        // Gearbox accessory load is different: a generator or hydraulic
-        // pump commanding constant *power* (as the shared-contract Vars
-        // are defined, already net of the workstreams' own efficiencies)
-        // would demand unbounded *torque* as HP speed approaches zero,
-        // which is not how these accessories actually behave below their
-        // normal operating range — a generator control unit would not
-        // connect an offline generator to the bus, nor a hydraulic pump
-        // reach its rated pressure, while the engine is barely turning
-        // over on the starter. The accessory torque here is floored at the
-        // idle HP speed (`params::IDLE_N3_PCT`, a real cited value) rather
-        // than at the spool's own near-zero cranking speed, so a load
-        // applied during a start does not stall it; at and above idle this
-        // has no effect (the spool's actual omega is used).
+        // Gearbox accessory load is constant *power* (generators, hydraulic
+        // pumps, already net of their own efficiencies); floored at idle HP
+        // speed so a load applied during a start does not demand unbounded
+        // torque from a barely turning spool (a real generator control unit
+        // would not connect it yet).
+        let accessory_w = (inputs.gearbox_elec_load_w + inputs.gearbox_hyd_load_w).max(0.0);
         let accessory_min_omega = omega_rad_s(IDLE_N3_PCT / 100.0 * N3_DESIGN_RPM);
         let accessory_torque = accessory_w / self.hp.omega_rad_s().max(accessory_min_omega);
         let starter_torque = if inputs.starter_engaged { starter::torque_n_m(self.hp.rpm, inputs.starter_supply_fraction) } else { 0.0 };
-
-        // Continuous bearing degradation (`failures` 72_000 "bearing
-        // wear"): extra shaft friction, scaled off the HP turbine's own
-        // design torque (a physically-sized reference, not an arbitrary
-        // constant) so it both drags the HP spool down directly (a real
-        // worn bearing's consequence) and shows up as extra friction heat
-        // in the oil-temperature balance below -- one physical cause, two
-        // consequences, not two independent scripted effects.
+        // Continuous bearing degradation (`failures` 72_000 "bearing wear"):
+        // extra shaft friction scaled off the HP turbine's design torque, a
+        // drag on the spool and friction heat into the oil.
         let bearing_extra_torque = inputs.bearing_friction_extra_fraction.max(0.0) * self.design.torque_hpt_design_n_m;
-
-        let torque_hp =
-            torque_hpt - self.hp.torque_from_power(hpc.power_w / MECH_EFFICIENCY) - accessory_torque + starter_torque - bearing_extra_torque;
-        let torque_ip = torque_ipt - self.ip.torque_from_power(ipc.power_w / MECH_EFFICIENCY);
-        let torque_lp = torque_lpt - self.lp.torque_from_power(fan.power_w / MECH_EFFICIENCY);
+        let torque_hp = self.hp.torque_from_power(gp.hpt_power_w) - self.hp.torque_from_power(gp.hpc_power_w / MECH_EFFICIENCY)
+            - accessory_torque
+            + starter_torque
+            - bearing_extra_torque;
+        let torque_ip = self.ip.torque_from_power(gp.ipt_power_w) - self.ip.torque_from_power(gp.ipc_power_w / MECH_EFFICIENCY);
+        let torque_lp = self.lp.torque_from_power(gp.lpt_power_w) - self.lp.torque_from_power(gp.fan_power_w / MECH_EFFICIENCY);
 
         self.hp.integrate(torque_hp, dt, MAX_SUBSTEP_S, MAX_SUBSTEPS);
         self.ip.integrate(torque_ip, dt, MAX_SUBSTEP_S, MAX_SUBSTEPS);
@@ -916,7 +732,7 @@ impl Engine {
             crate::invariants::Bound::Range(0.0, 1.0),
             "oil pressure fraction must be 0..1",
         );
-        let friction_loss_w = (hpc.power_w + ipc.power_w + fan.power_w) * (1.0 - MECH_EFFICIENCY);
+        let friction_loss_w = (gp.hpc_power_w + gp.ipc_power_w + gp.fan_power_w) * (1.0 - MECH_EFFICIENCY);
         let oil = self.oil.step(
             &oil::Surroundings {
                 n3_frac: n3_pct / 100.0,
@@ -925,13 +741,13 @@ impl Engine {
                 // mechanical loss is windage into the air. A worn bearing's
                 // extra drag is all bearing heat.
                 friction_w: friction_loss_w * OIL_SHARE_OF_MECHANICAL_LOSS + bearing_extra_torque * self.hp.omega_rad_s(),
-                front_air_k: ipc.tt_out_k,
+                front_air_k: gp.tt25_k,
                 hot_metal_k: self.hot.metal_k(),
-                exhaust_k: lpt.tt_out_k,
+                exhaust_k: gp.tt5_k,
                 fuel_kg_s: wf,
                 fuel_k: inputs.fuel_temp_k,
-                bypass_kg_s: mdot_bypass,
-                fan_air_k: fan.tt_out_k,
+                bypass_kg_s: gp.m_bypass,
+                fan_air_k: gp.tt13_k,
                 nacelle_k: ambient_t,
                 dt_s: dt,
             },
@@ -947,15 +763,15 @@ impl Engine {
             oil_press_psi: oil.pressure_psi,
             fuel_flow_kg_s: wf,
             net_thrust_n,
-            core_mdot_kg_s: mdot_core,
-            bypass_mdot_kg_s: mdot_bypass,
-            ip_port_pressure_pa: ipc.pt_out_pa,
-            ip_port_temp_k: ipc.tt_out_k,
-            hp_port_pressure_pa: hpc.pt_out_pa,
-            hp_port_temp_k: hpc.tt_out_k,
-            tet_k: comb.tt4_k,
-            w24_kg_s: w24,
-            w26_kg_s: mdot_core,
+            core_mdot_kg_s: gp.m_core,
+            bypass_mdot_kg_s: gp.m_bypass,
+            ip_port_pressure_pa: self.gas.state.p25,
+            ip_port_temp_k: gp.tt25_k,
+            hp_port_pressure_pa: self.gas.state.p3,
+            hp_port_temp_k: gp.tt3_k,
+            tet_k: gp.tt4_k,
+            w24_kg_s: self.gas.state.m_ipc,
+            w26_kg_s: gp.m_core,
             hot_section_c: self.hot.metal_k() - 273.15,
             oil_supply_c: oil.supply_k - 273.15,
             oil_chamber_c: oil.chamber_k.map(|k| k - 273.15),

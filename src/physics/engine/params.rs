@@ -163,6 +163,13 @@ pub const BYPASS_DUCT_LOSS_FRAC: f64 = 0.02;
 /// (ASTM D1655 / DEF STAN 91-091 typical spec value, ~43.1 MJ/kg).
 pub const LHV_JET_A1_J_KG: f64 = 43.1e6;
 
+/// Stoichiometric fuel-air ratio for kerosene (Jet A-1), kg fuel per kg
+/// air. Jet fuel is close enough to CH1.92 that complete combustion needs
+/// about 14.7 kg of air per kg of fuel; 1/14.7 = 0.068. This is a chemical
+/// limit, not a tuning constant: past it the air has no oxygen left and
+/// further fuel cannot release heat however much of it is sprayed in.
+pub const FAR_STOICHIOMETRIC: f64 = 1.0 / 14.7;
+
 /// Spool polar moment of inertia, kg·m², derived from `DRY_WEIGHT_KG` and
 /// `FAN_DIAMETER_M` since no public figure exists for this engine.
 ///

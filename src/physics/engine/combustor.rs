@@ -2,7 +2,7 @@
 //! not a lookup table. This is what makes EGT (and hot/hung starts) emerge
 //! from the model instead of being scripted.
 
-use super::params::{COMBUSTOR_EFFICIENCY, COMBUSTOR_PRESSURE_LOSS_FRAC, LHV_JET_A1_J_KG};
+use super::params::{COMBUSTOR_EFFICIENCY, COMBUSTOR_PRESSURE_LOSS_FRAC, FAR_STOICHIOMETRIC, LHV_JET_A1_J_KG};
 use super::gas::CP_AIR;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -32,10 +32,24 @@ pub fn burn(mdot_air_kg_s: f64, mdot_fuel_kg_s: f64, tt3_k: f64, pt3_pa: f64) ->
     let mdot_air = mdot_air_kg_s.max(0.0);
     let mdot_fuel = mdot_fuel_kg_s.max(0.0);
     let mdot_gas = mdot_air + mdot_fuel;
+    // Only the fuel the air can actually burn releases any heat. Kerosene
+    // needs about 14.7 kg of air per kg of fuel, so once the fuel-air ratio
+    // reaches 1/14.7 there is no oxygen left: the rest of the fuel leaves
+    // the combustor unburnt, carrying its mass out but no heat with it.
+    //
+    // Without this limit, fuel going into a core whose airflow has
+    // collapsed -- a stalled compressor, a seized spool, a start with the
+    // air shut off -- divides a finite heat release by an airflow heading
+    // for zero and hands the turbines a combustor exit in the tens of
+    // thousands of kelvin. That is not a hot start; it is a division by
+    // nothing. The real limit is chemical, and the real consequence of far
+    // too much fuel for the air is a rich flame-out with the unburnt fuel
+    // lighting further downstream, not an unbounded temperature.
+    let burnt_fuel = mdot_fuel.min(mdot_air * FAR_STOICHIOMETRIC);
     let tt4 = if mdot_gas <= 1e-6 {
         tt3_k
     } else {
-        let heat_released = mdot_fuel * LHV_JET_A1_J_KG * COMBUSTOR_EFFICIENCY;
+        let heat_released = burnt_fuel * LHV_JET_A1_J_KG * COMBUSTOR_EFFICIENCY;
         let heat_in_air = mdot_air * CP_AIR * tt3_k;
         (heat_released + heat_in_air) / (mdot_gas * CP_AIR)
     };

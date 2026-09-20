@@ -726,3 +726,4 @@ mod tests {
         assert!(throttled.stall_margin < 1.0 && healthy.stall_margin >= 1.0, "{} {}", healthy.stall_margin, throttled.stall_margin);
     }
 }
+
