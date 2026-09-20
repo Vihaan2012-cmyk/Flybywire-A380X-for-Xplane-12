@@ -180,8 +180,11 @@ pub struct ElectricPump {
 }
 impl ElectricPump {
     /// FlyByWire's `A380_EPUMP_REGULATED_SPEED_RPM` = 8000 rpm (`pumps.rs`
-    /// line 57), the yellow system's electric pump.
-    pub fn a380_yellow_electric() -> Self {
+    /// line 57). All four of the A380's electric pumps are the same unit --
+    /// FlyByWire builds green A/B and yellow A/B from one
+    /// `PumpCharacteristics::a380_electric_pump()`
+    /// (`a380_systems/src/hydraulic/mod.rs:1934-1985`).
+    pub fn a380_electric() -> Self {
         Self { characteristics: PumpCharacteristics::a380_electric(), regulated_rpm: 8000.0, spin_time_constant_s: 0.4, motor_efficiency: 0.85, speed_rpm: 0.0 }
     }
 
@@ -277,7 +280,7 @@ mod tests {
 
     #[test]
     fn electric_pump_spins_up_smoothly_and_draws_current_while_running() {
-        let mut pump = ElectricPump::a380_yellow_electric();
+        let mut pump = ElectricPump::a380_electric();
         let mut last = 0.0;
         for _ in 0..200 {
             let (_, _current) = pump.step(true, 3000.0 * PSI_PA, 50.0 * PSI_PA, 115.0, &PumpFaults::default(), 0.02);
@@ -292,7 +295,7 @@ mod tests {
 
     #[test]
     fn electric_pump_spins_down_when_unpowered() {
-        let mut pump = ElectricPump::a380_yellow_electric();
+        let mut pump = ElectricPump::a380_electric();
         let mut running = None;
         for _ in 0..200 {
             running = Some(pump.step(true, 3000.0 * PSI_PA, 50.0 * PSI_PA, 115.0, &PumpFaults::default(), 0.02));
@@ -330,7 +333,7 @@ mod tests {
 
     #[test]
     fn no_nan_at_rest_or_zero_voltage() {
-        let mut pump = ElectricPump::a380_yellow_electric();
+        let mut pump = ElectricPump::a380_electric();
         let (out, current) = pump.step(true, 0.0, 0.0, 0.0, &PumpFaults::default(), 0.0);
         assert!(out.flow_m3_s.is_finite());
         assert_eq!(current, 0.0);

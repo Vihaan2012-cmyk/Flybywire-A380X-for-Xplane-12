@@ -208,19 +208,38 @@ pub fn register(r: &mut Registry) {
         );
     }
 
-    // ---- Yellow electric pump (no green electric pump on the A380, see
-    // `topology.rs`'s module doc).
-    let ep_id = "29_hyd.yellow_electric_pump".to_string();
-    let ep_disp = next_id(r, "yellow electric pump displacement loss", &ep_id, "pump::ElectricPump (via topology::CircuitFaults.electric_pump.displacement_loss)", "0 healthy .. 1 zero displacement at any pressure", "electric pump delivers proportionally less flow at every pressure");
-    let ep_seize = next_id(r, "yellow electric pump seizure", &ep_id, "pump::ElectricPump (via topology::CircuitFaults.electric_pump.seizure)", "0 free .. 1 fully seized", "zero flow and zero case drain; the motor still spins (electrically healthy) against a jammed pump end");
-    r.component(ComponentDef {
-        id: ep_id,
-        area: Area::Hydraulics,
-        ata: ATA,
-        name: "yellow system electric motor pump".into(),
-        params: vec![ParamDef { name: "wear".into(), meaning: "internal clearance wear: 0 healthy .. 1 fully worn".into(), healthy: 0.0 }],
-        failures: vec![ep_disp, ep_seize],
-    });
+    // ---- Electric pumps: two per circuit, each fed from its own AC bus,
+    // so losing one bus still leaves that circuit a powered pump (green
+    // A/B on AC 1/2, yellow A/B on AC 3/4 -- `topology.rs`'s module doc).
+    for (colour, letter, bus) in [("green", "a", 1), ("green", "b", 2), ("yellow", "a", 3), ("yellow", "b", 4)] {
+        let index = usize::from(letter == "b");
+        let name = format!("{colour} system electric motor pump {}", letter.to_uppercase());
+        let ep_id = format!("29_hyd.{colour}_electric_pump_{letter}");
+        let ep_disp = next_id(
+            r,
+            &format!("{name} displacement loss"),
+            &ep_id,
+            &format!("pump::ElectricPump (via topology::CircuitFaults.electric_pump[{index}].displacement_loss)"),
+            "0 healthy .. 1 zero displacement at any pressure",
+            "electric pump delivers proportionally less flow at every pressure",
+        );
+        let ep_seize = next_id(
+            r,
+            &format!("{name} seizure"),
+            &ep_id,
+            &format!("pump::ElectricPump (via topology::CircuitFaults.electric_pump[{index}].seizure)"),
+            "0 free .. 1 fully seized",
+            "zero flow and zero case drain; the motor still spins (electrically healthy) against a jammed pump end",
+        );
+        r.component(ComponentDef {
+            id: ep_id,
+            area: Area::Hydraulics,
+            ata: ATA,
+            name: format!("{name}, motor supply AC {bus}"),
+            params: vec![ParamDef { name: "wear".into(), meaning: "internal clearance wear: 0 healthy .. 1 fully worn".into(), healthy: 0.0 }],
+            failures: vec![ep_disp, ep_seize],
+        });
+    }
 }
 
 #[cfg(test)]
@@ -246,12 +265,25 @@ mod tests {
         }
     }
 
+    /// Both circuits carry two electric pumps, split across two AC buses.
+    /// This test used to assert the opposite -- that no green electric
+    /// pump existed -- which was wrong about the aircraft: FlyByWire's own
+    /// `A380Hydraulic` constructs all four
+    /// (`a380_systems/src/hydraulic/mod.rs:1934-1985`).
     #[test]
-    fn no_green_electric_pump_is_registered() {
+    fn both_circuits_register_two_electric_pumps_on_separate_ac_buses() {
         let mut r = Registry::default();
         register(&mut r);
-        assert!(!r.components.iter().any(|c| c.id.contains("green_electric_pump")));
-        assert!(r.components.iter().any(|c| c.id == "29_hyd.yellow_electric_pump"));
+        for id in ["29_hyd.green_electric_pump_a", "29_hyd.green_electric_pump_b", "29_hyd.yellow_electric_pump_a", "29_hyd.yellow_electric_pump_b"] {
+            assert!(r.components.iter().any(|c| c.id == id), "missing {id}");
+        }
+        let pumps: Vec<_> = r.components.iter().filter(|c| c.id.contains("_electric_pump_")).collect();
+        assert_eq!(pumps.len(), 4, "2 per circuit x 2 circuits");
+        // Each names the bus it is fed from, and the four are all different
+        // -- a circuit whose pumps shared a bus would lose both at once.
+        for bus in ["AC 1", "AC 2", "AC 3", "AC 4"] {
+            assert_eq!(pumps.iter().filter(|c| c.name.contains(bus)).count(), 1, "exactly one pump on {bus}");
+        }
     }
 
     #[test]

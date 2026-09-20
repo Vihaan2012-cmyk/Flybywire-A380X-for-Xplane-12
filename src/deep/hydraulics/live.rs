@@ -214,8 +214,9 @@ pub struct HydraulicsLive {
     hyd: A380Hydraulics,
     green_ids: CircuitFailureIds,
     yellow_ids: CircuitFailureIds,
-    /// `[displacement loss, seizure]` for the yellow electric pump.
-    electric_pump_ids: [u64; 2],
+    /// `[displacement loss, seizure]` per electric pump: green A, green B,
+    /// yellow A, yellow B.
+    electric_pump_ids: [[u64; 2]; 4],
     green_out: CircuitOutputs,
     yellow_out: CircuitOutputs,
 
@@ -237,12 +238,18 @@ impl Default for HydraulicsLive {
 impl HydraulicsLive {
     pub fn new() -> Self {
         let map = registered_failures();
-        let electric = take(&map, "29_hyd.yellow_electric_pump", 2);
+        let electric_pump_ids = [
+            take(&map, "29_hyd.green_electric_pump_a", 2),
+            take(&map, "29_hyd.green_electric_pump_b", 2),
+            take(&map, "29_hyd.yellow_electric_pump_a", 2),
+            take(&map, "29_hyd.yellow_electric_pump_b", 2),
+        ]
+        .map(|v| [v[0], v[1]]);
         Self {
             hyd: A380Hydraulics::new(),
             green_ids: CircuitFailureIds::build(&map, "green", [1, 2]),
             yellow_ids: CircuitFailureIds::build(&map, "yellow", [3, 4]),
-            electric_pump_ids: [electric[0], electric[1]],
+            electric_pump_ids,
             green_out: CircuitOutputs::default(),
             yellow_out: CircuitOutputs::default(),
             engine_n3_frac: None,
@@ -337,7 +344,7 @@ impl HydraulicsLive {
         (gauge_pa / RESERVOIR_REGULATED_BOOST_PA).clamp(0.0, 1.0)
     }
 
-    fn circuit_faults(ids: &CircuitFailureIds, faults: &Faults, electric_pump: PumpFaults) -> CircuitFaults {
+    fn circuit_faults(ids: &CircuitFailureIds, faults: &Faults, electric_pump: [PumpFaults; 2]) -> CircuitFaults {
         CircuitFaults {
             edp: std::array::from_fn(|i| {
                 let id = ids.edp[i];
@@ -374,7 +381,7 @@ impl HydraulicsLive {
 }
 
 /// Circuit-level published variables, per colour.
-fn publish_circuit(out: &mut dyn FnMut(&str, f64), color: &str, c: &CircuitOutputs, pumps: [&str; 4], electric: bool) {
+fn publish_circuit(out: &mut dyn FnMut(&str, f64), color: &str, c: &CircuitOutputs, pumps: [&str; 4]) {
     // The four names `registry.rs` cites in its ECAM triggers.
     out(&format!("HYD_{color}_MANIFOLD_PRESSURE_PSI"), c.manifold_pressure_pa / PSI_PA);
     out(&format!("HYD_{color}_RESERVOIR_LEVEL_IS_LOW"), f64::from(u8::from(c.reservoir_low_level_warning)));
@@ -392,8 +399,9 @@ fn publish_circuit(out: &mut dyn FnMut(&str, f64), color: &str, c: &CircuitOutpu
         out(&format!("HYD_{color}_EDP_{name}_CASE_DRAIN_L_MIN"), c.edp[i].case_drain_m3_s * M3_S_TO_L_MIN);
         out(&format!("HYD_{color}_EDP_{name}_VOLUMETRIC_EFFICIENCY"), c.edp[i].volumetric_efficiency);
     }
-    if electric {
-        out(&format!("HYD_{color}_ELEC_PUMP_FLOW_L_MIN"), c.electric_pump_flow_m3_s * M3_S_TO_L_MIN);
+    // Both circuits carry two electric pumps.
+    for (i, letter) in ["A", "B"].iter().enumerate() {
+        out(&format!("HYD_{color}_ELEC_PUMP_{letter}_FLOW_L_MIN"), c.electric_pump_flow_m3_s[i] * M3_S_TO_L_MIN);
     }
 }
 
@@ -407,11 +415,21 @@ impl LiveArea for HydraulicsLive {
         let ambient_k = truth.environment.sat_c + 273.15;
         let pressurization = Self::pressurization_supply_fraction(truth);
 
+        // Each circuit's two electric pumps sit on separate AC buses, with
+        // one shared control bus per circuit: green A/B on AC 1/2 with DC 2
+        // control, yellow A/B on AC 3/4 with DC 1
+        // (`a380_systems/src/hydraulic/mod.rs:1767-1780`). A pump runs when
+        // its own supply bus is live and its circuit's control bus is up,
+        // so losing one AC bus costs that circuit one pump, not both.
+        let green_control = truth.dc_bus_volts[1] > DC_BUS_LIVE_V;
+        let green_supply = [truth.ac_bus_volts[0], truth.ac_bus_volts[1]];
+        let yellow_control = truth.dc_bus_volts[0] > DC_BUS_LIVE_V;
+        let yellow_supply = [truth.ac_bus_volts[2], truth.ac_bus_volts[3]];
+
         let green_inputs = CircuitInputs {
             edp: self.edp_inputs(truth, GREEN_PUMP_ENGINE_INDEX),
-            // `topology.rs`: no green electric pump exists in this model.
-            electric_pump_powered: false,
-            electric_pump_bus_voltage_v: 0.0,
+            electric_pump_powered: green_supply.map(|v| green_control && v > AC_BUS_LIVE_V),
+            electric_pump_bus_voltage_v: green_supply,
             demands: self.green_demands,
             fuel_kg_s: self.fuel_kg_s,
             fuel_temp_k: self.fuel_temp_k,
@@ -419,17 +437,10 @@ impl LiveArea for HydraulicsLive {
             pressurization_supply_fraction: pressurization,
         };
 
-        // The yellow electric motor pump stands in for FlyByWire's own
-        // yellow pump pair, supplied from AC bus 3 (pump a) and AC bus 4
-        // (pump b) with DC 1 control power
-        // (`a380_systems/src/hydraulic/mod.rs:1769,1777-1779`): it runs
-        // while either supply bus is live and its control bus is up.
-        let supply_v = truth.ac_bus_volts[2].max(truth.ac_bus_volts[3]);
-        let control_up = truth.dc_bus_volts[0] > DC_BUS_LIVE_V;
         let yellow_inputs = CircuitInputs {
             edp: self.edp_inputs(truth, YELLOW_PUMP_ENGINE_INDEX),
-            electric_pump_powered: control_up && supply_v > AC_BUS_LIVE_V,
-            electric_pump_bus_voltage_v: supply_v,
+            electric_pump_powered: yellow_supply.map(|v| yellow_control && v > AC_BUS_LIVE_V),
+            electric_pump_bus_voltage_v: yellow_supply,
             demands: self.yellow_demands,
             fuel_kg_s: self.fuel_kg_s,
             fuel_temp_k: self.fuel_temp_k,
@@ -437,24 +448,21 @@ impl LiveArea for HydraulicsLive {
             pressurization_supply_fraction: pressurization,
         };
 
-        let green_faults = Self::circuit_faults(&self.green_ids, faults, PumpFaults::default());
-        let yellow_faults = Self::circuit_faults(
-            &self.yellow_ids,
-            faults,
-            PumpFaults {
-                wear: 0.0,
-                displacement_loss: faults.get(self.electric_pump_ids[0]),
-                seizure: faults.get(self.electric_pump_ids[1]),
-            },
-        );
+        let pump_faults = |slot: usize| PumpFaults {
+            wear: 0.0,
+            displacement_loss: faults.get(self.electric_pump_ids[slot][0]),
+            seizure: faults.get(self.electric_pump_ids[slot][1]),
+        };
+        let green_faults = Self::circuit_faults(&self.green_ids, faults, [pump_faults(0), pump_faults(1)]);
+        let yellow_faults = Self::circuit_faults(&self.yellow_ids, faults, [pump_faults(2), pump_faults(3)]);
 
         self.green_out = self.hyd.green.step(&green_inputs, &green_faults, dt);
         self.yellow_out = self.hyd.yellow.step(&yellow_inputs, &yellow_faults, dt);
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
-        publish_circuit(out, "GREEN", &self.green_out, ["1A", "1B", "2A", "2B"], false);
-        publish_circuit(out, "YELLOW", &self.yellow_out, ["3A", "3B", "4A", "4B"], true);
+        publish_circuit(out, "GREEN", &self.green_out, ["1A", "1B", "2A", "2B"]);
+        publish_circuit(out, "YELLOW", &self.yellow_out, ["3A", "3B", "4A", "4B"]);
     }
 }
 
@@ -518,7 +526,7 @@ mod tests {
             ]);
             bound.extend(ids.line_leaks);
         }
-        bound.extend(live.electric_pump_ids);
+        bound.extend(live.electric_pump_ids.iter().flatten().copied());
         bound.sort_unstable();
 
         let mut registered: Vec<u64> = r.failures.iter().map(|f| f.id).collect();
@@ -543,10 +551,14 @@ mod tests {
     #[test]
     fn seizing_every_green_engine_driven_pump_drops_the_published_pressure_below_the_ecam_threshold() {
         // The registered effect of `green EDP n seizure` is "zero flow and
-        // zero case drain from this pump"; with all four seized the green
-        // circuit has no source at all, so `HYD_GREEN_SYS_LO_PR`'s own
-        // trigger variable must fall through 2900 psi. Yellow, untouched,
-        // must not move -- the two circuits are independent.
+        // zero case drain from this pump". Seizing all four now leaves
+        // green its two electric pumps, and those alone hold service
+        // pressure -- that redundancy is the point of the arrangement. So
+        // this checks both halves: the engine-driven pumps alone are not
+        // enough to lose the circuit, and with the electric pumps also
+        // unpowered `HYD_GREEN_SYS_LO_PR`'s own trigger variable falls
+        // through 2900 psi. Yellow, untouched, must not move -- the two
+        // circuits are independent.
         let live_ids = HydraulicsLive::new();
         let armed: Vec<(u64, f64)> = live_ids.green_ids.edp.iter().map(|e| (e.seizure, 1.0)).collect();
         let faults = Faults::from_pairs(armed);
@@ -554,14 +566,21 @@ mod tests {
         let mut healthy = HydraulicsLive::new();
         let mut seized = HydraulicsLive::new();
         let truth = running_truth();
+        let no_green_ac = Truth { ac_bus_volts: [0.0, 0.0, truth.ac_bus_volts[2], truth.ac_bus_volts[3]], ..truth.clone() };
+        let edps_seized_and_no_ac = run(&mut HydraulicsLive::new(), &no_green_ac, &faults, 60.0);
         let healthy_out = run(&mut healthy, &truth, &Faults::default(), 60.0);
         let seized_out = run(&mut seized, &truth, &faults, 60.0);
 
         assert!(healthy_out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] > 2900.0);
         assert!(
-            seized_out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] < 2900.0,
-            "four seized green EDPs must trip HYD GREEN SYS LO PR: {:.0} psi",
+            seized_out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] > 2900.0,
+            "four seized EDPs still leave green its two electric pumps: {:.0} psi",
             seized_out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"]
+        );
+        assert!(
+            edps_seized_and_no_ac["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] < 2900.0,
+            "with every green source gone HYD GREEN SYS LO PR must trip: {:.0} psi",
+            edps_seized_and_no_ac["HYD_GREEN_MANIFOLD_PRESSURE_PSI"]
         );
         assert!(seized_out["HYD_GREEN_EDP_1A_FLOW_L_MIN"].abs() < 1e-9);
         assert!(seized_out["HYD_YELLOW_MANIFOLD_PRESSURE_PSI"] > 2900.0, "yellow is a separate circuit and must be unaffected");
@@ -604,17 +623,34 @@ mod tests {
     }
 
     #[test]
-    fn the_yellow_electric_pump_needs_its_own_supply_and_control_buses() {
-        // AC 3/4 supply, DC 1 control (a380_systems/src/hydraulic/mod.rs).
+    fn each_electric_pump_needs_its_own_supply_bus_and_its_circuits_control_bus() {
+        // Green A/B on AC 1/2 with DC 2 control, yellow A/B on AC 3/4 with
+        // DC 1 (a380_systems/src/hydraulic/mod.rs:1767-1780).
         let mut on_batteries_only = Truth { dt_s: 0.02, dc_bus_volts: [28.0, 28.0], ..Truth::default() };
         on_batteries_only.ac_bus_volts = [0.0; 4];
         let out = run(&mut HydraulicsLive::new(), &on_batteries_only, &Faults::default(), 30.0);
-        assert!(out["HYD_YELLOW_ELEC_PUMP_FLOW_L_MIN"].abs() < 1e-9, "no AC supply, no pump");
+        for name in ["HYD_GREEN_ELEC_PUMP_A_FLOW_L_MIN", "HYD_GREEN_ELEC_PUMP_B_FLOW_L_MIN", "HYD_YELLOW_ELEC_PUMP_A_FLOW_L_MIN", "HYD_YELLOW_ELEC_PUMP_B_FLOW_L_MIN"] {
+            assert!(out[name].abs() < 1e-9, "no AC supply, no pump: {name}");
+        }
 
-        let ac4_only = Truth { dt_s: 0.02, ac_bus_volts: [0.0, 0.0, 0.0, 115.0], dc_bus_volts: [28.0, 28.0], ..Truth::default() };
-        let out = run(&mut HydraulicsLive::new(), &ac4_only, &Faults::default(), 30.0);
-        assert!(out["HYD_YELLOW_ELEC_PUMP_FLOW_L_MIN"] > 0.0, "AC 4 alone still runs it");
+        // One AC bus live each side: each circuit keeps exactly the pump on
+        // the bus that survived, which is why the pair is split across two.
+        let ac1_and_ac4 = Truth { dt_s: 0.02, ac_bus_volts: [115.0, 0.0, 0.0, 115.0], dc_bus_volts: [28.0, 28.0], ..Truth::default() };
+        let out = run(&mut HydraulicsLive::new(), &ac1_and_ac4, &Faults::default(), 30.0);
+        assert!(out["HYD_GREEN_ELEC_PUMP_A_FLOW_L_MIN"] > 0.0, "AC 1 runs green A");
+        assert!(out["HYD_GREEN_ELEC_PUMP_B_FLOW_L_MIN"].abs() < 1e-9, "AC 2 is dead, so green B is");
+        assert!(out["HYD_YELLOW_ELEC_PUMP_B_FLOW_L_MIN"] > 0.0, "AC 4 runs yellow B");
+        assert!(out["HYD_YELLOW_ELEC_PUMP_A_FLOW_L_MIN"].abs() < 1e-9, "AC 3 is dead, so yellow A is");
+        assert!(out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] > 100.0);
         assert!(out["HYD_YELLOW_MANIFOLD_PRESSURE_PSI"] > 100.0);
+
+        // Control power is per circuit: losing DC 2 stops both green pumps
+        // and leaves yellow's alone.
+        let no_dc2 = Truth { dt_s: 0.02, ac_bus_volts: [115.0; 4], dc_bus_volts: [28.0, 0.0], ..Truth::default() };
+        let out = run(&mut HydraulicsLive::new(), &no_dc2, &Faults::default(), 30.0);
+        assert!(out["HYD_GREEN_ELEC_PUMP_A_FLOW_L_MIN"].abs() < 1e-9, "no DC 2 control power, no green pump");
+        assert!(out["HYD_GREEN_ELEC_PUMP_B_FLOW_L_MIN"].abs() < 1e-9);
+        assert!(out["HYD_YELLOW_ELEC_PUMP_A_FLOW_L_MIN"] > 0.0, "yellow's control bus is DC 1 and is untouched");
     }
 
     #[test]
@@ -631,7 +667,10 @@ mod tests {
         // N1 says take-off, N3 says the engines are stopped: the real
         // value must win, so the pumps must not turn.
         live.set_engine_n3_frac([0.0; 4]);
-        let out = run(&mut live, &running_truth(), &Faults::default(), 30.0);
+        // The AC buses go too, so the only thing that could hold green
+        // pressure here is an engine-driven pump actually turning.
+        let stopped = Truth { ac_bus_volts: [0.0; 4], ..running_truth() };
+        let out = run(&mut live, &stopped, &Faults::default(), 30.0);
         assert!(out["HYD_GREEN_EDP_1A_FLOW_L_MIN"].abs() < 1e-9);
         assert!(out["HYD_GREEN_MANIFOLD_PRESSURE_PSI"] < 100.0);
     }

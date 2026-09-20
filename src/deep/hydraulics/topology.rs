@@ -2,14 +2,35 @@
 //! directory's generic elements.
 //!
 //! Pump layout matches FlyByWire's own A380 model
-//! (`a380_systems/src/hydraulic/mod.rs` lines 1645-1690,
+//! (`a380_systems/src/hydraulic/mod.rs` lines 1684-1694,
 //! `A380Hydraulic`'s field list): four engine-driven pumps per circuit
 //! (green from engines 1/2, yellow from engines 3/4 -- each engine drives
-//! two, `engine_driven_pump_{1,2,3,4}{a,b}_controller`), and one electric
-//! pump pair on yellow only (`yellow_electric_pump_{a,b}_controller`; no
-//! green electric pump exists in FlyByWire's own A380 model, so none is
-//! added here either) -- matching the brief's "4 engine-driven pumps per
-//! system (8 total), electric pumps".
+//! two, `engine_driven_pump_{1,2,3,4}{a,b}_controller`), and **two
+//! electric pumps per circuit**, all four the same unit:
+//!
+//! | Pump | Motor supply | Control power |
+//! |---|---|---|
+//! | Green A | AC 1 | DC 2 |
+//! | Green B | AC 2 | DC 2 |
+//! | Yellow A | AC 3 | DC 1 |
+//! | Yellow B | AC 4 | DC 1 |
+//!
+//! (`GREEN_A_ELEC_PUMP_SUPPLY_POWER_BUS` and its three siblings, and
+//! `GREEN_ELEC_PUMP_CONTROL_POWER_BUS`/`YELLOW_ELEC_PUMP_CONTROL_POWER_BUS`,
+//! same file lines 1767-1780.) Splitting a circuit's two pumps across two
+//! AC buses is the point of the arrangement: losing one bus still leaves
+//! that circuit a powered pump.
+//!
+//! This module used to claim the A380 had no green electric pump and
+//! modelled a single pump on yellow. Both were wrong -- FlyByWire
+//! constructs all four -- and the cost was that the green circuit had no
+//! electric source at all, so it could not be pressurised on the ground,
+//! nor after losing both its engines.
+//!
+//! Still not modelled: the green auxiliary pump (`green_auxiliary_pump`,
+//! a `ManualPump` on `PumpCharacteristics::a380_aux_pump()`), for cargo
+//! door operation with no engines or AC power. It is a different kind of
+//! pump and wants its own model rather than a third `ElectricPump`.
 //!
 //! Topology per circuit: pumps feed a manifold; a priority valve
 //! (`network::PriorityValve::a380`) gates a non-essential branch (gear,
@@ -107,8 +128,10 @@ pub struct EdpInputs {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CircuitInputs {
     pub edp: [EdpInputs; 4],
-    pub electric_pump_powered: bool,
-    pub electric_pump_bus_voltage_v: f64,
+    /// Per electric pump, A then B: its motor contactor is closed and its
+    /// own AC bus is live (green A/B on AC 1/2, yellow A/B on AC 3/4).
+    pub electric_pump_powered: [bool; 2],
+    pub electric_pump_bus_voltage_v: [f64; 2],
     pub demands: ConsumerDemands,
     pub fuel_kg_s: f64,
     pub fuel_temp_k: f64,
@@ -132,7 +155,8 @@ pub struct EdpFaults {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CircuitFaults {
     pub edp: [EdpFaults; 4],
-    pub electric_pump: PumpFaults,
+    /// Per electric pump, A then B.
+    pub electric_pump: [PumpFaults; 2],
     pub reservoir: ReservoirFaults,
     pub accumulator: AccumulatorFaults,
     /// Priority valve seized at its last position: 0 healthy .. 1 fully seized.
@@ -180,7 +204,8 @@ pub struct CircuitOutputs {
     pub fluid_temp_c: f64,
     pub fluid_overheat: bool,
     pub edp: [EdpReport; 4],
-    pub electric_pump_flow_m3_s: f64,
+    /// Per electric pump, A then B.
+    pub electric_pump_flow_m3_s: [f64; 2],
 }
 
 pub struct Circuit {
@@ -190,7 +215,7 @@ pub struct Circuit {
     accumulator: Accumulator,
     edps: [EngineDrivenPump; 4],
     edp_fire_open: [f64; 4],
-    electric_pump: Option<ElectricPump>,
+    electric_pumps: [ElectricPump; 2],
     priority_valve: PriorityValve,
     priority_open: f64,
     relief_valve: ReliefValve,
@@ -232,9 +257,11 @@ impl Circuit {
         ];
         debug_assert_eq!(lines.len(), line::COUNT);
 
-        let (reservoir, electric_pump) = match color {
-            Color::Green => (Reservoir::a380_green(), None),
-            Color::Yellow => (Reservoir::a380_yellow(), Some(ElectricPump::a380_yellow_electric())),
+        // Both circuits carry two electric pumps; only the reservoir
+        // differs between them.
+        let reservoir = match color {
+            Color::Green => Reservoir::a380_green(),
+            Color::Yellow => Reservoir::a380_yellow(),
         };
 
         Self {
@@ -244,7 +271,7 @@ impl Circuit {
             accumulator: Accumulator::a380(),
             edps: [EngineDrivenPump::a380(); 4],
             edp_fire_open: [1.0; 4],
-            electric_pump,
+            electric_pumps: [ElectricPump::a380_electric(); 2],
             priority_valve,
             priority_open: 0.0,
             relief_valve: ReliefValve { cracking_pa: 5400.0 * PSI_PA, full_flow_rise_pa: 200.0 * PSI_PA, full_flow_m3_s: 3.0e-3 },
@@ -312,15 +339,16 @@ impl Circuit {
             edp_report[i] = EdpReport { flow_m3_s: forward, case_drain_m3_s: case_drain, volumetric_efficiency: out.volumetric_efficiency };
         }
 
-        let mut electric_pump_flow = 0.0;
-        if let Some(pump) = &mut self.electric_pump {
-            let (out, _current_a) = pump.step(inputs.electric_pump_powered, manifold_pa, inlet_pa, inputs.electric_pump_bus_voltage_v, &faults.electric_pump, dt);
+        let mut electric_pump_flow = [0.0; 2];
+        for (i, pump) in self.electric_pumps.iter_mut().enumerate() {
+            let (out, _current_a) =
+                pump.step(inputs.electric_pump_powered[i], manifold_pa, inlet_pa, inputs.electric_pump_bus_voltage_v[i], &faults.electric_pump[i], dt);
             injections[node::MANIFOLD] += out.flow_m3_s;
             injections[node::RETURN] += out.case_drain_m3_s;
             pump_reservoir_draw += out.flow_m3_s + out.case_drain_m3_s;
             pump_heat_w += out.shaft_power_w * (1.0 - super::pump::PUMP_MECHANICAL_EFFICIENCY);
             pump_delivered_flow_m3_s += out.flow_m3_s;
-            electric_pump_flow = out.flow_m3_s;
+            electric_pump_flow[i] = out.flow_m3_s;
         }
 
         let relief_flow = self.relief_valve.flow_m3_s(manifold_pa, faults.relief_valve_crack_low);
@@ -441,10 +469,68 @@ mod tests {
         assert!(!out.fluid_overheat);
     }
 
+    /// Settle a circuit with the given electric pumps powered, and report
+    /// the manifold pressure and each pump's delivered flow.
+    fn settle_on_electric_pumps(color: Color, powered: [bool; 2]) -> CircuitOutputs {
+        let mut c = Circuit::new(color);
+        let inputs = CircuitInputs {
+            electric_pump_powered: powered,
+            electric_pump_bus_voltage_v: powered.map(|on| if on { 115.0 } else { 0.0 }),
+            ambient_k: 288.15,
+            fuel_temp_k: 288.15,
+            pressurization_supply_fraction: 1.0,
+            ..Default::default()
+        };
+        let mut out = CircuitOutputs::default();
+        for _ in 0..3000 {
+            out = c.step(&inputs, &CircuitFaults::default(), 0.02);
+        }
+        out
+    }
+
+    /// The green circuit has two electric pumps of its own (AC 1 and AC 2).
+    /// It used to have none at all, which left it unable to be pressurised
+    /// on the ground or after losing both its engines.
+    #[test]
+    fn the_green_circuit_can_be_pressurised_on_its_electric_pumps_with_no_engines() {
+        let out = settle_on_electric_pumps(Color::Green, [true, true]);
+        assert!(
+            out.manifold_pressure_pa > 500.0 * PSI_PA,
+            "green on its own electric pumps should build meaningful pressure: {:.0} psi",
+            out.manifold_pressure_pa / PSI_PA
+        );
+        assert!(out.electric_pump_flow_m3_s.iter().all(|&f| f > 0.0), "both green pumps should be delivering: {:?}", out.electric_pump_flow_m3_s);
+    }
+
+    /// The two pumps of a circuit are fed from different AC buses so that
+    /// losing one bus costs that circuit one pump, not both.
+    #[test]
+    fn losing_one_ac_bus_leaves_its_circuit_the_other_electric_pump() {
+        for color in [Color::Green, Color::Yellow] {
+            let both = settle_on_electric_pumps(color, [true, true]);
+            let one = settle_on_electric_pumps(color, [true, false]);
+            let none = settle_on_electric_pumps(color, [false, false]);
+
+            assert!(one.electric_pump_flow_m3_s[0] > 0.0, "{color:?}: pump A should still run on its own bus");
+            assert_eq!(one.electric_pump_flow_m3_s[1], 0.0, "{color:?}: pump B has no supply");
+            assert!(
+                one.manifold_pressure_pa > 500.0 * PSI_PA,
+                "{color:?}: one pump must still pressurise the circuit, got {:.0} psi",
+                one.manifold_pressure_pa / PSI_PA
+            );
+            assert!(one.manifold_pressure_pa <= both.manifold_pressure_pa, "{color:?}: one pump cannot beat two");
+            assert!(
+                none.manifold_pressure_pa < 100.0 * PSI_PA,
+                "{color:?}: with neither pump powered and no engines there is no source, got {:.0} psi",
+                none.manifold_pressure_pa / PSI_PA
+            );
+        }
+    }
+
     #[test]
     fn yellow_circuit_electric_pump_alone_can_pressurise_the_system() {
         let mut c = Circuit::new(Color::Yellow);
-        let inputs = CircuitInputs { electric_pump_powered: true, electric_pump_bus_voltage_v: 115.0, ambient_k: 288.15, fuel_temp_k: 288.15, pressurization_supply_fraction: 1.0, ..Default::default() };
+        let inputs = CircuitInputs { electric_pump_powered: [true, true], electric_pump_bus_voltage_v: [115.0, 115.0], ambient_k: 288.15, fuel_temp_k: 288.15, pressurization_supply_fraction: 1.0, ..Default::default() };
         let mut out = CircuitOutputs::default();
         for _ in 0..3000 {
             out = c.step(&inputs, &CircuitFaults::default(), 0.02);
