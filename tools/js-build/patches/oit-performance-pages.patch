@@ -1,0 +1,1452 @@
+diff --git a/fbw-a380x/src/systems/instruments/src/OIT/OitPageDirectory.tsx b/fbw-a380x/src/systems/instruments/src/OIT/OitPageDirectory.tsx
+index fcb89cf..1b6ee87 100644
+--- a/fbw-a380x/src/systems/instruments/src/OIT/OitPageDirectory.tsx
++++ b/fbw-a380x/src/systems/instruments/src/OIT/OitPageDirectory.tsx
+@@ -5,6 +5,8 @@ import { EventBus, FSComponent, VNode } from '@microsoft/msfs-sdk';
+ import { OitFltOpsEfbOverlay } from './Pages/FltOps/OitFltOpsEfbOverlay';
+ import { OitFltOpsMenuPage } from './Pages/FltOps/OitFltOpsMenuPage';
+ import { OitFltOpsPerformance } from './Pages/FltOps/OitFltOpsPerformance';
++import { OitFltOpsTakeoffPerformance } from './Pages/FltOps/OitFltOpsTakeoffPerformance';
++import { OitFltOpsLandingPerformance } from './Pages/FltOps/OitFltOpsLandingPerformance';
+ import { OitFltOpsStatus } from './Pages/FltOps/OitFltOpsStatus';
+ import { OitNotFound } from './Pages/OitNotFound';
+ import { OitUiService } from './OitUiService';
+@@ -32,9 +34,9 @@ export function fltOpsPageForUrl(
+     case 'flt-ops/sts':
+       return <OitFltOpsStatus bus={bus} uiService={uiService} container={container} />;
+     case 'flt-ops/to-perf':
+-      return <OitFltOpsPerformance bus={bus} uiService={uiService} container={container} />;
++      return <OitFltOpsTakeoffPerformance bus={bus} uiService={uiService} container={container} />;
+     case 'flt-ops/ldg-perf':
+-      return <OitFltOpsPerformance bus={bus} uiService={uiService} container={container} />;
++      return <OitFltOpsLandingPerformance bus={bus} uiService={uiService} container={container} />;
+     case 'flt-ops/charts':
+       return <OitFltOpsEfbOverlay bus={bus} uiService={uiService} container={container} />;
+     case 'flt-ops/flt-folder':
+diff --git a/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsLandingPerformance.tsx b/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsLandingPerformance.tsx
+new file mode 100644
+index 0000000..d57eb64
+--- /dev/null
++++ b/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsLandingPerformance.tsx
+@@ -0,0 +1,408 @@
++//  Copyright (c) 2025 FlyByWire Simulations
++//  SPDX-License-Identifier: GPL-3.0
++
++import { ArraySubject, FSComponent, MappedSubject, Subject, VNode } from '@microsoft/msfs-sdk';
++import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
++import { FmsData } from '@flybywiresim/fbw-sdk';
++import { AbstractOitFltOpsPageProps } from '../../OIT';
++import { Button } from '../../../MsfsAvionicsCommon/UiWidgets/Button';
++import { DropdownMenu } from '../../../MsfsAvionicsCommon/UiWidgets/DropdownMenu';
++import { InputField } from '../../../MsfsAvionicsCommon/UiWidgets/InputField';
++import { AirportFormat, WeightFormat } from '../../../MFD/pages/common/DataEntryFormats';
++import { OitFltOpsPerfOptions } from './OitFltOpsPerfOptions';
++import {
++  DEFAULT_UNITS,
++  OisRunwayEnd,
++  OisUnits,
++  UNAVAILABLE,
++  UNAVAILABLE_REASON,
++  distanceUnitLabel,
++  formatDistance,
++  formatPressure,
++  formatWeight,
++  loadAirport,
++  pressureAltitude,
++  pressureUnitLabel,
++  readWeather,
++  readWeights,
++  runwayEnds,
++  weightUnitLabel,
++  windComponents,
++} from './OitFltOpsPerfCommon';
++
++const RUNWAY_CONDITIONS = ['DRY', 'GOOD', 'MEDIUM'];
++const FLAPS = ['CONF FULL', 'CONF 3'];
++const TECHNIQUE = ['MANUAL', 'AUTOLAND'];
++const BRAKE_MODE = ['LO', '2', '3', 'HI'];
++const REVERSE = ['YES', 'NO'];
++
++/**
++ * OIS FLT OPS LDG PERF.
++ *
++ * As on T.O PERF, the arrival runway and the weather are real: LDA comes
++ * from the published runway length less its displaced threshold, the
++ * elevation and slope from the two published threshold elevations, the wind
++ * components from the simulator's ambient wind resolved on the runway
++ * bearing.
++ *
++ * The landing distances — LD, FLD and the stop margin — are certified
++ * performance data. No A380-842 landing performance data set is installed
++ * (`OitFltOpsPerfCommon`), so they read NOT AVAIL. A stop margin in
++ * particular is a number a crew would act on, and is never estimated here.
++ */
++export class OitFltOpsLandingPerformance extends DestroyableComponent<AbstractOitFltOpsPageProps> {
++  // Make sure to collect all subscriptions in this.subscriptions, otherwise page navigation doesn't work.
++
++  private readonly units = Subject.create<OisUnits>(DEFAULT_UNITS);
++
++  private readonly sub = this.props.bus.getSubscriber<FmsData>();
++
++  private readonly airport = Subject.create<string | null>(null);
++  private readonly runwayIdents = ArraySubject.create<string>([]);
++  private readonly selectedRunway = Subject.create<number | null>(null);
++  private readonly runways = Subject.create<OisRunwayEnd[]>([]);
++  private readonly databaseMessage = Subject.create('');
++
++  private readonly runway = MappedSubject.create(
++    ([list, index]) => (index === null ? null : (list[index] ?? null)),
++    this.runways,
++    this.selectedRunway,
++  );
++
++  private readonly landingWeight = Subject.create<number | null>(null);
++  private readonly landingWeightSource = Subject.create('NOT ENTERED');
++
++  private readonly oat = Subject.create<number | null>(null);
++  private readonly qnh = Subject.create<number | null>(null);
++  private readonly windText = Subject.create('---°/---');
++  private readonly headwindText = Subject.create('---');
++  private readonly crosswindText = Subject.create('---');
++  private readonly pressureAltText = Subject.create('-----');
++
++  private readonly runwayCondition = Subject.create<number | null>(0);
++  private readonly flaps = Subject.create<number | null>(0);
++  private readonly technique = Subject.create<number | null>(0);
++  private readonly brakeMode = Subject.create<number | null>(0);
++  private readonly reverse = Subject.create<number | null>(0);
++  private readonly vPilot = Subject.create<number | null>(0);
++
++  private readonly resultRunwayText = Subject.create('----/---');
++
++  private fmsDestinationValue: string | null = null;
++  private fmsLandingRunwayValue: string | null = null;
++
++  public onAfterRender(node: VNode): void {
++    super.onAfterRender(node);
++
++    this.subscriptions.push(
++      this.runway,
++      this.sub.on('fmsDestination').handle((destination) => {
++        this.fmsDestinationValue = destination;
++        if (destination && this.airport.get() === null) {
++          this.airport.set(destination);
++        }
++      }),
++      this.sub.on('fmsLandingRunway').handle((runway) => {
++        this.fmsLandingRunwayValue = runway;
++        if (runway && this.selectedRunway.get() === null) {
++          this.selectRunway(this.fmsLandingRunwayIdent);
++        }
++      }),
++      this.airport.sub((ident) => {
++        if (ident) {
++          this.loadRunways(ident);
++        } else {
++          this.runways.set([]);
++          this.runwayIdents.clear();
++          this.selectedRunway.set(null);
++        }
++      }),
++      this.runway.sub(() => this.refreshConditions()),
++    );
++
++    this.refreshConditions();
++  }
++
++  private get fmsLandingRunwayIdent(): string | null {
++    const raw = this.fmsLandingRunwayValue;
++    return raw && raw.length > 4 ? raw.substring(4) : null;
++  }
++
++  private selectRunway(ident: string | null): void {
++    const index = ident === null ? -1 : this.runways.get().findIndex((r) => r.ident === ident);
++    this.selectedRunway.set(index >= 0 ? index : null);
++  }
++
++  private loadRunways(ident: string): void {
++    this.databaseMessage.set('LOADING RUNWAY DATA...');
++    loadAirport(ident)
++      .then((airport) => {
++        if (this.airport.get() !== ident) {
++          return;
++        }
++        if (airport === null) {
++          this.runways.set([]);
++          this.runwayIdents.clear();
++          this.selectedRunway.set(null);
++          this.databaseMessage.set(`${ident} NOT IN NAVIGATION DATABASE`);
++          return;
++        }
++        const ends = runwayEnds(airport);
++        this.runways.set(ends);
++        this.runwayIdents.set(ends.map((r) => r.ident));
++        this.databaseMessage.set(ends.length === 0 ? `${ident} HAS NO RUNWAY DATA` : '');
++        this.selectRunway(this.fmsLandingRunwayIdent);
++      })
++      .catch(() => this.databaseMessage.set('NAVIGATION DATABASE UNAVAILABLE'));
++  }
++
++  private refreshConditions(): void {
++    const weather = readWeather();
++    this.oat.set(Math.round(weather.oat));
++    this.qnh.set(weather.qnh);
++    this.windText.set(
++      `${Math.round(weather.windDirectionTrue).toString().padStart(3, '0')}°T/${Math.round(weather.windKt)
++        .toString()
++        .padStart(3, '0')}KT`,
++    );
++
++    const rwy = this.runway.get();
++    if (rwy === null) {
++      this.headwindText.set('---');
++      this.crosswindText.set('---');
++      this.pressureAltText.set('-----');
++      return;
++    }
++    const { headwind, crosswind } = windComponents(rwy.bearingTrue, weather);
++    this.headwindText.set(`${headwind >= 0 ? 'HEAD' : 'TAIL'} ${Math.abs(headwind).toFixed(0)}KT`);
++    this.crosswindText.set(`${crosswind >= 0 ? 'R' : 'L'} ${Math.abs(crosswind).toFixed(0)}KT`);
++    this.pressureAltText.set(`${Math.round(pressureAltitude(rwy.elevationFt, weather.qnh))} FT`);
++  }
++
++  /**
++   * SYNC FMS takes the arrival from the flight plan and the weight from the
++   * FQMS. The FMS publishes no destination fuel prediction as a variable,
++   * so what is taken is the *current* gross weight, and the page says so:
++   * it is not a predicted landing weight.
++   */
++  private syncFms(): void {
++    if (this.fmsDestinationValue) {
++      if (this.airport.get() === this.fmsDestinationValue) {
++        this.selectRunway(this.fmsLandingRunwayIdent);
++      } else {
++        this.airport.set(this.fmsDestinationValue);
++      }
++    } else {
++      this.databaseMessage.set('FMS HAS NO DESTINATION');
++    }
++
++    const gw = readWeights().grossWeightKg;
++    if (gw === null) {
++      this.landingWeightSource.set('FQMS GROSS WEIGHT INVALID');
++    } else {
++      this.landingWeight.set(gw);
++      this.landingWeightSource.set('CURRENT GROSS WEIGHT (NO FMS LANDING WEIGHT PREDICTION AVAILABLE)');
++    }
++    this.refreshConditions();
++  }
++
++  private compute(): void {
++    this.refreshConditions();
++    const rwy = this.runway.get();
++    this.resultRunwayText.set(rwy === null ? '----/---' : `${this.airport.get() ?? '----'}/${rwy.ident}`);
++  }
++
++  render(): VNode {
++    const units = this.units;
++    return (
++      <>
++        {/* begin page content */}
++        <div class="oit-page-container oit-perf-page">
++          <div class="oit-labeled-box-container">
++            <span class="oit-labeled-box-label">ARRIVAL</span>
++            <div class="fr oit-perf-row">
++              <div class="oit-label bigger oit-perf-key">AIRPORT</div>
++              <InputField<string>
++                dataEntryFormat={new AirportFormat()}
++                mandatory={Subject.create(true)}
++                value={this.airport}
++                containerStyle="width: 160px; margin-right: 20px;"
++                alignText="center"
++                hEventConsumer={this.props.container.hEventConsumer}
++                interactionMode={this.props.container.interactionMode}
++                errorHandler={() => {}}
++              />
++              <div class="oit-label bigger oit-perf-key">RWY</div>
++              <DropdownMenu
++                idPrefix={`${this.props.uiService.captOrFo}_OIT_ldgPerfRunway`}
++                selectedIndex={this.selectedRunway}
++                values={this.runwayIdents}
++                freeTextAllowed={false}
++                containerStyle="width: 180px; margin-right: 20px;"
++                alignLabels="center"
++                numberOfDigitsForInputField={4}
++                tmpyActive={Subject.create(false)}
++                hEventConsumer={this.props.container.hEventConsumer}
++                interactionMode={this.props.container.interactionMode}
++              />
++              <Button label="SYNC FMS" onClick={() => this.syncFms()} containerStyle="width: 175px;" />
++            </div>
++            <div class="oit-label amber oit-perf-note">{this.databaseMessage}</div>
++            <div class="oit-perf-grid">
++              <div class="oit-label bigger">LDA</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(
++                  ([r, u]) => (r === null ? '----' : `${formatDistance(r.lda, u)} ${distanceUnitLabel(u)}`),
++                  this.runway,
++                  units,
++                )}
++              </div>
++              <div class="oit-label bigger">ELEVN</div>
++              <div class="oit-label bigger oit-green-text">
++                {this.runway.map((r) => (r === null ? '-----' : `${Math.round(r.elevationFt)} FT`))}
++              </div>
++
++              <div class="oit-label bigger">SLOPE</div>
++              <div class="oit-label bigger oit-green-text">
++                {this.runway.map((r) =>
++                  r === null ? '----' : `${r.slopePercent >= 0 ? 'UP' : 'DOWN'} ${Math.abs(r.slopePercent).toFixed(2)}%`,
++                )}
++              </div>
++              <div class="oit-label bigger">WIDTH</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(
++                  ([r, u]) => (r === null ? '----' : `${formatDistance(r.width, u)} ${distanceUnitLabel(u)}`),
++                  this.runway,
++                  units,
++                )}
++              </div>
++            </div>
++          </div>
++
++          <div class="oit-labeled-box-container">
++            <span class="oit-labeled-box-label">CONDITIONS</span>
++            <div class="fr oit-perf-row">
++              <div class="oit-label bigger oit-perf-key">LW</div>
++              <InputField<number>
++                dataEntryFormat={new WeightFormat()}
++                mandatory={Subject.create(true)}
++                value={this.landingWeight}
++                containerStyle="width: 220px; margin-right: 20px;"
++                alignText="center"
++                hEventConsumer={this.props.container.hEventConsumer}
++                interactionMode={this.props.container.interactionMode}
++                errorHandler={() => {}}
++              />
++              <div class="oit-label">{this.landingWeightSource}</div>
++            </div>
++            <div class="oit-perf-grid">
++              <div class="oit-label bigger">OAT</div>
++              <div class="oit-label bigger oit-green-text">{this.oat.map((v) => (v === null ? '---' : `${v}°C`))}</div>
++              <div class="oit-label bigger">QNH</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(
++                  ([q, u]) => (q === null ? '----' : `${formatPressure(q, u)} ${pressureUnitLabel(u)}`),
++                  this.qnh,
++                  units,
++                )}
++              </div>
++
++              <div class="oit-label bigger">WIND</div>
++              <div class="oit-label bigger oit-green-text">{this.windText}</div>
++              <div class="oit-label bigger">PRESS ALT</div>
++              <div class="oit-label bigger oit-green-text">{this.pressureAltText}</div>
++
++              <div class="oit-label bigger">HEADWIND</div>
++              <div class="oit-label bigger oit-green-text">{this.headwindText}</div>
++              <div class="oit-label bigger">CROSSWIND</div>
++              <div class="oit-label bigger oit-green-text">{this.crosswindText}</div>
++            </div>
++            <div class="fr oit-perf-row">
++              {this.selector('RWY COND', RUNWAY_CONDITIONS, this.runwayCondition, 'ldgPerfRwyCond', 180)}
++              {this.selector('FLAPS', FLAPS, this.flaps, 'ldgPerfFlaps', 200)}
++              {this.selector('VPILOT', ['0', '5', '10', '15', '20'], this.vPilot, 'ldgPerfVpilot', 130)}
++            </div>
++            <div class="fr oit-perf-row">
++              {this.selector('TECHNIQUE', TECHNIQUE, this.technique, 'ldgPerfTechnique', 200)}
++              {this.selector('BRAKE', BRAKE_MODE, this.brakeMode, 'ldgPerfBrake', 130)}
++              {this.selector('REVERSE', REVERSE, this.reverse, 'ldgPerfReverse', 130)}
++            </div>
++          </div>
++
++          <div class="oit-labeled-box-container">
++            <span class="oit-labeled-box-label">RESULTS</span>
++            <div class="fr oit-perf-row">
++              <Button
++                label="COMPUTE"
++                onClick={() => this.compute()}
++                containerStyle="width: 200px; margin-right: 20px;"
++              />
++              <div style="flex-grow: 1" />
++              <div class="oit-label bigger">RWY</div>
++              <div class="oit-label bigger oit-green-text" style="margin-left: 15px;">
++                {this.resultRunwayText}
++              </div>
++            </div>
++            <div class="oit-perf-grid">
++              <div class="oit-label bigger">LW USED</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(
++                  ([w, u]) => `${formatWeight(w, u)} ${weightUnitLabel(u)}`,
++                  this.landingWeight,
++                  units,
++                )}
++              </div>
++              <div class="oit-label bigger">LDA</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(
++                  ([r, u]) => (r === null ? '----' : `${formatDistance(r.lda, u)} ${distanceUnitLabel(u)}`),
++                  this.runway,
++                  units,
++                )}
++              </div>
++
++              <div class="oit-label bigger">LD</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++              <div class="oit-label bigger">FLD</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++
++              <div class="oit-label bigger">STOP MARGIN / LD</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++              <div class="oit-label bigger">STOP MARGIN / FLD</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++
++              <div class="oit-label bigger">VAPP</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++              <div class="oit-label bigger">MAX CROSSWIND</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++            </div>
++            <div class="oit-label amber oit-perf-note">{UNAVAILABLE_REASON}</div>
++          </div>
++
++          <OitFltOpsPerfOptions units={this.units} />
++        </div>
++        {/* end page content */}
++      </>
++    );
++  }
++
++  private selector(label: string, values: string[], selected: Subject<number | null>, id: string, width: number): VNode {
++    return (
++      <>
++        <div class="oit-label bigger oit-perf-key">{label}</div>
++        <DropdownMenu
++          idPrefix={`${this.props.uiService.captOrFo}_OIT_${id}`}
++          selectedIndex={selected}
++          values={ArraySubject.create(values)}
++          freeTextAllowed={false}
++          containerStyle={`width: ${width}px; margin-right: 20px;`}
++          alignLabels="center"
++          numberOfDigitsForInputField={16}
++          tmpyActive={Subject.create(false)}
++          hEventConsumer={this.props.container.hEventConsumer}
++          interactionMode={this.props.container.interactionMode}
++        />
++      </>
++    );
++  }
++}
+diff --git a/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsPerfCommon.ts b/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsPerfCommon.ts
+new file mode 100644
+index 0000000..ebe1443
+--- /dev/null
++++ b/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsPerfCommon.ts
+@@ -0,0 +1,343 @@
++//  Copyright (c) 2025 FlyByWire Simulations
++//  SPDX-License-Identifier: GPL-3.0
++
++/**
++ * Real data for the OIS FLT OPS performance pages (T.O PERF, LDG PERF).
++ *
++ * Everything here is measured, not assumed:
++ *
++ * - the runway comes from the simulator's own airport facility
++ *   (`LOAD_AIRPORT` on `JS_LISTENER_FACILITY`, answered by the host's
++ *    navigation database), so TORA, the stopway, the displaced threshold,
++ *    both threshold elevations and the runway bearing are the published
++ *    ones;
++ * - the weather comes from the simulator's ambient state (temperature,
++ *   wind and sea level pressure), not from a typed-in guess;
++ * - the weights come from the FQMS (gross weight and centre of gravity) and
++ *   the airframe's zero fuel weight, i.e. from the loadsheet the aircraft
++ *   is actually carrying.
++ *
++ * What is deliberately *not* here: V1/VR/V2, FLEX temperature, the
++ * performance-limited take-off weight, the stabiliser setting and the
++ * take-off/landing distances. Those come from the manufacturer's certified
++ * performance database (the RTOW/LPC data set). FlyByWire ships such a data
++ * set for the A320 only
++ * (`fbw-a32nx/src/systems/shared/src/performance/a32nx_takeoff.ts`); for the
++ * A380-842 `AircraftContext`'s `performanceCalculators.takeoff` is `null`,
++ * and no certified A380 data set is available here. The pages therefore
++ * show those fields as unavailable rather than an approximation: they are
++ * numbers a crew would act on.
++ */
++
++import { Arinc429SignStatusMatrix, Arinc429Word } from '@flybywiresim/fbw-sdk';
++import { maxGw, maxZfw } from '@shared/PerformanceConstants';
++
++/** One MSFS airport runway, as `facility.rs` writes it (`JS_Runway`). */
++export interface OisMsRunway {
++  designation: string;
++  designatorCharPrimary: number;
++  designatorCharSecondary: number;
++  /** Centre of the runway. */
++  latitude: number;
++  longitude: number;
++  /** True bearing of the primary end, degrees. */
++  direction: number;
++  /** Full paved length, metres. */
++  length: number;
++  width: number;
++  surface: number;
++  primaryElevation: number;
++  secondaryElevation: number;
++  primaryThresholdLength: number;
++  secondaryThresholdLength: number;
++  primaryOverrunLength: number;
++  secondaryOverrunLength: number;
++}
++
++/** The airport fields these pages use. */
++export interface OisMsAirport {
++  icao: string;
++  name?: string;
++  lat: number;
++  lon: number;
++  runways: OisMsRunway[];
++}
++
++/** One runway *end*, with the distances a performance page needs. */
++export interface OisRunwayEnd {
++  /** "09L". */
++  ident: string;
++  /** True bearing of this end, degrees. */
++  bearingTrue: number;
++  /** Take-off run available, metres: the paved length from this end. */
++  tora: number;
++  /**
++   * Accelerate-stop distance available, metres: TORA plus this end's
++   * stopway. A clearway is not in the simulator's airport data, so TODA is
++   * not derived here (see `todaKnown`).
++   */
++  asda: number;
++  /** Landing distance available, metres: TORA less the displaced threshold. */
++  lda: number;
++  /** Threshold elevation, feet. */
++  elevationFt: number;
++  /** Runway slope in percent, positive uphill in the direction of take-off. */
++  slopePercent: number;
++  /** Width, metres. */
++  width: number;
++  /** Whether a clearway length was published (it never is, from apt.dat). */
++  todaKnown: boolean;
++}
++
++/** Both ends of every runway at an airport, ready for the page. */
++export function runwayEnds(airport: OisMsAirport): OisRunwayEnd[] {
++  const out: OisRunwayEnd[] = [];
++  for (const rwy of airport.runways ?? []) {
++    const designations = (rwy.designation ?? '').split('-');
++    for (let i = 0; i < 2; i++) {
++      const primary = i === 0;
++      const number = designations[i];
++      if (number === undefined || number === '') {
++        continue;
++      }
++      const designator = designatorChar(primary ? rwy.designatorCharPrimary : rwy.designatorCharSecondary);
++      const ident = `${number.padStart(2, '0')}${designator}`;
++      const thisThreshold = primary ? rwy.primaryThresholdLength : rwy.secondaryThresholdLength;
++      const farOverrun = primary ? rwy.secondaryOverrunLength : rwy.primaryOverrunLength;
++      const thisElevation = primary ? rwy.primaryElevation : rwy.secondaryElevation;
++      const farElevation = primary ? rwy.secondaryElevation : rwy.primaryElevation;
++      // The usable length between the two thresholds, which is what the two
++      // published threshold elevations are measured over.
++      const between = Math.max(1, rwy.length - rwy.primaryThresholdLength - rwy.secondaryThresholdLength);
++      out.push({
++        ident,
++        bearingTrue: primary ? rwy.direction : (rwy.direction + 180) % 360,
++        tora: rwy.length,
++        asda: rwy.length + (farOverrun ?? 0),
++        lda: Math.max(0, rwy.length - (thisThreshold ?? 0)),
++        elevationFt: (thisElevation ?? 0) / 0.3048,
++        slopePercent: ((farElevation - thisElevation) / between) * 100,
++        width: rwy.width,
++        todaKnown: false,
++      });
++    }
++  }
++  out.sort((a, b) => a.ident.localeCompare(b.ident));
++  return out;
++}
++
++/** MSFS `RunwayDesignator` to its letter. */
++function designatorChar(designator: number): string {
++  switch (designator) {
++    case 1:
++      return 'L';
++    case 2:
++      return 'R';
++    case 3:
++      return 'C';
++    case 4:
++      return 'W';
++    case 5:
++      return 'A';
++    case 6:
++      return 'B';
++    default:
++      return '';
++  }
++}
++
++/**
++ * Loads one airport from the simulator's facility database, the same way
++ * every other instrument in this aircraft does: `LOAD_AIRPORT` on the
++ * facility view listener, answered by a `SendAirport` event.
++ *
++ * Resolves with `null` when the airport is not in the database, or when no
++ * answer arrives within `timeoutMs` (the host may still be indexing).
++ */
++export function loadAirport(ident: string, timeoutMs = 10_000): Promise<OisMsAirport | null> {
++  const wanted = ident.trim().toUpperCase();
++  if (wanted.length < 3 || wanted.length > 4) {
++    return Promise.resolve(null);
++  }
++  const icao = `A      ${wanted}`;
++
++  return new Promise((resolve) => {
++    let done = false;
++    const finish = (airport: OisMsAirport | null) => {
++      if (done) {
++        return;
++      }
++      done = true;
++      Coherent.off('SendAirport', receive);
++      clearTimeout(timer);
++      resolve(airport);
++    };
++    const receive = (airport: OisMsAirport) => {
++      if (airport && typeof airport.icao === 'string' && airport.icao.trim().slice(1).trim() === wanted) {
++        finish(airport);
++      }
++    };
++    const timer = setTimeout(() => finish(null), timeoutMs);
++
++    Coherent.on('SendAirport', receive);
++    Coherent.call('LOAD_AIRPORT', icao)
++      .then((found: boolean) => {
++        if (found === false) {
++          finish(null);
++        }
++      })
++      .catch(() => finish(null));
++  });
++}
++
++/** The ambient state the pages use, straight from the simulator. */
++export interface OisWeather {
++  /** Outside air temperature, °C. */
++  oat: number;
++  /** Sea level pressure, hPa. */
++  qnh: number;
++  /** True direction the wind is coming from, degrees. */
++  windDirectionTrue: number;
++  /** Wind speed, knots. */
++  windKt: number;
++}
++
++export function readWeather(): OisWeather {
++  return {
++    oat: SimVar.GetSimVarValue('AMBIENT TEMPERATURE', 'celsius'),
++    qnh: SimVar.GetSimVarValue('SEA LEVEL PRESSURE', 'millibars'),
++    windDirectionTrue: SimVar.GetSimVarValue('AMBIENT WIND DIRECTION', 'degrees'),
++    windKt: SimVar.GetSimVarValue('AMBIENT WIND VELOCITY', 'knots'),
++  };
++}
++
++/** Head- and crosswind on a runway, knots; headwind positive. */
++export function windComponents(
++  runwayBearingTrue: number,
++  weather: OisWeather,
++): { headwind: number; crosswind: number } {
++  const off = ((weather.windDirectionTrue - runwayBearingTrue) * Math.PI) / 180;
++  return {
++    headwind: weather.windKt * Math.cos(off),
++    crosswind: weather.windKt * Math.sin(off),
++  };
++}
++
++/** Pressure altitude of a point at `elevationFt` under `qnh`, feet. */
++export function pressureAltitude(elevationFt: number, qnh: number): number {
++  return elevationFt + (1013.25 - qnh) * 27;
++}
++
++/** ISA temperature at a pressure altitude, °C. */
++export function isaTemperature(pressureAltFt: number): number {
++  return 15 - 0.0019812 * pressureAltFt;
++}
++
++/**
++ * One ARINC 429 local variable, or `null` when its sign status matrix says
++ * the value must not be used: a page shows a dash rather than the stale
++ * number behind a failed or unfunctional word.
++ */
++export function arincValue(name: string): number | null {
++  const word = Arinc429Word.fromSimVarValue(name);
++  return word.ssm === Arinc429SignStatusMatrix.NormalOperation ? word.value : null;
++}
++
++/** The weights the loadsheet and the fuel system actually hold. */
++export interface OisWeights {
++  /** Gross weight from the FQMS, kg; null when the FQMS has no valid data. */
++  grossWeightKg: number | null;
++  /** Centre of gravity from the FQMS, % MAC; null when invalid. */
++  cgPercentMac: number | null;
++  /** Fuel on board from the FQMS, kg; null when invalid. */
++  fobKg: number | null;
++  /** Zero fuel weight from the airframe's loadsheet, kg. */
++  zeroFuelWeightKg: number;
++  /** Zero fuel weight centre of gravity, % MAC. */
++  zeroFuelCgPercentMac: number;
++}
++
++export function readWeights(): OisWeights {
++  return {
++    grossWeightKg: arincValue('L:A32NX_FQMS_GROSS_WEIGHT'),
++    cgPercentMac: arincValue('L:A32NX_FQMS_CENTER_OF_GRAVITY_MAC'),
++    fobKg: arincValue('L:A32NX_FQMS_TOTAL_FUEL_ON_BOARD'),
++    zeroFuelWeightKg: SimVar.GetSimVarValue('L:A32NX_AIRFRAME_ZFW', 'number'),
++    zeroFuelCgPercentMac: SimVar.GetSimVarValue('L:A32NX_AIRFRAME_ZFW_CG_PERCENT_MAC', 'number'),
++  };
++}
++
++/**
++ * The A380-842 structural weight limits this aircraft is configured with
++ * (`@shared/PerformanceConstants`, which the FMS itself validates entries
++ * against). Structural limits are airframe constants, not a performance
++ * computation, so they are shown as read.
++ *
++ * There is no maximum *landing* weight constant in that file, so the
++ * landing page shows the landing-weight limit as unavailable rather than
++ * inventing one.
++ */
++export const A380_MAX_ZFW_KG = maxZfw;
++export const A380_MAX_GW_KG = maxGw;
++
++/** The unit set the OPTIONS panel of a performance page holds. */
++export interface OisUnits {
++  /** 't' (metric tonnes) or 'klb' (thousands of pounds). */
++  weight: 't' | 'klb';
++  /** 'hpa' or 'inhg'. */
++  altimeter: 'hpa' | 'inhg';
++  /** 'm' or 'ft'. */
++  distance: 'm' | 'ft';
++}
++
++export const DEFAULT_UNITS: OisUnits = { weight: 't', altimeter: 'hpa', distance: 'm' };
++
++export const M_TO_FT = 1 / 0.3048;
++export const KG_TO_LB = 2.20462262;
++
++/** A weight in kg as the OPTIONS weight unit, one decimal. */
++export function formatWeight(kg: number | null, units: OisUnits): string {
++  if (kg === null || !Number.isFinite(kg)) {
++    return '---.-';
++  }
++  return (units.weight === 't' ? kg / 1000 : (kg * KG_TO_LB) / 1000).toFixed(1);
++}
++
++export function weightUnitLabel(units: OisUnits): string {
++  return units.weight === 't' ? 'T' : 'KLB';
++}
++
++/** A distance in metres as the OPTIONS distance unit, whole units. */
++export function formatDistance(metres: number | null, units: OisUnits): string {
++  if (metres === null || !Number.isFinite(metres)) {
++    return '----';
++  }
++  return Math.round(units.distance === 'm' ? metres : metres * M_TO_FT).toFixed(0);
++}
++
++export function distanceUnitLabel(units: OisUnits): string {
++  return units.distance === 'm' ? 'M' : 'FT';
++}
++
++/** A pressure in hPa as the OPTIONS altimeter unit. */
++export function formatPressure(hpa: number, units: OisUnits): string {
++  if (!Number.isFinite(hpa)) {
++    return '----';
++  }
++  return units.altimeter === 'hpa' ? Math.round(hpa).toFixed(0) : (hpa * 0.0295299830714).toFixed(2);
++}
++
++export function pressureUnitLabel(units: OisUnits): string {
++  return units.altimeter === 'hpa' ? 'HPA' : 'IN HG';
++}
++
++/** What every computed-but-unavailable performance field shows. */
++export const UNAVAILABLE = 'NOT AVAIL';
++
++/**
++ * Why the certified results are unavailable, shown on the page so the crew
++ * is never left guessing whether a blank field is a failure or a gap.
++ */
++export const UNAVAILABLE_REASON =
++  'NO CERTIFIED A380-842 TAKE-OFF/LANDING PERFORMANCE DATA SET IS INSTALLED. ' +
++  'THE COMPUTED RESULTS BELOW ARE NOT AVAILABLE AND MUST BE TAKEN FROM THE QRH OR THE AIRLINE PERFORMANCE TOOL.';
+diff --git a/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsPerfOptions.tsx b/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsPerfOptions.tsx
+new file mode 100644
+index 0000000..d926b27
+--- /dev/null
++++ b/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsPerfOptions.tsx
+@@ -0,0 +1,61 @@
++//  Copyright (c) 2025 FlyByWire Simulations
++//  SPDX-License-Identifier: GPL-3.0
++
++import { ComponentProps, FSComponent, MutableSubscribable, Subject, VNode } from '@microsoft/msfs-sdk';
++import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
++import { RadioButtonGroup } from '../../../MsfsAvionicsCommon/UiWidgets/RadioButtonGroup';
++import { OisUnits } from './OitFltOpsPerfCommon';
++
++interface OitFltOpsPerfOptionsProps extends ComponentProps {
++  /** The units the page formats with. Changing them changes nothing else. */
++  readonly units: MutableSubscribable<OisUnits>;
++}
++
++/**
++ * The OPTIONS panel at the bottom left of T.O PERF and LDG PERF: the units
++ * the page is read in. Deliberately local to the page — it does not touch
++ * the FMS or EFIS unit settings, exactly as the real OIS keeps them apart.
++ */
++export class OitFltOpsPerfOptions extends DestroyableComponent<OitFltOpsPerfOptionsProps> {
++  private readonly weightIndex = Subject.create<number | null>(this.props.units.get().weight === 't' ? 0 : 1);
++  private readonly altimeterIndex = Subject.create<number | null>(this.props.units.get().altimeter === 'hpa' ? 0 : 1);
++  private readonly distanceIndex = Subject.create<number | null>(this.props.units.get().distance === 'm' ? 0 : 1);
++
++  public onAfterRender(node: VNode): void {
++    super.onAfterRender(node);
++
++    this.subscriptions.push(
++      this.weightIndex.sub((i) => this.props.units.set({ ...this.props.units.get(), weight: i === 1 ? 'klb' : 't' })),
++      this.altimeterIndex.sub((i) =>
++        this.props.units.set({ ...this.props.units.get(), altimeter: i === 1 ? 'inhg' : 'hpa' }),
++      ),
++      this.distanceIndex.sub((i) => this.props.units.set({ ...this.props.units.get(), distance: i === 1 ? 'ft' : 'm' })),
++    );
++  }
++
++  render(): VNode {
++    return (
++      <div class="oit-labeled-box-container oit-perf-options">
++        <span class="oit-labeled-box-label">OPTIONS</span>
++        <div class="fr">
++          <div class="oit-perf-options-column">
++            <div class="oit-label">WEIGHT</div>
++            <RadioButtonGroup values={['T', 'KLB']} selectedIndex={this.weightIndex} idPrefix="oit-perf-opt-weight" />
++          </div>
++          <div class="oit-perf-options-column">
++            <div class="oit-label">ALTIMETER</div>
++            <RadioButtonGroup
++              values={['HPA', 'IN HG']}
++              selectedIndex={this.altimeterIndex}
++              idPrefix="oit-perf-opt-alt"
++            />
++          </div>
++          <div class="oit-perf-options-column">
++            <div class="oit-label">DISTANCE</div>
++            <RadioButtonGroup values={['M', 'FT']} selectedIndex={this.distanceIndex} idPrefix="oit-perf-opt-dist" />
++          </div>
++        </div>
++      </div>
++    );
++  }
++}
+diff --git a/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsTakeoffPerformance.tsx b/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsTakeoffPerformance.tsx
+new file mode 100644
+index 0000000..c7ef591
+--- /dev/null
++++ b/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsTakeoffPerformance.tsx
+@@ -0,0 +1,539 @@
++//  Copyright (c) 2025 FlyByWire Simulations
++//  SPDX-License-Identifier: GPL-3.0
++
++import { ArraySubject, FSComponent, MappedSubject, Subject, VNode } from '@microsoft/msfs-sdk';
++import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
++import { FmsData } from '@flybywiresim/fbw-sdk';
++import { AbstractOitFltOpsPageProps } from '../../OIT';
++import { Button } from '../../../MsfsAvionicsCommon/UiWidgets/Button';
++import { DropdownMenu } from '../../../MsfsAvionicsCommon/UiWidgets/DropdownMenu';
++import { InputField } from '../../../MsfsAvionicsCommon/UiWidgets/InputField';
++import { AirportFormat, LengthFormat } from '../../../MFD/pages/common/DataEntryFormats';
++import { OitFltOpsPerfOptions } from './OitFltOpsPerfOptions';
++import {
++  A380_MAX_GW_KG,
++  A380_MAX_ZFW_KG,
++  DEFAULT_UNITS,
++  OisRunwayEnd,
++  OisUnits,
++  UNAVAILABLE,
++  UNAVAILABLE_REASON,
++  arincValue,
++  distanceUnitLabel,
++  formatDistance,
++  formatPressure,
++  formatWeight,
++  loadAirport,
++  pressureAltitude,
++  pressureUnitLabel,
++  readWeather,
++  readWeights,
++  runwayEnds,
++  weightUnitLabel,
++  windComponents,
++} from './OitFltOpsPerfCommon';
++
++const ENTRY_ANGLES = ['0', '90', '180'];
++const RUNWAY_CONDITIONS = ['DRY', 'WET'];
++const ANTI_ICE = ['OFF [STD]', 'ON [ENG]', 'ON [ENG & WING]'];
++const AIR_COND = ['ON [STD]', 'OFF'];
++const FLAPS = ['OPTIMUM', '1+F', '2', '3'];
++const THRUST = ['FLEX [STD]', 'TOGA'];
++
++/**
++ * OIS FLT OPS T.O PERF.
++ *
++ * The DEPARTURE and CONDITIONS blocks are entirely real: the runway comes
++ * from the simulator's airport database and the weather from its ambient
++ * state, and the take-off shift subtracts from the published TORA and ASDA.
++ *
++ * The RESULTS block is where the real aircraft's OIS would call the
++ * certified take-off performance data set. None is installed for the
++ * A380-842 (see `OitFltOpsPerfCommon`), so every certified result — V1, VR,
++ * V2, the flap setting, FLEX, the performance-limited MTOW and the
++ * stabiliser setting — reads NOT AVAIL with the reason stated on the page.
++ * The two results that are *not* performance computations, the thrust
++ * reduction and engine-out acceleration altitudes, are read from the FMS
++ * and shown.
++ */
++export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOitFltOpsPageProps> {
++  // Make sure to collect all subscriptions in this.subscriptions, otherwise page navigation doesn't work.
++
++  private readonly units = Subject.create<OisUnits>(DEFAULT_UNITS);
++
++  private readonly sub = this.props.bus.getSubscriber<FmsData>();
++
++  // --- departure -----------------------------------------------------------
++
++  private readonly airport = Subject.create<string | null>(null);
++  private readonly runwayIdents = ArraySubject.create<string>([]);
++  private readonly selectedRunway = Subject.create<number | null>(null);
++  private readonly runways = Subject.create<OisRunwayEnd[]>([]);
++  private readonly databaseMessage = Subject.create('');
++  private readonly takeoffShift = Subject.create<number | null>(null);
++  private readonly entryAngle = Subject.create<number | null>(0);
++
++  private readonly runway = MappedSubject.create(
++    ([list, index]) => (index === null ? null : (list[index] ?? null)),
++    this.runways,
++    this.selectedRunway,
++  );
++
++  /** TORA left from the selected entry point: the published TORA less the shift. */
++  private readonly usableTora = MappedSubject.create(
++    ([rwy, shift]) => (rwy === null ? null : Math.max(0, rwy.tora - (shift ?? 0))),
++    this.runway,
++    this.takeoffShift,
++  );
++
++  private readonly usableAsda = MappedSubject.create(
++    ([rwy, shift]) => (rwy === null ? null : Math.max(0, rwy.asda - (shift ?? 0))),
++    this.runway,
++    this.takeoffShift,
++  );
++
++  // --- conditions ----------------------------------------------------------
++
++  private readonly oat = Subject.create<number | null>(null);
++  private readonly qnh = Subject.create<number | null>(null);
++  private readonly windText = Subject.create('---°/---');
++  private readonly headwindText = Subject.create('---');
++  private readonly crosswindText = Subject.create('---');
++  private readonly pressureAltText = Subject.create('-----');
++  private readonly weatherSource = Subject.create('NO DATA');
++
++  private readonly runwayCondition = Subject.create<number | null>(0);
++  private readonly antiIce = Subject.create<number | null>(0);
++  private readonly airCond = Subject.create<number | null>(0);
++  private readonly flaps = Subject.create<number | null>(0);
++  private readonly thrust = Subject.create<number | null>(0);
++
++  // --- weights -------------------------------------------------------------
++
++  private readonly zfwText = Subject.create('---.-');
++  private readonly zfwCgText = Subject.create('--.-');
++  private readonly fobText = Subject.create('---.-');
++  private readonly towText = Subject.create('---.-');
++  private readonly toCgText = Subject.create('--.-');
++  private readonly weightWarning = Subject.create('');
++
++  // --- results -------------------------------------------------------------
++
++  private readonly computed = Subject.create(false);
++  private readonly thrRedText = Subject.create('-----');
++  private readonly eoAccelText = Subject.create('-----');
++  private readonly resultRunwayText = Subject.create('----/---');
++
++  public onAfterRender(node: VNode): void {
++    super.onAfterRender(node);
++
++    this.subscriptions.push(
++      this.runway,
++      this.usableTora,
++      this.usableAsda,
++      // The FMS's own departure, so SYNC FMS has something real to take.
++      this.sub.on('fmsOrigin').handle((origin) => {
++        this.fmsOriginValue = origin;
++        if (origin && this.airport.get() === null) {
++          this.airport.set(origin);
++        }
++      }),
++      this.sub.on('fmsDepartureRunway').handle((runway) => {
++        this.fmsDepartureRunwayValue = runway;
++        if (runway && this.selectedRunway.get() === null) {
++          this.selectRunway(this.fmsDepartureRunwayIdent);
++        }
++      }),
++      this.airport.sub((ident) => {
++        if (ident) {
++          this.loadRunways(ident);
++        } else {
++          this.runways.set([]);
++          this.runwayIdents.clear();
++          this.selectedRunway.set(null);
++        }
++      }),
++      this.runway.sub(() => this.refreshConditions()),
++      this.units.sub(() => this.refreshWeights()),
++    );
++
++    this.refreshConditions();
++    this.refreshWeights();
++  }
++
++  /** Every runway end at `ident`, from the simulator's airport database. */
++  private loadRunways(ident: string): void {
++    this.databaseMessage.set('LOADING RUNWAY DATA...');
++    loadAirport(ident)
++      .then((airport) => {
++        if (this.airport.get() !== ident) {
++          return; // The crew moved on while the database answered.
++        }
++        if (airport === null) {
++          this.runways.set([]);
++          this.runwayIdents.clear();
++          this.selectedRunway.set(null);
++          this.databaseMessage.set(`${ident} NOT IN NAVIGATION DATABASE`);
++          return;
++        }
++        const ends = runwayEnds(airport);
++        this.runways.set(ends);
++        this.runwayIdents.set(ends.map((r) => r.ident));
++        this.databaseMessage.set(ends.length === 0 ? `${ident} HAS NO RUNWAY DATA` : '');
++
++        // Pre-select the FMS's departure runway when it is one of them.
++        this.selectRunway(this.fmsDepartureRunwayIdent);
++      })
++      .catch(() => this.databaseMessage.set('NAVIGATION DATABASE UNAVAILABLE'));
++  }
++
++  private fmsOriginValue: string | null = null;
++
++  private fmsDepartureRunwayValue: string | null = null;
++
++  private get fmsDepartureRunwayIdent(): string | null {
++    // FmsData's runway identifier is "<airport><runway>" (e.g. EDDF07C).
++    const raw = this.fmsDepartureRunwayValue;
++    return raw && raw.length > 4 ? raw.substring(4) : null;
++  }
++
++  private selectRunway(ident: string | null): void {
++    const index = ident === null ? -1 : this.runways.get().findIndex((r) => r.ident === ident);
++    this.selectedRunway.set(index >= 0 ? index : null);
++  }
++
++  /**
++   * SYNC FMS: take the departure the flight plan actually has, and re-read
++   * the ambient state and the loadsheet. Nothing is filled in that the FMS
++   * has not published.
++   */
++  private syncFms(): void {
++    if (this.fmsOriginValue) {
++      if (this.airport.get() === this.fmsOriginValue) {
++        this.selectRunway(this.fmsDepartureRunwayIdent);
++      } else {
++        this.airport.set(this.fmsOriginValue);
++      }
++    } else {
++      this.databaseMessage.set('FMS HAS NO DEPARTURE');
++    }
++    this.refreshConditions();
++    this.refreshWeights();
++  }
++
++  /** Re-read the ambient state and recompute the wind components. */
++  private refreshConditions(): void {
++    const weather = readWeather();
++    const units = this.units.get();
++    this.oat.set(Math.round(weather.oat));
++    this.qnh.set(weather.qnh);
++    this.weatherSource.set('SIMULATED AMBIENT AT AIRCRAFT');
++    this.windText.set(
++      `${Math.round(weather.windDirectionTrue).toString().padStart(3, '0')}°T/${Math.round(weather.windKt)
++        .toString()
++        .padStart(3, '0')}KT`,
++    );
++
++    const rwy = this.runway.get();
++    if (rwy === null) {
++      this.headwindText.set('---');
++      this.crosswindText.set('---');
++      this.pressureAltText.set('-----');
++      return;
++    }
++    const { headwind, crosswind } = windComponents(rwy.bearingTrue, weather);
++    this.headwindText.set(`${headwind >= 0 ? 'HEAD' : 'TAIL'} ${Math.abs(headwind).toFixed(0)}KT`);
++    this.crosswindText.set(`${crosswind >= 0 ? 'R' : 'L'} ${Math.abs(crosswind).toFixed(0)}KT`);
++    this.pressureAltText.set(`${Math.round(pressureAltitude(rwy.elevationFt, weather.qnh))} FT`);
++    void units;
++  }
++
++  /** Re-read the loadsheet and fuel state. */
++  private refreshWeights(): void {
++    const units = this.units.get();
++    const w = readWeights();
++    this.zfwText.set(formatWeight(w.zeroFuelWeightKg, units));
++    this.zfwCgText.set(Number.isFinite(w.zeroFuelCgPercentMac) ? w.zeroFuelCgPercentMac.toFixed(1) : '--.-');
++    this.fobText.set(formatWeight(w.fobKg, units));
++    this.towText.set(formatWeight(w.grossWeightKg, units));
++    this.toCgText.set(w.cgPercentMac === null ? '--.-' : w.cgPercentMac.toFixed(1));
++
++    const warnings: string[] = [];
++    if (w.zeroFuelWeightKg > A380_MAX_ZFW_KG) {
++      warnings.push('ZFW ABOVE STRUCTURAL LIMIT');
++    }
++    if (w.grossWeightKg !== null && w.grossWeightKg > A380_MAX_GW_KG) {
++      warnings.push('GW ABOVE STRUCTURAL LIMIT');
++    }
++    this.weightWarning.set(warnings.join(' - '));
++
++    this.thrRedText.set(this.altitudeText(arincValue('L:A32NX_FM1_THR_RED_ALT')));
++    this.eoAccelText.set(this.altitudeText(arincValue('L:A32NX_FM1_EO_ACC_ALT')));
++  }
++
++  private altitudeText(value: number | null): string {
++    return value === null ? '-----' : `${Math.round(value)} FT`;
++  }
++
++  /** COMPUTE: everything that can be computed is; the rest says so. */
++  private compute(): void {
++    this.refreshConditions();
++    this.refreshWeights();
++    const rwy = this.runway.get();
++    this.resultRunwayText.set(rwy === null ? '----/---' : `${this.airport.get() ?? '----'}/${rwy.ident}`);
++    this.computed.set(rwy !== null);
++  }
++
++  render(): VNode {
++    const units = this.units;
++    return (
++      <>
++        {/* begin page content */}
++        <div class="oit-page-container oit-perf-page">
++          <div class="oit-labeled-box-container">
++            <span class="oit-labeled-box-label">DEPARTURE</span>
++            <div class="fr oit-perf-row">
++              <div class="oit-label bigger oit-perf-key">AIRPORT</div>
++              <InputField<string>
++                dataEntryFormat={new AirportFormat()}
++                mandatory={Subject.create(true)}
++                value={this.airport}
++                containerStyle="width: 160px; margin-right: 20px;"
++                alignText="center"
++                hEventConsumer={this.props.container.hEventConsumer}
++                interactionMode={this.props.container.interactionMode}
++                errorHandler={() => {}}
++              />
++              <div class="oit-label bigger oit-perf-key">RWY</div>
++              <DropdownMenu
++                idPrefix={`${this.props.uiService.captOrFo}_OIT_toPerfRunway`}
++                selectedIndex={this.selectedRunway}
++                values={this.runwayIdents}
++                freeTextAllowed={false}
++                containerStyle="width: 180px; margin-right: 20px;"
++                alignLabels="center"
++                numberOfDigitsForInputField={4}
++                tmpyActive={Subject.create(false)}
++                hEventConsumer={this.props.container.hEventConsumer}
++                interactionMode={this.props.container.interactionMode}
++              />
++              <Button
++                label="SYNC FMS"
++                onClick={() => this.syncFms()}
++                containerStyle="width: 175px; margin-right: 10px;"
++              />
++              <Button
++                label="SYNC SIMBRIEF"
++                onClick={() => {}}
++                disabled={Subject.create(true)}
++                containerStyle="width: 220px;"
++              />
++            </div>
++            <div class="oit-label amber oit-perf-note">{this.databaseMessage}</div>
++            <div class="oit-perf-grid">
++              <div class="oit-label bigger">ELEVN</div>
++              <div class="oit-label bigger oit-green-text">
++                {this.runway.map((r) => (r === null ? '-----' : `${Math.round(r.elevationFt)} FT`))}
++              </div>
++              <div class="oit-label bigger">SLOPE</div>
++              <div class="oit-label bigger oit-green-text">
++                {this.runway.map((r) => (r === null ? '----' : `${r.slopePercent >= 0 ? 'UP' : 'DOWN'} ${Math.abs(r.slopePercent).toFixed(2)}%`))}
++              </div>
++
++              <div class="oit-label bigger">TORA</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(([t, u]) => `${formatDistance(t, u)} ${distanceUnitLabel(u)}`, this.usableTora, units)}
++              </div>
++              <div class="oit-label bigger">ASDA</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(([a, u]) => `${formatDistance(a, u)} ${distanceUnitLabel(u)}`, this.usableAsda, units)}
++              </div>
++
++              <div class="oit-label bigger">TODA</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++              <div class="oit-label bigger">WIDTH</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(
++                  ([r, u]) => (r === null ? '----' : `${formatDistance(r.width, u)} ${distanceUnitLabel(u)}`),
++                  this.runway,
++                  units,
++                )}
++              </div>
++            </div>
++            <div class="fr oit-perf-row">
++              <div class="oit-label bigger oit-perf-key">ENTRY ANGLE</div>
++              <DropdownMenu
++                idPrefix={`${this.props.uiService.captOrFo}_OIT_toPerfEntryAngle`}
++                selectedIndex={this.entryAngle}
++                values={ArraySubject.create(ENTRY_ANGLES)}
++                freeTextAllowed={false}
++                containerStyle="width: 150px; margin-right: 20px;"
++                alignLabels="center"
++                numberOfDigitsForInputField={3}
++                tmpyActive={Subject.create(false)}
++                hEventConsumer={this.props.container.hEventConsumer}
++                interactionMode={this.props.container.interactionMode}
++              />
++              <div class="oit-label bigger oit-perf-key">T.O SHIFT</div>
++              <InputField<number>
++                dataEntryFormat={new LengthFormat(Subject.create(0), Subject.create(6000))}
++                mandatory={Subject.create(false)}
++                value={this.takeoffShift}
++                containerStyle="width: 190px;"
++                alignText="center"
++                hEventConsumer={this.props.container.hEventConsumer}
++                interactionMode={this.props.container.interactionMode}
++                errorHandler={() => {}}
++              />
++            </div>
++            <div class="oit-label oit-perf-note">
++              INTERSECTION NAMES ARE NOT IN THE NAVIGATION DATABASE; ENTER THE INTERSECTION AS A T.O SHIFT FROM THE
++              RUNWAY THRESHOLD. TODA NEEDS A PUBLISHED CLEARWAY, WHICH THE DATABASE DOES NOT CARRY.
++            </div>
++          </div>
++
++          <div class="oit-labeled-box-container">
++            <span class="oit-labeled-box-label">CONDITIONS</span>
++            <div class="oit-perf-grid">
++              <div class="oit-label bigger">OAT</div>
++              <div class="oit-label bigger oit-green-text">{this.oat.map((v) => (v === null ? '---' : `${v}°C`))}</div>
++              <div class="oit-label bigger">QNH</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(
++                  ([q, u]) => (q === null ? '----' : `${formatPressure(q, u)} ${pressureUnitLabel(u)}`),
++                  this.qnh,
++                  units,
++                )}
++              </div>
++
++              <div class="oit-label bigger">WIND</div>
++              <div class="oit-label bigger oit-green-text">{this.windText}</div>
++              <div class="oit-label bigger">PRESS ALT</div>
++              <div class="oit-label bigger oit-green-text">{this.pressureAltText}</div>
++
++              <div class="oit-label bigger">HEADWIND</div>
++              <div class="oit-label bigger oit-green-text">{this.headwindText}</div>
++              <div class="oit-label bigger">CROSSWIND</div>
++              <div class="oit-label bigger oit-green-text">{this.crosswindText}</div>
++            </div>
++            <div class="fr oit-perf-row">
++              {this.selector('RWY COND', RUNWAY_CONDITIONS, this.runwayCondition, 'toPerfRwyCond', 160)}
++              {this.selector('ANTI ICE', ANTI_ICE, this.antiIce, 'toPerfAntiIce', 250)}
++              {this.selector('AIR COND', AIR_COND, this.airCond, 'toPerfAirCond', 160)}
++            </div>
++            <div class="fr oit-perf-row">
++              {this.selector('FLAPS', FLAPS, this.flaps, 'toPerfFlaps', 180)}
++              {this.selector('THRUST', THRUST, this.thrust, 'toPerfThrust', 200)}
++              <Button label="SYNC WX" onClick={() => this.refreshConditions()} containerStyle="width: 160px;" />
++            </div>
++            <div class="oit-label oit-perf-note">WEATHER SOURCE: {this.weatherSource}</div>
++          </div>
++
++          <div class="oit-labeled-box-container">
++            <span class="oit-labeled-box-label">WEIGHTS</span>
++            <div class="oit-perf-grid">
++              <div class="oit-label bigger">ZFW</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(([t, u]) => `${t} ${weightUnitLabel(u)}`, this.zfwText, units)}
++              </div>
++              <div class="oit-label bigger">ZFWCG</div>
++              <div class="oit-label bigger oit-green-text">{this.zfwCgText.map((v) => `${v} %`)}</div>
++
++              <div class="oit-label bigger">FOB</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(([t, u]) => `${t} ${weightUnitLabel(u)}`, this.fobText, units)}
++              </div>
++              <div class="oit-label bigger">TOW</div>
++              <div class="oit-label bigger oit-green-text">
++                {MappedSubject.create(([t, u]) => `${t} ${weightUnitLabel(u)}`, this.towText, units)}
++              </div>
++
++              <div class="oit-label bigger">TOCG</div>
++              <div class="oit-label bigger oit-green-text">{this.toCgText.map((v) => `${v} %`)}</div>
++              <div class="oit-label bigger">STRUCT MTOW</div>
++              <div class="oit-label bigger oit-green-text">
++                {units.map((u) => `${formatWeight(A380_MAX_GW_KG, u)} ${weightUnitLabel(u)}`)}
++              </div>
++            </div>
++            <div class="oit-label amber oit-perf-note">{this.weightWarning}</div>
++          </div>
++
++          <div class="oit-labeled-box-container">
++            <span class="oit-labeled-box-label">RESULTS</span>
++            <div class="fr oit-perf-row">
++              <Button label="COMPUTE" onClick={() => this.compute()} containerStyle="width: 200px; margin-right: 20px;" />
++              <Button
++                label="RECHECK WITH AVNCS"
++                onClick={() => {}}
++                disabled={Subject.create(true)}
++                containerStyle="width: 320px;"
++              />
++              <div style="flex-grow: 1" />
++              <div class="oit-label bigger">RWY</div>
++              <div class="oit-label bigger oit-green-text" style="margin-left: 15px;">
++                {this.resultRunwayText}
++              </div>
++            </div>
++            <div class="oit-perf-grid">
++              <div class="oit-label bigger">V1</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++              <div class="oit-label bigger">FLAPS</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++
++              <div class="oit-label bigger">VR</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++              <div class="oit-label bigger">FLEX</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++
++              <div class="oit-label bigger">V2</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++              <div class="oit-label bigger">THS</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++
++              <div class="oit-label bigger">MTOW (PERF)</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++              <div class="oit-label bigger">STOP MARGIN</div>
++              <div class="oit-label bigger amber">{UNAVAILABLE}</div>
++
++              <div class="oit-label bigger">THR RED</div>
++              <div class="oit-label bigger oit-green-text">{this.thrRedText}</div>
++              <div class="oit-label bigger">EO ACCEL</div>
++              <div class="oit-label bigger oit-green-text">{this.eoAccelText}</div>
++            </div>
++            <div class="oit-label amber oit-perf-note">{UNAVAILABLE_REASON}</div>
++          </div>
++
++          <OitFltOpsPerfOptions units={this.units} />
++        </div>
++        {/* end page content */}
++      </>
++    );
++  }
++
++  /** One labelled dropdown in a conditions row. */
++  private selector(
++    label: string,
++    values: string[],
++    selected: Subject<number | null>,
++    id: string,
++    width: number,
++  ): VNode {
++    return (
++      <>
++        <div class="oit-label bigger oit-perf-key">{label}</div>
++        <DropdownMenu
++          idPrefix={`${this.props.uiService.captOrFo}_OIT_${id}`}
++          selectedIndex={selected}
++          values={ArraySubject.create(values)}
++          freeTextAllowed={false}
++          containerStyle={`width: ${width}px; margin-right: 20px;`}
++          alignLabels="center"
++          numberOfDigitsForInputField={16}
++          tmpyActive={Subject.create(false)}
++          hEventConsumer={this.props.container.hEventConsumer}
++          interactionMode={this.props.container.interactionMode}
++        />
++      </>
++    );
++  }
++}
+diff --git a/fbw-a380x/src/systems/instruments/src/OIT/style.scss b/fbw-a380x/src/systems/instruments/src/OIT/style.scss
+index 3e5d0c3..a78a7f0 100644
+--- a/fbw-a380x/src/systems/instruments/src/OIT/style.scss
++++ b/fbw-a380x/src/systems/instruments/src/OIT/style.scss
+@@ -675,3 +675,47 @@ $font-file-path: '/Fonts/fbw-a380x/EFB';
+ .oit-a380x-systems-app-ldg-cap-td.green {
+   background-color: #006400;
+ }
++
++// ---------------------------------------------------------------------------
++// FLT OPS performance pages (T.O PERF, LDG PERF).
++// ---------------------------------------------------------------------------
++
++.oit-perf-page {
++  overflow-y: auto;
++  padding: 10px 15px;
++}
++
++.oit-perf-row {
++  align-items: center;
++  margin: 6px 0;
++}
++
++.oit-perf-key {
++  min-width: 190px;
++}
++
++.oit-perf-grid {
++  display: grid;
++  grid-template-columns: 220px 300px 260px 300px;
++  align-items: center;
++  row-gap: 6px;
++  margin: 6px 0;
++}
++
++.oit-perf-note {
++  font-size: 20px;
++  margin: 4px 0 2px 0;
++  max-width: 1250px;
++}
++
++.oit-perf-options {
++  margin-top: 10px;
++  align-self: flex-start;
++  min-width: 620px;
++}
++
++.oit-perf-options-column {
++  display: flex;
++  flex-direction: column;
++  margin-right: 40px;
++}

@@ -11,3 +11,6 @@
 .dev.vars
 *.env
 .env*
+
+# Per-agent build directories (parallel work)
+target-*/

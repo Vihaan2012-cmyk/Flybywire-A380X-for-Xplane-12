@@ -44,13 +44,13 @@ cp -r app/ui/* "$XPHFBW/ui/"
   cp "app/js/$f" "$XPHFBW/js/$f"
 done
 cp "$PANEL/panel.cfg" "$PANEL/panel.xml" "$AIRCRAFT/panel/"
-# FlyByWire's built instruments (GPL-3.0), without the EFB, OITs and popup.
+# FlyByWire's built instruments (GPL-3.0), without the EFB, the OITs'
+# superseded legacy page and the popup. The OIT itself (A380X/OIT and
+# Images/fbw-a380x/oit) is installed: it is drawn now (docs/oit.md).
 ( cd "$BUILD" && find . -type f \
     ! -path "./Pages/VCockpit/Instruments/A380X/EFB/*" \
-    ! -path "./Pages/VCockpit/Instruments/A380X/OIT/*" \
     ! -path "./Pages/VCockpit/Instruments/A380X/OITlegacy/*" \
     ! -path "./Pages/VCockpit/Instruments/A380X/popup/*" \
-    ! -path "./Images/fbw-a380x/oit/*" \
     ! -path "./Fonts/fbw-a380x/EFB/*" -print ) | while read -r f; do
   mkdir -p "$AIRCRAFT/html_ui/$(dirname "$f")"
   cp "$BUILD/$f" "$AIRCRAFT/html_ui/$f"

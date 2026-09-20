@@ -153,7 +153,8 @@ capitals.
 PNG files resolved from `<aircraft>/html_ui/` (`/Images/fbw-a380x/...`),
 and PNG data URIs; decoded once with a premultiplied-average mipmap chain
 and drawn trilinear. Install: copy the MSFS package's
-`html_ui/Images/fbw-a380x/` (without `oit/`) to `<aircraft>/html_ui/Images/fbw-a380x/`.
+`html_ui/Images/fbw-a380x/` (`oit/` included now the OIT is drawn, docs/oit.md)
+to `<aircraft>/html_ui/Images/fbw-a380x/`.
 Native images (NATIVE_IMAGE, the terronnd terrain under each ND) are looked
 up from `mapdata::plugin::native_image` every frame, one texture per id,
 re-uploaded only when their `generation` or size changes, and drawn with

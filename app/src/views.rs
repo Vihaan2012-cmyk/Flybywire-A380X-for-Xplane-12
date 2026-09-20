@@ -474,8 +474,8 @@ mod tests {
     }
 
     #[test]
-    fn screen_order_has_sixteen_distinct_non_empty_ids() {
-        assert_eq!(SCREEN_ORDER.len(), 16);
+    fn screen_order_has_eighteen_distinct_non_empty_ids() {
+        assert_eq!(SCREEN_ORDER.len(), 18);
         let mut sorted = SCREEN_ORDER.to_vec();
         sorted.sort();
         sorted.dedup();
@@ -489,6 +489,8 @@ mod tests {
         assert_eq!(screen_slot("screen_du_pfdl"), Some(0));
         assert_eq!(screen_slot("SCREEN_DU_RMP_3"), Some(14));
         assert_eq!(screen_slot("SCREEN_EFB"), Some(15), "the EFB gets its own hand-made view, not one from panel.cfg's view_list");
+        assert_eq!(screen_slot("SCREEN_OIT_LEFT"), Some(16));
+        assert_eq!(screen_slot("SCREEN_OIT_RIGHT"), Some(17));
     }
 
     #[test]
