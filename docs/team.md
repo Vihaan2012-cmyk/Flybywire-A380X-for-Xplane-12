@@ -17,7 +17,22 @@ The goal is a study-level FlyByWire A380X in X-Plane 12: FBW's own code (Rust sy
   - Only the lead edits the converter. If you need a converter change, describe it exactly in your report.
   - Screen meshes carry `ATTR_cockpit_device <id> 0 0 1`, where the id is panel.cfg's texture name without `$`, in panel.cfg's case: BAT, Clock, FCU, RTPI, SCREEN_DU_EWD, SCREEN_DU_MFD (two meshes, one texture), SCREEN_DU_NDL, SCREEN_DU_NDR, SCREEN_DU_PFDL, SCREEN_DU_PFDR, SCREEN_DU_RMP_1/2/3, SCREEN_DU_SD, SCREEN_ISIS_1, SCREEN_EFB, SCREEN_OIT_LEFT, SCREEN_OIT_RIGHT (display/screens.rs's `SCREENS`).
   - The EFB is out of scope: the user won't use FBW's EFB (the app draws its own study/settings UI on that mesh instead). The OIT is drawn now (docs/oit.md) — the two lateral-console terminals, from FlyByWire's own `A380X/OIT/oit.html`.
-  - **Needed converter change (undone; describe, don't implement):** the OIT Side Console switches (`SWITCH_GLARESHIELD_CS_OIT_SIDE`/`_FO_OIT_SIDE` in FBW's glareshield.xml — despite the "glareshield" file name, real position is the lateral console per FBW's own Lateral Consoles doc) need a click manipulator writing the boolean dataref `L:A380X_SWITCH_OIT_SIDE_LEFT` (captain) / `L:A380X_SWITCH_OIT_SIDE_RIGHT` (first officer), the same way any other FBW dummy toggle switch's `SWITCH_POSITION_VAR` already becomes a clickable X-Plane manipulator elsewhere in this aircraft. No plugin-side change is needed once that manipulator exists: `false`/unset already reads as FLT OPS (FlyByWire's own `OIT.tsx`: `domainSwitch ? 'nss-avncs' : 'flt-ops'`), which is the terminal's working mode, and the OIT's own JS already reads that dataref (`OitSimvarPublisher.tsx`). docs/oit.md has the full trace.
+  - **~~Needed converter change~~ -- checked, and none is needed.** The OIT
+    Side Console switches (`SWITCH_GLARESHIELD_CS_OIT_SIDE` /
+    `_FO_OIT_SIDE` in FBW's glareshield.xml) already convert to clickable
+    manipulators today. They use `A32NX_GT_Switch_Dummy`, which the
+    converter handles directly (`behaviour/bind.rs:353`) and which also
+    expands to `ASOBO_GT_Interaction_LeftSingle_Code`, handled at
+    `bind.rs:351`; `SWITCH_POSITION_TYPE`/`SWITCH_POSITION_VAR` become
+    `L:A380X_SWITCH_OIT_SIDE_LEFT` through the generic binding at
+    `bind.rs:330`. Verified against the *installed* aircraft rather than
+    the source: the switch is present in `objects/a380_cockpit_click.obj`
+    and its dataref appears four times in the generated SASL module. It is
+    a toggle on `LEFT_SINGLE_CODE` with no leave code, so the latching bug
+    that affects the ECAM control panel's buttons does not apply to it.
+    No plugin-side change is needed either, for the reason already given:
+    unset reads as FLT OPS, which is the terminal's working mode, and the
+    OIT's own JS reads that dataref. docs/oit.md has the full trace.
 
 ## Rules
 - Deliver working, tested code. Partial files from earlier engineers may exist: read them, keep what is sound, and finish.
