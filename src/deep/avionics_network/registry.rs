@@ -20,14 +20,15 @@
 //! sequential within its own ATA chapter (42 or 21) in the order this
 //! function assigns them; nothing here reuses an `(ata, n)` pair.
 //!
-//! Vars this module's failures/alerts reference are not published yet —
-//! `topology`/`graph`/`message`/etc. are still self-contained per the
-//! brief's hard rule 2 ("nothing else in the crate references your code
-//! yet"). Once the lead wires this module into the simulation, it needs to
-//! publish, per network side: `AFDX_NETWORK_<A|B>_AVAILABLE` (1 if any end
-//! system can still reach any other on that side, else 0), and per module:
-//! `AVNCS_MODULE_<NAME>_AVAILABLE` (`ModuleFaults::is_available`). See
-//! `PROGRESS.md`.
+//! Vars this module's failures/alerts reference are published every tick by
+//! `live.rs`'s `LiveAvionicsNetwork`, which owns `topology`/`graph`/`message`
+//! and drives every registered failure through them: per network side,
+//! `AFDX_NETWORK_<A|B>_AVAILABLE` (1 if any end system can still reach any
+//! other on that side, else 0), and per module, `AVNCS_MODULE_<NAME>_
+//! AVAILABLE` (`ModuleFaults::is_available`). This note used to record that
+//! wiring as outstanding; `live.rs`'s own
+//! `every_variable_an_ecam_trigger_names_is_published` test now checks it
+//! directly.
 
 use super::topology::{a380_reference_topology, CpiomType, ModuleKind, NetworkSide, NetworkTopology};
 use crate::deep::api::*;

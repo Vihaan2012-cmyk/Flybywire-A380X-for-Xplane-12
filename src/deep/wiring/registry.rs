@@ -10,12 +10,13 @@
 //! input as a plain argument (an ambient-temperature closure, a magnitude,
 //! a duty cycle) and publish nothing themselves. The `WIRING_ZONE_<ZONE>_
 //! OVERHEAT_SEVERITY` and `WIRING_SEGMENT_<ID>_FAULT_SEVERITY` variable
-//! names an `EcamAlert::trigger` below reads are **not yet published** --
-//! whoever integrates `routing::build_generic_a380_network()` into the
-//! running simulation (feeding real per-segment fault severities in, and
-//! `faults::zone_overheat_effects`/`arc::arc_heat_w`'s outputs to the
-//! thermal-zone and electrical-network models) needs to publish them each
-//! tick. Recorded in `PROGRESS.md`.
+//! names an `EcamAlert::trigger` below reads are now published every tick by
+//! `live.rs`'s `WiringLive`, which owns `routing::build_generic_a380_network()`
+//! and drives every registered failure into it (`live.rs`'s own
+//! `it_plugs_into_deep_and_publishes_the_variable_every_one_of_its_alerts_
+//! triggers_on` test checks this directly). This note used to record that
+//! wiring as outstanding; it has since been done, so this only stays as a
+//! pointer to where that integration now lives.
 
 use super::routing::build_generic_a380_network;
 use super::zones::Zone;
