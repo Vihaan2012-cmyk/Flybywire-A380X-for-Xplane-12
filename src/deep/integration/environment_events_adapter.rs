@@ -179,7 +179,7 @@ mod tests {
     use super::*;
     use crate::deep::environment::runway_contamination::friction;
     use crate::deep::environment::wind_shear::f_factor;
-    use crate::xp::{WeatherCloudLayer, WeatherSample};
+    use crate::deep::weather::{WeatherCloudLayer, WeatherSample};
 
     // `LightningModel::step`/`HailModel::step`/`TurbulenceModel::step`/
     // `BirdStrikeModel::step` all take `&mut environment::rng::Rng`, but

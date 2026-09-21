@@ -11,9 +11,10 @@
 //!   confirmed by that article's own worked example), positive `L` right
 //!   roll, positive `M` nose up, positive `N` clockwise from above (yaw
 //!   right). **X-Plane resets every one of these to zero every frame**;
-//!   a plugin must read-add-write every tick, which is why every function
-//!   below returns a **delta**, applied through [`add_plug_force`] rather
-//!   than ever calling `xplm.set_f` with an absolute value. This is a
+//!   a live implementation must read-add-write every tick, which is why
+//!   every function below hands off a **delta**, applied through
+//!   [`ForceSink::add_plug_force`] rather than ever writing an absolute
+//!   value. This is a
 //!   different, more physically direct mechanism than
 //!   `extra_backend_fbw.rs::apply_reverser_thrust`'s velocity/yaw-rate
 //!   nudge (that file predates this documentation search and does not use
@@ -42,45 +43,77 @@
 //!   though the *visual* is imperfect.
 
 use crate::deep::gear_structure::LegOutput;
-use crate::xp::{DataRef, Xplm};
 
 // ---------------------------------------------------------------------------
-// The plug-force mechanism: read-add-write every tick (X-Plane zeroes these
-// every frame -- module doc).
+// The host seam: applying a plugin force/moment and overriding a gear
+// leg's deploy ratio (module doc for what each corresponds to on
+// X-Plane). `deep` only describes *what* to apply; each host supplies its
+// own [`ForceSink`] -- `crate::xp`'s live implementation forwards to the
+// same six `*_plug_acf` datarefs and the `deploy_ratio` element this file
+// always used, read-add-write, exactly as before this trait existed.
 // ---------------------------------------------------------------------------
 
-/// Adds `delta` to a plugin-force dataref (one of the six named in the
-/// module doc) and writes the result back, the mandatory pattern for a
-/// dataref X-Plane resets to zero every frame. Safe to call from more than
-/// one consequence source per tick on the same `dataref` (each call reads
-/// what the previous one just wrote), and a no-op if `dataref` is `None`
-/// (older SDK target, or the offline test harness).
-pub fn add_plug_force(xplm: &Xplm, dataref: Option<DataRef>, delta: f64) {
-    if let Some(d) = dataref {
-        xplm.set_f(d, (xplm.get_f(d) as f64 + delta) as f32);
+/// Which of the six plugin-force/moment axes `sim/flightmodel/forces/
+/// {fside,fnrml,faxil}_plug_acf`/`{L,M,N}_plug_acf` exposes (module doc for
+/// signs and axes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlugForceAxis {
+    Fside,
+    Fnrml,
+    Faxil,
+    Roll,
+    Pitch,
+    Yaw,
+}
+
+/// What this file needs from a host to make its outputs (ice/dent drag, a
+/// collapsed gear leg) physically real.
+pub trait ForceSink {
+    /// Adds `delta` (force, N, on `Fside`/`Fnrml`/`Faxil`; moment, N*m, on
+    /// `Roll`/`Pitch`/`Yaw`) to one plugin-force axis this tick. X-Plane
+    /// resets these to zero every frame, so a live implementation must
+    /// read-add-write (module doc) -- safe to call more than once per
+    /// tick on the same axis, each call sees what the previous one just
+    /// wrote. A no-op if this host has no handle for the axis (an older
+    /// SDK target, or an offline implementation choosing not to record
+    /// it).
+    fn add_plug_force(&self, axis: PlugForceAxis, delta: f64);
+
+    /// Sets one gear's deploy-ratio element (`index`, the aircraft's own
+    /// gear ordering) to `ratio`, 0.0..1.0.
+    fn set_gear_deploy_ratio(&self, index: usize, ratio: f32);
+}
+
+/// Offline/test implementation: records every call instead of touching a
+/// real host, so a test can assert on exactly what was applied. Never
+/// wired up in the live plugin path -- that is `crate::xp`'s
+/// `impl ForceSink for XpForceSink`.
+#[derive(Debug, Default)]
+pub struct RecordingForceSink {
+    pub plug_forces: std::cell::RefCell<Vec<(PlugForceAxis, f64)>>,
+    pub gear_deploy_ratios: std::cell::RefCell<Vec<(usize, f32)>>,
+}
+
+impl RecordingForceSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// This axis's applied deltas, summed -- what a live read-add-write
+    /// implementation would have left the dataref holding after one tick
+    /// starting from zero.
+    pub fn total_on(&self, axis: PlugForceAxis) -> f64 {
+        self.plug_forces.borrow().iter().filter(|(a, _)| *a == axis).map(|(_, d)| d).sum()
     }
 }
 
-/// Handles to all six plugin-force datarefs, looked up once.
-pub struct PlugForceRefs {
-    pub fside: Option<DataRef>,
-    pub fnrml: Option<DataRef>,
-    pub faxil: Option<DataRef>,
-    pub roll: Option<DataRef>,
-    pub pitch: Option<DataRef>,
-    pub yaw: Option<DataRef>,
-}
+impl ForceSink for RecordingForceSink {
+    fn add_plug_force(&self, axis: PlugForceAxis, delta: f64) {
+        self.plug_forces.borrow_mut().push((axis, delta));
+    }
 
-impl PlugForceRefs {
-    pub fn new(xplm: &Xplm) -> Self {
-        Self {
-            fside: xplm.find("sim/flightmodel/forces/fside_plug_acf"),
-            fnrml: xplm.find("sim/flightmodel/forces/fnrml_plug_acf"),
-            faxil: xplm.find("sim/flightmodel/forces/faxil_plug_acf"),
-            roll: xplm.find("sim/flightmodel/forces/L_plug_acf"),
-            pitch: xplm.find("sim/flightmodel/forces/M_plug_acf"),
-            yaw: xplm.find("sim/flightmodel/forces/N_plug_acf"),
-        }
+    fn set_gear_deploy_ratio(&self, index: usize, ratio: f32) {
+        self.gear_deploy_ratios.borrow_mut().push((index, ratio));
     }
 }
 
@@ -170,11 +203,9 @@ pub fn collapsed_leg_drag_force_n(leg: &LegOutput, static_load_share_n: f64, on_
 /// `.acf`'s own order -- left wing/right wing/left body/right body for the
 /// converted A380X, matching `flight_controls.rs`'s own `WING1..4`
 /// left/right convention).
-pub fn gear_deploy_override(xplm: &Xplm, deploy_ratio: Option<DataRef>, index: usize, leg: &LegOutput) {
+pub fn gear_deploy_override(sink: &dyn ForceSink, index: usize, leg: &LegOutput) {
     if leg.collapsed {
-        if let Some(d) = deploy_ratio {
-            xplm.set_vf_at(d, index, 0.0);
-        }
+        sink.set_gear_deploy_ratio(index, 0.0);
     }
 }
 
@@ -236,10 +267,27 @@ mod tests {
     }
 
     #[test]
-    fn add_plug_force_is_a_no_op_without_a_live_dataref() {
-        // Exercises the `None` branch (offline/test harness, or an SDK
-        // target predating X-Plane 10.30) without needing a live `Xplm`.
-        let xplm = Xplm::dummy();
-        add_plug_force(&xplm, None, 1234.0); // must not panic
+    fn add_plug_force_records_a_delta_per_axis() {
+        let sink = RecordingForceSink::new();
+        sink.add_plug_force(PlugForceAxis::Faxil, 1234.0);
+        sink.add_plug_force(PlugForceAxis::Faxil, 66.0);
+        sink.add_plug_force(PlugForceAxis::Yaw, -50.0);
+        assert_eq!(sink.total_on(PlugForceAxis::Faxil), 1300.0);
+        assert_eq!(sink.total_on(PlugForceAxis::Yaw), -50.0);
+        assert_eq!(sink.total_on(PlugForceAxis::Roll), 0.0, "an axis never touched sums to zero");
+    }
+
+    #[test]
+    fn gear_deploy_override_is_a_no_op_on_an_intact_leg() {
+        let sink = RecordingForceSink::new();
+        gear_deploy_override(&sink, 2, &leg(false));
+        assert!(sink.gear_deploy_ratios.borrow().is_empty());
+    }
+
+    #[test]
+    fn gear_deploy_override_retracts_a_collapsed_legs_deploy_ratio() {
+        let sink = RecordingForceSink::new();
+        gear_deploy_override(&sink, 2, &leg(true));
+        assert_eq!(sink.gear_deploy_ratios.borrow().as_slice(), &[(2, 0.0)]);
     }
 }

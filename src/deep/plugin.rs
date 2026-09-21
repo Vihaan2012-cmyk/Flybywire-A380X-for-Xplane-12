@@ -144,6 +144,7 @@ use std::collections::{BTreeSet, HashMap};
 use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
 use crate::deep::integration::weather_truth::{EnvironmentTruth, WeatherTruthReader};
+use crate::deep::weather::WeatherSource;
 use crate::deep::live::{CommandedSurfaces, Deep, Faults, Truth, DOOR_NAMES};
 use crate::fadec::EngineState;
 use crate::physics::tyre;
@@ -572,7 +573,7 @@ impl DeepLayer {
         self.since_weather_s = (self.since_weather_s + dt_s).min(f64::MAX);
         if self.since_weather_s >= WEATHER_INTERVAL_S {
             self.since_weather_s = 0.0;
-            self.environment = self.weather.read(vars, xplm);
+            self.environment = self.weather.read(vars, xplm, xplm.map(|x| x as &dyn WeatherSource));
             // A missing barometer dataref reads 0.0, which is a vacuum,
             // not a measurement: several areas divide by ambient pressure,
             // so fall back to what `Truth::default()` documents instead.

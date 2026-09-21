@@ -856,7 +856,7 @@ mod tests {
     use crate::deep::fuel::live::test_support::collect_vars;
     use crate::deep::integration::weather_truth::EnvironmentTruth;
     use crate::deep::live::Area as _;
-    use crate::xp::{WeatherCloudLayer, WeatherSample};
+    use crate::deep::weather::{WeatherCloudLayer, WeatherSample};
     use std::collections::BTreeMap;
 
     fn published(area: &dyn crate::deep::live::Area) -> BTreeMap<String, f64> {

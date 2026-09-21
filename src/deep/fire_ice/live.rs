@@ -1128,11 +1128,11 @@ mod tests {
         // No failure: the environmental baseline the anti-ice systems
         // exist to prevent, driven from the real cloud sample.
         let mut truth = icing_truth();
-        truth.environment.weather = Some(crate::xp::WeatherSample {
+        truth.environment.weather = Some(crate::deep::weather::WeatherSample {
             clouds: [
-                crate::xp::WeatherCloudLayer { cloud_type: 1.0, coverage: 1.0, alt_base_m: 1000.0, alt_top_m: 4000.0 },
-                crate::xp::WeatherCloudLayer::default(),
-                crate::xp::WeatherCloudLayer::default(),
+                crate::deep::weather::WeatherCloudLayer { cloud_type: 1.0, coverage: 1.0, alt_base_m: 1000.0, alt_top_m: 4000.0 },
+                crate::deep::weather::WeatherCloudLayer::default(),
+                crate::deep::weather::WeatherCloudLayer::default(),
             ],
             ..Default::default()
         });

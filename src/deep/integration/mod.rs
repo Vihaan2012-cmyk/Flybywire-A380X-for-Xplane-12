@@ -37,10 +37,20 @@
 //!
 //! Per hard rule 2, nothing outside this directory references this code
 //! yet; unlike most areas, Integration's whole purpose is to depend on
-//! already-existing crate internals (`crate::xp`, `crate::flight_controls`'s
-//! public conversions, `systems::simulation`, other deep areas' public
-//! input/output types) rather than staying self-contained -- that is what
-//! "integration" means here, and the task explicitly calls for it.
+//! already-existing crate internals -- `crate::flight_controls`'s public
+//! conversions, `systems::simulation`, other deep areas' public
+//! input/output types -- rather than staying self-contained, that is what
+//! "integration" means here. What changed once a second host (MSFS)
+//! entered the picture: it no longer depends on a specific simulator.
+//! Where it once called `crate::xp` directly, it now depends on
+//! host-facing traits `deep` itself owns -- [`crate::deep::weather::WeatherSource`],
+//! [`xp_consequences::ForceSink`] -- each with one implementation per host
+//! (`crate::xp`'s is X-Plane's). The remaining exception is
+//! [`weather_truth`] itself, which still reads a handful of raw
+//! atmosphere datarefs (leading-edge temperature, ambient pressure,
+//! aircraft precipitation) directly -- the same kind of general
+//! `Truth`-building `deep::plugin` does, out of scope for the weather
+//! trait and not yet drawn into its own seam.
 
 pub mod weather_truth;
 

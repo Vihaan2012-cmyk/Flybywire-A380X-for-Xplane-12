@@ -7,6 +7,9 @@
 
 use std::ffi::{c_char, c_int, c_uint, c_void, CString};
 
+use crate::deep::integration::xp_consequences::{ForceSink, PlugForceAxis};
+use crate::deep::weather::{WeatherCloudLayer, WeatherSample, WeatherSource};
+
 /// An X-Plane dataref handle.
 pub type DataRef = *mut c_void;
 
@@ -1187,33 +1190,11 @@ struct WeatherInfoRaw {
 
 type GetWeatherAtLocationFn = unsafe extern "C" fn(f64, f64, f64, *mut WeatherInfoRaw) -> c_int;
 
-/// One cloud layer: type (0 cirrus, 1 stratus, 2 cumulus, 3 cumulonimbus),
-/// coverage (0..1) and its base/top, metres MSL.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct WeatherCloudLayer {
-    pub cloud_type: f32,
-    pub coverage: f32,
-    pub alt_base_m: f32,
-    pub alt_top_m: f32,
-}
-
-/// What `src/wxr` reads from `XPLMWeatherInfo_t`: the fields with a real
-/// bearing on a radar return (precipitation and turbulence), plus the
-/// three cloud layers used to tell convective cells from stratiform rain.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct WeatherSample {
-    /// Precipitation rate at the sampled altitude, 0..1 (unitless ratio,
-    /// as `sim/weather/region/rain_percent` is).
-    pub precip_rate_alt: f32,
-    /// Precipitation rate at 0 altitude, 0..1.
-    pub precip_rate: f32,
-    /// Turbulence ratio at the sampled altitude, 0..1.
-    pub turbulence_alt: f32,
-    pub clouds: [WeatherCloudLayer; WXR_CLOUD_LAYERS],
-    /// Whether X-Plane found a detailed (e.g. METAR-backed) report here,
-    /// as opposed to the best interpolation it could give.
-    pub detailed: bool,
-}
+// `WeatherSample`/`WeatherCloudLayer` are `deep::weather`'s own types now
+// (imported above) -- `deep` owns the shape, this file only fills it from
+// `XPLMWeatherInfo_t`. `WXR_CLOUD_LAYERS` (3) matches
+// `deep::weather::CLOUD_LAYERS` exactly; both come from the same real SDK
+// struct.
 
 /// `XPLMGetWeatherAtLocation`: X-Plane's weather at a point (main thread
 /// only; see the module comment above). `None` if this X-Plane has no
@@ -1242,6 +1223,84 @@ pub fn weather_at_location(lat: f64, lon: f64, alt_m: f64) -> Option<WeatherSamp
 /// `XPLM400`, X-Plane 12; absent in a build against an older SDK target).
 pub fn has_weather_api() -> bool {
     Xplm::xplm_symbol("XPLMGetWeatherAtLocation").is_some()
+}
+
+/// `deep::weather::WeatherSource`, live: forwards to [`weather_at_location`]/
+/// [`has_weather_api`] above, unchanged. `Xplm`'s own methods don't need
+/// `self` for these two (both look up their symbol independently), so this
+/// impl exists purely so `deep::integration::weather_truth` can hold an
+/// `Option<&dyn WeatherSource>` the same way it already holds
+/// `Option<&Xplm>` for everything else it reads.
+impl WeatherSource for Xplm {
+    fn has_weather_api(&self) -> bool {
+        has_weather_api()
+    }
+
+    fn weather_at_location(&self, lat: f64, lon: f64, alt_m: f64) -> Option<WeatherSample> {
+        weather_at_location(lat, lon, alt_m)
+    }
+}
+
+// ----------------------------------------------------------------------
+// [deep/integration/xp_consequences] The plugin-force/gear-deploy-ratio
+// host seam (`ForceSink`): read-add-write on the six `*_plug_acf`
+// datarefs (X-Plane zeroes them every frame -- see that module's own
+// doc), plus `sim/flightmodel2/gear/deploy_ratio`. Handles resolved once
+// in `XpForceSink::new`, like every other seam in this file.
+// ----------------------------------------------------------------------
+
+/// The live [`ForceSink`]: the same six plug-force datarefs and the same
+/// `deploy_ratio` element `deep::integration::xp_consequences` always
+/// wrote, just resolved and cached here instead of inline in that file.
+pub struct XpForceSink<'a> {
+    xplm: &'a Xplm,
+    fside: Option<DataRef>,
+    fnrml: Option<DataRef>,
+    faxil: Option<DataRef>,
+    roll: Option<DataRef>,
+    pitch: Option<DataRef>,
+    yaw: Option<DataRef>,
+    gear_deploy_ratio: Option<DataRef>,
+}
+
+impl<'a> XpForceSink<'a> {
+    pub fn new(xplm: &'a Xplm) -> Self {
+        Self {
+            xplm,
+            fside: xplm.find("sim/flightmodel/forces/fside_plug_acf"),
+            fnrml: xplm.find("sim/flightmodel/forces/fnrml_plug_acf"),
+            faxil: xplm.find("sim/flightmodel/forces/faxil_plug_acf"),
+            roll: xplm.find("sim/flightmodel/forces/L_plug_acf"),
+            pitch: xplm.find("sim/flightmodel/forces/M_plug_acf"),
+            yaw: xplm.find("sim/flightmodel/forces/N_plug_acf"),
+            gear_deploy_ratio: xplm.find("sim/flightmodel2/gear/deploy_ratio"),
+        }
+    }
+
+    fn axis_ref(&self, axis: PlugForceAxis) -> Option<DataRef> {
+        match axis {
+            PlugForceAxis::Fside => self.fside,
+            PlugForceAxis::Fnrml => self.fnrml,
+            PlugForceAxis::Faxil => self.faxil,
+            PlugForceAxis::Roll => self.roll,
+            PlugForceAxis::Pitch => self.pitch,
+            PlugForceAxis::Yaw => self.yaw,
+        }
+    }
+}
+
+impl ForceSink for XpForceSink<'_> {
+    fn add_plug_force(&self, axis: PlugForceAxis, delta: f64) {
+        if let Some(d) = self.axis_ref(axis) {
+            self.xplm.set_f(d, (self.xplm.get_f(d) as f64 + delta) as f32);
+        }
+    }
+
+    fn set_gear_deploy_ratio(&self, index: usize, ratio: f32) {
+        if let Some(d) = self.gear_deploy_ratio {
+            self.xplm.set_vf_at(d, index, ratio);
+        }
+    }
 }
 
 // ----------------------------------------------------------------------

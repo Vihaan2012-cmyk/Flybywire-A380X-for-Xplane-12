@@ -50,7 +50,7 @@ mod tests {
     use crate::deep::integration::weather_truth::mach_from_tas_sat;
     use crate::deep::sensors::pitot::{PitotFaults, PitotProbe};
     use crate::deep::sensors::tat_probe::{TatProbe, TatProbeFaults};
-    use crate::xp::{WeatherCloudLayer, WeatherSample};
+    use crate::deep::weather::{WeatherCloudLayer, WeatherSample};
 
     fn icing_truth() -> EnvironmentTruth {
         let mut clouds = [WeatherCloudLayer::default(); 3];

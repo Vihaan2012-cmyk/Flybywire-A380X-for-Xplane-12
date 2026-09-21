@@ -30,7 +30,7 @@ pub fn register(r: &mut Registry) {
         name: "Real X-Plane weather truth feed (XPLMGetWeatherAtLocation + sim/weather/aircraft/*)".into(),
         params: vec![ParamDef {
             name: "weather_api_available".into(),
-            meaning: "1.0 X-Plane's weather API answered this tick (crate::xp::has_weather_api()) .. 0.0 unavailable (pre-12 SDK target, or outside its regional data) -- every icing/lightning/hail/turbulence input derived from it falls back to a documented dry/calm default while this is 0, never a fabricated reading".into(),
+            meaning: "1.0 the host's weather source answered this tick (deep::weather::WeatherSource::has_weather_api()) .. 0.0 unavailable (pre-12 SDK target on X-Plane, or outside its regional data) -- every icing/lightning/hail/turbulence input derived from it falls back to a documented dry/calm default while this is 0, never a fabricated reading".into(),
             healthy: 1.0,
         }],
         failures: vec![],

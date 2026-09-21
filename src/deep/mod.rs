@@ -25,6 +25,10 @@ pub mod plugin;
 pub mod pneumatic_ducts;
 pub mod sensors;
 pub mod thermal_zones;
+/// The weather capability `deep` needs from a host (X-Plane, MSFS),
+/// behind a trait -- see the module doc for why this lives here rather
+/// than borrowing `crate::xp`'s types.
+pub mod weather;
 pub mod wiring;
 
 /// Every area's failures, components and ECAM alerts in one registry.

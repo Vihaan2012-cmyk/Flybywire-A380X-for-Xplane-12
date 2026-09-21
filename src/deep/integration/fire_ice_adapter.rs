@@ -31,7 +31,7 @@ mod tests {
     use super::*;
     use crate::deep::fire_ice::icing::{IcingSurface, WING_LEADING_EDGE};
     use crate::deep::integration::weather_truth::CloudKind;
-    use crate::xp::{WeatherCloudLayer, WeatherSample};
+    use crate::deep::weather::{WeatherCloudLayer, WeatherSample};
 
     fn truth_in_icing_stratus() -> EnvironmentTruth {
         let mut clouds = [WeatherCloudLayer::default(); 3];

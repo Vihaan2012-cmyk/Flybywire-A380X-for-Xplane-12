@@ -37,24 +37,29 @@
 //!   (`elevation` is X-Plane's fundamental MSL-metres position dataref,
 //!   used here only to feed `XPLMGetWeatherAtLocation`'s altitude
 //!   argument, not published further).
-//! - `weather`: `crate::xp::weather_at_location` (`XPLMGetWeatherAtLocation`,
+//! - `weather`: [`deep::weather::WeatherSource::weather_at_location`]
+//!   (X-Plane's implementation forwards to `XPLMGetWeatherAtLocation`,
 //!   already wired for `src/wxr`), sampled at the aircraft's own position —
 //!   gives precipitation rate, turbulence ratio and up to three cloud
-//!   layers' type/coverage/base/top, all real X-Plane outputs. `None` when
-//!   X-Plane has no weather API (`crate::xp::has_weather_api`) or no
-//!   regional data at this point (its own documented "not world-wide"
-//!   limitation) — every consumer below must treat that as "unknown", not
-//!   "clear", per the no-fake-values rule (`fallback_dry` is explicit about
-//!   this).
+//!   layers' type/coverage/base/top, all real X-Plane outputs on that host.
+//!   `None` when the host has no weather API at all
+//!   (`WeatherSource::has_weather_api`) or no regional data at this point
+//!   (X-Plane's own documented "not world-wide" limitation) — every
+//!   consumer below must treat that as "unknown", not "clear", per the
+//!   no-fake-values rule (`fallback_dry` is explicit about this).
 //!
-//! Everything here is read through `Option<DataRef>`/`Option<&Xplm>`
-//! exactly the way `physics/xp_effects.rs::XpEffects` already does, so it
-//! degrades to a documented default rather than panicking when a dataref
-//! is missing (an older SDK target, or the offline test harness).
+//! `weather` is read through the host-neutral [`deep::weather::WeatherSource`]
+//! trait (`crate::xp` supplies the one live implementation, over
+//! `XPLMGetWeatherAtLocation`); everything else here is still read through
+//! `Option<DataRef>`/`Option<&Xplm>` directly, exactly the way
+//! `physics/xp_effects.rs::XpEffects` already does, so it degrades to a
+//! documented default rather than panicking when a dataref is missing (an
+//! older SDK target, or the offline test harness).
 
 use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
-use crate::xp::{DataRef, Xplm, WeatherSample};
+use crate::deep::weather::{WeatherSample, WeatherSource};
+use crate::xp::{DataRef, Xplm};
 
 /// kt -> m/s (NIST international nautical mile / 3600 s).
 pub const KT_TO_MS: f64 = 0.514_444;
@@ -99,9 +104,9 @@ pub fn mach_from_tas_sat(tas_ms: f64, sat_c: f64) -> f64 {
     (tas_ms.max(0.0) / speed_of_sound_ms).max(0.0)
 }
 
-/// One X-Plane weather cloud layer's type, `crate::xp::WeatherCloudLayer`'s
-/// own documented enum (`XPLMWeatherInfoClouds_t`): 0 cirrus, 1 stratus,
-/// 2 cumulus, 3 cumulonimbus.
+/// One weather cloud layer's type, `deep::weather::WeatherCloudLayer`'s
+/// own documented enum (X-Plane's `XPLMWeatherInfoClouds_t`): 0 cirrus,
+/// 1 stratus, 2 cumulus, 3 cumulonimbus.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CloudKind {
     Cirrus,
@@ -254,14 +259,19 @@ impl WeatherTruthReader {
         }
     }
 
-    pub fn read<V: SimulatorReaderWriter>(&self, vars: &mut V, xplm: Option<&Xplm>) -> EnvironmentTruth {
+    /// `weather_source` is the same "are we live" presence this reader
+    /// already keys off for everything else (`xplm`) -- pass
+    /// `xplm.map(|x| x as &dyn WeatherSource)` to keep the identical
+    /// gating X-Plane always had (`Some` exactly when `xplm` is `Some`);
+    /// a different host passes its own [`WeatherSource`] implementation.
+    pub fn read<V: SimulatorReaderWriter>(&self, vars: &mut V, xplm: Option<&Xplm>, weather_source: Option<&dyn WeatherSource>) -> EnvironmentTruth {
         let f = |d: Option<DataRef>| d.map_or(0.0, |d| xplm.map_or(0.0, |x| x.get_f(d) as f64));
         let sat_c = vars.read(&self.ids.sat);
         let tas_ms = vars.read(&self.ids.tas) * KT_TO_MS;
         let latitude = vars.read(&self.ids.latitude);
         let longitude = f(self.refs.longitude);
         let elevation_m = f(self.refs.elevation_m);
-        let weather = xplm.and_then(|_| crate::xp::weather_at_location(latitude, longitude, elevation_m));
+        let weather = weather_source.and_then(|w| w.weather_at_location(latitude, longitude, elevation_m));
         EnvironmentTruth {
             sat_c,
             leading_edge_c: f(self.refs.leading_edge_c),
@@ -276,7 +286,7 @@ impl WeatherTruthReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xp::WeatherCloudLayer;
+    use crate::deep::weather::WeatherCloudLayer;
 
     fn sample(cloud_type: f32, coverage: f32, turbulence: f32, precip: f32) -> WeatherSample {
         let mut clouds = [WeatherCloudLayer::default(); 3];
