@@ -493,7 +493,7 @@ window.__deepStudyStart = function() {
     const d = el("div", { class: "diagram" });
     d.style.width = px(topo.designW);
     d.style.height = px(topo.designH);
-    d.style.setProperty("--s", sc);
+    d.style.fontSize = px(11.5);
     const svg = svgEl("svg", { viewBox: `0 0 ${topo.designW} ${topo.designH}`, preserveAspectRatio: "none", class: "diagram-links" });
     for (const link of topo.links) {
       const live = evalGate(link.gate, vars);
@@ -548,7 +548,7 @@ window.__deepStudyStart = function() {
     const d = el("div", { class: "diagram" });
     d.style.width = px(W);
     d.style.height = px(H);
-    d.style.setProperty("--s", sc);
+    d.style.fontSize = px(11.5);
     const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", class: "diagram-links cutaway-shapes" });
     svg.append(svgEl("line", { x1: 0, y1: 196, x2: W, y2: 196, class: "band" }), svgEl("line", { x1: 0, y1: 520, x2: W, y2: 520, class: "band" }));
     const pts = (list) => list.map((p) => p.join(",")).join(" ");

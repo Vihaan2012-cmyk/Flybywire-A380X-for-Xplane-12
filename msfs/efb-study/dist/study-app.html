@@ -33,7 +33,7 @@
       repeating-linear-gradient(115deg, rgba(255,255,255,0.018) 0 2px, transparent 2px 60px),
       var(--bg);
     color: var(--text);
-    font: 15px/1.35 "Segoe UI", system-ui, sans-serif;
+    font: 15px/1.35 "Segoe UI", sans-serif;
     display: flex; flex-direction: column;
   }
   main {
@@ -60,7 +60,7 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
   .apply { display: flex; justify-content: center; margin-top: 18px; }
   button {
-    font: 600 14px "Segoe UI", system-ui, sans-serif; color: var(--text); background: transparent;
+    font: 600 14px "Segoe UI", sans-serif; color: var(--text); background: transparent;
     border: 2px solid var(--line); padding: 12px 20px; min-width: min(250px, 100%); cursor: pointer; text-transform: uppercase;
   }
   button:hover { background: rgba(255,255,255,0.06); }
@@ -94,7 +94,7 @@
   .masked { -webkit-text-security: disc; }
   #tab-status .columns, #tab-support .columns { grid-template-columns: minmax(0, 900px); justify-content: center; }
   .tabs { display: flex; flex-wrap: nowrap; flex-shrink: 0; gap: 4px; padding: 14px 24px 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
-  .tab-btn { font: 600 13px "Segoe UI", system-ui, sans-serif; color: var(--text-dim); background: transparent; border: 2px solid var(--line-dim); border-bottom: 0; padding: 10px 12px; min-width: 0; width: auto; flex: 1 1 auto; text-align: center; white-space: nowrap; cursor: pointer; text-transform: uppercase; }
+  .tab-btn { font: 600 13px "Segoe UI", sans-serif; color: var(--text-dim); background: transparent; border: 2px solid var(--line-dim); border-bottom: 0; padding: 10px 12px; min-width: 0; width: auto; flex: 1 1 auto; text-align: center; white-space: nowrap; cursor: pointer; text-transform: uppercase; }
   .tab-btn.active { color: var(--text); border-color: var(--line); background: rgba(255,255,255,0.04); }
   .tab-panel { display: none; flex: 1; min-height: 0; }
   .tab-panel.active { display: flex; flex-direction: column; }
@@ -131,7 +131,7 @@
   .page-main { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 56px 30px; }
   .section-title { color: var(--heading); text-transform: uppercase; font-size: 13px; letter-spacing: 0.6px; margin: 18px 0 8px; }
   .diagram-wrap { overflow-x: auto; padding: 4px 0 12px; }
-  .diagram { position: relative; margin: 0 auto; font-size: calc(11.5px * var(--s)); }
+  .diagram { position: relative; margin: 0 auto; font-size: 11.5px; }
   .diagram-links { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; overflow: visible; }
   .diagram-links .link { fill: none; stroke: var(--line-dim); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
   .diagram-links .link.wire.live { stroke: var(--ok); stroke-width: 3; }
@@ -159,7 +159,7 @@
   .dnode .dlabel { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
   .dnode .dval { font-variant-numeric: tabular-nums; color: var(--text); }
   .dnode .dval.nodata { color: var(--line-dim); }
-  .dnode .dot { width: calc(7px * var(--s)); height: calc(7px * var(--s)); margin-right: 5px; }
+  .dnode .dot { width: 0.61em; height: 0.61em; margin-right: 0.43em; }
   .dnode .lamp-off { color: var(--line-dim); }
   .fail-row { display: grid; grid-template-columns: 70px 1fr auto; align-items: center; gap: 12px; padding: 7px 4px; border-bottom: 1px solid var(--line-dim); }
   .fail-row .ata { color: var(--text-dim); font-variant-numeric: tabular-nums; }
@@ -524,49 +524,8 @@
 
 <style id="efb-palette">
    
-  :root {
-    --bg: #0d1218;
-    --panel: #0d1218;
-    --line: #5c6b7a;
-    --line-dim: #2f3a45;
-    --text: #eef4f9;
-    --text-dim: #93a3b2;
-    --heading: #93a3b2;
-    --field: #06090d;
-    --button: #1d2732;
-    --button-line: #5c6b7a;
-    --accent: #00c2cc;
-    --ok: #3ccf6e;
-    --warn: #e8a33d;
-    --bad: #e05c5c;
-  }
   html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-   
   footer { display: none; }
-
-   
-   
-  #ds-app {
-    font-family: "Segoe UI", Tahoma, Verdana, Arial, sans-serif;
-    font-size: 15px;
-    line-height: 1.35;
-  }
-  .study-nav button, .study-nav button .count {
-    font-family: "Segoe UI", Tahoma, Verdana, Arial, sans-serif;
-    font-size: 12px;
-  }
-
-   
-  .study-nav button {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-  }
-  .study-nav button .count { float: none; margin-left: 8px; flex: 0 0 auto; }
-
-   
-  .fail-row { grid-template-columns: 92px minmax(0, 1fr) auto; }
-  .fail-row .ata { white-space: nowrap; }
 
    
   .tabs { padding-right: 108px; }

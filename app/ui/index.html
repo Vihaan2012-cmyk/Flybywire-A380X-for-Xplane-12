@@ -152,7 +152,7 @@
   .page-main { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 56px 30px; }
   .section-title { color: var(--heading); text-transform: uppercase; font-size: 13px; letter-spacing: 0.6px; margin: 18px 0 8px; }
   .diagram-wrap { overflow-x: auto; padding: 4px 0 12px; }
-  .diagram { position: relative; margin: 0 auto; font-size: calc(11.5px * var(--s)); }
+  .diagram { position: relative; margin: 0 auto; font-size: 11.5px; }
   .diagram-links { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
   .diagram-links .link { fill: none; stroke: var(--line-dim); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
   .diagram-links .link.wire.live { stroke: var(--ok); stroke-width: 3; }
@@ -180,7 +180,7 @@
   .dnode .dlabel { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
   .dnode .dval { font-variant-numeric: tabular-nums; color: var(--text); }
   .dnode .dval.nodata { color: var(--line-dim); }
-  .dnode .dot { width: calc(7px * var(--s)); height: calc(7px * var(--s)); margin-right: 5px; }
+  .dnode .dot { width: 0.61em; height: 0.61em; margin-right: 0.43em; }
   .dnode .lamp-off { color: var(--line-dim); }
   .fail-row { display: grid; grid-template-columns: 70px 1fr auto; align-items: center; gap: 12px; padding: 7px 4px; border-bottom: 1px solid var(--line-dim); }
   .fail-row .ata { color: var(--text-dim); font-variant-numeric: tabular-nums; }
@@ -929,7 +929,14 @@ function renderTopology(container, topo, vars) {
   const d = el('div', { class: 'diagram' });
   d.style.width = px(topo.designW);
   d.style.height = px(topo.designH);
-  d.style.setProperty('--s', sc);
+  // The type is scaled here, beside the geometry, rather than in the
+  // stylesheet. It used to be font-size: calc(11.5px * var(--s)), and the
+  // EFB's browser has no calc() -- so the declaration was dropped, the
+  // text fell back to the page's own 15px, and it was half again too
+  // large for boxes the line above had sized correctly. Nothing about
+  // that is specific to the EFB: any engine without calc() got the same,
+  // silently. The status dot follows in em, for the same reason.
+  d.style.fontSize = px(11.5);
   const svg = svgEl('svg', { viewBox: `0 0 ${topo.designW} ${topo.designH}`, preserveAspectRatio: 'none', class: 'diagram-links' });
   for (const link of topo.links) {
     const live = evalGate(link.gate, vars);
@@ -987,7 +994,14 @@ function renderCutaway(container, page, vars) {
   const d = el('div', { class: 'diagram' });
   d.style.width = px(W);
   d.style.height = px(H);
-  d.style.setProperty('--s', sc);
+  // The type is scaled here, beside the geometry, rather than in the
+  // stylesheet. It used to be font-size: calc(11.5px * var(--s)), and the
+  // EFB's browser has no calc() -- so the declaration was dropped, the
+  // text fell back to the page's own 15px, and it was half again too
+  // large for boxes the line above had sized correctly. Nothing about
+  // that is specific to the EFB: any engine without calc() got the same,
+  // silently. The status dot follows in em, for the same reason.
+  d.style.fontSize = px(11.5);
   const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', class: 'diagram-links cutaway-shapes' });
   svg.append(svgEl('line', { x1: 0, y1: 196, x2: W, y2: 196, class: 'band' }), svgEl('line', { x1: 0, y1: 520, x2: W, y2: 520, class: 'band' }));
   const pts = (list) => list.map((p) => p.join(',')).join(' ');

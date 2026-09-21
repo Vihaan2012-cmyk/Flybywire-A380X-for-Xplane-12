@@ -49,78 +49,25 @@ HIDDEN_TABS = ('flightplan', 'ground', 'settings', 'status', 'support')
 
 PALETTE = """
 <style id="efb-palette">
-  /* The X-Plane app's own colours, restated for the EFB. Appended rather
-     than edited so app/ui/index.html stays a byte-for-byte source. */
-  :root {
-    --bg: #0d1218;
-    --panel: #0d1218;
-    --line: #5c6b7a;
-    --line-dim: #2f3a45;
-    --text: #eef4f9;
-    --text-dim: #93a3b2;
-    --heading: #93a3b2;
-    --field: #06090d;
-    --button: #1d2732;
-    --button-line: #5c6b7a;
-    --accent: #00c2cc;
-    --ok: #3ccf6e;
-    --warn: #e8a33d;
-    --bad: #e05c5c;
-  }
+  /* Nothing here changes how the app looks.
+
+     There was a palette in this slot once, recolouring the pages to sit
+     beside FlyByWire's EFB: a darker blue-black ground, a cyan accent, its
+     own greys. It is gone. These are the same pages as the X-Plane app --
+     the app's own :root, its own type, its own spacing, to the value --
+     and anything that makes them look otherwise is a bug in this build
+     rather than a decision.
+
+     What is left is the three things being inside the EFB forces: the
+     app's window is now this container, its footer belongs to the
+     standalone app and names a plugin port that does not exist here, and
+     five of its tabs are FlyByWire's job on this tablet. */
   html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-  /* The footer belongs to the standalone app: its logo, its own branding,
-     and the address of a plugin port that does not exist here. */
   footer { display: none; }
 
-  /* Nothing here restates the app's layout. The sidebar stacking above the
-     content was not a layout question at all: grid-template-columns was
-     written as a clamp, this engine has no such function, and the whole
-     declaration was dropped
-     -- see the CSS compat pass below. The app's own rule is correct and at
-     1430x1000 its media queries never fire. */
-  /* Typography, restated as separate properties.
-
-     The app writes `font: 15px/1.35 "Segoe UI", system-ui, sans-serif` on
-     body and `font: <size> "Segoe UI"` on the nav buttons. `system-ui` is a
-     family keyword this engine need not know, and an unknown family
-     invalidates the whole shorthand -- which takes the size with it,
-     because `font` sets both at once. Everything then renders at whatever
-     the default is, which is how a seven-digit ATA number stopped fitting
-     the 70px column it was given and ran under the name beside it.
-
-     Split apart, a family the engine does not know costs only the family. */
-  #ds-app {
-    font-family: "Segoe UI", Tahoma, Verdana, Arial, sans-serif;
-    font-size: 15px;
-    line-height: 1.35;
-  }
-  .study-nav button, .study-nav button .count {
-    font-family: "Segoe UI", Tahoma, Verdana, Arial, sans-serif;
-    font-size: 12px;
-  }
-
-  /* The chapter count is floated right. In a 210px column most chapter
-     names wrap, and a float placed after the text lands on the last line --
-     so the number drops onto a line of its own underneath. On the wide
-     window the app was written for the names do not wrap and the question
-     never comes up. A flex row puts the number back beside the name. */
-  .study-nav button {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-  }
-  .study-nav button .count { float: none; margin-left: 8px; flex: 0 0 auto; }
-
-  /* Seven digits, and 70px was measured against a font that is not the one
-     being used. Widen the column rather than shrink the number. */
-  .fail-row { grid-template-columns: 92px minmax(0, 1fr) auto; }
-  .fail-row .ata { white-space: nowrap; }
-
-  /* The tabs are flex: 1 1 auto, so they fill the strip end to end and
-     leave the overlay's CLOSE button nowhere to sit but on top of the
-     page. Hold back enough of the strip for it. The number is in the app's
-     own 1000px coordinates; the button is sized in the screen's, which is
-     1.43 times larger, so ~84px of button reads as ~120px on the screen. */
+  /* Room at the end of the tab strip for the overlay's CLOSE button. The
+     tabs are flex: 1 1 auto, so without this they fill the strip end to end
+     and the button has nowhere to sit but on top of the page. */
   .tabs { padding-right: 108px; }
 %HIDDEN_TABS%
 </style>
@@ -378,7 +325,7 @@ def flex_gap_fallback(css):
 
 def compat(page):
     """Apply every fix above to each <style> block in the page."""
-    skipped, gaps, unresolved = [], [], []
+    skipped, gaps, unresolved, stripped = [], [], [], [0]
 
     def fix(match):
         # Comments go first. Everything below walks braces to find where a
@@ -397,6 +344,15 @@ def compat(page):
                      'top: 0; right: 0; bottom: 0; left: 0;', css)
         css = re.sub(r'overflow-wrap\s*:\s*anywhere\s*;',
                      'word-break: break-word; overflow-wrap: anywhere;', css)
+        # `system-ui` is a font-family keyword, not a family, and this
+        # engine need not know it. An unknown name in a `font` SHORTHAND
+        # invalidates the whole declaration -- and `font` carries the size,
+        # so the size goes with the family. The app names it in every font
+        # stack it has. Dropping the keyword keeps the app's own sizes and
+        # its own families, which is the point: nothing here is a redesign.
+        dropped = css.count(', system-ui')
+        css = css.replace(', system-ui', '')
+        stripped[0] += dropped
         gaps.extend(flex_gap_fallback(css))
         return match.group(1) + css + match.group(3)
 
@@ -408,7 +364,7 @@ def compat(page):
                  '     Generated by build.py -- see flex_gap_fallback. */\n  '
                  + '\n  '.join(gaps) + '\n</style>\n')
 
-    return page, skipped, len(gaps), unresolved
+    return page, skipped, len(gaps), unresolved, stripped[0]
 
 
 HEADER = (
@@ -501,7 +457,7 @@ def main():
         + hidden + ' { display: none; }')
 
     page = html[:match.start()] + html[match.end():] + palette
-    page, skipped, gap_rules, unresolved = compat(page)
+    page, skipped, gap_rules, unresolved, stripped = compat(page)
 
     # Prove it rather than trust it. Anything left that this engine cannot
     # parse is a declaration that will be dropped in the sim with no error.
@@ -534,8 +490,9 @@ def main():
     if left and not unresolved:
         sys.exit('@media survived the build: ' + '; '.join(sorted(set(left))))
 
-    print('  css: laid out at %gx%g on a %gx%g screen, %d flex-gap fallbacks'
-          % (VIEWPORT_W, VIEWPORT_H, SCREEN_W, SCREEN_H, gap_rules))
+    print('  css: laid out at %gx%g on a %gx%g screen, %d flex-gap fallbacks, '
+          '%d system-ui dropped'
+          % (VIEWPORT_W, VIEWPORT_H, SCREEN_W, SCREEN_H, gap_rules, stripped))
     for call in sorted(set(skipped)):
         print('       left alone (cannot resolve here): ' + call)
     for query in sorted(set(unresolved)):
