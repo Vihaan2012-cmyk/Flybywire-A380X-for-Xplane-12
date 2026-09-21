@@ -194,6 +194,8 @@ pub struct Tess {
     sent_atlas: (u64, u32),
     sent_pictures: usize,
     logged: HashSet<String>,
+    /// Per screen, the largest stream FBW_DUMP_STREAMS has written out.
+    dumped: std::collections::HashMap<String, usize>,
 }
 
 impl Tess {
@@ -216,6 +218,7 @@ impl Tess {
             sent_atlas: (0, 0),
             sent_pictures: 0,
             logged: HashSet::new(),
+            dumped: std::collections::HashMap::new(),
         }
     }
 
@@ -241,14 +244,20 @@ impl Tess {
     /// rasteriser: if it draws wrong, the fault is upstream in whatever
     /// builds the stream; if it draws right, only `gl.rs` is left.
     ///
-    /// Once per screen per session -- the instruments resubmit whenever a
-    /// value changes, which is most frames.
+    /// The largest stream each screen has sent, not the first.
+    ///
+    /// The first was the obvious choice and the wrong one: a screen's
+    /// opening stream is `SAVE / TRANSFORM / RESTORE` and nothing else --
+    /// eight numbers, the frame before it has anything to draw. Keeping the
+    /// largest converges on a representative frame within a second or two
+    /// of the instruments running, and costs one comparison per submit.
     fn dump_stream(&mut self, screen: &str, ops: &[f64], strings: &[String]) {
         let Some(dir) = std::env::var_os("FBW_DUMP_STREAMS") else { return };
-        let key = format!("dump:{screen}");
-        if !self.logged.insert(key) {
+        let biggest = self.dumped.entry(screen.to_owned()).or_insert(0);
+        if ops.len() <= *biggest {
             return;
         }
+        *biggest = ops.len();
         let path = Path::new(&dir).join(format!("{screen}.json"));
         let body = serde_json::json!({ "screen": screen, "ops": ops, "strings": strings });
         match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, body.to_string())) {
