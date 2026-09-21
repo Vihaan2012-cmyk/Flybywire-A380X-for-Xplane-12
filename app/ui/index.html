@@ -62,7 +62,18 @@
   .apply { display: flex; justify-content: center; margin-top: 18px; }
   button {
     font: 600 14px "Segoe UI", system-ui, sans-serif; color: var(--text); background: transparent;
-    border: 2px solid var(--line); padding: 12px 20px; min-width: min(250px, 100%); cursor: pointer; text-transform: uppercase;
+    border: 2px solid var(--line); padding: 12px 20px; cursor: pointer; text-transform: uppercase;
+    /* Was `min-width: min(250px, 100%)`: prefer 250px, but never force the
+       button wider than its container. That needed min() only because
+       min-width and max-width can't express "the smaller of the two" --
+       min-width always wins over max-width by spec, so that pair alone
+       would force overflow in a narrow container instead of preventing it.
+       Every plain (unclassed) button in this file is a flex child of
+       .apply, so the same result -- 250px preferred, shrinking instead of
+       overflowing a narrower parent -- comes from flex-basis/flex-shrink,
+       which is plain flexbox and needs no CSS function build.py must
+       flatten for Coherent GT. */
+    flex: 0 1 250px; min-width: 0;
   }
   button:hover { background: rgba(255,255,255,0.06); }
   button:disabled { opacity: 0.45; cursor: default; }
