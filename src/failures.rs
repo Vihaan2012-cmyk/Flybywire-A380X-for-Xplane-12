@@ -281,15 +281,28 @@ pub fn failure_name(id: u64) -> String {
         24_002 => "TR ESS",
         24_003 => "TR APU",
         24_004 => "Static Inverter",
-        24_104 => "AC EMER",
-        24_105 => "AC ESS",
+        // Bus order is `buses` in `a380_failures` above: index 4 is
+        // AlternatingCurrentEssential ("AC_ESS"), index 5 is
+        // AlternatingCurrentEssentialShed ("AC_ESS_SHED") -- confirmed
+        // against `ElectricalBusType`'s own `Display` impl
+        // (fbw-common/.../systems/src/shared/mod.rs:427-428). The previous
+        // "AC EMER"/"AC ESS" pair named the wrong buses (no "AC EMER" bus
+        // exists in this enum at all) and would have shown the wrong bus
+        // name on the Study page and in the failure log for these two ids.
+        24_104 => "AC ESS",
+        24_105 => "AC ESS SHED",
         24_106 => "AC 247XP",
         24_107 => "AC GND FLT SRV",
         24_110 => "DC ESS",
         24_111 => "DC 247PP",
         24_112 => "DC 309PP",
-        24_115 => "DC HOT ESS",
-        24_116 => "DC HOT APU",
+        // index 15/16 are DirectCurrentHot(3)/DirectCurrentHot(4)
+        // ("DC_HOT_3"/"DC_HOT_4", same Display impl, line 436), matching
+        // the "DC HOT 1"/"DC HOT 2" the format arm below already produces
+        // for indices 13/14 -- not "ESS"/"APU", which name buses that don't
+        // exist in this id range.
+        24_115 => "DC HOT 3",
+        24_116 => "DC HOT 4",
         24_117 => "DC GND FLT SRV",
         26_005 => "Fire - APU",
         26_006 => "Fire - Main Landing Gear Bay",
@@ -1740,6 +1753,26 @@ pub(crate) mod tests {
         assert_eq!(failure_name(26_010), "Engine 2 Loop B");
         assert_eq!(failure_name(24_109), "DC 2");
         assert_eq!(failure_name(21_029), "OCSM 2 Channel 2");
+    }
+
+    /// `failure_name`'s fixed table for the AC ESS/ESS SHED and DC HOT 3/4
+    /// buses must name the same bus `a380_failures`' `buses` array actually
+    /// registered at each id, not a bus that doesn't exist in
+    /// `ElectricalBusType` at all ("AC EMER") or one from a different index
+    /// ("DC HOT ESS"/"DC HOT APU" for what is really DC HOT 3/4). Regression
+    /// for a mislabeling that would have shown the wrong bus name on the
+    /// Study page and in the failure log.
+    #[test]
+    fn ac_ess_and_dc_hot_bus_ids_show_the_bus_actually_at_that_index() {
+        let buses = super::a380_failures();
+        assert!(buses.contains(&(24_104, FailureType::ElectricalBus(ElectricalBusType::AlternatingCurrentEssential))));
+        assert!(buses.contains(&(24_105, FailureType::ElectricalBus(ElectricalBusType::AlternatingCurrentEssentialShed))));
+        assert!(buses.contains(&(24_115, FailureType::ElectricalBus(ElectricalBusType::DirectCurrentHot(3)))));
+        assert!(buses.contains(&(24_116, FailureType::ElectricalBus(ElectricalBusType::DirectCurrentHot(4)))));
+        assert_eq!(failure_name(24_104), "AC ESS");
+        assert_eq!(failure_name(24_105), "AC ESS SHED");
+        assert_eq!(failure_name(24_115), "DC HOT 3");
+        assert_eq!(failure_name(24_116), "DC HOT 4");
     }
 
     /// The C++ computers' FailuresConsumer ids (FailureList.h) are registered
