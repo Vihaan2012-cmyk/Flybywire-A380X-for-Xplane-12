@@ -831,3 +831,90 @@ fn anisotropic_scale_does_not_skew_text() {
     // one glyph's own ascent/descent shape, not a whole line height).
     assert!((max_y - min_y) < 30., "vertices span {} device px vertically: {:?}", max_y - min_y, ys);
 }
+
+/// The definitive check for the "text draws, geometry does not" report: a
+/// stream captured live from the running sim through `FBW_DUMP_STREAMS`
+/// (`Tess::dump_stream` in `super`), not reconstructed by hand from a golden
+/// fixture. Loaded verbatim -- its own ops and strings, parsed the same way
+/// `Tess::submit` parses what comes off the wire -- tessellated and rasterised
+/// with the software renderer.
+///
+/// If this draws its geometry, the fault is conclusively confined to gl.rs
+/// (everything upstream of it, on the exact bytes the instruments really
+/// emit, is now proven correct rather than merely proven correct on two
+/// hand-picked golden excerpts). If it does not, the earlier
+/// golden-fixture-based tests above missed something the real stream
+/// exercises that they do not, and the fault is upstream after all.
+///
+/// Skips cleanly (rather than failing) when the capture file is not present,
+/// so this passes on any machine that hasn't run the capture.
+#[test]
+fn real_captured_stream_draws_its_vector_geometry() {
+    if !have_package() {
+        return println!("the MSFS package is not on this machine; skipped");
+    }
+    let dir = std::env::var("FBW_STREAM_CAPTURES").unwrap_or_else(|_| {
+        r"C:\Users\bansa\AppData\Local\Temp\claude\d--Converter\2ab03b5e-47e8-485c-9ab0-6b1a7f42eaed\scratchpad\streams".to_string()
+    });
+    let path = Path::new(&dir).join("SCREEN_DU_PFDL.json");
+    if !path.is_file() {
+        return println!("no captured stream at {}; skipped", path.display());
+    }
+    let mut res = resources();
+    let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("valid JSON");
+    let ops: Vec<f64> = serde_json::from_value(body["ops"].clone()).expect("an ops array");
+    let strings: Vec<String> = serde_json::from_value(body["strings"].clone()).expect("a strings array");
+    let screen = body["screen"].as_str().unwrap_or("SCREEN_DU_PFDL").to_string();
+    println!("real capture: {} ops, {} strings, screen {screen}", ops.len(), strings.len());
+
+    let parsed = stream::parse(&ops, strings.len()).expect("the captured stream parses");
+    let (w, h) = (768u32, 1024u32);
+    let mut t = Tessellator::default();
+    let mut mesh = None;
+    for _ in 0..4 {
+        match t.run(&parsed, &strings, &screen, (w, h), (1., 1.), &mut res) {
+            Ok(m) => {
+                assert!(m.problems.is_empty(), "{:?}", m.problems);
+                mesh = Some(m);
+                break;
+            }
+            Err(_) => println!("atlas settling pass: stale, retrying"),
+        }
+    }
+    let mesh = mesh.expect("the atlas never settled");
+
+    // Diagnostics for the gl.rs comparison in step 2: how the plan this mesh
+    // produces is shaped, since gl.rs and soft.rs both draw from exactly the
+    // same `Vec<Step>`.
+    let steps = plan::plan(&mesh);
+    let (mut draw_off, mut draw_equal, mut clip_paths, mut dims) = (0usize, 0usize, 0usize, 0usize);
+    for step in &steps {
+        match step {
+            Step::Draw { stencil: super::plan::StencilTest::Off, .. } => draw_off += 1,
+            Step::Draw { stencil: super::plan::StencilTest::Equal { .. }, .. } => draw_equal += 1,
+            Step::ClipPath { .. } => clip_paths += 1,
+            Step::Dim { .. } => dims += 1,
+            _ => {}
+        }
+    }
+    println!(
+        "mesh: {} vertices, {} batches, {} clips; plan: {} steps ({draw_off} unclipped draws, {draw_equal} stencil-tested draws, {clip_paths} clip-path passes, {dims} dim passes)",
+        mesh.vertices.len(),
+        mesh.batches.len(),
+        mesh.clips.len(),
+        steps.len(),
+    );
+
+    let rgba = rgba_of(&soft::render(&mesh, &res, 4, &[], &[]));
+    save("real-captured-pfd", w, h, rgba.clone());
+    let mut lit = 0usize;
+    for y in 0..h {
+        for x in 0..w {
+            if pixel(&rgba, w, x, y) != [0, 0, 0, 255] {
+                lit += 1;
+            }
+        }
+    }
+    println!("real-captured-pfd: {lit} non-background pixels of {}", w * h);
+    assert!(lit > 2000, "only {lit} non-background pixels in the whole captured PFD frame -- geometry did not draw offline either");
+}

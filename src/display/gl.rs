@@ -13,7 +13,15 @@
 //! - After drawing into an FBO of our own, the FBO X-Plane had bound is
 //!   bound again, read from `sim/graphics/view/current_gl_fbo` rather than
 //!   glGet; framebuffer completeness is checked once, when it is made.
-//! - No glGetError in shipping code.
+//! - No glGetError in the per-draw hot path (it stalls the pipeline once a
+//!   frame is enough to notice, every triangle is not). It is checked after
+//!   the rare, state-establishing uploads in [`Renderer::upload`] --
+//!   texture and vertex buffer creation, which only run when an atlas
+//!   generation, image or mesh actually changed -- since a silently
+//!   rejected texture format or buffer upload there (GL_INVALID_ENUM,
+//!   GL_INVALID_VALUE, GL_OUT_OF_MEMORY) is exactly the kind of failure
+//!   that would leave geometry undrawn while everything sharing a
+//!   different, unaffected call still works.
 //!
 //! Anti-aliasing is 4x multisampling. The mesh is drawn into a multisampled
 //! framebuffer with a stencil buffer (for clip paths and translucent
@@ -92,6 +100,45 @@ const GL_ONE_MINUS_SRC_ALPHA: c_uint = 0x0303;
 const GL_ONE: c_uint = 1;
 const GL_BGRA: c_uint = 0x80E1;
 const GL_UNPACK_ROW_LENGTH: c_uint = 0x0CF2;
+const GL_NO_ERROR: c_uint = 0;
+const GL_INVALID_ENUM: c_uint = 0x0500;
+const GL_INVALID_VALUE: c_uint = 0x0501;
+const GL_INVALID_OPERATION: c_uint = 0x0502;
+const GL_STACK_OVERFLOW: c_uint = 0x0503;
+const GL_STACK_UNDERFLOW: c_uint = 0x0504;
+const GL_OUT_OF_MEMORY: c_uint = 0x0505;
+const GL_INVALID_FRAMEBUFFER_OPERATION: c_uint = 0x0506;
+
+/// A human name for a `glGetError` code, for the log; the numeric value too,
+/// since a code this list does not recognise is still worth reporting.
+fn gl_error_name(code: c_uint) -> String {
+    match code {
+        GL_INVALID_ENUM => "GL_INVALID_ENUM".into(),
+        GL_INVALID_VALUE => "GL_INVALID_VALUE".into(),
+        GL_INVALID_OPERATION => "GL_INVALID_OPERATION".into(),
+        GL_STACK_OVERFLOW => "GL_STACK_OVERFLOW".into(),
+        GL_STACK_UNDERFLOW => "GL_STACK_UNDERFLOW".into(),
+        GL_OUT_OF_MEMORY => "GL_OUT_OF_MEMORY".into(),
+        GL_INVALID_FRAMEBUFFER_OPERATION => "GL_INVALID_FRAMEBUFFER_OPERATION".into(),
+        other => format!("0x{other:04X}"),
+    }
+}
+
+/// Drain and log every pending `glGetError` (there can be more than one),
+/// once per distinct `site` (`warned` is [`Renderer::gl_error_warned`]).
+/// Only called after the rare, state-establishing uploads in
+/// [`Renderer::upload`] -- never in the per-triangle draw loop.
+fn check_upload_errors(gl: &Fns, warned: &mut std::collections::HashSet<&'static str>, site: &'static str) {
+    loop {
+        let code = unsafe { (gl.get_error)() };
+        if code == GL_NO_ERROR {
+            return;
+        }
+        if warned.insert(site) {
+            crate::log(&format!("display: GL error {} after {site}", gl_error_name(code)));
+        }
+    }
+}
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -189,6 +236,7 @@ gl_functions! {
     framebuffer_renderbuffer: "glFramebufferRenderbuffer" => fn(c_uint, c_uint, c_uint, c_uint);
     check_framebuffer_status: "glCheckFramebufferStatus" => fn(c_uint) -> c_uint;
     blit_framebuffer: "glBlitFramebuffer" => fn(c_int, c_int, c_int, c_int, c_int, c_int, c_int, c_int, c_uint, c_uint);
+    get_error: "glGetError" => fn() -> c_uint;
 }
 
 /// The multisampled framebuffer every screen draws through.
@@ -246,6 +294,10 @@ pub struct Renderer {
     /// Draw calls in the last frame, for the statistics.
     pub draw_calls: usize,
     stencil_warned: bool,
+    /// Call sites `check_upload_errors` has already logged a GL error for,
+    /// so a state that keeps failing (e.g. every frame's mesh re-upload on
+    /// a driver that rejects it) is reported once, not forever.
+    gl_error_warned: std::collections::HashSet<&'static str>,
     /// Whether X-Plane's device target is itself multisampled, asked once:
     /// a multisampled framebuffer cannot be resolved into one, so the mesh
     /// is then drawn straight into it with its own samples.
@@ -299,6 +351,7 @@ impl Renderer {
             native_textures: Vec::new(),
             draw_calls: 0,
             stencil_warned: false,
+            gl_error_warned: std::collections::HashSet::new(),
             target_multisampled: None,
         };
         r.multisample = unsafe { r.make_multisample() };
@@ -421,6 +474,18 @@ impl Renderer {
             self.atlas_size = atlas.size;
             self.atlas_generation = atlas.generation;
             atlas.dirty = None;
+            // The call most worth checking in this file: GL_ALPHA / GL_ALPHA8
+            // is a single-channel legacy format removed from core-profile
+            // OpenGL. If X-Plane ever hands a plugin a core context instead
+            // of the compatibility one this whole renderer assumes, this is
+            // where it would first show -- as a rejected atlas upload, while
+            // the images and native textures below (GL_RGBA8, never legacy)
+            // keep working. That alone would not explain text surviving
+            // (glyphs share this same atlas texture), but a texture that
+            // fails here can be left holding whatever the driver had bound
+            // before it, so partial/stale sampling is not ruled out either;
+            // this makes that visible instead of silent.
+            check_upload_errors(gl, &mut self.gl_error_warned, "atlas texture upload (GL_ALPHA8)");
         } else if let Some((first, last)) = atlas.dirty.take() {
             (self.xp.bind_texture)(self.atlas_texture, 0);
             let row = (first * atlas.size) as usize;
@@ -435,6 +500,7 @@ impl Renderer {
                 GL_UNSIGNED_BYTE,
                 atlas.pixels[row..].as_ptr().cast(),
             );
+            check_upload_errors(gl, &mut self.gl_error_warned, "atlas texture sub-upload (GL_ALPHA)");
         }
         for batch in &mesh.batches {
             if let Paint::Image(i) = batch.paint {
@@ -449,6 +515,7 @@ impl Renderer {
                         (gl.tex_image)(GL_TEXTURE_2D, level as c_int, GL_RGBA8, *w as c_int, *h as c_int, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.as_ptr().cast());
                     }
                     self.texture_parameters(GL_LINEAR_MIPMAP_LINEAR, picture.levels.len() as c_int);
+                    check_upload_errors(gl, &mut self.gl_error_warned, "picture texture upload");
                 }
             }
         }
@@ -472,6 +539,7 @@ impl Renderer {
                     self.texture_parameters(GL_LINEAR, 1);
                 }
                 self.natives.insert(id.clone(), (texture, image.generation, image.width, image.height));
+                check_upload_errors(gl, &mut self.gl_error_warned, "native image texture upload");
             }
             self.native_textures.push(texture);
         }
@@ -486,6 +554,11 @@ impl Renderer {
                 mesh.vertices.as_ptr().cast(),
                 GL_DYNAMIC_DRAW,
             );
+            // Every vertex the mesh has -- text glyph quads and flat-colour
+            // fill/stroke triangles alike -- lands in this one buffer.
+            // GL_OUT_OF_MEMORY or a rejected size here would drop both
+            // together, not one selectively; still worth knowing.
+            check_upload_errors(gl, &mut self.gl_error_warned, "vertex buffer upload");
             (gl.bind_buffer)(GL_ARRAY_BUFFER, 0);
             gpu.gradient_rows = mesh.gradients.len();
             if !mesh.gradients.is_empty() {
@@ -496,6 +569,7 @@ impl Renderer {
                 let rows = mesh.gradients.concat();
                 (gl.tex_image)(GL_TEXTURE_2D, 0, GL_RGBA8, RAMP as c_int, mesh.gradients.len() as c_int, 0, GL_RGBA, GL_UNSIGNED_BYTE, rows.as_ptr().cast());
                 self.texture_parameters(GL_LINEAR, 1);
+                check_upload_errors(gl, &mut self.gl_error_warned, "gradient ramp texture upload");
             }
             gpu.uploaded = stream;
         }
