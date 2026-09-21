@@ -146,7 +146,10 @@ if ($Remove) {
         $p = Join-Path $efbDir $name
         if (Test-Path $p) { Remove-Item $p -Force }
     }
-    (Get-Content $htmlPath) | Where-Object { $_ -notmatch 'study\.js' } | ForEach-Object { $_ } | Out-String | ForEach-Object { [System.IO.File]::WriteAllText($htmlPath, $_, (New-Object System.Text.UTF8Encoding $false)) }
+    # Both lines this script appends: study-app.js and study.js. The old
+    # pattern 'study\.js' did not match 'study-app.js', which left that
+    # import behind on removal.
+    (Get-Content $htmlPath) | Where-Object { $_ -notmatch 'study-app\.js|/study\.js' } | ForEach-Object { $_ } | Out-String | ForEach-Object { [System.IO.File]::WriteAllText($htmlPath, $_, (New-Object System.Text.UTF8Encoding $false)) }
     if (Test-Path $panelBackup) {
         Copy-Item $panelBackup $panelPath -Force
         Remove-Item $panelBackup -Force
