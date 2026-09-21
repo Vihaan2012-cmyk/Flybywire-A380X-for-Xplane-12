@@ -718,6 +718,8 @@ async function studyGet(path) {
     if (path === '/study/pages') return fixtureData.pages;
     if (path === '/study/failures') return fixtureData.failures;
     if (path === '/study/breakers') return fixtureData.breakers;
+    if (path === '/study/components') return fixtureData.components || {};
+    if (path === '/study/maintenance') return fixtureData.maintenance || {};
     if (path.startsWith('/vars')) return fixtureData.vars;
     return {};
   }
@@ -911,13 +913,23 @@ function fieldLabel(f) {
 // design sheet (elec::box_h: a 22-unit title plus 16 units per field).
 function renderTopology(container, topo, vars) {
   const avail = container.clientWidth || topo.designW;
-  const sc = Math.max(0.85, Math.min(1.25, avail / topo.designW));
+  // One scale, not two. The boxes were laid out with a floor of 0.85 and
+  // the type inside them with a floor of 0.95, so in any window narrow
+  // enough to reach either, the text came out up to 12% too large for the
+  // box holding it: titles clipped to an ellipsis, value rows lying across
+  // the border. They have to be the same number.
+  //
+  // That floor is also what stopped the sheet fitting at all -- at 0.85 a
+  // 1200-unit design still asks for 1020px -- so it now goes low enough for
+  // a narrow column, leaving .diagram-wrap's sideways scroll as the last
+  // resort it was meant to be.
+  const sc = Math.max(0.55, Math.min(1.25, avail / topo.designW));
   const px = (v) => `${v * sc}px`;
   const wrap = el('div', { class: 'diagram-wrap' });
   const d = el('div', { class: 'diagram' });
   d.style.width = px(topo.designW);
   d.style.height = px(topo.designH);
-  d.style.setProperty('--s', Math.max(0.95, sc));
+  d.style.setProperty('--s', sc);
   const svg = svgEl('svg', { viewBox: `0 0 ${topo.designW} ${topo.designH}`, preserveAspectRatio: 'none', class: 'diagram-links' });
   for (const link of topo.links) {
     const live = evalGate(link.gate, vars);
@@ -968,13 +980,14 @@ function renderTopology(container, topo, vars) {
 function renderCutaway(container, page, vars) {
   const W = 1000, H = 600;
   const avail = container.clientWidth || W;
-  const sc = Math.max(0.85, Math.min(1.25, avail / W));
+  // One scale, not two -- see renderTopology.
+  const sc = Math.max(0.55, Math.min(1.25, avail / W));
   const px = (v) => `${v * sc}px`;
   const wrap = el('div', { class: 'diagram-wrap' });
   const d = el('div', { class: 'diagram' });
   d.style.width = px(W);
   d.style.height = px(H);
-  d.style.setProperty('--s', Math.max(0.95, sc));
+  d.style.setProperty('--s', sc);
   const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', class: 'diagram-links cutaway-shapes' });
   svg.append(svgEl('line', { x1: 0, y1: 196, x2: W, y2: 196, class: 'band' }), svgEl('line', { x1: 0, y1: 520, x2: W, y2: 520, class: 'band' }));
   const pts = (list) => list.map((p) => p.join(',')).join(' ');

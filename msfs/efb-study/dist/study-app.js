@@ -487,13 +487,13 @@ window.__deepStudyStart = function() {
   }
   function renderTopology(container, topo, vars) {
     const avail = container.clientWidth || topo.designW;
-    const sc = Math.max(0.85, Math.min(1.25, avail / topo.designW));
+    const sc = Math.max(0.55, Math.min(1.25, avail / topo.designW));
     const px = (v) => `${v * sc}px`;
     const wrap = el("div", { class: "diagram-wrap" });
     const d = el("div", { class: "diagram" });
     d.style.width = px(topo.designW);
     d.style.height = px(topo.designH);
-    d.style.setProperty("--s", Math.max(0.95, sc));
+    d.style.setProperty("--s", sc);
     const svg = svgEl("svg", { viewBox: `0 0 ${topo.designW} ${topo.designH}`, preserveAspectRatio: "none", class: "diagram-links" });
     for (const link of topo.links) {
       const live = evalGate(link.gate, vars);
@@ -542,13 +542,13 @@ window.__deepStudyStart = function() {
   function renderCutaway(container, page, vars) {
     const W = 1e3, H = 600;
     const avail = container.clientWidth || W;
-    const sc = Math.max(0.85, Math.min(1.25, avail / W));
+    const sc = Math.max(0.55, Math.min(1.25, avail / W));
     const px = (v) => `${v * sc}px`;
     const wrap = el("div", { class: "diagram-wrap" });
     const d = el("div", { class: "diagram" });
     d.style.width = px(W);
     d.style.height = px(H);
-    d.style.setProperty("--s", Math.max(0.95, sc));
+    d.style.setProperty("--s", sc);
     const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", class: "diagram-links cutaway-shapes" });
     svg.append(svgEl("line", { x1: 0, y1: 196, x2: W, y2: 196, class: "band" }), svgEl("line", { x1: 0, y1: 520, x2: W, y2: 520, class: "band" }));
     const pts = (list) => list.map((p) => p.join(",")).join(" ");
