@@ -174,7 +174,7 @@
   .dnode.live { border-color: var(--line); }
   .dnode.bus { border-color: #6a5a2a; }
   .dnode.bus.live { border-color: var(--ok); }
-  .dnode .dtitle { box-sizing: border-box; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; border-bottom: 1px solid var(--line-dim); }
+  .dnode .dtitle { box-sizing: border-box; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 600; text-transform: uppercase; letter-spacing: 0.026em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 0.35em; border-bottom: 1px solid var(--line-dim); }
   .dnode .drow { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 6px; white-space: nowrap; }
   .dnode .drow.center { justify-content: center; }
   .dnode .dlabel { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
@@ -2094,7 +2094,12 @@ function cbRow(c) {
   wrap.append(row);
   if (hasDetail) {
     const detail = el('div', { class: 'cb-detail', hidden: '' });
-    if (c.consumers && c.consumers.length) detail.append(el('div', { text: `Consumers: ${c.consumers.join(', ')}` }));
+    // The backend sends `consumers` as a list on 265 breakers and as a
+    // plain string on the other 399. A string has a length, so the guard
+    // above let it through, and then join() -- which a string does not
+    // have -- threw and took the whole breaker list down with it.
+    const consumers = Array.isArray(c.consumers) ? c.consumers.join(', ') : c.consumers;
+    if (consumers && consumers.length) detail.append(el('div', { text: `Consumers: ${consumers}` }));
     if (c.basis) detail.append(el('div', { text: `Basis: ${c.basis}` }));
     info.addEventListener('click', () => { detail.hidden = !detail.hidden; });
     wrap.append(detail);

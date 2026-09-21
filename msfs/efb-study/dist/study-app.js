@@ -1622,8 +1622,9 @@ window.__deepStudyStart = function() {
     wrap.append(row);
     if (hasDetail) {
       const detail = el("div", { class: "cb-detail", hidden: "" });
-      if (c.consumers && c.consumers.length)
-        detail.append(el("div", { text: `Consumers: ${c.consumers.join(", ")}` }));
+      const consumers = Array.isArray(c.consumers) ? c.consumers.join(", ") : c.consumers;
+      if (consumers && consumers.length)
+        detail.append(el("div", { text: `Consumers: ${consumers}` }));
       if (c.basis)
         detail.append(el("div", { text: `Basis: ${c.basis}` }));
       info.addEventListener("click", () => {

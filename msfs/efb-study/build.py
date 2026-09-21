@@ -221,6 +221,24 @@ def each_rule(css):
         i = j
 
 
+# `font: [<weight> ]<size>[/<line-height>] <families>`, the only shapes the
+# app uses. Anything more elaborate is left alone rather than half-parsed.
+FONT_SHORTHAND = re.compile(
+    r'(?<![-\w])font\s*:\s*(?:(\d{3})\s+)?([\d.]+px)(?:\s*/\s*([\d.]+))?\s+([^;}]+)')
+
+
+def _split_font(m):
+    weight, size, line_height, families = m.groups()
+    parts = []
+    if weight:
+        parts.append('font-weight: ' + weight)
+    parts.append('font-size: ' + size)
+    if line_height:
+        parts.append('line-height: ' + line_height)
+    parts.append('font-family: ' + families.strip())
+    return '; '.join(parts)
+
+
 CONDITION = re.compile(r'\(\s*(max|min)-(width|height)\s*:\s*([\d.]+)px\s*\)')
 
 
@@ -352,6 +370,18 @@ def compat(page):
         # its own families, which is the point: nothing here is a redesign.
         dropped = css.count(', system-ui')
         css = css.replace(', system-ui', '')
+        # The `font` shorthand, split into longhands.
+        #
+        # The app sets its nav buttons with `font: 11px "Segoe UI"`, and the
+        # chapter counts inside those buttons came out half again too large
+        # -- a 465 that dwarfed the chapter it belonged to. The count is a
+        # floated span with no size of its own, so it should simply inherit
+        # the button's. This engine does not propagate a size set through
+        # the shorthand to it. Set as `font-size`, it inherits normally.
+        #
+        # Nothing about the values changes: the same size, weight, line
+        # height and families the app asked for, said one property at a time.
+        css = FONT_SHORTHAND.sub(_split_font, css)
         stripped[0] += dropped
         gaps.extend(flex_gap_fallback(css))
         return match.group(1) + css + match.group(3)

@@ -33,7 +33,7 @@
       repeating-linear-gradient(115deg, rgba(255,255,255,0.018) 0 2px, transparent 2px 60px),
       var(--bg);
     color: var(--text);
-    font: 15px/1.35 "Segoe UI", sans-serif;
+    font-size: 15px; line-height: 1.35; font-family: "Segoe UI", sans-serif;
     display: flex; flex-direction: column;
   }
   main {
@@ -60,7 +60,7 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
   .apply { display: flex; justify-content: center; margin-top: 18px; }
   button {
-    font: 600 14px "Segoe UI", sans-serif; color: var(--text); background: transparent;
+    font-weight: 600; font-size: 14px; font-family: "Segoe UI", sans-serif; color: var(--text); background: transparent;
     border: 2px solid var(--line); padding: 12px 20px; min-width: min(250px, 100%); cursor: pointer; text-transform: uppercase;
   }
   button:hover { background: rgba(255,255,255,0.06); }
@@ -72,7 +72,7 @@
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #666; margin-right: 8px; }
   .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
   .support-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; border-bottom: 1px solid var(--line-dim); padding: 8px 0; font-size: 17px; }
-  .link-button { font: 600 15px "Segoe UI"; background: var(--button); color: #fff; border: 2px solid var(--button-line); padding: 6px 12px; min-width: 0; width: 226px; max-width: 45%; flex: none; text-transform: none; }
+  .link-button { font-weight: 600; font-size: 15px; font-family: "Segoe UI"; background: var(--button); color: #fff; border: 2px solid var(--button-line); padding: 6px 12px; min-width: 0; width: 226px; max-width: 45%; flex: none; text-transform: none; }
   .link-button::after { content: " \27A4"; }
   .discord { min-width: 0; width: 226px; max-width: 45%; flex: none; height: 70px; background: #5865f2; border: 0; display: flex; align-items: center; justify-content: center; gap: 10px; text-transform: none; font-size: 20px; font-weight: 800; }
   .changelog h3 { text-align: center; font-weight: 400; margin: 18px 0 8px; font-size: 16px; }
@@ -94,7 +94,7 @@
   .masked { -webkit-text-security: disc; }
   #tab-status .columns, #tab-support .columns { grid-template-columns: minmax(0, 900px); justify-content: center; }
   .tabs { display: flex; flex-wrap: nowrap; flex-shrink: 0; gap: 4px; padding: 14px 24px 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
-  .tab-btn { font: 600 13px "Segoe UI", sans-serif; color: var(--text-dim); background: transparent; border: 2px solid var(--line-dim); border-bottom: 0; padding: 10px 12px; min-width: 0; width: auto; flex: 1 1 auto; text-align: center; white-space: nowrap; cursor: pointer; text-transform: uppercase; }
+  .tab-btn { font-weight: 600; font-size: 13px; font-family: "Segoe UI", sans-serif; color: var(--text-dim); background: transparent; border: 2px solid var(--line-dim); border-bottom: 0; padding: 10px 12px; min-width: 0; width: auto; flex: 1 1 auto; text-align: center; white-space: nowrap; cursor: pointer; text-transform: uppercase; }
   .tab-btn.active { color: var(--text); border-color: var(--line); background: rgba(255,255,255,0.04); }
   .tab-panel { display: none; flex: 1; min-height: 0; }
   .tab-panel.active { display: flex; flex-direction: column; }
@@ -103,7 +103,7 @@
   .study-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 0; padding: 0 var(--gutter); }
   .study-nav { overflow-y: auto; border-right: 2px solid var(--line-dim); padding-right: 10px; }
   .study-nav-group { color: var(--heading); text-transform: uppercase; font-size: 12px; margin: 14px 0 4px; letter-spacing: 0.5px; }
-  .study-nav button { display: block; width: 100%; text-align: left; background: transparent; border: 0; color: var(--text-dim); padding: 6px 8px; font: 11px "Segoe UI"; text-transform: none; cursor: pointer; min-width: 0; word-break: break-word; overflow-wrap: anywhere; }
+  .study-nav button { display: block; width: 100%; text-align: left; background: transparent; border: 0; color: var(--text-dim); padding: 6px 8px; font-size: 11px; font-family: "Segoe UI"; text-transform: none; cursor: pointer; min-width: 0; word-break: break-word; overflow-wrap: anywhere; }
   .study-nav button:hover { color: var(--text); background: rgba(255,255,255,0.05); }
   .study-nav button.active { color: var(--accent); font-weight: 700; }
   .study-main { min-width: 0; overflow-y: auto; padding: 10px 16px 30px; }
@@ -143,8 +143,8 @@
   .cutaway-shapes .edge { stroke: #1e1e30; stroke-width: 1; vector-effect: non-scaling-stroke; }
   .cutaway-shapes .leader { stroke: var(--text-dim); stroke-opacity: 0.55; stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; }
   .cutaway-shapes .marker { fill: #d6d6e6; stroke: #1e1e30; stroke-width: 1; vector-effect: non-scaling-stroke; }
-  .cutaway-shapes .marker-text { fill: #08081a; font: 600 11px "Segoe UI"; }
-  .cutaway-shapes .caption { fill: var(--text-dim); font: 12px "Segoe UI"; }
+  .cutaway-shapes .marker-text { fill: #08081a; font-weight: 600; font-size: 11px; font-family: "Segoe UI"; }
+  .cutaway-shapes .caption { fill: var(--text-dim); font-size: 12px; font-family: "Segoe UI"; }
   .cutaway-shapes .band { stroke: var(--line-dim); stroke-width: 1; vector-effect: non-scaling-stroke; }
   .dnode.stage { background: rgba(48,52,58,0.95); }
   .dnode.label { border: 0; background: var(--bg); }
@@ -153,7 +153,7 @@
   .dnode.live { border-color: var(--line); }
   .dnode.bus { border-color: #6a5a2a; }
   .dnode.bus.live { border-color: var(--ok); }
-  .dnode .dtitle { box-sizing: border-box; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; border-bottom: 1px solid var(--line-dim); }
+  .dnode .dtitle { box-sizing: border-box; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 600; text-transform: uppercase; letter-spacing: 0.026em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 0.35em; border-bottom: 1px solid var(--line-dim); }
   .dnode .drow { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 6px; white-space: nowrap; }
   .dnode .drow.center { justify-content: center; }
   .dnode .dlabel { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
