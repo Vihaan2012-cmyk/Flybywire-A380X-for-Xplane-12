@@ -69,16 +69,22 @@
       'display:flex;flex-direction:column;overflow:hidden;';
     shell.appendChild(host);
 
-    // Sits above the app, in the screen's own coordinates rather than the
-    // app's -- so its size is scaled by hand to match what the app around
-    // it ends up looking like, instead of staying stubbornly 13px.
+    // In the tab strip, not over the page. It used to sit at the bottom
+    // right, where it lay across whatever was underneath it -- an ARM
+    // button, a row of the failure list -- and at this size it covers one
+    // outright. The strip's right-hand end is empty now that five of the
+    // app's tabs are hidden, so it goes there instead.
+    //
+    // It lives in the screen's coordinates rather than the app's, so its
+    // size is scaled by hand to match what the app beside it looks like
+    // instead of staying stubbornly 13px.
     var close = document.createElement('div');
     close.textContent = 'CLOSE';
     close.style.cssText =
-      'position:absolute;right:' + Math.round(10 * zoom) + 'px;bottom:' +
-      Math.round(10 * zoom) + 'px;z-index:10;cursor:pointer;' +
+      'position:absolute;right:' + Math.round(16 * zoom) + 'px;top:' +
+      Math.round(14 * zoom) + 'px;z-index:10;cursor:pointer;' +
       'font:600 ' + Math.round(13 * zoom) + 'px "Segoe UI",Tahoma,sans-serif;color:#eef4f9;' +
-      'border:2px solid #5c6b7a;padding:' + Math.round(8 * zoom) + 'px ' +
+      'border:2px solid #5c6b7a;padding:' + Math.round(7 * zoom) + 'px ' +
       Math.round(18 * zoom) + 'px;background:#0d1218;';
     close.addEventListener('click', hide);
     shell.appendChild(close);

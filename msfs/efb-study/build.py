@@ -115,6 +115,13 @@ PALETTE = """
      being used. Widen the column rather than shrink the number. */
   .fail-row { grid-template-columns: 92px minmax(0, 1fr) auto; }
   .fail-row .ata { white-space: nowrap; }
+
+  /* The tabs are flex: 1 1 auto, so they fill the strip end to end and
+     leave the overlay's CLOSE button nowhere to sit but on top of the
+     page. Hold back enough of the strip for it. The number is in the app's
+     own 1000px coordinates; the button is sized in the screen's, which is
+     1.43 times larger, so ~84px of button reads as ~120px on the screen. */
+  .tabs { padding-right: 108px; }
 %HIDDEN_TABS%
 </style>
 """
