@@ -147,6 +147,73 @@ mod tests {
         assert_eq!(remote.stats.late, 0);
     }
 
+    /// Regression test for the "Ready for Takeoff preset leaves the aircraft
+    /// cold and dark" report: loads FlyByWire's real "Powered" preset (2)
+    /// through `AircraftPresets` against the real, local
+    /// `a380_systems::Simulation` (not a stub) and checks that AC BUS 1
+    /// energises.
+    ///
+    /// This pins the bug to a380_systems, not to this crate. `AircraftPresets`
+    /// runs FlyByWire's real procedure verbatim: batteries on, APU master
+    /// and start commanded, and -- confirmed here -- the APU genuinely
+    /// reaches `OVHD_APU_START_PB_IS_AVAILABLE` (N past its self-sustaining
+    /// speed). But `A32NX_ELEC_AC_1_BUS_IS_POWERED` never follows, even
+    /// hundreds of simulated seconds later: `Pw980ApuGenerator::
+    /// output_within_normal_parameters()` (fbw-common/.../apu/pw980.rs)
+    /// never turns true once the APU is available, so no AC bus ever gets a
+    /// source and FlyByWire's own ECAM logic correctly reports ELEC EMER
+    /// CONFIG forever -- which is exactly what the user's screenshots show.
+    ///
+    /// Root cause traced to D:\fbw-aircraft's `deep-systems` branch, commit
+    /// 13f900e ("wip: deepen the A380X WASM systems in place"): a recovered
+    /// snapshot of previously-uncommitted work, self-described by its own
+    /// message as needing review, that rewrote `apu/pw980.rs` around a new
+    /// `pw980_physics.rs` core (1252 -> 837 lines) and in the process
+    /// dropped both `context.aircraft_preset_quick_mode()` fast paths the
+    /// file used to have. `cargo test` in that crate does not even build
+    /// right now (`InfinitelyAtNTestTurbine` is missing `Clone`), so this
+    /// is unreviewed, not-yet-working code, not something to patch blind
+    /// from fbw-xp-systems. Ignored so it does not fail the routine suite
+    /// on a known, out-of-repo bug; run with `--ignored` to re-check after
+    /// the upstream fix lands.
+    #[test]
+    #[ignore = "known a380_systems bug (D:\\fbw-aircraft deep-systems@13f900e): APU reaches AVAILABLE but its generator never reports output_within_normal_parameters, so AC buses never energise"]
+    fn powered_preset_against_real_systems_energises_ac_bus_1() {
+        use crate::extra_backend::aircraft_presets::AircraftPresets;
+        use crate::extra_backend::sim::test_xplane::FakeXplane;
+        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut vars = TestVars::default();
+        let mut systems = Simulation::new(StartState::Apron, A380::new, &mut vars);
+        let mut presets = AircraftPresets::new(&mut vars);
+        let mut xp = FakeXplane::default();
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("AMBIENT PRESSURE", 29.92);
+        vars.set("AMBIENT TEMPERATURE", 15.);
+        vars.set("AMBIENT DENSITY", 0.002377);
+        vars.set("SEA LEVEL PRESSURE", 1013.25);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        let delta = std::time::Duration::from_millis(50);
+        // 4000 * 50 ms = 200 simulated seconds: the APU reaches AVAILABLE
+        // well inside the first minute, so this leaves a wide margin.
+        let mut ac1_ever_powered = false;
+        for tick in 0..4000 {
+            let time = tick as f64 * 0.05;
+            presets.update(&mut vars, &mut xp, delta.as_secs_f64());
+            systems.tick(delta, time, &mut vars);
+            ac1_ever_powered |= vars.value("A32NX_ELEC_AC_1_BUS_IS_POWERED") != 0.;
+        }
+        assert!(
+            vars.value("A32NX_OVHD_APU_START_PB_IS_AVAILABLE") != 0.,
+            "test setup regressed: the APU itself no longer reaches AVAILABLE in 200 s"
+        );
+        assert!(
+            ac1_ever_powered,
+            "AC BUS 1 never powered up from the running, available APU -- see this test's doc comment"
+        );
+    }
+
     /// The real executable as its own process: builds, mirrors, and ticks a
     /// few thousand frames in lockstep, reporting the round-trip cost.
     #[test]
