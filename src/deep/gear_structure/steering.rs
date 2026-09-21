@@ -164,10 +164,28 @@ impl SteeringActuator {
         let mut remaining = dt;
         while remaining > 1e-9 {
             let h = SUB_STEP_S.min(remaining);
-            let accel = (DISTURBANCE_NM - c_net * delta_dot - K_EFF * delta) / I_EFF;
-            delta_dot += accel * h;
+            // The damping term is taken implicitly. Explicitly, the rate is
+            // multiplied by (1 - c_net*h/I_EFF) each sub-step, which for the
+            // healthy damper at rest is -1.5: the perturbation grew without
+            // bound in a few ticks, overflowed, and the NaN stayed in the
+            // state for the rest of the session (seen live as
+            // NW_STEER_ANGLE_DEG = NaN every frame on a parked aircraft).
+            // Dividing by (1 + c_net*h/I_EFF) instead is the exact solution
+            // of the linear damping over the sub-step and is stable for any
+            // positive damping and any h; the stiffness and disturbance
+            // terms are unchanged. Negative c_net (an unstable, failed
+            // damper above its critical speed) still grows, as it should,
+            // and the clamp below still caps it.
+            let forcing = (DISTURBANCE_NM - K_EFF * delta) / I_EFF;
+            delta_dot = (delta_dot + forcing * h) / (1.0 + c_net * h / I_EFF).max(1e-6);
             delta += delta_dot * h;
             remaining -= h;
+        }
+        // A non-finite state cannot recover on its own and would poison
+        // every frame after it; start the perturbation over instead.
+        if !delta.is_finite() || !delta_dot.is_finite() {
+            delta = 0.0;
+            delta_dot = 0.0;
         }
         self.perturbation_deg = to_deg(delta).clamp(-MAX_PERTURBATION_DEG, MAX_PERTURBATION_DEG);
         self.perturbation_rate = delta_dot;
@@ -199,6 +217,23 @@ mod tests {
     fn a_fully_failed_damper_has_a_low_critical_speed() {
         let v_crit = SteeringActuator::critical_speed_ms(1.0);
         assert!(v_crit < 10.0, "a fully failed damper should go unstable at a realistic taxi speed: {v_crit} m/s");
+    }
+
+    #[test]
+    fn a_healthy_damper_at_rest_stays_finite_and_settles() {
+        // The live defect: parked, healthy damper, the explicit damping
+        // step diverged (multiplier -1.5 per sub-step) and the angle was NaN
+        // from the first seconds of the session onward.
+        let mut s = SteeringActuator::new_nose();
+        let inputs = SteeringInputs { commanded_angle_deg: 0.0, groundspeed_ms: 0.0, dt_s: 1.0 / 36.0 };
+        let mut out = SteeringOutputs::default();
+        for _ in 0..3_600 {
+            out = s.step(&inputs, &healthy());
+            assert!(out.angle_deg.is_finite(), "steering angle went non-finite: {}", out.angle_deg);
+        }
+        assert!(!out.shimmy_unstable);
+        // 50 N*m against 60 kN*m/rad is a 0.048 degree static offset.
+        assert!(out.shimmy_deg.abs() < 0.1, "at rest the perturbation must settle near its static offset, got {}", out.shimmy_deg);
     }
 
     #[test]
