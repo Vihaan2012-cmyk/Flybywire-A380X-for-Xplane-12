@@ -19,6 +19,10 @@ test = false
 # FlyByWire's own fork of the MSFS bindings -- the same git dependency their
 # shipping a380_systems_wasm uses.
 msfs = { git = "https://github.com/flybywiresim/msfs-rs", branch = "main" }
+# The systems themselves: the X-Plane plugin crate as a library, with none
+# of its optional features (no QuickJS, no screens). Stage 1 of the port is
+# exactly this line compiling and linking for wasm32-wasip1.
+fbw_a380_systems = { path = "../..", package = "fbw_a380_systems_xp", default-features = false }
 
 [profile.release]
 # Same shape as FlyByWire's workspace release profile.

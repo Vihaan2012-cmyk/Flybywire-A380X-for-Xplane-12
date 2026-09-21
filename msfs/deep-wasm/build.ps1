@@ -32,7 +32,19 @@ $script = "set -e; cd /external/msfs/deep-wasm; mkdir -p dist; cargo build --tar
 $env:MSYS_NO_PATHCONV = '1'
 Write-Host "Building in $DevEnvImage ..."
 $ErrorActionPreference = 'Continue'
-& docker run --rm -v "${mount}:/external" -e CARGO_HOME=/external/msfs/deep-wasm/target/cargo_home $DevEnvImage bash -c $script
+# The plugin crate's build.rs compiles FlyByWire's C++ computers with `cc`,
+# which for a wasm target needs telling which compiler and sysroot to use --
+# the same flags FlyByWire's own fbw_a380/build.sh passes clang. The
+# aircraft checkout is mounted where the plugin's ../fbw-aircraft path
+# dependency resolves.
+$aircraft = ((Resolve-Path (Join-Path $RepoRoot '..bw-aircraft')).Path -replace '\', '/')
+$sysroot = '/workdir/MSFS_SDK/WASM/wasi-sysroot'
+$cflags = "--sysroot=$sysroot -D__wasi__ -D_LIBCPP_HAS_NO_THREADS -mbulk-memory"
+& docker run --rm -v "${mount}:/external" -v "${aircraft}:/fbw-aircraft" `
+    -e CARGO_HOME=/external/msfs/deep-wasm/target/cargo_home `
+    -e CC_wasm32_wasip1=clang -e CXX_wasm32_wasip1=clang++ -e AR_wasm32_wasip1=llvm-ar `
+    -e "CFLAGS_wasm32_wasip1=$cflags" -e "CXXFLAGS_wasm32_wasip1=$cflags -fno-exceptions -fno-rtti" `
+    $DevEnvImage bash -c $script
 if ($LASTEXITCODE -ne 0) { throw "docker build failed with exit code $LASTEXITCODE" }
 $ErrorActionPreference = 'Stop'
 

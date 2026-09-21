@@ -23,23 +23,18 @@
 //! EFB's live state -- is hundreds of variables, and `msfs/lvar-bench`
 //! measured that at 11 ns a write. Nothing here needs to be clever.
 //!
-//! The two modules under `#[path]` are the plugin's own files, compiled in
-//! place rather than copied, so this crate cannot drift from the table the
-//! X-Plane side documents. Neither references anything outside itself
-//! (their tests do, and this crate builds no tests).
+//! The bridge and the input table are the plugin crate's own modules, used
+//! through it as a library, so this crate cannot drift from what the X-Plane
+//! side documents. The crate is linked whole, with none of its optional
+//! features; stage 1 of the port is that link succeeding.
 
 use msfs::legacy::{AircraftVariable, NamedVariable};
 use msfs::MSFSEvent;
 use std::collections::BTreeMap;
 use std::error::Error;
 
-#[path = "../../../src/deep/lvar_bridge.rs"]
-mod lvar_bridge;
-#[path = "../../../src/deep/msfs_inputs.rs"]
-mod msfs_inputs;
-
-use lvar_bridge::{Handle, Published, VarStore};
-use msfs_inputs::{Confidence, Convert, INPUTS};
+use fbw_a380_systems::deep::lvar_bridge::{Handle, Published, VarStore};
+use fbw_a380_systems::deep::msfs_inputs::{Confidence, Convert, INPUTS};
 
 /// How often the status line is printed, in frames: about ten seconds.
 const STATUS_EVERY: u64 = 600;
@@ -204,6 +199,12 @@ async fn deep(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
                 // simulator's variable tables are not guaranteed to be ready
                 // before the panel initialises.
                 module = Some(Module::new());
+                // Stage 1's first honest question: does the deep layer --
+                // all seventeen areas, every registry -- instantiate in this
+                // runtime at all? Nothing is ticked yet; the count printed
+                // is the same one the X-Plane plugin reports.
+                let deep = fbw_a380_systems::deep::live::all_areas();
+                println!("DEEP: the deep layer instantiated; it publishes {} names", deep.published_names().len());
             }
             MSFSEvent::PreDraw(data) => {
                 if let Some(m) = module.as_mut() {
