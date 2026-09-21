@@ -30,9 +30,9 @@ file is the human-readable index). Format: `ATA | name | model element | magnitu
 
 | ATA | name | model element | magnitude (0..1) | effect |
 |---|---|---|---|---|
-| 30 | WingLeLeft anti-ice duct leak | `network::Zone.injected_heat_w` (`zones.wing_le_left`) | fraction of reference 30 kW full-severity leak | WingLeLeft overheats past its normal anti-ice cycle, threatening its insulation blanket. |
+| 30 | WingLeLeft anti-ice duct leak | `network::Zone.injected_heat_w` (`zones.wing_le_left`), via `live::anti_ice_duct_leak_heat_w` | fraction of a full-severity crack's own choked-orifice flow at the wing's own side engine bleed condition (no fixed reference wattage) | WingLeLeft overheats past its normal anti-ice cycle, threatening its insulation blanket. |
 | 30 | WingLeRight anti-ice duct leak | as above (`zones.wing_le_right`) | as above | WingLeRight overheats. |
-| 30 | Engine 1-4 nacelle anti-ice duct leak (×4) | `network::Zone.injected_heat_w` (`zones.nacelle_cowl[n]`) | fraction of reference 20 kW full-severity leak | NacelleCowl_n overheats, threatening its wiring. |
+| 30 | Engine 1-4 nacelle anti-ice duct leak (×4) | `network::Zone.injected_heat_w` (`zones.nacelle_cowl[n]`), via `live::anti_ice_duct_leak_heat_w` | fraction of a full-severity crack's own choked-orifice flow at that engine's own bleed condition (no fixed reference wattage) | NacelleCowl_n overheats, threatening its wiring. |
 | 30 | Engine 1-4 nacelle vent scoop ice blockage (×4) | `network::VentilationLink.health` (`vents.nacelle_vent[n]`) | fraction of ram-air flow blocked by ice | NacelleCowl_n loses its large ram-air ventilation term; any heat present accumulates faster. |
 
 ## ATA 32 — landing gear bay doors

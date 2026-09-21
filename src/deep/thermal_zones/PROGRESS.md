@@ -250,3 +250,38 @@ constant. They were left alone deliberately in this pass because:
   the leak heats its own bay ~73 K and only its own bay, staying under the 100 K ODLS margin —
   asserted on the physics rather than that area's trip flag, so it stays true when the
   recommendation above is acted on. Full `deep::thermal_zones` suite green (49 tests).
+
+## 2026-09-21 — the wing/nacelle duct leak follow-up owed above, done
+
+`WING_DUCT_LEAK_MAX_HEAT_W`/`NACELLE_DUCT_LEAK_MAX_HEAT_W` are gone, replaced by
+`live::anti_ice_duct_leak_heat_w` (`live.rs`): the same choked-orifice-crack derivation as
+`pylon_bleed_leak_heat_w`, factored out into a shared `duct_leak_heat_w`, sized to a 50 mm bore
+(`ANTI_ICE_DUCT_BORE_M`, `pneumatic_ducts::network::WAI_DUCT_DIAMETER_M`'s own cited figure,
+reused for the nacelle case too since no separate public nacelle anti-ice duct diameter exists).
+Fed from `Truth::engine_bleed_pressure_pa`/`_temp_k`: for the wing case, whichever of that
+wing's own two engines (1/2 left, 3/4 right, `topology_a380`'s own numbering) is at the higher
+bleed pressure this tick; for the nacelle case, that engine directly. `APU_DUCT_LEAK_MAX_HEAT_W`
+is untouched — `Truth` still carries no APU bleed *temperature*, the same gap the pylon pass
+already documented above.
+
+Consequences, measured: a full-severity wing/nacelle leak on a cold, shut-down aircraft now
+warms its bay by nothing (previously 30/20 kW regardless); at take-off IP8 port conditions
+WingLeLeft settles well below the 590 K duct feeding it rather than at an impossible 853 C.
+Two new tests (`live.rs`): the cold/hot pair for the wing case (mirrors the pylon tests'
+pattern), and `a_blocked_nacelle_vent_scoop_makes_the_same_duct_leak_hotter` updated to use
+`takeoff_truth()` instead of `powered_ground_truth()` (AC power alone no longer exercises a duct
+leak that needs a running engine's own bleed air — the old test's continuing to pass was itself
+evidence the old constant hid the missing state dependency). Full `deep::thermal_zones` suite
+green (50 tests).
+
+**Known cross-area consequence, not fixed here (outside this area's owned files):**
+`pneumatic_ducts::live::tests::a_thermal_areas_own_wing_duct_leak_heats_the_bay_enough_to_trip_this_areas_odls`
+now fails its own setup assertion (`THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C > 150.0`): with the
+honest physics and that test's own `Truth::default()` fixture (engine bleed at ambient, i.e. a
+cold aircraft), the bay reaches only ~21.8 C, not >150 C — which is the *correct* answer for a
+cold aircraft, and exactly what that test's own comment already predicted ("even the honest
+figure would clear this area's 124 C threshold only if `thermal_zones` also fixes its own
+leak-model form" — it has, and a cold-aircraft fixture cannot clear it; the fixture needs a
+running engine, e.g. this area's own `takeoff_truth()`, to exercise the now-real bleed
+dependency). That test lives in `deep::pneumatic_ducts`, outside this pass's owned files, so it
+was read and confirmed but not edited.
