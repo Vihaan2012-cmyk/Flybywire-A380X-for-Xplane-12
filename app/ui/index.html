@@ -2095,21 +2095,23 @@ function cbRow(c) {
   const rating = el('span', { class: 'fval', text: c.ratingA !== null && c.ratingA !== undefined ? c.ratingA.toFixed(0) + ' A' : '—' });
   const current = el('span', { class: 'fval', text: c.currentA !== null && c.currentA !== undefined ? c.currentA.toFixed(1) + ' A' : '—' });
   const state = el('span', { class: 'row', style: 'margin:0;gap:6px' }, el('span', { class: 'dot ' + cbStateDot(c) }), el('span', { class: 'label dim', style: 'text-transform:none', text: cbStateLabel(c) }));
-  // Consumers/basis only exist on a catalogue entry (breakers_json's own
-  // doc comment: "the last two only on catalogue entries" — a systems.cfg
-  // circuit carries neither, so it gets no expand affordance at all rather
-  // than a fake empty one.
-  const hasDetail = (c.consumers && c.consumers.length) || c.basis;
+  // Consumers/basis only exist on a catalogue or deep entry, never on a
+  // raw systems.cfg circuit, so that case gets no expand affordance at all
+  // rather than a fake empty one. The backend deliberately keys this two
+  // different ways depending on `source` (src/study/web.rs's own doc
+  // comment on breakers_json): `consumers` is a list on `"catalogue"`
+  // entries, `consumer` a single string on `"deep"` ones -- it used to be
+  // `consumers` on both, a string on 399 of them, and `.join()` (which a
+  // string does not have) threw and took the whole breaker list down with
+  // it. Reading both named keys, rather than one key of either shape,
+  // means there is no shape left to guess at here any more.
+  const consumers = Array.isArray(c.consumers) ? c.consumers.join(', ') : (c.consumer || '');
+  const hasDetail = (consumers && consumers.length) || c.basis;
   const info = hasDetail ? el('span', { class: 'help cb-info', title: 'Consumers and rating basis', text: 'i' }) : el('span', {});
   row.append(cb, name, rating, current, state, info);
   wrap.append(row);
   if (hasDetail) {
     const detail = el('div', { class: 'cb-detail', hidden: '' });
-    // The backend sends `consumers` as a list on 265 breakers and as a
-    // plain string on the other 399. A string has a length, so the guard
-    // above let it through, and then join() -- which a string does not
-    // have -- threw and took the whole breaker list down with it.
-    const consumers = Array.isArray(c.consumers) ? c.consumers.join(', ') : c.consumers;
     if (consumers && consumers.length) detail.append(el('div', { text: `Consumers: ${consumers}` }));
     if (c.basis) detail.append(el('div', { text: `Basis: ${c.basis}` }));
     info.addEventListener('click', () => { detail.hidden = !detail.hidden; });

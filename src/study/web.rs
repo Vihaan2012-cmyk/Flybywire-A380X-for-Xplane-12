@@ -543,8 +543,16 @@ pub(crate) fn mel_search_json(query: &str) -> String {
 /// `"systemsCfgAbsorbed": true` at the top level flags this shape to a
 /// client that cached the older split-source response. Every entry carries
 /// `id`/`name`/`ata`/`chapter`/`bus`/`ratingA`/`currentA`/`closed`/`trip`/
-/// `consumers`/`basis`/`gates` (the last, new, is `"pluginVar"`|`"circuit"`|
-/// `"failurePower"`|`"failureSoft"`|`"none"` -- see `BreakerDef::gate_kind`).
+/// `basis`; the last two below are only on catalogue entries (`"gates"`,
+/// `"pluginVar"`|`"circuit"`|`"failurePower"`|`"failureSoft"`|`"none"` --
+/// see `BreakerDef::gate_kind`) or only on deep ones (`"panel"`/`"row"`/
+/// `"column"`/`"label"`/`"protectsModelledLoad"`). Consumers are the one
+/// field every entry has under a *different* key depending on `"source"`:
+/// `"consumers"` (a list) on `"source":"catalogue"` entries, `"consumer"`
+/// (a single string, by design) on `"source":"deep"` ones -- see
+/// `deep::breakers::catalog::BreakerDef::consumer`'s own doc. Two shapes
+/// under one key crashed the client once already; keeping them under two
+/// keys instead is deliberate, not an oversight to unify later.
 pub(crate) fn breakers_json() -> String {
     let Ok(snap) = crate::snapshot().lock() else {
         return json!({ "breakers": [], "systemsCfgAbsorbed": true }).to_string();
@@ -617,7 +625,17 @@ pub(crate) fn breakers_json() -> String {
             // a breaker nobody has reported on is not a tripped breaker.
             "closed": open != Some(1.),
             "trip": trip,
-            "consumers": def.consumer,
+            // Singular, and deliberately a different key from the
+            // "consumers" list above: `deep::breakers::catalog::BreakerDef`
+            // carries exactly one consumer string, by design (see its own
+            // field doc), not a list with one element. Emitting it under
+            // "consumers" made two incompatible JSON shapes -- an array on
+            // the 529 catalogue entries, a bare string on these 399 deep
+            // ones -- share one key in the same merged array, which is
+            // exactly the crash cbRow (app/ui/index.html) hit once already
+            // (a string has no `.join`). `src/study/catalogue.rs`'s own
+            // `breaker_json` already keys this "consumer"; this matches it.
+            "consumer": def.consumer,
             "basis": def.basis,
             "panel": format!("{:?}", def.panel),
             "row": def.position.row,
@@ -941,6 +959,35 @@ mod tests {
         assert_eq!(deep.len(), crate::deep::breakers::catalog::all().len());
         assert_eq!(legacy.len() + deep.len(), list.len(), "no raw systemsCfg entry should be emitted any more");
         assert!(legacy.iter().all(|b| b["gates"].is_string()), "every gating entry must report how it gates its consumer");
+    }
+
+    /// `"consumers"` and `"consumer"` must never both mean "who this
+    /// breaker feeds" under the same key in the merged array: a client
+    /// iterating the list would see an array on some entries and a bare
+    /// string on others under one field name, and a string has no
+    /// `.join`/`.length` the way an array does -- that crashed the Study
+    /// UI's breaker list once already (app/ui/index.html cbRow). Catalogue
+    /// entries (`crate::breakers`, a real list per breaker) carry
+    /// `"consumers"`; deep ELMS entries (`crate::deep::breakers::catalog`,
+    /// exactly one consumer by design) carry `"consumer"`. Neither key
+    /// should ever appear with the other's shape.
+    #[test]
+    fn consumers_never_change_shape_under_one_key() {
+        let v: Value = serde_json::from_str(&breakers_json()).unwrap();
+        let list = v["breakers"].as_array().unwrap();
+        for b in list {
+            match b["source"].as_str().unwrap() {
+                "catalogue" => {
+                    assert!(b["consumers"].is_array(), "catalogue entry's consumers must be a list: {b}");
+                    assert!(b.get("consumer").is_none(), "catalogue entry must not also carry singular \"consumer\": {b}");
+                }
+                "deep" => {
+                    assert!(b["consumer"].is_string(), "deep entry's consumer must be a single string: {b}");
+                    assert!(b.get("consumers").is_none(), "deep entry must not carry a \"consumers\" list: {b}");
+                }
+                other => panic!("unknown breaker source: {other}"),
+            }
+        }
     }
 
     /// The ELMS panel set reaches the Study page, with the honest flag on
