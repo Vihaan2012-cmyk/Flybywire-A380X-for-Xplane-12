@@ -61,13 +61,19 @@ impl RemoteSystems {
     pub fn start<V: VariableRegistry + SimulatorReaderWriter>(exe: &std::path::Path, state: StartState, vars: &mut V) -> Result<Self, String> {
         let exe = exe.to_path_buf();
         Self::connect(state, vars, move |tag| {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            Command::new(&exe)
-                .arg(tag)
-                .arg(std::process::id().to_string())
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
+            let mut cmd = Command::new(&exe);
+            cmd.arg(tag).arg(std::process::id().to_string());
+            // Keep the systems process off the taskbar and without a
+            // console. The flag is Windows' own; on any other target (the
+            // MSFS wasm build type-checks this file) there is no window to
+            // suppress and no process to spawn, and `spawn` says so.
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            cmd.spawn()
                 .map(Some)
                 .map_err(|e| format!("cannot start {}: {e}", exe.display()))
         })
