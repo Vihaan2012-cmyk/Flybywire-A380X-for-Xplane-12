@@ -17,6 +17,11 @@ mod canvas;
 /// build as a whole.
 #[allow(dead_code)]
 mod catalogue;
+/// One Study page per `deep` area (src/deep/*): its registered components,
+/// failures, ECAM alerts and its own live-published variables, generated
+/// from `deep::registry()` and each area's `live.rs`. See its own module
+/// doc for why nothing here is invented.
+mod deep_page;
 mod depth;
 mod elec;
 mod engine;
@@ -61,6 +66,10 @@ pub(crate) enum PageKind {
     Breakers,
     GroundServices,
     All,
+    /// One `deep` area's own page: its registered components, failures and
+    /// ECAM alerts (`deep::registry()`), and its own published variables
+    /// (its `live.rs`'s `Area::publish`). See `deep_page`'s module doc.
+    Area(crate::deep::api::Area),
 }
 
 /// Every page. A menu item's refcon is its place in here.
@@ -85,6 +94,26 @@ pub(crate) const ITEMS: &[(&str, PageKind)] = &[
     ("Circuit Breakers", PageKind::Breakers),
     ("Ground Services", PageKind::GroundServices),
     ("All Variables", PageKind::All),
+    // One page per `deep` area (src/deep/*), in `deep_page::AREA_LIST`'s own
+    // order -- kept in sync with it by `deep_pages_match_area_list` below.
+    ("Deep: APU", PageKind::Area(crate::deep::api::Area::Apu)),
+    ("Deep: Avionics Network", PageKind::Area(crate::deep::api::Area::AvionicsNetwork)),
+    ("Deep: Breakers", PageKind::Area(crate::deep::api::Area::Breakers)),
+    ("Deep: Cabin", PageKind::Area(crate::deep::api::Area::Cabin)),
+    ("Deep: Electrical", PageKind::Area(crate::deep::api::Area::Electrical)),
+    ("Deep: Engine Accessories", PageKind::Area(crate::deep::api::Area::EngineAccessories)),
+    ("Deep: Environment", PageKind::Area(crate::deep::api::Area::Environment)),
+    ("Deep: Fire & Ice", PageKind::Area(crate::deep::api::Area::FireIce)),
+    ("Deep: Flight Controls", PageKind::Area(crate::deep::api::Area::FlightControls)),
+    ("Deep: Fuel", PageKind::Area(crate::deep::api::Area::Fuel)),
+    ("Deep: Gear & Structure", PageKind::Area(crate::deep::api::Area::GearStructure)),
+    ("Deep: Hydraulics", PageKind::Area(crate::deep::api::Area::Hydraulics)),
+    ("Deep: Oxygen", PageKind::Area(crate::deep::api::Area::Oxygen)),
+    ("Deep: Pneumatic Ducts", PageKind::Area(crate::deep::api::Area::PneumaticDucts)),
+    ("Deep: Sensors", PageKind::Area(crate::deep::api::Area::Sensors)),
+    ("Deep: Thermal Zones", PageKind::Area(crate::deep::api::Area::ThermalZones)),
+    ("Deep: Wiring", PageKind::Area(crate::deep::api::Area::Wiring)),
+    ("Deep: Integration", PageKind::Area(crate::deep::api::Area::Integration)),
 ];
 
 pub(crate) fn item_of(kind: PageKind) -> usize {
@@ -177,6 +206,11 @@ pub fn build_menu(xplm: &Xplm) {
         add(study, PageKind::Failures);
         add(study, PageKind::Breakers);
         add(study, PageKind::GroundServices);
+
+        let deep_systems = xplm.submenu(study, "Deep Systems", menu_handler);
+        for &(area, _) in deep_page::AREA_LIST {
+            add(deep_systems, PageKind::Area(area));
+        }
 
         let menu = &raw mut MENU;
         *menu = root;
@@ -377,6 +411,7 @@ unsafe extern "C" fn draw(window: WindowId, refcon: *mut c_void) {
                 PageKind::Failures => overflow = failures::draw(&mut cv, win.scroll),
                 PageKind::Breakers => overflow = services::breakers(&mut cv, win.scroll),
                 PageKind::GroundServices => services::ground(&mut cv),
+                PageKind::Area(area) => overflow = pages::flow(&mut cv, &deep_page::var_groups(area), win.scroll),
                 other => overflow = pages::flow(&mut cv, &pages::groups(other), win.scroll),
             },
             View::Variable { name, from } => pages::variable(&mut cv, name, ITEMS[*from].0, trace),
@@ -490,5 +525,20 @@ mod tests {
     #[test]
     fn engine_items_are_found_by_engine() {
         assert_eq!(ITEMS[item_of(PageKind::Engine(3))].0, "Engine 3 State");
+    }
+
+    /// Every `deep` area (`deep_page::AREA_LIST`, one per `src/deep/*`
+    /// directory) has exactly one Study page, in the same order -- the gap
+    /// this module closes: eighteen areas publishing thousands of
+    /// variables and not one of them had a page.
+    #[test]
+    fn every_deep_area_has_one_study_page_in_registration_order() {
+        let area_items: Vec<crate::deep::api::Area> = ITEMS
+            .iter()
+            .filter_map(|(_, kind)| if let PageKind::Area(a) = kind { Some(*a) } else { None })
+            .collect();
+        let expected: Vec<crate::deep::api::Area> = deep_page::AREA_LIST.iter().map(|&(a, _)| a).collect();
+        assert_eq!(area_items, expected, "ITEMS' Area entries must match deep_page::AREA_LIST, in order");
+        assert_eq!(area_items.len(), 18, "eighteen deep areas");
     }
 }

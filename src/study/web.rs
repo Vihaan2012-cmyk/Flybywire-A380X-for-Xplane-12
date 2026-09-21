@@ -15,7 +15,7 @@
 use serde_json::{json, Value};
 
 use super::canvas::{self, Field, Group};
-use super::{depth, elec, engine, failures, hyd, pages, services, PageKind, ITEMS};
+use super::{deep_page, depth, elec, engine, failures, hyd, pages, services, PageKind, ITEMS};
 
 // ---------------------------------------------------------------------
 // Shared JSON for a Field/Group, the box-page data type every field-list
@@ -94,8 +94,81 @@ fn menu_group(kind: PageKind) -> &'static str {
         PageKind::Hydraulics | PageKind::FlightControls => "Hydraulics",
         PageKind::GearBrakes => "Landing Gear",
         PageKind::Fire => "Fire",
+        PageKind::Area(_) => "Deep Systems",
         _ => "",
     }
+}
+
+// ---------------------------------------------------------------------
+// A `deep` area's own page: its registered components, failures and ECAM
+// alerts (`deep::registry()`, via `deep_page`), and its own published
+// variables as the same `Group`/`Field` boxes every other field-list page
+// uses -- so `collectNames` (app/ui/index.html) picks them up for the
+// `/vars` poll with no separate code path, exactly like `groups`/`extra`.
+
+fn area_component_json(c: &crate::deep::api::ComponentDef) -> Value {
+    json!({
+        "id": c.id,
+        "name": c.name,
+        "ata": c.ata,
+        "chapter": failures::chapter(u64::from(c.ata)),
+        "params": c.params.iter().map(|p| json!({ "name": p.name, "meaning": p.meaning, "healthy": p.healthy })).collect::<Vec<_>>(),
+        "failures": c.failures,
+    })
+}
+
+/// `active`: `crate::failures::active_ids()`, taken once by the caller --
+/// the same armed set `/study/failures` itself reports from, not a second
+/// notion of "armed".
+fn area_failure_json(f: &crate::deep::api::FailureDef, active: &[u64]) -> Value {
+    json!({
+        "id": f.id,
+        "name": f.name,
+        "ata": f.ata,
+        "chapter": failures::chapter(u64::from(f.ata)),
+        "component": f.component,
+        // What the failure's own 0..1 magnitude means physically (the
+        // registry carries no separate "severity" field -- see
+        // `deep::api::FailureDef`), and the physical effect, both quoted
+        // verbatim from the registration.
+        "magnitudeMeaning": f.magnitude,
+        "effect": f.effect,
+        "armed": active.contains(&f.id),
+        "magnitudeNow": crate::failures::magnitude(f.id),
+    })
+}
+
+fn area_alert_level(l: crate::deep::api::Level) -> &'static str {
+    use crate::deep::api::Level;
+    match l {
+        Level::Warning => "warning",
+        Level::Caution => "caution",
+        Level::Advisory => "advisory",
+        Level::Memo => "memo",
+    }
+}
+
+/// `read`: a live variable reader, the same shape `breakers_json` already
+/// builds from the snapshot. `triggerNow` is the alert's own registered
+/// `Cond` evaluated against it -- not the full FWS confirmation-delay/
+/// inhibit state `deep::api::Ecam` tracks frame to frame (this endpoint is
+/// stateless, rebuilt fresh on every request), so it means "the condition
+/// holds this instant", not "this alert is currently annunciated". Labelled
+/// accordingly rather than claiming the fuller semantics.
+fn area_alert_json(a: &crate::deep::api::EcamAlert, read: &dyn Fn(&str) -> f64) -> Value {
+    let mut failures = a.failures.clone();
+    failures.sort_unstable();
+    json!({
+        "key": a.key,
+        "title": a.title,
+        "ata": a.ata,
+        "chapter": failures::chapter(u64::from(a.ata)),
+        "level": area_alert_level(a.level),
+        "failures": failures,
+        "statusPageLines": a.status,
+        "inoperativeSystemsListEntries": a.inop,
+        "triggerNow": a.trigger.eval(read),
+    })
 }
 
 fn engine_station_json(s: &engine::Station) -> Value {
@@ -236,6 +309,25 @@ fn page_json(index: usize, title: &str, kind: PageKind) -> Value {
         }
         PageKind::All => {
             map.insert("kind".into(), json!("all"));
+        }
+        PageKind::Area(area) => {
+            map.insert("kind".into(), json!("area"));
+            map.insert("area".into(), json!(format!("{area:?}")));
+            let active = crate::failures::active_ids();
+            let components: Vec<Value> = deep_page::components_of(area).into_iter().map(area_component_json).collect();
+            let failures: Vec<Value> = deep_page::failures_of(area).into_iter().map(|f| area_failure_json(f, &active)).collect();
+            let alert_defs = deep_page::alerts_of(area);
+            let alerts: Vec<Value> = match crate::snapshot().lock() {
+                Ok(snap) => {
+                    let read = |name: &str| snap.find(name).map(|i| snap.values[i]).unwrap_or(0.0);
+                    alert_defs.into_iter().map(|a| area_alert_json(a, &read)).collect()
+                }
+                Err(_) => alert_defs.into_iter().map(|a| area_alert_json(a, &|_| 0.0)).collect(),
+            };
+            map.insert("components".into(), Value::Array(components));
+            map.insert("failures".into(), Value::Array(failures));
+            map.insert("alerts".into(), Value::Array(alerts));
+            map.insert("groups".into(), groups_json(&deep_page::var_groups(area)));
         }
     }
     obj
@@ -1039,6 +1131,77 @@ mod tests {
         assert!(apply_action(r#"{"kind":"toggleBreaker","id":1}"#).is_ok());
         assert!(apply_action(r#"{"kind":"command","command":"fbw/efb/ground/gpu"}"#).is_ok());
         assert!(apply_action(r#"{"kind":"serviceOxygen"}"#).is_ok());
+    }
+
+    /// Every `deep` area's page carries the four sections item 2 of the
+    /// "where are the pages" brief asked for: components, failures, ECAM
+    /// alerts and grouped published variables -- generated fresh, not
+    /// cached at the page-list level, so armed/triggered state is never
+    /// stale.
+    #[test]
+    fn every_deep_area_page_carries_its_four_sections() {
+        let v: Value = serde_json::from_str(&pages_json()).unwrap();
+        let pages = v["pages"].as_array().unwrap();
+        let mut any_components = false;
+        let mut any_failures = false;
+        let mut any_groups = false;
+        for &(area, _) in deep_page::AREA_LIST {
+            let page = &pages[super::super::item_of(PageKind::Area(area))];
+            assert_eq!(page["kind"], "area");
+            assert_eq!(page["menuGroup"], "Deep Systems");
+            assert_eq!(page["area"], format!("{area:?}"));
+            for key in ["components", "failures", "alerts", "groups"] {
+                assert!(page[key].is_array(), "{area:?} page is missing \"{key}\"");
+            }
+            any_components |= !page["components"].as_array().unwrap().is_empty();
+            any_failures |= !page["failures"].as_array().unwrap().is_empty();
+            any_groups |= !page["groups"].as_array().unwrap().is_empty();
+        }
+        assert!(any_components, "at least one deep area should carry components");
+        assert!(any_failures, "at least one deep area should carry failures");
+        assert!(any_groups, "at least one deep area should carry published-variable groups");
+    }
+
+    /// A deep area's page reports "armed" from exactly
+    /// `crate::failures::active_ids()` -- the same set `/study/failures`
+    /// itself reads -- rather than a second, parallel notion of armed.
+    /// (`crate::failures::toggle` only takes effect once `Failures::new()`
+    /// has registered the id, which needs a running plugin, so this checks
+    /// the wiring against whatever the bare active set already is here,
+    /// rather than asserting a toggle took hold.)
+    #[test]
+    fn a_deep_areas_failure_reports_armed_from_the_same_active_set_study_failures_uses() {
+        let area = deep_page::AREA_LIST[0].0;
+        let f = deep_page::failures_of(area).first().copied().expect("this area has failures");
+        let active = crate::failures::active_ids();
+        let v: Value = serde_json::from_str(&pages_json()).unwrap();
+        let pages = v["pages"].as_array().unwrap();
+        let page = &pages[super::super::item_of(PageKind::Area(area))];
+        let entry = page["failures"].as_array().unwrap().iter().find(|e| e["id"] == f.id).expect("the failure is listed");
+        assert_eq!(entry["armed"], json!(active.contains(&f.id)));
+    }
+
+    /// An area's variable groups are exactly the same `Group`/`Field` JSON
+    /// shape `groups_json` already produces for every other field-list
+    /// page, so `collectNames` (app/ui/index.html) needs no separate case
+    /// to find their names for the `/vars` poll.
+    #[test]
+    fn a_deep_areas_groups_carry_real_field_names_the_vars_poll_can_use() {
+        let v: Value = serde_json::from_str(&pages_json()).unwrap();
+        let pages = v["pages"].as_array().unwrap();
+        let page = &pages[super::super::item_of(PageKind::Area(crate::deep::api::Area::Wiring))];
+        let groups = page["groups"].as_array().unwrap();
+        assert!(!groups.is_empty());
+        let owned_names = deep_page::live_names(crate::deep::api::Area::Wiring);
+        let names: Vec<&str> = owned_names.iter().map(String::as_str).collect();
+        let mut seen = 0;
+        for g in groups {
+            for f in g["fields"].as_array().unwrap() {
+                assert!(f["name"].as_str().is_some_and(|n| names.contains(&n)));
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, names.len(), "every published name appears in exactly one group");
     }
 
     #[test]
