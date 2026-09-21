@@ -6,7 +6,8 @@
 //! (`prelude.js`) is the part of MSFS's they rely on first: `console`,
 //! timers and animation frames on the simulator's clock, and `SimVar`, which
 //! reaches the plugin's variables through the [`Host`] the plugin passes in
-//! each tick.
+//! each tick. It also shims a bare-bones `process.env` (still `prelude.js`)
+//! for the two bundles that read it unguarded (the OIT views).
 //!
 //! Scripts run on the simulator's thread, inside a time budget per call:
 //! a script that runs past it is interrupted rather than stalling X-Plane.
@@ -608,6 +609,27 @@ mod tests {
     fn javascript_runs() {
         let e = engine_in(&std::env::temp_dir());
         assert_eq!(e.eval("t", "[1,2,3].map(x => x * 2).join(',')").unwrap(), "2,4,6");
+    }
+
+    /// The OIT views' bundle (A380X/OIT/oit.js, compiled from
+    /// fbw-common/src/systems/instruments/src/navigraph.ts) reads
+    /// `process.env.CLIENT_ID`/`process.env.CLIENT_SECRET` with no
+    /// `typeof process !== 'undefined'` guard, unlike everything else that
+    /// touches `process` in that bundle; with no `process` global at all
+    /// that used to throw `ReferenceError: process is not defined` and take
+    /// the whole view down before it rendered anything (views 15/16 in
+    /// X-Plane's log). `prelude.js`'s shim only needs to make `process`
+    /// exist with an `env` object so those two reads fall through to
+    /// `undefined`, same as real Node would with the variables unset.
+    #[test]
+    fn process_env_reads_are_undefined_not_a_referenceerror() {
+        let e = engine_in(&std::env::temp_dir());
+        assert_eq!(e.eval("t", "typeof process").unwrap(), "object");
+        assert_eq!(e.eval("t", "typeof process.env").unwrap(), "object");
+        assert_eq!(e.eval("t", "String(process.env.CLIENT_ID)").unwrap(), "undefined");
+        assert_eq!(e.eval("t", "String(process.env.CLIENT_SECRET)").unwrap(), "undefined");
+        // The shim must stay minimal: nothing beyond `env` should appear.
+        assert_eq!(e.eval("t", "Object.keys(process).join(',')").unwrap(), "env");
     }
 
     #[test]

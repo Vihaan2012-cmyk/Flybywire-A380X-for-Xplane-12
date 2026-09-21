@@ -68,6 +68,26 @@
   window.addEventListener('error', (e) => native.log(2, `Uncaught ${e.message} (${e.filename}:${e.lineno}:${e.colno})`));
   window.addEventListener('unhandledrejection', (e) => native.log(2, `Unhandled rejection: ${e.reason && e.reason.stack ? e.reason.stack : e.reason}`));
 
+  // NOT a real Node `process`: this is a real Chromium page, which never
+  // had one, but two of FlyByWire's bundles (the OIT views' oit.js) read
+  // `process.env.CLIENT_ID`/`process.env.CLIENT_SECRET` unconditionally at
+  // the top of the script (fbw-common/src/systems/instruments/src/
+  // navigraph.ts calling the Navigraph SDK's `initializeApp`), unlike the
+  // rest of their dependencies, which all guard the same global behind
+  // `typeof process !== 'undefined'` first. With no `process` at all, that
+  // read throws `ReferenceError: process is not defined` before the
+  // script's first line finishes, which `bootstrapGauge`'s catch below
+  // turns straight into `host.loaded(false, ...)` — view 15/16 "failed to
+  // load" in X-Plane's log. FlyByWire's own build normally substitutes
+  // those two properties with real Navigraph client credentials from CI
+  // secrets; we have none to substitute and must not invent any, so this
+  // only supplies the shape (`process.env` as a plain object) and lets
+  // `CLIENT_ID`/`CLIENT_SECRET` read back as `undefined`, exactly as an
+  // unmodified copy of the bundle would behave under real Node with those
+  // variables unset. Nothing else of a real `process` (argv, platform,
+  // version, ...) is provided or should be added here.
+  window.process = { env: {} };
+
   // Coherent GT draws no scrollbars and a cockpit screen never scrolls;
   // Chromium would draw one down the edge of any page taller than its view.
   const noScrollbars = document.createElement('style');

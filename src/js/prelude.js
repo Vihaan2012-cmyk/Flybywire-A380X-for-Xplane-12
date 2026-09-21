@@ -28,6 +28,25 @@
     error: (...a) => host.log(2, format(a)),
   };
 
+  // NOT a real Node `process`: two of FlyByWire's bundles (the OIT views,
+  // A380X/OIT/oit.js) read `process.env.CLIENT_ID` and
+  // `process.env.CLIENT_SECRET` unconditionally at top level
+  // (fbw-common/src/systems/instruments/src/navigraph.ts calling the
+  // Navigraph SDK's `initializeApp`), rather than through a
+  // `typeof process !== 'undefined'` guard like the rest of their
+  // dependencies do. With no `process` global at all, that read throws
+  // `ReferenceError: process is not defined` before the script's first
+  // line finishes, which is why those two views used to fail to load
+  // outright. FlyByWire's own build normally substitutes those two
+  // properties with real Navigraph client credentials from CI secrets;
+  // we have none to substitute and must not invent any, so this shim
+  // supplies only the shape (`process.env` as a plain object) and lets
+  // `CLIENT_ID`/`CLIENT_SECRET` read back as `undefined`, exactly as an
+  // unmodified copy of the bundle would behave under real Node with
+  // those variables unset. Nothing else of a real `process` (argv,
+  // platform, version, ...) is provided or should be added here.
+  globalThis.process = { env: {} };
+
   globalThis.setTimeout = (fn, ms = 0, ...args) => {
     const id = nextId++;
     timers.set(id, { at: now + Math.max(0, Number(ms) || 0), fn, args, every: null });
