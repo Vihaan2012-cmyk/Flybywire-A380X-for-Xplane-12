@@ -256,14 +256,6 @@ impl Circuits {
         self.list().into_iter().filter(|c| c.type_name == type_name).collect()
     }
 
-    /// Close (`true`) or open (`false`) one circuit's breaker by its
-    /// `circuit.N` number. An open breaker powers nothing downstream of it,
-    /// the same as a real one — stage 3's CB page, or a reset-panel-style
-    /// control, calls this. A number with no circuit does nothing.
-    ///
-    /// Not called anywhere yet: no cockpit CB geometry exists to drive it
-    /// from (CB-002), and stage 3 owns building the Study CB page that will.
-    #[allow(dead_code)]
     /// Apply the breaker toggles asked for since the last tick.
     pub fn apply_requests<V: VariableRegistry + SimulatorReaderWriter>(&mut self, vars: &mut V) {
         let requests = TOGGLE_REQUESTS.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default();
@@ -273,6 +265,12 @@ impl Circuits {
         }
     }
 
+    /// Close (`true`) or open (`false`) one circuit's breaker by its
+    /// `circuit.N` number. An open breaker powers nothing downstream of it,
+    /// the same as a real one — `apply_requests` above (the Study panel's CB
+    /// page) and `breakers::Breakers::pre_systems` (an absorbed
+    /// `systems.cfg` catalogue entry) both call this. A number with no
+    /// circuit does nothing.
     pub fn set_breaker<V: VariableRegistry + SimulatorReaderWriter>(&mut self, vars: &mut V, number: usize, closed: bool) {
         if let Some(&i) = self.by_number.get(&number) {
             vars.write(&self.states[i].breaker, if closed { 1. } else { 0. });
