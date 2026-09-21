@@ -32,12 +32,23 @@ fetch('study-app.html').then(function (r) { return r.text(); }).then(function (h
   document.head.appendChild(fix);
   window.__deepStudyStart();
   // ?tab=breakers opens a tab other than Study, so each one can be looked at.
-  var want = new URLSearchParams(location.search).get('tab');
+  var q = new URLSearchParams(location.search);
+  var want = q.get('tab');
   if (want) {
     setTimeout(function () {
       var b = host.querySelector('.tab-btn[data-tab="' + want + '"]');
       if (b) b.click();
     }, 1200);
+  }
+  // ?page=<sidebar title> opens one Study page by its nav button text.
+  var page = q.get('page');
+  if (page) {
+    setTimeout(function () {
+      var btns = host.querySelectorAll('#study-nav button');
+      for (var i = 0; i < btns.length; i++) {
+        if (btns[i].textContent.trim() === page) { btns[i].click(); break; }
+      }
+    }, 1500);
   }
   window.__harnessReady = true;
 });
