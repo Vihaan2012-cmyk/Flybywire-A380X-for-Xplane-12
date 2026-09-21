@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>XPHFBW</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    /* One side gutter for every page, so the whole app breathes in and out
+       with the window instead of keeping a 56 px margin on a small one. */
+    --gutter: clamp(12px, 3vw, 56px);
+    --bg: #242424;
+    --panel: #242424;
+    --line: #9a9a9a;
+    --line-dim: #5a5a5a;
+    --text: #f2f2f2;
+    --text-dim: #a8a8a8;
+    --heading: #9d9d9d;
+    --field: #1c1c1c;
+    --button: #4c5663;
+    --button-line: #d8dde3;
+    --accent: #3fb0ff;
+    --ok: #3ccf6e;
+    --warn: #f0b429;
+    --bad: #e5484d;
+    --efb-brightness: 1;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    filter: brightness(var(--efb-brightness));
+    background:
+      radial-gradient(ellipse at 45% 20%, rgba(255,255,255,0.05), transparent 55%),
+      repeating-linear-gradient(115deg, rgba(255,255,255,0.018) 0 2px, transparent 2px 60px),
+      var(--bg);
+    color: var(--text);
+    font: 15px/1.35 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  main {
+    flex: 1; min-height: 0;
+    display: flex; flex-direction: column;
+  }
+  .columns { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(20px, 4vw, 64px); padding: clamp(14px, 2vw, 28px) var(--gutter) 0; overflow: hidden; }
+  .column { min-height: 0; overflow-y: auto; padding-right: 10px; scrollbar-color: #555 transparent; }
+  h2 { font-weight: 300; color: var(--heading); font-size: 28px; margin: 14px 0 12px; letter-spacing: 0.2px; }
+  .box { border: 2px solid var(--line); padding: 14px 16px 18px; margin-bottom: 26px; }
+  .row { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
+  .label { text-transform: uppercase; font-size: 16px; letter-spacing: 0.2px; }
+  .label.dim { color: var(--text-dim); }
+  .help { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #6b6b6b; color: #eee; font-size: 12px; cursor: help; margin-left: 6px; }
+  input[type=checkbox] { appearance: none; width: 22px; height: 22px; border: 2px solid var(--line); background: transparent; margin: 0; cursor: pointer; display: grid; place-items: center; flex: none; }
+  input[type=checkbox]:checked::after { content: ""; width: 11px; height: 6px; border: 2px solid #ccc; border-top: 0; border-right: 0; transform: rotate(-45deg) translate(1px, -1px); }
+  select, input[type=text], input[type=number], input[type=password] {
+    width: 100%; background: var(--field); color: var(--text); border: 2px solid var(--line);
+    padding: 7px 8px; font: inherit; outline: none; border-radius: 0;
+  }
+  select:focus, input:focus { border-color: #d0d0d0; }
+  .field { margin: 12px 0 4px; }
+  .field .label { display: block; margin-bottom: 6px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+  .apply { display: flex; justify-content: center; margin-top: 18px; }
+  button {
+    font: 600 14px "Segoe UI", system-ui, sans-serif; color: var(--text); background: transparent;
+    border: 2px solid var(--line); padding: 12px 20px; min-width: min(250px, 100%); cursor: pointer; text-transform: uppercase;
+  }
+  button:hover { background: rgba(255,255,255,0.06); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.small { min-width: 0; padding: 6px 14px; font-size: 13px; }
+  button.grey { background: #7c7c7c; border-color: #9a9a9a; color: #cfcfcf; }
+  .status { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+  .lights { display: grid; gap: 6px; margin-top: 14px; font-size: 14px; color: var(--text-dim); }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #666; margin-right: 8px; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  .support-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; border-bottom: 1px solid var(--line-dim); padding: 8px 0; font-size: 17px; }
+  .link-button { font: 600 15px "Segoe UI"; background: var(--button); color: #fff; border: 2px solid var(--button-line); padding: 6px 12px; min-width: 0; width: 226px; max-width: 45%; flex: none; text-transform: none; }
+  .link-button::after { content: " \27A4"; }
+  .discord { min-width: 0; width: 226px; max-width: 45%; flex: none; height: 70px; background: #5865f2; border: 0; display: flex; align-items: center; justify-content: center; gap: 10px; text-transform: none; font-size: 20px; font-weight: 800; }
+  .changelog h3 { text-align: center; font-weight: 400; margin: 18px 0 8px; font-size: 16px; }
+  .changelog h4 { color: var(--text-dim); font-weight: 400; font-size: 26px; margin: 8px 0; }
+  .changelog em { display: block; margin-bottom: 12px; }
+  .changelog b { display: block; margin: 12px 0 6px; }
+  .changelog ul { margin: 0; padding-left: 30px; list-style: none; }
+  .changelog li { margin: 7px 0; position: relative; }
+  .changelog li::before { content: ""; position: absolute; left: -24px; top: 5px; width: 9px; height: 9px; border: 2px solid var(--text); border-radius: 50%; }
+  footer { display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; padding: 12px 0 10px; }
+  .brand { display: flex; align-items: center; gap: 12px; padding-left: 8px; }
+  .brand img { height: 44px; width: auto; }
+  .brand span { font-size: 22px; font-weight: 300; letter-spacing: 2px; color: var(--text-dim); border-left: 1px solid var(--line-dim); padding-left: 12px; }
+  .legal { text-align: center; color: var(--text-dim); font-size: 14px; line-height: 1.8; }
+  .legal a { color: var(--text-dim); }
+  .server { text-align: right; color: var(--text-dim); font-size: 14px; padding-right: 10px; align-self: end; }
+  .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); background: #333; border: 1px solid #777; padding: 8px 16px; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .masked { -webkit-text-security: disc; }
+  #tab-status .columns, #tab-support .columns { grid-template-columns: minmax(0, 900px); justify-content: center; }
+  .tabs { display: flex; flex-wrap: nowrap; flex-shrink: 0; gap: 4px; padding: 14px 24px 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+  .tab-btn { font: 600 13px "Segoe UI", system-ui, sans-serif; color: var(--text-dim); background: transparent; border: 2px solid var(--line-dim); border-bottom: 0; padding: 10px 12px; min-width: 0; width: auto; flex: 1 1 auto; text-align: center; white-space: nowrap; cursor: pointer; text-transform: uppercase; }
+  .tab-btn.active { color: var(--text); border-color: var(--line); background: rgba(255,255,255,0.04); }
+  .tab-panel { display: none; flex: 1; min-height: 0; }
+  .tab-panel.active { display: flex; flex-direction: column; }
+  #tab-study.active { display: flex; }
+  .study-offline { margin: 20px 56px; }
+  .study-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: clamp(140px, 16vw, 210px) minmax(0, 1fr); gap: 0; padding: 0 var(--gutter); }
+  .study-nav { overflow-y: auto; border-right: 2px solid var(--line-dim); padding-right: 10px; }
+  .study-nav-group { color: var(--heading); text-transform: uppercase; font-size: 12px; margin: 14px 0 4px; letter-spacing: 0.5px; }
+  .study-nav button { display: block; width: 100%; text-align: left; background: transparent; border: 0; color: var(--text-dim); padding: 6px 8px; font: clamp(11px, 0.85vw, 13px) "Segoe UI"; text-transform: none; cursor: pointer; min-width: 0; overflow-wrap: anywhere; }
+  .study-nav button:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+  .study-nav button.active { color: var(--accent); font-weight: 700; }
+  .study-main { min-width: 0; overflow-y: auto; padding: 10px 16px 30px; }
+  .study-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .study-toolbar input[type=text] { width: auto; flex: 1; min-width: 160px; }
+  .study-groups { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+  .study-field-row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 13px; }
+  .study-field-row .fname { color: var(--text-dim); }
+  .study-field-row .fval { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .study-field-row .fval.missing { color: var(--text-dim); font-style: italic; }
+  .study-svg { width: 100%; height: auto; background: #05060a; border: 2px solid var(--line-dim); }
+
+  /* Small and medium windows. The app used to assume a wide one: two
+     equal columns and a fixed 210 px sidebar simply ran off the edge. */
+  @media (max-width: 1100px) {
+    .columns { grid-template-columns: minmax(0, 1fr); gap: clamp(14px, 2vw, 28px); overflow-y: auto; }
+    #tab-status .columns, #tab-support .columns { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 820px) {
+    .study-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    .study-nav { border-right: 0; border-bottom: 2px solid var(--line-dim); padding: 0 0 6px; max-height: 30vh; }
+    .study-nav button { display: inline-block; width: auto; }
+    .study-nav-group { margin: 8px 0 2px; }
+    .grid2 { grid-template-columns: minmax(0, 1fr); }
+    .support-row { flex-wrap: wrap; }
+    .link-button, .discord { max-width: 100%; width: 100%; }
+  }
+  @media (max-width: 560px) {
+    .study-toolbar input[type=text] { min-width: 0; }
+    footer { grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 6px; }
+  }
+  .study-svg .node-box { fill: #0b0d12; stroke: #4a4f5a; stroke-width: 1.5; }
+  .study-svg .node.live .node-box { stroke: #cfd3da; }
+  .study-svg .node-title { fill: #cfd3da; font-size: 11px; font-family: "Segoe UI"; }
+  .study-svg .node.live .node-title { fill: #fff; }
+  .study-svg .node-value { fill: #3ccf6e; font-size: 10px; font-family: "Segoe UI"; }
+  .study-svg .node-flag { fill: #666; font-size: 10px; font-family: "Segoe UI"; }
+  .study-svg .node-flag.on { fill: #3ccf6e; } .study-svg .node-flag.off { fill: #666; } .study-svg .node-flag.missing { fill: #444; }
+  .study-svg .link { fill: none; stroke: #444; stroke-width: 1.5; }
+  .ecam-wrap { overflow-x: auto; padding: 4px 0 12px; display: flex; justify-content: center; }
+  .ecam-panel { width: 100%; max-width: 520px; height: auto; display: block; background: #000; border: 2px solid var(--line-dim); border-radius: 10px; }
+  .ecam-panel text { font-family: "Ecam", "Segoe UI", monospace; }
+  .study-svg .link.live { stroke: #3ccf6e; stroke-width: 2.5; }
+  .study-svg .link.pipe.live { stroke: #4db8ff; }
+  .page-main { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 56px 30px; }
+  .section-title { color: var(--heading); text-transform: uppercase; font-size: 13px; letter-spacing: 0.6px; margin: 18px 0 8px; }
+  .diagram-wrap { overflow-x: auto; padding: 4px 0 12px; }
+  .diagram { position: relative; margin: 0 auto; font-size: calc(11.5px * var(--s)); }
+  .diagram-links { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .diagram-links .link { fill: none; stroke: var(--line-dim); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+  .diagram-links .link.wire.live { stroke: var(--ok); stroke-width: 3; }
+  .diagram-links .link.pipe.live { stroke: var(--accent); stroke-width: 3; }
+  .diagram-links .link.air.live { stroke: var(--accent); stroke-width: 3; }
+  .diagram-links .link.gas.live { stroke: #ff9f43; stroke-width: 4; }
+  .diagram-links .link.shaft { stroke-dasharray: 6 4; }
+  .diagram-links .link.shaft.live { stroke: var(--ok); stroke-width: 3; stroke-dasharray: none; }
+  .cutaway-shapes .edge { stroke: #1e1e30; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .cutaway-shapes .leader { stroke: var(--text-dim); stroke-opacity: 0.55; stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .cutaway-shapes .marker { fill: #d6d6e6; stroke: #1e1e30; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .cutaway-shapes .marker-text { fill: #08081a; font: 600 11px "Segoe UI"; }
+  .cutaway-shapes .caption { fill: var(--text-dim); font: 12px "Segoe UI"; }
+  .cutaway-shapes .band { stroke: var(--line-dim); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .dnode.stage { background: rgba(48,52,58,0.95); }
+  .dnode.label { border: 0; background: var(--bg); }
+  .dnode.label .dtitle { border: 0; color: var(--text-dim); font-weight: 400; }
+  .dnode { position: absolute; box-sizing: content-box; line-height: 1.1; border: 2px solid var(--line-dim); background: rgba(36,36,36,0.92); display: flex; flex-direction: column; overflow: hidden; }
+  .dnode.live { border-color: var(--line); }
+  .dnode.bus { border-color: #6a5a2a; }
+  .dnode.bus.live { border-color: var(--ok); }
+  .dnode .dtitle { box-sizing: border-box; flex: none; display: flex; align-items: center; justify-content: center; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; border-bottom: 1px solid var(--line-dim); }
+  .dnode .drow { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 6px; white-space: nowrap; }
+  .dnode .drow.center { justify-content: center; }
+  .dnode .dlabel { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+  .dnode .dval { font-variant-numeric: tabular-nums; color: var(--text); }
+  .dnode .dval.nodata { color: var(--line-dim); }
+  .dnode .dot { width: calc(7px * var(--s)); height: calc(7px * var(--s)); margin-right: 5px; }
+  .dnode .lamp-off { color: var(--line-dim); }
+  .fail-row { display: grid; grid-template-columns: 70px 1fr auto; align-items: center; gap: 12px; padding: 7px 4px; border-bottom: 1px solid var(--line-dim); }
+  .fail-row .ata { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .fail-row button { min-width: 96px; padding: 5px 10px; font-size: 12px; }
+  .fail-row button.armed { border-color: var(--bad); color: #fff; background: rgba(229,72,77,0.25); }
+  .cb-row { display: grid; grid-template-columns: 40px 1fr 68px 68px 150px 26px; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line-dim); }
+  .cb-row .bus { font-size: 11px; text-transform: none; }
+  .cb { position: relative; width: 32px; height: 32px; min-width: 0; padding: 0; border: 2px solid var(--line-dim); background: #141414; border-radius: 3px; overflow: hidden; flex: none; }
+  .cb-collar { position: absolute; left: 0; right: 0; top: 0; height: 0; background: #fff; transition: height 0.15s; }
+  .cb.pulled .cb-collar { height: 9px; }
+  .cb.pulled.trip-thermal .cb-collar { background: var(--warn); }
+  .cb.pulled.trip-magnetic .cb-collar { background: var(--bad); }
+  .cb-cap { position: absolute; left: 2px; right: 2px; top: 2px; bottom: 2px; background: #3a3f47; border: 1px solid #565b63; transition: transform 0.15s; }
+  .cb.pulled .cb-cap { transform: translateY(9px); }
+  .cb-detail { padding: 2px 4px 12px 50px; color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+  .cb-detail div + div { margin-top: 2px; }
+  .cb-info { cursor: pointer; }
+  .comp-row { display: grid; grid-template-columns: 40px 1fr 60px 140px auto 26px; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line-dim); }
+  .comp-row .bus, .mel-row .bus { font-size: 11px; text-transform: none; }
+  .comp-bar { height: 6px; background: var(--line-dim); }
+  .comp-bar > div { height: 6px; }
+  .comp-quick { display: flex; gap: 6px; }
+  .comp-quick button { min-width: 0; width: auto; padding: 4px 10px; font-size: 12px; }
+  .comp-quick button.armed { border-color: var(--bad); color: #fff; background: rgba(229,72,77,0.25); }
+  .mel-row { display: grid; grid-template-columns: minmax(220px, 1fr) auto 26px; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line-dim); }
+  .mel-units { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+  .mel-units button { min-width: 0; width: auto; padding: 4px 10px; font-size: 12px; }
+  .mel-units button.armed { border-color: var(--bad); color: #fff; background: rgba(229,72,77,0.25); }
+  .cb-detail .box { margin: 6px 0 0; }
+  .study-nav button .count { float: right; color: var(--text-dim); font-weight: 400; }
+  .study-nav button .count.armed { color: var(--bad); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+  .tile { min-width: 0; height: 74px; display: flex; flex-direction: column; align-items: flex-start; justify-content: space-between; text-align: left; padding: 10px 14px; }
+  .tile.loading { border-color: var(--accent); }
+  .preset-bar { flex: 1; height: 10px; border: 2px solid var(--line-dim); }
+  .preset-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.3s; }
+  .tile .tile-state { font-weight: 400; font-size: 12px; color: var(--text-dim); text-transform: none; }
+  .fp-head { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 20px; }
+  .fp-apt .icao { font-size: 38px; font-weight: 300; letter-spacing: 1px; }
+  .fp-apt .name { color: var(--text-dim); }
+  .fp-apt.dest { text-align: right; }
+  .fp-mid { text-align: center; color: var(--text-dim); }
+  .fp-mid .big { color: var(--text); font-size: 18px; }
+  .fp-route { font-family: Consolas, monospace; font-size: 13px; line-height: 1.6; word-spacing: 4px; color: var(--text); }
+  .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px 20px; }
+  .kv div span { display: block; }
+  .kv .k { color: var(--text-dim); font-size: 12px; text-transform: uppercase; }
+  .kv .v { font-size: 17px; font-variant-numeric: tabular-nums; }
+  table.navlog { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  table.navlog th { text-align: left; color: var(--text-dim); font-weight: 600; text-transform: uppercase; font-size: 11px; border-bottom: 2px solid var(--line); padding: 6px; }
+  table.navlog td { padding: 5px 6px; border-bottom: 1px solid var(--line-dim); }
+  table.navlog td.num, table.navlog th.num { text-align: right; }
+  .study-grid-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .study-item-btn { border: 2px solid var(--line-dim); background: transparent; color: var(--text); padding: 8px 10px; text-align: left; text-transform: none; font-size: 13px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+  .study-item-btn.active { border-color: var(--ok); }
+  .study-item-btn .amps { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  @media (max-width: 1100px) {
+    .study-layout { grid-template-columns: 1fr; padding: 0 16px; }
+    .study-nav { border-right: 0; border-bottom: 2px solid var(--line-dim); padding-bottom: 10px; max-height: 160px; }
+    .tabs { padding: 14px 16px 0; flex-wrap: wrap; }
+    .page-main { padding: 12px 16px 24px; }
+    .columns { grid-template-columns: 1fr; gap: 0; padding: 16px 24px; overflow-y: auto; }
+    .column { padding-right: 0; }
+    .column { overflow: visible; }
+    button:not(.tab-btn), .link-button, .discord { min-width: 0; width: 100%; }
+    .support-row { flex-direction: column; align-items: stretch; }
+    footer { grid-template-columns: 1fr; gap: 8px; text-align: center; }
+    .brand { justify-content: center; }
+    .server { text-align: center; }
+  }
+</style>
+</head>
+<body>
+<div class="tabs" id="tabs">
+  <button type="button" class="tab-btn active" data-tab="study">Study</button>
+  <button type="button" class="tab-btn" data-tab="failures">Failures</button>
+  <button type="button" class="tab-btn" data-tab="breakers">Circuit Breakers</button>
+  <button type="button" class="tab-btn" data-tab="maintenance">MEL &amp; Maintenance</button>
+  <button type="button" class="tab-btn" data-tab="components">Components</button>
+  <button type="button" class="tab-btn" data-tab="flightplan">Flight Plan</button>
+  <button type="button" class="tab-btn" data-tab="ground">Ground Services</button>
+  <button type="button" class="tab-btn" data-tab="settings">Settings</button>
+  <button type="button" class="tab-btn" data-tab="status">Status</button>
+  <button type="button" class="tab-btn" data-tab="support">Support</button>
+</div>
+<main>
+<div class="tab-panel active" id="tab-study">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="box study-offline" id="study-offline" hidden><span class="label dim">Not connected to X-Plane / the plugin. Retrying…</span></div>
+  <div class="study-layout" id="study-layout">
+    <nav class="study-nav" id="study-nav"></nav>
+    <div class="study-main">
+      <div class="study-toolbar" id="study-toolbar"></div>
+      <div id="study-content"></div>
+    </div>
+  </div>
+</div>
+<div class="tab-panel" id="tab-failures">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="study-layout">
+    <nav class="study-nav" id="failures-nav"></nav>
+    <div class="study-main">
+      <div class="study-toolbar" id="failures-toolbar">
+        <input type="text" id="failures-search" placeholder="Search by ATA number or name…">
+        <label class="row" style="margin:0"><input type="checkbox" id="failures-armed"><span class="label">Armed only</span></label>
+        <button type="button" class="small grey" id="failures-clear">Disarm all</button>
+      </div>
+      <div id="failures-content"></div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-maintenance">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="study-layout">
+    <nav class="study-nav" id="maint-nav"></nav>
+    <div class="study-main">
+      <div class="study-toolbar">
+        <input type="text" id="maint-filter" placeholder="Filter this list, or search the whole MEL (Enter)…">
+        <button type="button" class="small grey" id="maint-refresh">Refresh</button>
+      </div>
+      <div id="maint-content"></div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-components">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="study-layout">
+    <nav class="study-nav" id="comp-nav"></nav>
+    <div class="study-main">
+      <div class="study-toolbar">
+        <input type="text" id="comp-filter" placeholder="Search by name, system or cause…">
+        <label class="row" style="margin:0"><input type="checkbox" id="comp-degraded"><span class="label">Degraded only</span></label>
+        <button type="button" class="small grey" id="comp-restore-all">Restore all</button>
+        <button type="button" class="small grey" id="comp-refresh">Refresh</button>
+      </div>
+      <div id="comp-content"></div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-breakers">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="study-layout">
+    <nav class="study-nav" id="breakers-nav"></nav>
+    <div class="study-main">
+      <div class="study-toolbar" id="breakers-toolbar">
+        <input type="text" id="breakers-search" placeholder="Search by ATA number, name or bus…">
+        <label class="row" style="margin:0"><input type="checkbox" id="breakers-pulled"><span class="label">Pulled/tripped only</span></label>
+        <button type="button" class="small grey" id="breakers-reset-all">Reset all</button>
+      </div>
+      <div id="breakers-content"></div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-flightplan">
+  <div class="page-main">
+    <div class="study-toolbar">
+      <span class="label">SimBrief user ID</span>
+      <input type="text" id="fp-user" style="width:220px" placeholder="From your SimBrief account">
+      <button type="button" class="small" id="fp-fetch">Fetch latest OFP</button>
+      <span class="label dim" id="fp-state"></span>
+    </div>
+    <div id="fp-content"><div class="box"><span class="label dim">Enter your SimBrief user ID and fetch your latest flight plan.</span></div></div>
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-ground">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="page-main" id="ground-content"></div>
+</div>
+
+<div class="tab-panel" id="tab-settings">
+<div class="columns">
+  <div class="column" id="left">
+    <h2>Product Configuration</h2>
+    <form class="box" data-group="product">
+      <label class="row"><input type="checkbox" data-key="xphfbw.autoCrashReport"><span class="label">Auto crash report</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.streamerMode"><span class="label">Streamer mode</span></label>
+      <div class="field"><span class="label">ACARS service</span>
+        <select data-key="ACARS_PROVIDER">
+          <option value="NONE">None</option>
+          <option value="HOPPIE">Hoppie</option>
+          <option value="SAYINTENTIONS">SayIntentions</option>
+        </select></div>
+      <div class="field" data-show="ACARS_PROVIDER=HOPPIE"><span class="label">Hoppie ACARS code</span>
+        <input type="text" data-key="CONFIG_HOPPIE_USERID" data-secret placeholder="Enter Logon Code"></div>
+      <div class="field" data-show="ACARS_PROVIDER=SAYINTENTIONS"><span class="label">SayIntentions logon key</span>
+        <input type="text" data-key="CONFIG_SAI_LOGON_KEY" data-secret placeholder="Enter Logon Key"></div>
+      <div class="grid2">
+        <div class="field"><span class="label">Online features</span>
+          <select data-key="CONFIG_ONLINE_FEATURES_STATUS"><option value="DISABLED">Disabled</option><option value="ENABLED">Enabled</option></select></div>
+        <div class="field"><span class="label">SimBridge</span>
+          <select data-key="CONFIG_SIMBRIDGE_ENABLED"><option value="AUTO ON">Auto on</option><option value="PERM OFF">Off</option></select></div>
+        <div class="field"><span class="label">SimBridge location</span>
+          <select data-key="CONFIG_SIMBRIDGE_REMOTE"><option value="local">This PC</option><option value="remote">Another PC</option></select></div>
+        <div class="field"><span class="label">SimBridge port</span>
+          <input type="number" min="1" max="65535" data-key="CONFIG_SIMBRIDGE_PORT"></div>
+        <div class="field" data-show="CONFIG_SIMBRIDGE_REMOTE=remote"><span class="label">SimBridge IP</span>
+          <input type="text" data-key="CONFIG_SIMBRIDGE_IP"></div>
+        <div class="field"><span class="label">SimBrief user ID</span>
+          <input type="text" data-key="CONFIG_OVERRIDE_SIMBRIEF_USERID" data-secret placeholder="From your SimBrief account"></div>
+        <div class="field"><span class="label">SimBrief auto import</span>
+          <select data-key="CONFIG_AUTO_SIMBRIEF_IMPORT"><option value="DISABLED">Disabled</option><option value="ENABLED">Enabled</option></select></div>
+      </div>
+      <div class="row"><button type="button" class="small" data-action="navigraph">Link Navigraph account</button><span class="label dim" id="navigraph-user"></span></div>
+      <div class="apply"><button type="submit">Apply</button></div>
+    </form>
+
+    <h2>Flight Deck Displays</h2>
+    <form class="box" data-group="displays">
+      <label class="row"><input type="checkbox" data-key="xphfbw.displaySafeMode"><span class="label">Use display safe mode</span><span class="help" title="Draws the instruments with the most compatible settings (lower frame rate, no hardware paths). Use if screens stay black or flicker.">?</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.forceCpuRendering"><span class="label">Force safe mode CPU rendering</span><span class="help" title="Renders every instrument on the CPU: no extra video memory. On by default.">?</span></label>
+      <div class="grid2">
+        <div class="field"><span class="label">Display frame rate</span>
+          <select data-key="xphfbw.displayFps"><option value="60">60</option><option value="30">30</option><option value="20">20</option></select></div>
+        <div class="field"><span class="label">EFB brightness</span>
+          <input type="range" min="20" max="100" step="5" data-key="xphfbw.efbBrightness"></div>
+        <div class="field"><span class="label">DMC self test (s)</span>
+          <input type="number" min="0" max="60" data-key="CONFIG_SELF_TEST_TIME"></div>
+        <div class="field"><span class="label">Initial baro unit</span>
+          <select data-key="CONFIG_INIT_BARO_UNIT"><option value="AUTO">Auto</option><option value="IN HG">inHg</option><option value="HPA">hPa</option></select></div>
+        <div class="field"><span class="label">MCDU keyboard timeout (s)</span>
+          <input type="number" min="0" max="600" data-key="CONFIG_MCDU_KB_TIMEOUT"></div>
+      </div>
+      <label class="row"><input type="checkbox" data-key="ISIS_BARO_UNIT_INHG" data-bool="1,0"><span class="label">ISIS baro in inHg</span></label>
+      <label class="row"><input type="checkbox" data-key="ISIS_METRIC_ALTITUDE" data-bool="1,0"><span class="label">ISIS metric altitude</span></label>
+      <label class="row"><input type="checkbox" data-key="LATLON_EXT_FMT" data-bool="1,0"><span class="label">Extended lat/lon format</span></label>
+      <label class="row"><input type="checkbox" data-key="CONFIG_A380X_SHOW_ECL_SOFTKEYS" data-bool="1,0"><span class="label">Show ECL softkeys</span></label>
+      <label class="row"><input type="checkbox" data-key="FO_SYNC_EFIS_ENABLED" data-bool="1,0"><span class="label">Sync first officer EFIS</span></label>
+      <div class="apply"><button type="submit">Apply</button></div>
+    </form>
+
+  </div>
+
+  <div class="column" id="right">
+    <h2>Aircraft</h2>
+    <form class="box" data-group="aircraft">
+      <div class="grid2">
+        <div class="field"><span class="label">Weight unit</span>
+          <select data-key="EFB_PREFERRED_WEIGHT_UNIT"><option value="kg">kg</option><option value="lb">lb</option></select></div>
+        <div class="field"><span class="label">ADIRS align time</span>
+          <select data-key="CONFIG_ALIGN_TIME"><option value="REAL">Real</option><option value="FAST">Fast</option><option value="INSTANT">Instant</option></select></div>
+        <div class="field"><span class="label">Boarding rate</span>
+          <select data-key="CONFIG_BOARDING_RATE"><option value="REAL">Real</option><option value="FAST">Fast</option><option value="INSTANT">Instant</option></select></div>
+        <div class="field"><span class="label">Refuel rate</span>
+          <select data-key="REFUEL_RATE_SETTING"><option value="REAL">Real</option><option value="FAST">Fast</option><option value="INSTANT">Instant</option></select></div>
+        <div class="field"><span class="label">Thrust reduction alt (ft)</span>
+          <input type="number" min="400" max="5000" step="10" data-key="CONFIG_THR_RED_ALT"></div>
+        <div class="field"><span class="label">Acceleration alt (ft)</span>
+          <input type="number" min="400" max="5000" step="10" data-key="CONFIG_ACCEL_ALT"></div>
+        <div class="field"><span class="label">Engine-out accel alt (ft)</span>
+          <input type="number" min="400" max="5000" step="10" data-key="CONFIG_ENG_OUT_ACCEL_ALT"></div>
+        <div class="field"><span class="label">Pause at T/D distance (NM)</span>
+          <input type="number" min="1" max="99" data-key="PAUSE_AT_TOD_DISTANCE"></div>
+      </div>
+      <label class="row"><input type="checkbox" data-key="DYNAMIC_REGISTRATION_DECAL" data-bool="1,0"><span class="label">Dynamic registration decal</span></label>
+      <label class="row"><input type="checkbox" data-key="CONFIG_PILOT_AVATAR_VISIBLE" data-bool="1,0"><span class="label">Pilot avatars</span></label>
+      <label class="row"><input type="checkbox" data-key="MODEL_WHEELCHOCKS_ENABLED" data-bool="1,0"><span class="label">Wheel chocks</span></label>
+      <label class="row"><input type="checkbox" data-key="MODEL_CONES_ENABLED" data-bool="1,0"><span class="label">Safety cones</span></label>
+      <label class="row"><input type="checkbox" data-key="MODEL_SATCOM_ENABLED" data-bool="1,0"><span class="label">Satcom antenna</span></label>
+      <label class="row"><input type="checkbox" data-key="REALISTIC_TILLER_ENABLED" data-bool="1,0"><span class="label">Realistic tiller</span></label>
+      <label class="row"><input type="checkbox" data-key="PUSHBACK_USE_CONTROLLER_INPUT" data-bool="1,0"><span class="label">Pushback with controller input</span></label>
+      <label class="row"><input type="checkbox" data-key="RMP_VHF_SPACING_25KHZ" data-bool="1,0"><span class="label">RMP 25 kHz spacing</span></label>
+      <label class="row"><input type="checkbox" data-key="RADIO_RECEIVER_USAGE_ENABLED" data-bool="1,0"><span class="label">Radio receiver usage</span></label>
+      <label class="row"><input type="checkbox" data-key="FDR_ENABLED" data-bool="1,0"><span class="label">Flight data recorder</span></label>
+      <label class="row"><input type="checkbox" data-key="LIGHT_PRESET_AUTOLOAD" data-bool="1,0"><span class="label">Autoload light presets</span></label>
+      <div class="grid2" data-show="LIGHT_PRESET_AUTOLOAD=1">
+        <div class="field"><span class="label">Day preset</span><input type="number" min="0" max="10" data-key="LIGHT_PRESET_AUTOLOAD_DAY"></div>
+        <div class="field"><span class="label">Dawn/dusk preset</span><input type="number" min="0" max="10" data-key="LIGHT_PRESET_AUTOLOAD_DAWNDUSK"></div>
+        <div class="field"><span class="label">Night preset</span><input type="number" min="0" max="10" data-key="LIGHT_PRESET_AUTOLOAD_NIGHT"></div>
+      </div>
+      <h2 style="font-size:18px;margin:18px 0 4px">Sound</h2>
+      <label class="row"><input type="checkbox" data-key="SOUND_ANNOUNCEMENTS_ENABLED" data-bool="1,0"><span class="label">Cabin announcements</span></label>
+      <label class="row"><input type="checkbox" data-key="SOUND_PTU_AUDIBLE_COCKPIT" data-bool="1,0"><span class="label">PTU audible in cockpit</span></label>
+      <div class="grid2">
+        <div class="field"><span class="label">Interior engine (dB)</span><input type="number" min="-30" max="10" data-key="SOUND_INTERIOR_ENGINE"></div>
+        <div class="field"><span class="label">Interior wind (dB)</span><input type="number" min="-30" max="10" data-key="SOUND_INTERIOR_WIND"></div>
+        <div class="field"><span class="label">Exterior master (dB)</span><input type="number" min="-30" max="10" data-key="SOUND_EXTERIOR_MASTER"></div>
+      </div>
+      <div class="apply"><button type="submit">Apply</button></div>
+    </form>
+
+    <h2>Simulation</h2>
+    <form class="box" data-group="simulation">
+      <label class="row"><input type="checkbox" data-key="xphfbw.systemsOutOfProcess"><span class="label">Run systems in XPHFBW</span><span class="help" title="FlyByWire's systems run in this app, in lockstep with X-Plane's frame. A crash in the systems cannot take X-Plane down.">?</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.coldStartGroundPower"><span class="label">Cold &amp; dark start on ground power</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.randomFailures"><span class="label">Random failures</span></label>
+      <div class="field" data-show="xphfbw.randomFailures=true"><span class="label">Failure rate multiplier</span>
+        <input type="number" min="0.1" max="1000" step="0.1" data-key="xphfbw.failureRate"></div>
+      <label class="row"><input type="checkbox" data-key="xphfbw.persistence"><span class="label">Airframe wear &amp; damage persistence</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.stateDumps"><span class="label">State dumps</span><span class="help" title="Every variable written to D:\fbw-build\state-dumps every N frames, for diagnosing problems.">?</span></label>
+      <div class="grid2" data-show="xphfbw.stateDumps=true">
+        <div class="field"><span class="label">Every N frames</span><input type="number" min="10" max="10000" data-key="xphfbw.stateDumpFrames"></div>
+        <div class="field"><span class="label">Keep dumps</span><input type="number" min="1" max="1000" data-key="xphfbw.stateDumpKeep"></div>
+      </div>
+      <div class="apply"><button type="submit">Apply</button></div>
+    </form>
+  </div>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-status">
+<div class="columns">
+  <div class="column">
+    <h2>System Status</h2>
+    <div class="box">
+      <div class="status">
+        <button type="button" class="small grey" data-action="restart-all">Restart all</button>
+        <button type="button" class="small grey" data-action="restart-displays">Restart displays</button>
+        <button type="button" class="small grey" data-action="restart-systems">Restart systems</button>
+        <button type="button" class="small" data-action="reset-airframe">Reset airframe</button>
+      </div>
+      <div class="lights">
+        <div><span class="dot" id="dot-xplane"></span><span id="st-xplane">X-Plane: not connected</span></div>
+        <div><span class="dot" id="dot-systems"></span><span id="st-systems">Systems: stopped</span></div>
+        <div><span class="dot" id="dot-displays"></span><span id="st-displays">Displays: stopped</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="column"></div>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-support">
+<div class="columns">
+  <div class="column">
+    <h2>Help &amp; Support</h2>
+    <div class="box">
+      <div class="support-row"><span>Found a problem or want to report an issue?</span><button type="button" class="link-button" data-action="report">Report an Issue</button></div>
+      <div class="support-row"><span>Been asked for your logs?</span><button type="button" class="link-button" data-action="open-logs">Open Logs</button></div>
+      <div class="support-row"><span>Need the systems' variable dumps?</span><button type="button" class="link-button" data-action="open-dumps">Open State Dumps</button></div>
+      <div class="support-row" style="border:0"><span>Want to give feedback or chat with the team?</span>
+        <button type="button" class="discord" data-action="discord">
+          <svg width="42" height="32" viewBox="0 0 71 55" fill="#fff" aria-hidden="true"><path d="M60.1 4.9A58.5 58.5 0 0 0 45.6.4a40 40 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0A38 38 0 0 0 25.8.4 58.4 58.4 0 0 0 11.3 4.9C2.1 18.6-.4 32 .9 45.2a58.9 58.9 0 0 0 17.9 9 43 43 0 0 0 3.8-6.2 38 38 0 0 1-6-2.9l1.5-1.1a42 42 0 0 0 36 0l1.5 1.1a38 38 0 0 1-6 2.9 43 43 0 0 0 3.8 6.2 58.7 58.7 0 0 0 17.9-9C72.6 29.9 68.8 16.6 60.1 4.9ZM23.7 37.1c-3.5 0-6.4-3.2-6.4-7.2s2.8-7.2 6.4-7.2 6.5 3.3 6.4 7.2c0 4-2.8 7.2-6.4 7.2Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.2s2.8-7.2 6.4-7.2 6.5 3.3 6.4 7.2c0 4-2.8 7.2-6.4 7.2Z"/></svg>
+          <span>JOIN US ON DISCORD</span></button></div>
+      <div class="changelog" id="changelog">
+        <h3>Changelog</h3>
+        <h4>XPHFBW A380X v0.1.0</h4>
+        <em>In development</em>
+        <b>Systems</b>
+        <ul>
+          <li>FlyByWire's systems run in their own process, in lockstep with X-Plane's frame</li>
+          <li>Flight warning system clock fixed: FWS 1+2 FAULT clears after the self test</li>
+          <li>Ground power stays connected on a cold start</li>
+          <li>Every MSFS variable, event and runtime call FlyByWire uses is served or reported</li>
+        </ul>
+        <b>Flight deck</b>
+        <ul>
+          <li>Display brightness follows the knobs in linear light</li>
+          <li>Placard lettering without black boxes or shadows</li>
+          <li>Cold and dark apron start states from FlyByWire's own start steps</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+</main>
+
+<footer>
+  <div class="brand">
+    <img src="/xplane12-logo.png" alt="X-Plane 12" onerror="this.hidden=true">
+    <span>XPHFBW</span>
+  </div>
+  <div class="legal">&copy; 2026 XPHFBW &middot; FlyByWire A380X (GPL-3.0)<br><a href="#" data-action="licenses">LICENSES</a></div>
+  <div class="server">Systems link: <span class="dot" id="dot-link" style="margin:0 0 0 4px"></span></div>
+</footer>
+<div class="toast" id="toast"></div>
+
+
+</body>
+</html>
+
+<style id="efb-palette">
+  /* The X-Plane app's own colours, restated for the EFB. Appended rather
+     than edited so app/ui/index.html stays a byte-for-byte source. */
+  :root {
+    --bg: #0d1218;
+    --panel: #0d1218;
+    --line: #5c6b7a;
+    --line-dim: #2f3a45;
+    --text: #eef4f9;
+    --text-dim: #93a3b2;
+    --heading: #93a3b2;
+    --field: #06090d;
+    --button: #1d2732;
+    --button-line: #5c6b7a;
+    --accent: #00c2cc;
+    --ok: #3ccf6e;
+    --warn: #e8a33d;
+    --bad: #e05c5c;
+  }
+  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+  /* The footer belongs to the standalone app: its logo, its own branding,
+     and the address of a plugin port that does not exist here. */
+  footer { display: none; }
+
+  /* The app collapses its sidebar under @media (max-width: 1100px), and the
+     EFB's viewport is narrower than that in CSS pixels -- so its phone
+     layout fires on what is actually a wide landscape instrument, stacking
+     the chapter nav above the content. Put the sidebar back. These follow
+     the media block in source order, so they win at equal specificity. */
+  .study-layout {
+    grid-template-columns: clamp(150px, 18vw, 230px) minmax(0, 1fr);
+    padding: 0 var(--gutter);
+  }
+  .study-nav {
+    border-right: 2px solid var(--line-dim);
+    border-bottom: 0;
+    max-height: none;
+    padding: 0 10px 0 0;
+  }
+  .study-nav button { display: block; width: 100%; }
+  .study-nav-group { margin: 14px 0 4px; }
+  /* FlyByWire's own tablet covers these, and the last three of them
+     talk to the X-Plane plugin, which is not here. */
+  .tab-btn[data-tab="flightplan"],
+  .tab-btn[data-tab="ground"],
+  .tab-btn[data-tab="settings"],
+  .tab-btn[data-tab="status"],
+  .tab-btn[data-tab="support"] { display: none; }
+</style>
