@@ -144,12 +144,28 @@ PALETTE = """
 # The instrument is a fixed size, so a clamp against the viewport has one
 # answer, and it can be worked out here instead of at runtime.
 
-# From the A380X's own panel.cfg:
+# The screen, from the A380X's own panel.cfg:
 #   [VCockpit15] pixel_size=1430,1000
 #   htmlgauge00=A380X/EFB/efb.html, 0,0,1430,1000
-# Nothing in efb.css scales the document, so these are CSS pixels.
-VIEWPORT_W = 1430.0
-VIEWPORT_H = 1000.0
+# install.ps1 -Scale can enlarge the render target, but study.js pins the
+# document back to this, so this is the screen in CSS pixels either way.
+SCREEN_W = 1430.0
+SCREEN_H = 1000.0
+
+# The coordinate system the app is laid out in, which is NOT the screen.
+#
+# The app was written for a desktop window a metre away. The tablet is a
+# small object in a 3D cockpit, and FlyByWire's own EFB pages are set about
+# 1.4 times larger than ours to suit it -- their body text next to ours is
+# the whole of the difference, and no amount of resolution closes it.
+#
+# So study.js lays the app out in a 1000px-wide box and scales that box up
+# to fill the 1430px screen. Every length grows by 1.43 and not one device
+# pixel is lost, because the scaling happens at draw time. These are the
+# numbers the app's own lengths are resolved against, so they belong here;
+# study.js reads the same width back out of APP_W.
+VIEWPORT_W = 1000.0
+VIEWPORT_H = 699.0
 
 LENGTH = re.compile(r'^(-?\d*\.?\d+)(px|vw|vh|vmin|vmax)$')
 # The word-boundary look-behind is what keeps this off `minmax(` and
@@ -251,6 +267,67 @@ def each_rule(css):
         i = j
 
 
+CONDITION = re.compile(r'\(\s*(max|min)-(width|height)\s*:\s*([\d.]+)px\s*\)')
+
+
+def resolve_media(css, unresolved):
+    """Settle every @media here, since the screen cannot change size.
+
+    The conditions are measured against the SCREEN, not against the box the
+    app is laid out in. That distinction is the whole point: a breakpoint is
+    the app asking "am I on a small screen?", and the answer is no -- it is
+    on a 1430px landscape instrument. The 1000px box is a coordinate system
+    chosen to make the type bigger, not a small window, and answering the
+    app's question with it would collapse the sidebar onto the top of the
+    page, which is where this whole thread of bugs started.
+
+    A block whose conditions are all true is inlined; one with a false
+    condition is dropped. Anything not understood is left alone and reported.
+    """
+    out = ''
+    i = 0
+    while i < len(css):
+        open_at = css.find('{', i)
+        if open_at < 0:
+            out += css[i:]
+            break
+        depth, j = 1, open_at + 1
+        while j < len(css) and depth:
+            depth += (css[j] == '{') - (css[j] == '}')
+            j += 1
+        head, body = css[i:open_at].strip(), css[open_at + 1:j - 1]
+
+        if not re.match(r'@media\b', head, re.I):
+            out += css[i:open_at] + '{' + body + '}'
+            i = j
+            continue
+
+        query = head[len('@media'):]
+        parts = CONDITION.findall(query)
+        bare = CONDITION.sub('', query)
+        # Only plain `and`-joined width/height conditions, optionally
+        # prefixed with `only screen`. Anything else is someone else's
+        # problem and stays exactly as it was.
+        if not parts or re.sub(r'\b(only|screen|and|all)\b|\s', '', bare):
+            unresolved.append(head)
+            out += head + '{' + resolve_media(body, unresolved) + '}'
+            i = j
+            continue
+
+        keep = True
+        for kind, axis, value in parts:
+            have = SCREEN_W if axis == 'width' else SCREEN_H
+            limit = float(value)
+            if kind == 'max' and have > limit:
+                keep = False
+            if kind == 'min' and have < limit:
+                keep = False
+        if keep:
+            out += resolve_media(body, unresolved)
+        i = j
+    return out
+
+
 GAP = re.compile(r'(?<![-\w])gap\s*:\s*([^;}]+)')
 
 
@@ -294,10 +371,18 @@ def flex_gap_fallback(css):
 
 def compat(page):
     """Apply every fix above to each <style> block in the page."""
-    skipped, gaps = [], []
+    skipped, gaps, unresolved = [], [], []
 
     def fix(match):
-        css = flatten_math(match.group(2), skipped)
+        # Comments go first. Everything below walks braces to find where a
+        # rule ends, and a comment is the one place a brace can hide from
+        # that -- but the immediate reason is duller: a comment sitting in
+        # front of an @media becomes part of its selector text, and the
+        # block stops looking like an @media at all. The prose lives in
+        # app/ui/index.html and in this file; the shipped CSS is generated.
+        css = re.sub(r'/\*.*?\*/', ' ', match.group(2), flags=re.S)
+        css = flatten_math(css, skipped)
+        css = resolve_media(css, unresolved)
         # `inset` and `overflow-wrap: anywhere` both post-date this engine.
         # Each gets a long-hand written beside it; the new spelling stays,
         # harmlessly ignored, so the source rule is still recognisable.
@@ -316,7 +401,7 @@ def compat(page):
                  '     Generated by build.py -- see flex_gap_fallback. */\n  '
                  + '\n  '.join(gaps) + '\n</style>\n')
 
-    return page, skipped, len(gaps)
+    return page, skipped, len(gaps), unresolved
 
 
 HEADER = (
@@ -409,7 +494,7 @@ def main():
         + hidden + ' { display: none; }')
 
     page = html[:match.start()] + html[match.end():] + palette
-    page, skipped, gap_rules = compat(page)
+    page, skipped, gap_rules, unresolved = compat(page)
 
     # Prove it rather than trust it. Anything left that this engine cannot
     # parse is a declaration that will be dropped in the sim with no error.
@@ -438,10 +523,16 @@ def main():
         sys.exit('--gutter did not resolve to a plain length: '
                  + (gutter.group(1) if gutter else 'not found'))
 
-    print('  css: flattened to %gx%g, %d flex-gap fallbacks'
-          % (VIEWPORT_W, VIEWPORT_H, gap_rules))
+    left = re.findall(r'@media[^{]*', styles)
+    if left and not unresolved:
+        sys.exit('@media survived the build: ' + '; '.join(sorted(set(left))))
+
+    print('  css: laid out at %gx%g on a %gx%g screen, %d flex-gap fallbacks'
+          % (VIEWPORT_W, VIEWPORT_H, SCREEN_W, SCREEN_H, gap_rules))
     for call in sorted(set(skipped)):
         print('       left alone (cannot resolve here): ' + call)
+    for query in sorted(set(unresolved)):
+        print('       media query not understood, kept: ' + query)
     io.open(os.path.join(OUT, 'study-app.html'), 'w', encoding='utf8', newline='\n').write(page)
 
     shutil.copyfile(FIXTURE, os.path.join(OUT, 'test', 'study-fixture.json'))

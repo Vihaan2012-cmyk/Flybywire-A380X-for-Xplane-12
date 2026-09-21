@@ -20,6 +20,21 @@
   var PAGE = BASE + 'study-app.html';
   var HOST = 'ds-app';
 
+  // The width the app is laid out in, which is not the width of the screen.
+  //
+  // The app was written for a desktop window a metre away. This is a small
+  // object in a 3D cockpit, and FlyByWire's own EFB pages are set about 1.4
+  // times larger than the app's to suit it -- put their dashboard beside
+  // our component list and that difference is the whole of it. Resolution
+  // does not close it; 12px text is 12px text however finely it is drawn.
+  //
+  // So the app gets a 1000px-wide box and the box is scaled up to fill the
+  // screen. Every length grows by the same factor and nothing is lost,
+  // because the scaling happens when it is drawn rather than when it is
+  // measured. build.py resolves the app's own lengths against this same
+  // number, so the two must not drift.
+  var APP_W = 1000;
+
   var shell = null;
   var loaded = false;
 
@@ -37,25 +52,34 @@
     // scaled twice again. This is set inline because a stylesheet rule
     // cannot override an inline style without !important, and fighting our
     // own declaration is a worse way to say it.
-    var size = pinned
-      ? 'width:' + pinned[0] + 'px;height:' + pinned[1] + 'px;'
-      : 'width:100vw;height:100vh;';
+    var screenW = pinned ? pinned[0] : window.innerWidth;
+    var screenH = pinned ? pinned[1] : window.innerHeight;
     shell.style.cssText =
-      'position:fixed;top:0;left:0;' + size + 'z-index:2147483000;' +
-      'display:none;background:#0d1218;overflow:hidden;';
+      'position:fixed;top:0;left:0;width:' + screenW + 'px;height:' + screenH +
+      'px;z-index:2147483000;display:none;background:#0d1218;overflow:hidden;';
 
+    // The app's own box: APP_W wide, whatever height that leaves at the
+    // screen's shape, drawn at the size of the screen.
+    var zoom = screenW / APP_W;
     var host = document.createElement('div');
     host.id = HOST;
-    host.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;';
+    host.style.cssText =
+      'width:' + APP_W + 'px;height:' + Math.round(screenH / zoom) + 'px;' +
+      'transform:scale(' + zoom + ');transform-origin:0 0;' +
+      'display:flex;flex-direction:column;overflow:hidden;';
     shell.appendChild(host);
 
-    // Sits above the app, clear of its tab strip.
+    // Sits above the app, in the screen's own coordinates rather than the
+    // app's -- so its size is scaled by hand to match what the app around
+    // it ends up looking like, instead of staying stubbornly 13px.
     var close = document.createElement('div');
     close.textContent = 'CLOSE';
     close.style.cssText =
-      'position:absolute;right:10px;bottom:10px;z-index:10;cursor:pointer;' +
-      'font:600 13px "Segoe UI",system-ui,sans-serif;color:#eef4f9;' +
-      'border:2px solid #5c6b7a;padding:8px 18px;background:#0d1218;';
+      'position:absolute;right:' + Math.round(10 * zoom) + 'px;bottom:' +
+      Math.round(10 * zoom) + 'px;z-index:10;cursor:pointer;' +
+      'font:600 ' + Math.round(13 * zoom) + 'px "Segoe UI",Tahoma,sans-serif;color:#eef4f9;' +
+      'border:2px solid #5c6b7a;padding:' + Math.round(8 * zoom) + 'px ' +
+      Math.round(18 * zoom) + 'px;background:#0d1218;';
     close.addEventListener('click', hide);
     shell.appendChild(close);
 
