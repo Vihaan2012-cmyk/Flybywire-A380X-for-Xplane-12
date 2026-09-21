@@ -484,6 +484,10 @@ pub struct Engine {
     governor: Governor,
     gas: gas_path::GasPath,
     egt_lag_c: f64,
+    /// Latched by the EEC's start protection when TGT passes the
+    /// ground-start limit below 50 % HP speed. Holds fuel shut until the
+    /// crew cycles the master switch, as a real hot-start abort does.
+    start_aborted: bool,
     hot: hot_section::HotSection,
     oil: oil::OilSystem,
     /// Temperatures start at the first frame's ambient (a cold-soaked
@@ -567,6 +571,35 @@ impl Engine {
     /// See [`TGT_START_CUTBACK_BAND_C`]. Uses the lagged TGT the engine
     /// publishes, which is what a real EEC's own probe gives it -- the
     /// sensor's lag is part of the loop, not an error in it.
+    /// The other half of the EEC's start protection: the limiter above
+    /// holds TGT off the limit by metering fuel, and this aborts the start
+    /// if it gets there anyway -- a hot start the schedule could not hold,
+    /// which on a real engine means the EEC shuts the HP fuel valve and the
+    /// crew motors the engine before trying again.
+    ///
+    /// With the limiter working this never fires on a healthy start (the
+    /// peak sits around 760 C, and only after the core is past 50 % HP
+    /// speed where this no longer applies). It exists for the starts the
+    /// limiter cannot save: a hot restart into soaked metal, a failed
+    /// igniter relit late, a compressor that will not pass air. Those used
+    /// to run to whatever temperature the fuel could produce, because
+    /// nothing in either FlyByWire's FADEC or this model watched TGT at
+    /// all -- their own start EGT is a polynomial of N3 rather than a
+    /// consequence of combustion, so a hot start could not happen there and
+    /// needed no protection.
+    fn update_start_protection(&mut self, n3_pct: f64, fuel_valve_open: bool) {
+        // Cycling the master switch is what clears it, as on the aircraft.
+        if !fuel_valve_open {
+            self.start_aborted = false;
+            return;
+        }
+        if n3_pct < crate::physics::damage::trent900::GROUND_START_HP_PCT
+            && self.egt_lag_c > crate::physics::damage::trent900::TGT_GROUND_START_C
+        {
+            self.start_aborted = true;
+        }
+    }
+
     fn start_tgt_cutback(&self, n3_pct: f64) -> f64 {
         // The limit is scoped the way the certification text scopes it:
         // 700 C applies *below 50 % HP speed* (`GROUND_START_HP_PCT`).
@@ -592,6 +625,7 @@ impl Engine {
             gas,
             design,
             egt_lag_c: 15.0,
+            start_aborted: false,
             hot: hot_section::HotSection::new(T_REF_K),
             oil: oil::OilSystem::new(T_REF_K),
             soaked: false,
@@ -715,15 +749,20 @@ impl Engine {
         // fan has run past its target, which it does repeatedly on the way
         // up. Using it as the gate dropped whole frames of start fuel.
         let lit = Governor::combustion_floor_met(n1_corr, n3_corr);
+        self.update_start_protection(n3_pct, inputs.fuel_valve_open);
         let wf = if inputs.fuel_valve_open && lit && !self.start_complete {
             let idle_cn1 = crate::fadec::table1502::icn1(alt_ft, inputs.mach, ambient_t - 273.15);
             let idle_ff_kg_h = crate::fadec::polynomial::corrected_fuel_flow(idle_cn1, inputs.mach, alt_ft)
                 * 0.453_593_4
                 * (ambient_p / P_REF_PA)
                 * correction;
-            let scheduled = (crate::fadec::polynomial::start_ff(n3_pct, fbw_idle_n3, idle_ff_kg_h) / 3600.0)
-                .min(mdot_to_combustor * MAX_COMBUSTOR_FUEL_AIR_RATIO)
-                * self.start_tgt_cutback(n3_pct);
+            let scheduled = if self.start_aborted {
+                0.0
+            } else {
+                (crate::fadec::polynomial::start_ff(n3_pct, fbw_idle_n3, idle_ff_kg_h) / 3600.0)
+                    .min(mdot_to_combustor * MAX_COMBUSTOR_FUEL_AIR_RATIO)
+                    * self.start_tgt_cutback(n3_pct)
+            };
             self.governor.track(scheduled, n1_corr, self.gas.design.wf_kg_s);
             scheduled
         } else {
@@ -1297,6 +1336,48 @@ mod tests {
         let standard = peak_start_egt(T_REF_K);
         let hot = peak_start_egt(T_REF_K + 30.0);
         assert!(hot > standard + 20.0, "hot day {hot} C vs standard day {standard} C");
+    }
+
+    /// The EEC's start protection, both halves. A healthy ground start
+    /// never trips the abort (the limiter holds TGT well clear of it), and
+    /// a start that does reach the limit below 50 % HP speed is cut and
+    /// stays cut until the master switch is cycled -- not merely throttled.
+    #[test]
+    fn the_eec_aborts_a_start_that_reaches_the_ground_start_limit_and_stays_aborted() {
+        use crate::physics::damage::trent900::{GROUND_START_HP_PCT, TGT_GROUND_START_C};
+
+        // A healthy start: run one and confirm the protection never latched.
+        let mut engine = Engine::new();
+        let mut inputs = EngineInputs { target_n1_corrected_pct: IDLE_N1_PCT, ..isa_sea_level() };
+        let mut out = EngineOutputs::default();
+        for _ in 0..(90.0 / inputs.dt_s) as usize {
+            inputs.starter_engaged = out.n3_pct < starter::CUTOFF_N3_FRAC * 100.0;
+            out = engine.step(&inputs);
+            assert!(!engine.start_aborted, "a healthy start must not trip the abort");
+        }
+
+        // The protection itself, driven directly: below 50 % HP speed and
+        // past the ground-start limit is a hot start, and it latches.
+        let mut hot = Engine::new();
+        hot.egt_lag_c = TGT_GROUND_START_C + 1.0;
+        hot.update_start_protection(GROUND_START_HP_PCT - 1.0, true);
+        assert!(hot.start_aborted, "TGT past the limit below 50 % HP must abort the start");
+
+        // It does not clear just because the engine cooled: on the aircraft
+        // the crew cycles the master switch.
+        hot.egt_lag_c = 200.0;
+        hot.update_start_protection(GROUND_START_HP_PCT - 1.0, true);
+        assert!(hot.start_aborted, "the abort must stay latched while the valve is open");
+
+        hot.update_start_protection(GROUND_START_HP_PCT - 1.0, false);
+        assert!(!hot.start_aborted, "cycling the master switch clears it");
+
+        // Above 50 % HP speed the ground-start limit no longer applies, so
+        // the running limits govern and this must not fire.
+        let mut running = Engine::new();
+        running.egt_lag_c = TGT_GROUND_START_C + 50.0;
+        running.update_start_protection(GROUND_START_HP_PCT + 1.0, true);
+        assert!(!running.start_aborted, "the ground-start limit does not apply above 50 % HP speed");
     }
 
     #[test]
