@@ -14,6 +14,7 @@ pub const WAIT_OBJECT_0: u32 = 0;
 pub const WAIT_TIMEOUT: u32 = 0x102;
 pub const INFINITE: u32 = 0xFFFF_FFFF;
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn CreateFileMappingW(file: Handle, attributes: *mut c_void, protect: u32, size_high: u32, size_low: u32, name: *const u16) -> Handle;
@@ -28,6 +29,32 @@ extern "system" {
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
     fn CloseHandle(object: Handle) -> i32;
 }
+
+/// Not Windows -- the MSFS wasm build compiles this module, though nothing
+/// there runs a second process. Each call answers as the real one does when
+/// the object cannot be had: a null handle, a failed wait. `Shared::create`,
+/// `Event::open` and the rest then return `None` through their existing
+/// checks, and `remote::Systems::Remote` is simply never constructed.
+#[cfg(not(windows))]
+#[allow(non_snake_case)]
+mod stand_ins {
+    use super::Handle;
+    use std::ffi::c_void;
+    const WAIT_FAILED: u32 = 0xFFFF_FFFF;
+    pub unsafe fn CreateFileMappingW(_: Handle, _: *mut c_void, _: u32, _: u32, _: u32, _: *const u16) -> Handle { std::ptr::null_mut() }
+    pub unsafe fn OpenFileMappingW(_: u32, _: i32, _: *const u16) -> Handle { std::ptr::null_mut() }
+    pub unsafe fn MapViewOfFile(_: Handle, _: u32, _: u32, _: u32, _: usize) -> *mut c_void { std::ptr::null_mut() }
+    pub unsafe fn UnmapViewOfFile(_: *const c_void) -> i32 { 0 }
+    pub unsafe fn CreateEventW(_: *mut c_void, _: i32, _: i32, _: *const u16) -> Handle { std::ptr::null_mut() }
+    pub unsafe fn OpenEventW(_: u32, _: i32, _: *const u16) -> Handle { std::ptr::null_mut() }
+    pub unsafe fn SetEvent(_: Handle) -> i32 { 0 }
+    pub unsafe fn WaitForSingleObject(_: Handle, _: u32) -> u32 { super::WAIT_TIMEOUT }
+    pub unsafe fn WaitForMultipleObjects(_: u32, _: *const Handle, _: i32, _: u32) -> u32 { WAIT_FAILED }
+    pub unsafe fn OpenProcess(_: u32, _: i32, _: u32) -> Handle { std::ptr::null_mut() }
+    pub unsafe fn CloseHandle(_: Handle) -> i32 { 0 }
+}
+#[cfg(not(windows))]
+use stand_ins::*;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

@@ -18,6 +18,8 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
+    wasm_link_args();
+
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let fbw = manifest.join("../fbw-aircraft/fbw-a380x/src/wasm/fbw_a380/src");
@@ -145,5 +147,45 @@ fn copy(from: &Path, to: &Path) {
     // Only rewrite when changed, so the C++ is not rebuilt for nothing.
     if std::fs::read(to).ok().as_deref() != Some(&bytes[..]) {
         std::fs::write(to, bytes).unwrap();
+    }
+}
+
+/// The MSFS build. `msfs/deep-wasm` links this crate as a library, but the
+/// `cdylib` in `crate-type` is built alongside the rlib whatever depends on
+/// it, and for `wasm32-wasip1` that link needs the SDK's C library and the
+/// export/undefined flags FlyByWire's own modules use, or it fails on the
+/// first `kernel32` symbol. Same list as `msfs/lvar-bench/build.rs`, which
+/// documents where each flag comes from. A host build emits nothing.
+fn wasm_link_args() {
+    println!("cargo:rerun-if-env-changed=MSFS_SDK");
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if !target.starts_with("wasm32") {
+        return;
+    }
+    let sdk = std::env::var("MSFS_SDK")
+        .ok()
+        .filter(|p| Path::new(p).exists())
+        .or_else(|| ["/workdir/MSFS_SDK", r"C:\MSFS SDK"].into_iter().find(|p| Path::new(p).exists()).map(String::from))
+        .expect("wasm32 build needs the MSFS SDK: set MSFS_SDK, or build in FlyByWire's dev-env image (msfs/deep-wasm/build.ps1)");
+    let sysroot_lib = format!("{sdk}/WASM/wasi-sysroot/lib/wasm32-wasi");
+    for arg in [
+        "-l".to_string(),
+        "c".to_string(),
+        format!("{sysroot_lib}/libclang_rt.builtins-wasm32.a"),
+        "-L".to_string(),
+        sysroot_lib.clone(),
+        "--export-table".to_string(),
+        "--allow-undefined".to_string(),
+        "--export-dynamic".to_string(),
+        "--export=__wasm_call_ctors".to_string(),
+        "--export=malloc".to_string(),
+        "--export=free".to_string(),
+        "--export=mark_decommit_pages".to_string(),
+        "--export=mallinfo".to_string(),
+        "--export=mchunkit_begin".to_string(),
+        "--export=mchunkit_next".to_string(),
+        "--export=get_pages_state".to_string(),
+    ] {
+        println!("cargo:rustc-link-arg={arg}");
     }
 }

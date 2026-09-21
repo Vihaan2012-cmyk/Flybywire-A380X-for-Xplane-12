@@ -159,10 +159,26 @@ const NUMBER_TYPES: c_int = 1 | 2 | 4;
 /// Run every frame, after the flight model.
 const EVERY_FRAME: f32 = -1.;
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn LoadLibraryA(name: *const c_char) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+}
+
+/// Not Windows -- the MSFS wasm build compiles this file. There is no
+/// XPLM_64.dll (nor opengl32.dll) in that process to load, and these answer exactly as the real
+/// calls do for a DLL that is not there: a null module, so every loader
+/// above returns `None`. Nothing is stood in for.
+#[cfg(not(windows))]
+#[allow(non_snake_case)]
+unsafe fn LoadLibraryA(_name: *const c_char) -> *mut c_void {
+    std::ptr::null_mut()
+}
+#[cfg(not(windows))]
+#[allow(non_snake_case)]
+unsafe fn GetProcAddress(_module: *mut c_void, _name: *const c_char) -> *mut c_void {
+    std::ptr::null_mut()
 }
 
 /// X-Plane's functions, bound to the copy of XPLM already in the process.

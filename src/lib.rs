@@ -470,8 +470,8 @@ impl Vars {
                 }
                 let Ok(c) = CString::new(dataref.clone()) else { continue };
                 // The refcon carries the slot: type in the high bits, index
-                // in the low ones.
-                let refcon = ((kind << 32) | i) as *mut c_void;
+                // in the low ones. `slot_of` is the inverse.
+                let refcon = ((kind << SLOT_SHIFT) | i) as *mut c_void;
                 self.xplm.publish(&c, refcon);
                 self.kept.push(c);
                 self.slots[kind][i].published = true;
@@ -2186,10 +2186,17 @@ fn start_xphfbw<V: VariableRegistry + SimulatorReaderWriter>(
 static mut PLUGIN: Option<Box<Plugin>> = None;
 static mut XPLM: Option<Xplm> = None;
 
+/// Where the slot type sits in a packed refcon: the upper half of the
+/// word. On the 64-bit plugin that is bit 32 and the index has 32 bits,
+/// exactly as before; on a 32-bit target (the MSFS wasm build compiles
+/// this file, though nothing there ever registers an accessor) it is bit
+/// 16, and a shift by 32 would not compile at all.
+const SLOT_SHIFT: u32 = usize::BITS / 2;
+
 /// The slot a dataref accessor was registered with.
 fn slot_of(refcon: *mut c_void) -> (usize, usize) {
     let packed = refcon as usize;
-    (packed >> 32, packed & 0xffff_ffff)
+    (packed >> SLOT_SHIFT, packed & ((1usize << SLOT_SHIFT) - 1))
 }
 
 fn value_of(refcon: *mut c_void) -> f64 {

@@ -45,6 +45,7 @@ pub fn object_name(tag: &str, what: &str) -> String {
 // A named mutex, for many writers across processes.
 // ---------------------------------------------------------------------------
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn CreateMutexW(attributes: *mut std::ffi::c_void, initial_owner: i32, name: *const u16) -> win::Handle;
@@ -53,6 +54,23 @@ extern "system" {
     fn WaitForSingleObject(object: win::Handle, milliseconds: u32) -> u32;
     fn CloseHandle(object: win::Handle) -> i32;
 }
+
+/// Not Windows -- the MSFS wasm build compiles this file, though no second
+/// process exists there to share a mutex with. Answers as the real calls do
+/// when the object cannot be had, so `NamedMutex::create`/`open` return
+/// `None` through their existing null checks.
+#[cfg(not(windows))]
+#[allow(non_snake_case)]
+mod stand_ins {
+    use crate::remote::win;
+    pub unsafe fn CreateMutexW(_: *mut std::ffi::c_void, _: i32, _: *const u16) -> win::Handle { std::ptr::null_mut() }
+    pub unsafe fn OpenMutexW(_: u32, _: i32, _: *const u16) -> win::Handle { std::ptr::null_mut() }
+    pub unsafe fn ReleaseMutex(_: win::Handle) -> i32 { 0 }
+    pub unsafe fn WaitForSingleObject(_: win::Handle, _: u32) -> u32 { win::WAIT_TIMEOUT }
+    pub unsafe fn CloseHandle(_: win::Handle) -> i32 { 0 }
+}
+#[cfg(not(windows))]
+use stand_ins::*;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

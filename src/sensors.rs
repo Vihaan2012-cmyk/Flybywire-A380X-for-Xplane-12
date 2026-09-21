@@ -162,10 +162,26 @@ pub const ILS_RECEIVER: usize = 2;
 /// XPLMNavType's glide slope (XPLMNavigation.h:61).
 const XPLM_NAV_GLIDESLOPE: c_int = 32;
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn LoadLibraryA(name: *const c_char) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+}
+
+/// Not Windows -- the MSFS wasm build compiles this file. There is no
+/// XPLM_64.dll in that process to load, and these answer exactly as the real
+/// calls do for a DLL that is not there: a null module, so every loader
+/// above returns `None`. Nothing is stood in for.
+#[cfg(not(windows))]
+#[allow(non_snake_case)]
+unsafe fn LoadLibraryA(_name: *const c_char) -> *mut c_void {
+    std::ptr::null_mut()
+}
+#[cfg(not(windows))]
+#[allow(non_snake_case)]
+unsafe fn GetProcAddress(_module: *mut c_void, _name: *const c_char) -> *mut c_void {
+    std::ptr::null_mut()
 }
 
 type FindNavAidFn =
