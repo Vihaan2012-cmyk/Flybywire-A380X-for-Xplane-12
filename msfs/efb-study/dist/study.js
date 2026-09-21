@@ -23,11 +23,25 @@
   var shell = null;
   var loaded = false;
 
+  // The size the document has been pinned to when the render target is
+  // larger than the page was written for -- see applyScale. Null means the
+  // target is its original size and the viewport can be trusted.
+  var pinned = null;
+
   function build() {
     shell = document.createElement('div');
     shell.id = 'deepstudy';
+    // Not 100vw/100vh when the document is pinned: a viewport unit measures
+    // the enlarged render target, not the box the page was pinned into, and
+    // the overlay would lay itself out at twice the width before being
+    // scaled twice again. This is set inline because a stylesheet rule
+    // cannot override an inline style without !important, and fighting our
+    // own declaration is a worse way to say it.
+    var size = pinned
+      ? 'width:' + pinned[0] + 'px;height:' + pinned[1] + 'px;'
+      : 'width:100vw;height:100vh;';
     shell.style.cssText =
-      'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:2147483000;' +
+      'position:fixed;top:0;left:0;' + size + 'z-index:2147483000;' +
       'display:none;background:#0d1218;overflow:hidden;';
 
     var host = document.createElement('div');
@@ -298,16 +312,15 @@
   function applyScale() {
     var scale = window.innerWidth / 1430;
     if (!(scale > 1.01)) return;
+    pinned = [1430, 1000];
     var st = document.createElement('style');
     st.id = 'deepstudy-scale';
     st.textContent =
       'html, body { width: 1430px; height: 1000px; margin: 0; overflow: hidden; }' +
       'body { transform: scale(' + scale + '); transform-origin: 0 0; }' +
       // Tailwind's viewport-sized utilities would still measure the real
-      // target rather than the box we just pinned, so restate those two.
-      '.h-screen { height: 1000px; } .w-screen { width: 1430px; }' +
-      // Ours is fixed-positioned in 100vw/100vh, same problem.
-      '#deepstudy { width: 1430px; height: 1000px; }';
+      // target rather than the box just pinned, so restate those two.
+      '.h-screen { height: 1000px; } .w-screen { width: 1430px; }';
     document.head.appendChild(st);
   }
 
