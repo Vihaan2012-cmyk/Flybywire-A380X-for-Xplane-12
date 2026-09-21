@@ -103,6 +103,46 @@ fn main() {
     });
     crash::install(shared.clone());
 
+    // Outlive nobody. The plugin passes its own process id as the second
+    // positional argument, and until now the only thing that watched it was
+    // the systems thread below -- which exists only when the plugin also
+    // chose this app as its *systems* backend. Started for the instrument
+    // browsers alone, or with the plugin running the systems in-process or
+    // in fbw_a380_systems_server.exe, nothing watched anything: X-Plane
+    // exited and this app and its CEF children stayed up indefinitely,
+    // still holding their GPU surfaces (five of them were found alive an
+    // hour and a half after X-Plane had gone, the parent still spawning
+    // renderers).
+    //
+    // A parent id given at all now means "die with that process", whatever
+    // else this instance is doing. A standalone launch passes none and is
+    // unaffected.
+    if let Some(pid) = parent_pid {
+        std::thread::Builder::new()
+            .name("parent watch".into())
+            .spawn(move || {
+                use fbw_a380_systems::remote::win;
+                let Some(parent) = win::Process::open(pid) else {
+                    // Already gone, or not ours to open: either way there is
+                    // nothing to serve.
+                    logging::log(&format!("app: parent {pid} could not be opened; exiting"));
+                    window::quit_from_any_thread();
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    std::process::exit(0);
+                };
+                while win::wait_any(&[parent.handle()], 1000).is_none() {}
+                logging::log(&format!("app: parent {pid} has exited; shutting down"));
+                window::quit_from_any_thread();
+                // Same reasoning as the systems thread: CEF's orderly
+                // shutdown waits on every instrument browser and can hang
+                // with nobody left to close them.
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                logging::log("app: shutdown did not finish after the parent went; exiting");
+                std::process::exit(0);
+            })
+            .ok();
+    }
+
     // FlyByWire's systems, for the plugin that started us.
     if let Some(tag) = tag.clone() {
         let s = shared.clone();
