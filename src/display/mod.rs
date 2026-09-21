@@ -225,10 +225,43 @@ impl Tess {
         }
     }
 
+    /// Write one screen's stream out, when `FBW_DUMP_STREAMS` names a folder.
+    ///
+    /// The screens draw correctly offline. Every op sequence captured from
+    /// the instruments renders its geometry in the right place, under
+    /// rotation and anisotropic scale alike, and the tessellator, the clip
+    /// stack, the affine algebra and the glyph placement all check out
+    /// against them. Yet in the cockpit the same screens show their text and
+    /// none of their shapes, with the text sheared.
+    ///
+    /// Two things that cannot be tested offline remain: the live OpenGL path
+    /// in `gl.rs`, and whether the stream the instruments really emit is the
+    /// same kind of stream as the captures. This settles the second. Replay
+    /// what comes out of here through the tessellator and a software
+    /// rasteriser: if it draws wrong, the fault is upstream in whatever
+    /// builds the stream; if it draws right, only `gl.rs` is left.
+    ///
+    /// Once per screen per session -- the instruments resubmit whenever a
+    /// value changes, which is most frames.
+    fn dump_stream(&mut self, screen: &str, ops: &[f64], strings: &[String]) {
+        let Some(dir) = std::env::var_os("FBW_DUMP_STREAMS") else { return };
+        let key = format!("dump:{screen}");
+        if !self.logged.insert(key) {
+            return;
+        }
+        let path = Path::new(&dir).join(format!("{screen}.json"));
+        let body = serde_json::json!({ "screen": screen, "ops": ops, "strings": strings });
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, body.to_string())) {
+            Ok(()) => println!("FBW A380 systems: display: wrote {} ops for {screen} to {}", ops.len(), path.display()),
+            Err(e) => println!("FBW A380 systems: display: could not write {}: {e}", path.display()),
+        }
+    }
+
     /// A new stream for a screen, read and tessellated; nothing for a stream
     /// identical to the last.
     fn submit(&mut self, screen: &str, ops: &[f64], strings: Vec<String>) -> Result<Vec<Made>, String> {
         let index = screens::find(screen).ok_or_else(|| format!("there is no screen {screen}"))?;
+        self.dump_stream(screen, ops, &strings);
         let s = &mut self.screens[index];
         if s.have && s.raw == ops && s.strings == strings {
             return Ok(Vec::new());
