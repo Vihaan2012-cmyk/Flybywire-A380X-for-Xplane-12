@@ -828,3 +828,157 @@ a flyPad EFB page.
 | `authority.md` FlyByWire-failure couplings | 25 electrical + 16 hydraulic + 8 pneumatic = 49 | reading `authority.md`'s own tables |
 | `Truth` leaf fields | ~40 top-level + ~30 `Controls` fields | reading `live.rs`'s struct definitions |
 | FlyByWire's MSFS systems build | confirmed real, `wasm32-wasip1`, Rust 1.96.0, `msfs-rs` git dependency, 4-module `panel.cfg` load | direct reads of `D:\fbw-aircraft`'s `Cargo.toml`/`rust-toolchain.toml`/`.cargo/config.toml`/`panel.cfg` plus a scratch clone of `msfs-rs` |
+
+## What actually stands between us and running the deep layer in MSFS
+
+Measured 2026-09-21 against this copy, not estimated.
+
+The WASM module needs a core that compiles for `wasm32-wasip1`, which
+means a core with no X-Plane in it. The question is how much of the tree
+that is. Counting the outward references:
+
+| module | what it reaches for outside itself |
+| --- | --- |
+| `deep` | 291 `crate::deep`, then `physics` 35, `failures` 26, **`xp` 20**, `aspects` 6, and single figures for eight more |
+| `physics` | `failures` 55, **`xp` 30**, `fadec` 13, `invariants` 10 |
+| `failures` | `components` 4, **`xp` 3**, `mel` 3, `aspects` 2, `study`, `remote` |
+| `aspects` | nothing |
+
+**Correction (2026-09-21).** The sentence that stood here -- "all twenty
+references are the weather API and nothing else" -- was wrong, and the
+claim was mine. Two of the twenty are not weather:
+
+- `deep/integration/xp_consequences.rs` writes the plug-force datarefs
+  (`sim/flightmodel/forces/*_plug_acf`) and a gear leg's `deploy_ratio`.
+  That is how ice drag, bird-strike drag and a collapsed leg act on the
+  airframe. It has no weather content to abstract.
+- `deep/plugin.rs` builds essentially the whole `Truth` struct from about
+  180 dataref reads. Weather is one delegated piece of it, not the reason
+  for the import.
+
+A weather trait alone therefore takes `deep` from 20 references to 2, not
+to 0. `integration/mod.rs`'s own module doc also asserted that depending
+on `crate::xp` broadly was Integration's deliberate purpose -- true while
+X-Plane was the only host, false as soon as there are two.
+
+### The boundary, drawn (step 2)
+
+Counting what the rest of the prospective core actually touches:
+
+| module | `crate::xp` refs | files | lines |
+| --- | --- | --- | --- |
+| `physics` | 30 | 4 | 12,384 |
+| `failures.rs` | 3 | 1 | 1,969 |
+| `fadec.rs` | 3 (one is a test's `Xplm::dummy()`) | 1 | 1,571 |
+| `invariants.rs` | 0 | -- | 466 |
+| `components.rs` | 0 | -- | 418 |
+| `mel.rs` | 0 | -- | 411 |
+| `aspects.rs` | 0 | -- | 962 |
+
+The thirty-three references that made this look like a wide boundary are
+concentrated in **four files**, and reading them shows they are not
+thirty-three different problems. Every one falls into one of three
+shapes:
+
+1. **Host inputs.** A struct of `Option<DataRef>` fields, resolved once
+   and read every frame. `physics/adirs.rs` is 23 of the 30 on its own --
+   attitude, body rates, accelerations, position, static pressure, SAT,
+   Mach, alpha, weight-on-wheels. `deep/plugin.rs` and `failures.rs` are
+   the same shape.
+2. **Host effects.** Writing back: forces, dataref sets, a retracting
+   gear leg. `physics/xp_effects.rs`, `physics/damage.rs`,
+   `physics/tyre.rs` and `deep/integration/xp_consequences.rs`, 33 write
+   call sites between them.
+3. **Host queries.** Two, both point lookups: `probe_terrain_y` and the
+   weather API.
+
+So the decision is: **the core is everything except `src/xp`**, and it
+reaches the host through three narrow traits -- inputs, effects, queries
+-- rather than through a module boundary drawn between systems. Nothing
+in the list above belongs to X-Plane; all of it is aircraft behaviour
+that happens to have been written against the only host there was.
+
+`fadec.rs` needs no trait at all: its only non-test reference is the
+import, and the live one is a test constructing `Xplm::dummy()`. It moves
+for free alongside `invariants`, `components`, `mel` and `aspects`.
+
+### Measured (2026-09-21): the crate already checks for wasm
+
+Rather than gate modules by reading, the plugin crate was type-checked
+for `wasm32-wasip1` inside FlyByWire's dev-env image, with `cc` pointed
+at the SDK's clang and sysroot for the C++ computers:
+
+    cargo check --target wasm32-wasip1 --lib      -> 2 errors
+
+Both in `src/remote/client.rs`: a `std::os::windows` import and a
+`creation_flags` call. FlyByWire's C++ computers (FADEC, PRIMs, SECs,
+FCUs) compiled through clang without complaint, as they do for their own
+modules. Everything else -- `deep`, `physics`, `study`, `display`'s host
+parts, `mapdata`, the lot -- checks. Gated the flag behind `cfg(windows)`
+and the count is zero.
+
+So the boundary the sections above draw so carefully is, at the level of
+*compiling*, two lines. What remains is the level of *instantiating*: the
+`#[link(name = "kernel32")]` blocks (`xp.rs`, `big_stack.rs`,
+`sensors.rs`, `remote/win.rs`, `xphfbw_bridge.rs`) become undefined
+symbols, which `--allow-undefined` turns into imports MSFS's runtime does
+not provide. The module would link and then fail to load. Listing those
+imports from the built module is the next measurement, and each one is
+either gated for wasm or given a host implementation.
+
+`msfs/deep-wasm` is the fifth module. Stage 0 -- load, resolve the ten
+inputs, publish through the bridge -- built (107 KB) and ran as
+`htmlgauge04`. **Stage 1 has linked**: the same crate with the plugin
+crate linked whole, `deep::live::all_areas()` instantiated at
+PreInitialize, 6.8 MB after wasm-opt. Beyond the two process flags it took
+one overflow lint (a refcon shifted by 32 on a 32-bit usize) and six
+`kernel32` extern blocks -- two of them bare, with no `#[link]`, relying on
+Windows' default link set, which is why they only showed up as imports in
+the built module.
+
+The built module's import section is the boundary, measured rather than
+drawn:
+
+| module | imports | provided? |
+| --- | --- | --- |
+| `env` | 5: `aircraft_varget`, `get_aircraft_var_enum`, `get_units_enum`, `register_named_variable`, `set_named_variable_value` | yes -- MSFS's gauge API, all five also imported by FlyByWire's modules |
+| `wasi_snapshot_preview1` | 22 | 18 are imported by `systems.wasm`, `fbw.wasm` or `extra-backend-a380x.wasm` and so provably provided (including the filesystem calls -- `fbw.wasm` imports `path_open`, `fd_readdir`, `path_remove_directory`). **Four are not proven by anything that ships**: `fd_filestat_get`, `fd_sync`, `path_rename`, `poll_oneoff`. |
+
+An import the runtime does not provide fails instantiation outright, so
+those four are the one remaining risk between the linked module and a
+running one. They come from host-only code -- an atomic file save, a
+`sync_all`, a `thread::sleep` -- not from the systems, and the honest
+fix if the runtime rejects one is to gate that code for wasm, not to
+supply a stand-in. The console names the missing import if it happens.
+
+Two things about the image that cost time and are now in `build.ps1`:
+its entrypoint `cd`s to the mount root regardless of `-w`, so the script
+must `cd` into the crate itself or cargo builds the plugin at the
+repository root; and the crate's `../fbw-aircraft` path dependency means
+the aircraft checkout is mounted at `/fbw-aircraft`.
+
+### Order of work
+
+1. ~~The weather trait in `deep`, plus a force-injection trait for
+   `xp_consequences.rs`~~ -- done. `WeatherSource` and `ForceSink`,
+   each with a live X-Plane implementation and an offline one.
+   `deep`'s real `crate::xp` imports went from 8 files to 2: 18 of the
+   original 20 references are gone, and the 2 left are both
+   `DataRef`/`Xplm` for general Truth-building, not weather --
+   `plugin.rs` (the documented seam) and `integration/weather_truth.rs`,
+   which turned out to import them for a second reason nobody had
+   noticed: three raw atmosphere datarefs (`leading_edge_c`,
+   `ambient_pressure_pa`, `precipitation_on_aircraft_ratio`) that the
+   icing and lightning models read directly. That is the same shape of
+   problem as `plugin.rs`, just smaller, and it belongs to the inputs
+   trait in step 3.
+2. ~~Draw the core boundary~~ -- done, above.
+3. The inputs trait, whose first and largest implementation is
+   `physics/adirs.rs`'s 23 fields, then `deep/plugin.rs`'s ~180. This is
+   the bulk of the remaining work and it is mechanical, not a judgement
+   call, now that the shape is known.
+4. Move the core into its own crate, both simulators depending on it.
+5. Only then the gauge: `deep::lvar_bridge::VarStore` over msfs-rs's
+   `NamedVariable`, `deep::msfs_inputs::INPUTS` for the ten host values,
+   published every frame. The measurements in `msfs/lvar-bench` say that
+   part is affordable -- 4,228 variables in 0.048 ms.
