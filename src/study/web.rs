@@ -669,7 +669,7 @@ fn breaker_number(def: &crate::breakers::BreakerDef) -> usize {
 /// state and never touches a queue.
 static QUEUED_WRITES: std::sync::Mutex<Vec<(&'static str, f64)>> = std::sync::Mutex::new(Vec::new());
 
-fn queue_write(name: &'static str, value: f64) {
+pub(crate) fn queue_write(name: &'static str, value: f64) {
     QUEUED_WRITES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((name, value));
 }
 
@@ -803,6 +803,31 @@ mod tests {
 
     /// Writes `/study/pages` to `STUDY_PAGES_OUT`, for previewing the web
     /// pages without X-Plane or the app.
+    /// Writes the whole `app/ui/test/study-fixture.json` to
+    /// `STUDY_FIXTURE_OUT`: the shape the Study app's own `?fixture=1`
+    /// mode reads when there is no plugin to talk to, which is the
+    /// situation in MSFS and in the app's own preview.
+    ///
+    /// Page structure is static Rust data, so this needs no running
+    /// aircraft. `vars` is deliberately empty: there is no simulator here
+    /// and inventing readings would defeat the point of the pages.
+    #[test]
+    #[ignore]
+    fn dump_fixture() {
+        let Ok(path) = std::env::var("STUDY_FIXTURE_OUT") else { return };
+        let fixture = format!(
+            "{{\"pages\":{},\"failures\":{},\"breakers\":{},\"components\":{},\"maintenance\":{},\"vars\":{}}}",
+            pages_json(),
+            failures_json(),
+            breakers_json(),
+            components_json(),
+            maintenance_json(),
+            "{\"running\":false,\"time\":0.0,\"ticks\":0,\"vars\":{}}",
+        );
+        serde_json::from_str::<serde_json::Value>(&fixture).expect("the fixture must be valid JSON");
+        std::fs::write(path, fixture).unwrap();
+    }
+
     #[test]
     #[ignore]
     fn dump_pages() {

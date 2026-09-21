@@ -1930,7 +1930,64 @@ fn xphfbw_status(sim: &remote::Systems) -> xphfbw_datarefs::Status {
 /// agent A). `xphfbw.json`'s `systemsOutOfProcess` (app_settings.rs, agent B)
 /// gates the first two: off skips straight to the plugin, same as
 /// `FBW_SYSTEMS_IN_PROCESS=1`.
+/// The overhead pushbuttons FlyByWire's systems construct in a position
+/// other than the variable's zero.
+///
+/// FlyByWire's pushbuttons keep their state in a simulation variable, and
+/// `SimulationElement` runs read before update before write: whatever
+/// `OnOffFaultPushButton::new_on` built is overwritten by the first read of
+/// a variable nobody has set. In MSFS the aircraft's own panel state sets
+/// these before the systems ever run. Here nothing did, so every button
+/// that is normally in read 0 on the first tick and latched there for the
+/// rest of the session.
+///
+/// The cost of that was the whole aeroplane. The APU would start and reach
+/// AVAILABLE, its generator would sit at a healthy 115 V / 400 Hz reporting
+/// output_within_normal_parameters, and no bus would ever see it, because
+/// both APU generator pushbuttons read off. FlyByWire's own preset procedure
+/// never turns them on -- there is no APU GEN step anywhere in
+/// aircraft_preset_procedures.xml, and there should not be: on the real
+/// aircraft those buttons are already in.
+///
+/// Every entry is FlyByWire's own constructed default, from
+/// fbw-a380x/src/wasm/systems/a380_systems/src/electrical/mod.rs around
+/// line 355: `new_on` writes `_PB_IS_ON`, `new_auto` writes `_PB_IS_AUTO`,
+/// `new_normal` writes `_PB_IS_NORMAL`. Buttons built off (the four
+/// external power ones, `new_off`) are left out: their default already is
+/// the variable's zero.
+///
+/// This is the electrical panel only. The same mechanism applies to every
+/// other overhead panel FlyByWire models, and each one needs the same
+/// treatment against its own source before its systems can be trusted.
+pub(crate) const OVERHEAD_DEFAULTS_ON: &[&str] = &[
+    "OVHD_ELEC_ENG_GEN_1_PB_IS_ON",
+    "OVHD_ELEC_ENG_GEN_2_PB_IS_ON",
+    "OVHD_ELEC_ENG_GEN_3_PB_IS_ON",
+    "OVHD_ELEC_ENG_GEN_4_PB_IS_ON",
+    "OVHD_ELEC_APU_GEN_1_PB_IS_ON",
+    "OVHD_ELEC_APU_GEN_2_PB_IS_ON",
+    "OVHD_ELEC_COMMERCIAL_PB_IS_ON",
+    "OVHD_ELEC_BUS_TIE_PB_IS_AUTO",
+    "OVHD_ELEC_GALY_AND_CAB_PB_IS_AUTO",
+    "OVHD_ELEC_AC_ESS_FEED_PB_IS_NORMAL",
+];
+
+/// Put those defaults in before the systems read them for the first time.
+///
+/// Through the same queue the Study panel's own writes use, which the tick
+/// drains before `read_inputs` -- so these land on the first tick, ahead of
+/// the first read, which is the whole point. Queued once at startup, so
+/// anything the pilot or a preset does afterwards simply overwrites them:
+/// this is the factory position of the switch, not a policy that keeps
+/// reasserting itself.
+fn seed_overhead_defaults() {
+    for name in OVERHEAD_DEFAULTS_ON {
+        study::web::queue_write(name, 1.);
+    }
+}
+
 fn start_systems(start_state: StartState, vars: &mut Vars) -> remote::Systems {
+    seed_overhead_defaults();
     const SERVER_EXE: &str = "fbw_a380_systems_server.exe";
     let env_in_process = std::env::var("FBW_SYSTEMS_IN_PROCESS").is_ok_and(|v| v == "1");
     let out_of_process = app_settings::systems_out_of_process() && !env_in_process;

@@ -153,31 +153,27 @@ mod tests {
     /// `a380_systems::Simulation` (not a stub) and checks that AC BUS 1
     /// energises.
     ///
-    /// This pins the bug to a380_systems, not to this crate. `AircraftPresets`
-    /// runs FlyByWire's real procedure verbatim: batteries on, APU master
-    /// and start commanded, and -- confirmed here -- the APU genuinely
-    /// reaches `OVHD_APU_START_PB_IS_AVAILABLE` (N past its self-sustaining
-    /// speed). But `A32NX_ELEC_AC_1_BUS_IS_POWERED` never follows, even
-    /// hundreds of simulated seconds later: `Pw980ApuGenerator::
-    /// output_within_normal_parameters()` (fbw-common/.../apu/pw980.rs)
-    /// never turns true once the APU is available, so no AC bus ever gets a
-    /// source and FlyByWire's own ECAM logic correctly reports ELEC EMER
-    /// CONFIG forever -- which is exactly what the user's screenshots show.
+    /// What it was. FlyByWire's pushbuttons keep their state in a simulation
+    /// variable, and `SimulationElement` runs read before update before
+    /// write -- so whatever `OnOffFaultPushButton::new_on` constructed was
+    /// overwritten by the first read of a variable nobody had set. Both APU
+    /// generator pushbuttons read off on tick one and latched there. The APU
+    /// started, reached AVAILABLE, and its generator sat at a perfectly
+    /// healthy 115 V / 400 Hz reporting `output_within_normal_parameters`
+    /// with nothing connected to it, so FlyByWire's own ECAM correctly
+    /// reported ELEC EMER CONFIG forever.
     ///
-    /// Root cause traced to D:\fbw-aircraft's `deep-systems` branch, commit
-    /// 13f900e ("wip: deepen the A380X WASM systems in place"): a recovered
-    /// snapshot of previously-uncommitted work, self-described by its own
-    /// message as needing review, that rewrote `apu/pw980.rs` around a new
-    /// `pw980_physics.rs` core (1252 -> 837 lines) and in the process
-    /// dropped both `context.aircraft_preset_quick_mode()` fast paths the
-    /// file used to have. `cargo test` in that crate does not even build
-    /// right now (`InfinitelyAtNTestTurbine` is missing `Clone`), so this
-    /// is unreviewed, not-yet-working code, not something to patch blind
-    /// from fbw-xp-systems. Ignored so it does not fail the routine suite
-    /// on a known, out-of-repo bug; run with `--ignored` to re-check after
-    /// the upstream fix lands.
+    /// FlyByWire's preset procedure never turns those buttons on, and should
+    /// not: there is no APU GEN step anywhere in
+    /// `aircraft_preset_procedures.xml`, because on the real aircraft they
+    /// are already in. In MSFS the aircraft's own panel state sets them
+    /// before the systems run; here nothing did, until
+    /// `crate::seed_overhead_defaults`.
+    ///
+    /// Seeding those defaults energises AC BUS 1 within 20 simulated
+    /// seconds, and the bus voltage then sags to 113.4 V under real load,
+    /// which is the electrical model working rather than idling.
     #[test]
-    #[ignore = "known a380_systems bug (D:\\fbw-aircraft deep-systems@13f900e): APU reaches AVAILABLE but its generator never reports output_within_normal_parameters, so AC buses never energise"]
     fn powered_preset_against_real_systems_energises_ac_bus_1() {
         use crate::extra_backend::aircraft_presets::AircraftPresets;
         use crate::extra_backend::sim::test_xplane::FakeXplane;
@@ -192,6 +188,13 @@ mod tests {
         vars.set("AMBIENT TEMPERATURE", 15.);
         vars.set("AMBIENT DENSITY", 0.002377);
         vars.set("SEA LEVEL PRESSURE", 1013.25);
+        // The factory positions the plugin seeds at startup
+        // (crate::seed_overhead_defaults). The plugin queues them
+        // through the Study write queue, which this test does not
+        // drain, so apply the same list directly.
+        for name in crate::OVERHEAD_DEFAULTS_ON {
+            vars.set(&format!("A32NX_{name}"), 1.);
+        }
         vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 1.);
         vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
         let delta = std::time::Duration::from_millis(50);
