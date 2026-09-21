@@ -380,7 +380,24 @@ impl PowerSection {
             // as residual heat and windmilling airflow carry it away,
             // rather than jumping instantly to the cold compressor-exit
             // value the (fuel-less) expansion above would otherwise imply.
-            (self.egt_k - 15.0 * dt).max(t1)
+            //
+            // Rate: 1 deg C/s, not an invented figure. A real hot section
+            // is a substantial thermal mass that cools over *minutes*, not
+            // tens of seconds -- the same reasoning FlyByWire's own
+            // pw980_physics.rs documents for its EGT relaxation (that file
+            // was itself found and fixed mid-audit: a previous 40 deg C/s
+            // there "desynchronised from n2's own, much slower mechanical
+            // coast-down", the same failure mode a bare, uncited 15 deg C/s
+            // here would reproduce -- e.g. a 900 deg C EGT would wrongly
+            // reach ambient in one minute, in step with a rotor that is
+            // nowhere near spooled down that fast). 1 deg C/s also matches
+            // this codebase's own sibling relaxation, `fadec.rs::polynomial
+            // ::shutdown_egt`'s slow leg (0.00072756 * previous_egt-ish
+            // decay constant, i.e. a long time constant once near the
+            // steady baseline), and FlyByWire's `ShutdownPw980Turbine`/
+            // `aps3200.rs`, both of which this file's module docs already
+            // cite as using 1 deg C/s for exactly this state.
+            (self.egt_k - 1.0 * dt).max(t1)
         };
 
         Outputs {
@@ -598,6 +615,65 @@ mod tests {
         assert!(!ps.egt_over_hard_trip());
         ps.egt_k = params::EGT_TRIP_C + 273.15 + 1.0;
         assert!(ps.egt_over_hard_trip());
+    }
+
+    /// A previous version of this decay used an uncited 15 deg C/s, which
+    /// would cool a hot EGT to ambient in well under a minute -- far faster
+    /// than the rotor's own mechanical coast-down (tens of seconds just to
+    /// reach the light-off/self-sustaining boundary, see `apu.rs`'s own
+    /// coast-down behaviour) and inconsistent with this file's cited 1 deg
+    /// C/s (matching FlyByWire's own fixed `pw980_physics.rs`/`aps3200.rs`
+    /// relaxation). A 900 deg C EGT losing fuel must still be within a few
+    /// degrees of 900 after one second, and nowhere near ambient after 30.
+    #[test]
+    fn no_combustion_egt_decays_at_one_degree_c_per_second_not_faster() {
+        let mut ps = PowerSection::new(288.15);
+        ps.egt_k = 900.0 + 273.15;
+        ps.n_percent = 50.0;
+
+        let out = ps.step(
+            &Inputs {
+                ambient_pressure_pa: 101_325.0,
+                ambient_temperature_k: 288.15,
+                inlet_pressure_loss_frac: 0.0,
+                fuel_flow_kg_s: 0.0,
+                starter_torque_nm: 0.0,
+                accessory_torque_nm: 0.0,
+                dt_s: 1.0,
+            },
+            &no_faults(),
+        );
+        // Within a whisker of 900, not the ~15 deg C a 15 deg C/s rate (or
+        // worse, ~900 minus substep artefacts) would have produced.
+        assert!(
+            (out.egt_c - 899.0).abs() < 0.5,
+            "one second of no-combustion decay should cost about 1 deg C, got {} (started at 900)",
+            out.egt_c
+        );
+
+        // After 30 more seconds, well above ambient: nowhere near the ~470
+        // deg C total drop a 15 deg C/s rate would have produced over the
+        // full 31 s.
+        let mut egt_after_30 = out.egt_c;
+        for _ in 0..30 {
+            let step_out = ps.step(
+                &Inputs {
+                    ambient_pressure_pa: 101_325.0,
+                    ambient_temperature_k: 288.15,
+                    inlet_pressure_loss_frac: 0.0,
+                    fuel_flow_kg_s: 0.0,
+                    starter_torque_nm: 0.0,
+                    accessory_torque_nm: 0.0,
+                    dt_s: 1.0,
+                },
+                &no_faults(),
+            );
+            egt_after_30 = step_out.egt_c;
+        }
+        assert!(
+            egt_after_30 > 860.0,
+            "31 s of no-combustion decay at 1 deg C/s should still be well above 860 deg C, got {egt_after_30}"
+        );
     }
 
     #[test]
