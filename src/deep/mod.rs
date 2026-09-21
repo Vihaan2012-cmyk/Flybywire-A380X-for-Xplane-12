@@ -17,6 +17,13 @@ pub mod gear_structure;
 pub mod hydraulics;
 pub mod integration;
 pub mod live;
+/// The variable bridge to a host simulator -- what the deep layer
+/// publishes and reads, behind a `VarStore` trait so one mapping serves
+/// X-Plane's datarefs and MSFS's LVars alike.
+pub mod lvar_bridge;
+/// Where `Truth`'s ten X-Plane-specific inputs come from in MSFS, with
+/// their unit conversions and how far each has been verified.
+pub mod msfs_inputs;
 pub mod oxygen;
 /// The plugin's own side of `live`: filling `Truth`, snapshotting `Faults`
 /// and turning a published name into a `Vars` write. Kept out of `live`
