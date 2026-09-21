@@ -207,6 +207,52 @@
     });
   }
 
+  // ------------------------------------------- saying what actually failed
+  //
+  // There is no console to open here and no debugger to attach, so a page
+  // that throws simply comes up empty and every diagnosis after that is
+  // guesswork. The breaker list is the standing example: drawBreakers()
+  // writes its heading, builds a box, fills it row by row and appends it
+  // only after the loop -- so one throw inside cbRow() leaves a heading
+  // that says "118 shown" above nothing at all, and nothing anywhere says
+  // why.
+  //
+  // So the overlay reports its own errors. A strip along the bottom, only
+  // present once something has gone wrong, carrying the message and the
+  // first few frames of the stack. Both handlers are needed: the app's
+  // page switches are async, so a throw inside one arrives as a rejected
+  // promise rather than as an error event.
+  var errBox = null;
+
+  function showError(what, err) {
+    if (!shell) return;
+    if (!errBox) {
+      errBox = document.createElement('div');
+      errBox.style.cssText =
+        'position:absolute;left:0;right:0;bottom:0;max-height:38%;overflow:auto;' +
+        'z-index:20;background:#2a1414;border-top:2px solid #e05c5c;color:#ffd9d9;' +
+        'font:12px Consolas,monospace;white-space:pre-wrap;padding:8px 10px;';
+      shell.appendChild(errBox);
+    }
+    var text = what + ': ' + (err && err.message ? err.message : String(err));
+    if (err && err.stack) {
+      text += '\n' + String(err.stack).split('\n').slice(0, 4).join('\n');
+    }
+    var line = document.createElement('div');
+    line.textContent = text;
+    errBox.insertBefore(line, errBox.firstChild);
+    while (errBox.childNodes.length > 6) errBox.removeChild(errBox.lastChild);
+  }
+
+  function watchForErrors() {
+    window.addEventListener('error', function (ev) {
+      showError('error', ev.error || { message: ev.message + ' (' + ev.filename + ':' + ev.lineno + ')' });
+    });
+    window.addEventListener('unhandledrejection', function (ev) {
+      showError('unhandled rejection', ev.reason);
+    });
+  }
+
   // ------------------------------------------------- giving the SVGs a size
   //
   // The synoptics are `.study-svg { width: 100%; height: auto; }`. A browser
@@ -256,6 +302,7 @@
       return;
     }
     polyfill();
+    watchForErrors();
     try {
       window.__deepStudyStart();
       setInterval(sizeDiagrams, 400);
