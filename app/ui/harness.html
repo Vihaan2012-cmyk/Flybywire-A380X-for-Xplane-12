@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<!-- Not shipped. Opens the real Study app -- app/ui/index.html, all ten tabs,
+     the app as it runs in X-Plane -- in an ordinary browser, against the
+     offline fixture.
+
+     This exists because the only harness before it was
+     msfs/efb-study/dist/harness.html, which loads the *MSFS EFB build*. That
+     build deliberately hides five tabs (build.py's HIDDEN_TABS: flight plan,
+     ground services, settings, status, support) because FlyByWire's own
+     tablet already has them. Screenshotting that harness while debugging the
+     X-Plane app shows a five-tab app that nobody actually runs, which is
+     exactly the wrong thing to reason from.
+
+     Serve this directory over HTTP and open it:
+         python -m http.server 8731        (from app/ui)
+         http://127.0.0.1:8731/harness.html
+     Headless, at the size the in-sim tablet uses:
+         chrome --headless=new --disable-gpu --hide-scrollbars \
+                --virtual-time-budget=15000 --window-size=1430,1000 \
+                --screenshot=out.png http://127.0.0.1:8731/harness.html
+
+     ?page=<sidebar title>  opens one Study page by its nav button text
+     ?tab=<data-tab>        opens one top-level tab -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Study app harness</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; }
+  iframe { border: 0; width: 100%; height: 100%; display: block; }
+</style>
+</head>
+<body>
+<iframe id="app" src="index.html?fixture=1"></iframe>
+<script>
+// The app runs in the frame exactly as it does in the sim; this only drives
+// it to the tab or page asked for, once it has loaded its fixture.
+var q = new URLSearchParams(location.search);
+document.getElementById('app').addEventListener('load', function () {
+  var doc = this.contentDocument;
+  var tab = q.get('tab');
+  if (tab) {
+    setTimeout(function () {
+      var b = doc.querySelector('.tab-btn[data-tab="' + tab + '"]');
+      if (b) b.click();
+    }, 1200);
+  }
+  var page = q.get('page');
+  if (page) {
+    setTimeout(function () {
+      var btns = doc.querySelectorAll('#study-nav button');
+      for (var i = 0; i < btns.length; i++) {
+        if (btns[i].textContent.trim() === page) { btns[i].click(); break; }
+      }
+    }, 1500);
+  }
+});
+</script>
+</body>
+</html>
