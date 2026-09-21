@@ -1949,17 +1949,89 @@ fn xphfbw_status(sim: &remote::Systems) -> xphfbw_datarefs::Status {
 /// aircraft_preset_procedures.xml, and there should not be: on the real
 /// aircraft those buttons are already in.
 ///
-/// Every entry is FlyByWire's own constructed default, from
-/// fbw-a380x/src/wasm/systems/a380_systems/src/electrical/mod.rs around
-/// line 355: `new_on` writes `_PB_IS_ON`, `new_auto` writes `_PB_IS_AUTO`,
-/// `new_normal` writes `_PB_IS_NORMAL`. Buttons built off (the four
-/// external power ones, `new_off`) are left out: their default already is
-/// the variable's zero.
+/// The electrical entries below are FlyByWire's own constructed default,
+/// from fbw-a380x/src/wasm/systems/a380_systems/src/electrical/mod.rs
+/// around line 355: `new_on` writes `_PB_IS_ON`, `new_auto` writes
+/// `_PB_IS_AUTO`, `new_normal` writes `_PB_IS_NORMAL`. Buttons built off
+/// (the four external power ones, `new_off`) are left out: their default
+/// already is the variable's zero.
 ///
-/// This is the electrical panel only. The same mechanism applies to every
-/// other overhead panel FlyByWire models, and each one needs the same
-/// treatment against its own source before its systems can be trusted.
+/// This started as the electrical panel only; it now also covers
+/// hydraulics, bleed/pneumatic and cabin air conditioning/pressurization,
+/// against FlyByWire's A380 source (`D:\fbw-aircraft`) the same way: every
+/// entry below is a pushbutton (or, for the cross bleed selector, a
+/// three-position knob using the same `SimulationElement` read/write cycle)
+/// whose FlyByWire constructor builds it in a position other than the
+/// variable's zero, so the first read on a cold start -- nothing having
+/// written the variable yet -- would otherwise clobber it back to zero
+/// forever. `AutoOffFaultPushButton`/`AutoOnFaultPushButton`/
+/// `AutoManFaultPushButton::new_auto` write `_PB_IS_AUTO`; `OnOffFaultPushButton`/
+/// `OnOffPushButton::new_on` write `_PB_IS_ON`; the button-name-to-variable-name
+/// mapping (`OVHD_{name}_PB_IS_ON` / `_PB_IS_AUTO`) is
+/// `fbw-common/src/wasm/systems/systems/src/overhead/mod.rs`.
+///
+/// HYDRAULICS -- `fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/mod.rs`,
+/// `A380HydraulicOverheadPanel::new` (around line 4936-4994): every EDP
+/// pushbutton, EDP disconnect guard, electric pump ON and OFF guard, and
+/// leak-measurement pushbutton is built `new_auto` (is_auto = true). Once DC
+/// power is up (which the electrical entries above establish),
+/// `A380EngineDrivenPumpController::update`'s own comment says why this
+/// matters: "Inverted logic, no power means solenoid valve always leave
+/// pump in pressurise mode" -- unpowered, the pump free-wheels to
+/// pressurise regardless of the button; powered, the button decides, and a
+/// button stuck reading OFF (this bug) commands it off explicitly.
+///
+/// BLEED / PNEUMATIC -- `fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs`,
+/// `A380PneumaticOverheadPanel::new` (line 1322-1330): the APU bleed
+/// pushbutton is `new_on`, the four engine bleed pushbuttons are
+/// `new_auto`. The cross bleed selector knob is
+/// `fbw-common/src/wasm/systems/systems/src/pneumatic/mod.rs`,
+/// `CrossBleedValveSelectorKnob::new_auto` (line 495-500): built as
+/// `CrossBleedValveSelectorMode::Auto`, whose discriminant is 1 (`Shut` = 0,
+/// `Open` = 2, line 521-525), and read back with
+/// `read_discrete_or_fallback` -- which only falls back on a value outside
+/// 0-2, so an unwritten variable decodes as valid `Shut` (0), not the
+/// fallback; this is the same clobber, just landing on a different wrong
+/// value than zero-as-"nothing written" usually gives.
+///
+/// AIR CONDITIONING / CARGO / VENT / PRESSURIZATION --
+/// `fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/mod.rs`:
+/// `A380AirConditioningSystemOverhead::new` (line 866-892) builds both HOT
+/// AIR pushbuttons, both PACK pushbuttons, the cabin fans pushbutton, both
+/// cargo isolation valve pushbuttons and the cargo heater pushbutton
+/// `new_on`; the RAM AIR pushbutton is `new_off` and is left out, since off
+/// already is the variable's zero. `A380PressurizationOverheadPanel::new`
+/// (line 1190-1195) builds the MAN ALTITUDE and MAN V/S selectors
+/// `new_auto`; the CABIN AIR EXTRACT and DITCHING pushbuttons are
+/// `new_normal` (`NormalOnPushButton`, off/normal = zero) and are left out
+/// for the same reason.
+///
+/// Deliberately left out, and why -- not a gap, checked and found not to
+/// apply:
+/// - FUEL: `A380Fuel`/`A380FuelSystem` (`fbw-a380x/.../fuel/mod.rs`, its own
+///   first comment: "Fuel system for now is still handled in MSFS") has no
+///   `OVHD_`-style pushbutton at all. Its pumps read the bare (non-`A32NX_`)
+///   `FUELSYSTEM PUMP ACTIVE:{id}` simulator variable
+///   (`fbw-common/.../fuel/mod.rs` `FuelPump::new`), which this plugin feeds
+///   from its own `src/fuel.rs`/`src/fuel_network.rs` model, not from
+///   FlyByWire's `SimulationElement` read/write cycle -- a different
+///   subsystem this task's edits stay out of (constraints: `src/lib.rs` and
+///   `src/remote/**` only).
+/// - ANTI-ICE: `WingAntiIcePushButton` does exist
+///   (`fbw-common/.../pneumatic/mod.rs` line ~432-437) but is built
+///   `new_off` (off = zero, needs no seeding even where used) and, checked
+///   with a repo-wide grep, is never instantiated anywhere under
+///   `fbw-a380x/src/wasm/systems/` -- the A380 wires no anti-ice
+///   pushbutton at all. `icing.rs`'s only content is a cockpit
+///   ice-accretion indicator (`Icing`/`IcingState`), not a system. Nothing
+///   to seed.
+/// - APU: `AuxiliaryPowerUnitOverheadPanel::new`
+///   (`fbw-common/.../apu/mod.rs` line 508-512) builds both MASTER SW and
+///   START `new_off` -- off already is the variable's zero, so this pair
+///   needs no seeding (the APU GEN pushbuttons that do need it are already
+///   in the electrical entries above).
 pub(crate) const OVERHEAD_DEFAULTS_ON: &[&str] = &[
+    // ELECTRICAL -- fbw-a380x/.../electrical/mod.rs:355-368.
     "OVHD_ELEC_ENG_GEN_1_PB_IS_ON",
     "OVHD_ELEC_ENG_GEN_2_PB_IS_ON",
     "OVHD_ELEC_ENG_GEN_3_PB_IS_ON",
@@ -1970,6 +2042,53 @@ pub(crate) const OVERHEAD_DEFAULTS_ON: &[&str] = &[
     "OVHD_ELEC_BUS_TIE_PB_IS_AUTO",
     "OVHD_ELEC_GALY_AND_CAB_PB_IS_AUTO",
     "OVHD_ELEC_AC_ESS_FEED_PB_IS_NORMAL",
+
+    // HYDRAULICS -- hydraulic/mod.rs:4936-4994.
+    "OVHD_HYD_ENG_1A_PUMP_PB_IS_AUTO",
+    "OVHD_HYD_ENG_2A_PUMP_PB_IS_AUTO",
+    "OVHD_HYD_ENG_3A_PUMP_PB_IS_AUTO",
+    "OVHD_HYD_ENG_4A_PUMP_PB_IS_AUTO",
+    "OVHD_HYD_ENG_1B_PUMP_PB_IS_AUTO",
+    "OVHD_HYD_ENG_2B_PUMP_PB_IS_AUTO",
+    "OVHD_HYD_ENG_3B_PUMP_PB_IS_AUTO",
+    "OVHD_HYD_ENG_4B_PUMP_PB_IS_AUTO",
+    "OVHD_HYD_ENG_1AB_PUMP_DISC_PB_IS_AUTO",
+    "OVHD_HYD_ENG_2AB_PUMP_DISC_PB_IS_AUTO",
+    "OVHD_HYD_ENG_3AB_PUMP_DISC_PB_IS_AUTO",
+    "OVHD_HYD_ENG_4AB_PUMP_DISC_PB_IS_AUTO",
+    "OVHD_HYD_EPUMPYA_ON_PB_IS_AUTO",
+    "OVHD_HYD_EPUMPYB_ON_PB_IS_AUTO",
+    "OVHD_HYD_EPUMPGA_ON_PB_IS_AUTO",
+    "OVHD_HYD_EPUMPGB_ON_PB_IS_AUTO",
+    "OVHD_HYD_EPUMPYA_OFF_PB_IS_AUTO",
+    "OVHD_HYD_EPUMPYB_OFF_PB_IS_AUTO",
+    "OVHD_HYD_EPUMPGA_OFF_PB_IS_AUTO",
+    "OVHD_HYD_EPUMPGB_OFF_PB_IS_AUTO",
+    "OVHD_HYD_LEAK_MEASUREMENT_G_PB_IS_AUTO",
+    "OVHD_HYD_LEAK_MEASUREMENT_Y_PB_IS_AUTO",
+
+    // BLEED / PNEUMATIC -- pneumatic.rs:1322-1330; cross bleed knob from
+    // fbw-common/.../pneumatic/mod.rs:495-500.
+    "OVHD_PNEU_APU_BLEED_PB_IS_ON",
+    "OVHD_PNEU_ENG_1_BLEED_PB_IS_AUTO",
+    "OVHD_PNEU_ENG_2_BLEED_PB_IS_AUTO",
+    "OVHD_PNEU_ENG_3_BLEED_PB_IS_AUTO",
+    "OVHD_PNEU_ENG_4_BLEED_PB_IS_AUTO",
+    "KNOB_OVHD_AIRCOND_XBLEED_Position",
+
+    // AIR CONDITIONING / CARGO / VENT -- air_conditioning/mod.rs:866-892.
+    "OVHD_COND_HOT_AIR_1_PB_IS_ON",
+    "OVHD_COND_HOT_AIR_2_PB_IS_ON",
+    "OVHD_COND_PACK_1_PB_IS_ON",
+    "OVHD_COND_PACK_2_PB_IS_ON",
+    "OVHD_VENT_CAB_FANS_PB_IS_ON",
+    "OVHD_CARGO_AIR_ISOL_VALVES_FWD_PB_IS_ON",
+    "OVHD_CARGO_AIR_ISOL_VALVES_BULK_PB_IS_ON",
+    "OVHD_CARGO_AIR_HEATER_PB_IS_ON",
+
+    // PRESSURIZATION -- air_conditioning/mod.rs:1190,1192.
+    "OVHD_PRESS_MAN_ALTITUDE_PB_IS_AUTO",
+    "OVHD_PRESS_MAN_VS_CTL_PB_IS_AUTO",
 ];
 
 /// Put those defaults in before the systems read them for the first time.

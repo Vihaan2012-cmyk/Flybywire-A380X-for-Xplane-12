@@ -217,6 +217,105 @@ mod tests {
         );
     }
 
+    /// Extends the "Powered" regression above to the panels this task added
+    /// to `crate::OVERHEAD_DEFAULTS_ON`: hydraulics and bleed/pneumatic.
+    /// Loads the same real "Powered" preset (2) the sibling test above does
+    /// -- reaching a running, AVAILABLE APU and energised AC/DC buses --
+    /// then feeds engine 1's `TrentEngine` a normal running N2/N3 the way
+    /// MSFS's own turbine model otherwise would (`TrentEngine::update` is a
+    /// no-op; it only reads `ENGINE_N2`/`ENGINE_N3`, trent_engine.rs
+    /// line 73/122-ish), and checks two things against the real, local
+    /// `a380_systems::Simulation` (not a stub):
+    ///
+    /// - the APU bleed valve actually opens (`APU_BLEED_AIR_VALVE_OPEN`,
+    ///   pneumatic.rs's `apu_bleed_air_valve_open_id`), proving the APU
+    ///   bleed pushbutton's seeded ON default
+    ///   (`OVHD_PNEU_APU_BLEED_PB_IS_ON`) reached the pneumatic system and
+    ///   not just the variable;
+    /// - EDP 1A actually pressurises (`HYD_EDPUMP_1A_LOW_PRESS` clears once
+    ///   engine 1 is "running"), proving the EDP pushbutton's seeded AUTO
+    ///   default (`OVHD_HYD_ENG_1A_PUMP_PB_IS_AUTO`) let
+    ///   `A380EngineDrivenPumpController::update` take the "should
+    ///   pressurise" branch instead of the explicit "button reads OFF, stay
+    ///   depressurised" branch this bug used to force once DC power came
+    ///   up.
+    ///
+    /// Driving the engine directly through its own external N2/N3 inputs,
+    /// rather than through FlyByWire's "Ready for Takeoff" preset and this
+    /// plugin's own fadec/key-event glue (`src/fadec.rs`, `src/fuel.rs`,
+    /// `src/extra_backend/sim.rs`), keeps this pinned to `a380_systems`
+    /// itself: `ENGINE_STATE` -- what that preset's engine-start steps wait
+    /// on -- is written by this plugin's own port of FlyByWire's separate
+    /// MSFS-side FADEC gauge, not by anything `Simulation<A380>::tick`
+    /// drives (confirmed by grepping FlyByWire's own systems source: nothing
+    /// under `fbw-common`/`fbw-a380x`'s `systems` crates ever writes
+    /// `ENGINE_STATE`, only reads it), so a preset-driven version of this
+    /// test would really be pinning that unrelated glue rather than the
+    /// overhead-pushbutton defaults this task is about.
+    #[test]
+    fn powered_preset_against_real_systems_pressurises_hydraulics_and_bleed_air() {
+        use crate::extra_backend::aircraft_presets::AircraftPresets;
+        use crate::extra_backend::sim::test_xplane::FakeXplane;
+        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut vars = TestVars::default();
+        let mut systems = Simulation::new(StartState::Apron, A380::new, &mut vars);
+        let mut presets = AircraftPresets::new(&mut vars);
+        let mut xp = FakeXplane::default();
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("AMBIENT PRESSURE", 29.92);
+        vars.set("AMBIENT TEMPERATURE", 15.);
+        vars.set("AMBIENT DENSITY", 0.002377);
+        vars.set("SEA LEVEL PRESSURE", 1013.25);
+        // The factory positions the plugin seeds at startup
+        // (crate::seed_overhead_defaults); see the sibling test above for
+        // why this test applies the same list directly instead of going
+        // through the Study write queue.
+        for name in crate::OVERHEAD_DEFAULTS_ON {
+            vars.set(&format!("A32NX_{name}"), 1.);
+        }
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        let delta = std::time::Duration::from_millis(50);
+        // 6000 * 50 ms = 300 simulated seconds: the sibling test above
+        // reaches AC BUS 1 powered within 20 s, so this leaves a wide
+        // margin for the APU/electrical chain plus however long the
+        // hydraulic circuit's own fluid dynamics take to build pressure
+        // once EDP 1A starts trying.
+        let mut apu_bleed_valve_ever_open = false;
+        let mut edp_1a_ever_pressurised = false;
+        for tick in 0..6000 {
+            let time = tick as f64 * 0.05;
+            presets.update(&mut vars, &mut xp, delta.as_secs_f64());
+            // A normal running speed for engine 1's Trent, fed the same way
+            // MSFS's own turbine model otherwise would.
+            vars.set("A32NX_ENGINE_N2:1", 70.);
+            vars.set("A32NX_ENGINE_N3:1", 70.);
+            systems.tick(delta, time, &mut vars);
+            apu_bleed_valve_ever_open |= vars.value("A32NX_APU_BLEED_AIR_VALVE_OPEN") != 0.;
+            edp_1a_ever_pressurised |= vars.value("A32NX_HYD_EDPUMP_1A_LOW_PRESS") == 0.;
+        }
+        eprintln!(
+            "DIAG dc_ess={} hyd_1a_auto={} pneu_apu_bleed_on={} low_press={}",
+            vars.value("A32NX_ELEC_DC_ESS_BUS_IS_POWERED"),
+            vars.value("A32NX_OVHD_HYD_ENG_1A_PUMP_PB_IS_AUTO"),
+            vars.value("A32NX_OVHD_PNEU_APU_BLEED_PB_IS_ON"),
+            vars.value("A32NX_HYD_EDPUMP_1A_LOW_PRESS"),
+        );
+        assert!(
+            vars.value("A32NX_OVHD_APU_START_PB_IS_AVAILABLE") != 0.,
+            "test setup regressed: the APU itself no longer reaches AVAILABLE in 300 s"
+        );
+        assert!(
+            apu_bleed_valve_ever_open,
+            "the APU bleed valve never opened -- see this test's doc comment"
+        );
+        assert!(
+            edp_1a_ever_pressurised,
+            "EDP 1A never pressurised with engine 1 \"running\" -- see this test's doc comment"
+        );
+    }
+
     /// The real executable as its own process: builds, mirrors, and ticks a
     /// few thousand frames in lockstep, reporting the round-trip cost.
     #[test]
