@@ -650,3 +650,184 @@ fn native_images_draw_under_the_nd_with_transform_clip_and_alpha() {
     assert_eq!(pixel(&empty, w, 50, 50), [0, 0, 0, 255]);
     assert_eq!(pixel(&empty, w, 200, 100), [255, 0, 255, 255]);
 }
+
+/// A regression check against the display-bug report ("fills and strokes
+/// produce nothing, text is sheared"): the exact op sequence captured in
+/// src/js/dom/tests/golden/pfd.txt's third submit (attitude sphere shown,
+/// speed and FMA box), a real stream FlyByWire's PFD component emits, fed
+/// through the real tessellator and software rasteriser. Investigating the
+/// bug report, this and the two tests below are how it was established
+/// that fill/stroke geometry and text placement are both correct for real
+/// captured streams; see the handback report for what was and was not
+/// found.
+#[test]
+fn real_pfd_capture_draws_its_vector_geometry() {
+    if !have_package() {
+        return println!("the MSFS package is not on this machine; skipped");
+    }
+    let mut res = resources();
+    let (w, h) = (768, 1024);
+    let mut s = S::default();
+    s.op(BEGIN_PATH, &[]).op(RECT, &[0., 0., 768., 1024.]).fill([0., 0., 0., 1.], false);
+    s.op(SAVE, &[]);
+    s.op(CLIP_RECT, &[0., 0., 768., 1024.]);
+    s.op(TRANSFORM, &[4.838, 0., 0., 4.838, 0., 0.161]);
+    s.op(BEGIN_PATH, &[]);
+    s.op(MOVE_TO, &[105.64, 62.887]);
+    s.op(LINE_TO, &[107.212, 62.086]);
+    s.op(MOVE_TO, &[105.64, 61.303]);
+    s.op(LINE_TO, &[107.212, 60.502]);
+    s.stroke([0., 1., 0., 1.], 0.378, 1, 0, 4., &[], 0.);
+    s.op(BEGIN_PATH, &[]);
+    s.op(MOVE_TO, &[90.858, 44.839]);
+    s.op(ELLIPSE, &[68.906, 80.823, 42.133, 42.158, 0., -1.023, -2.119, 1.]);
+    s.stroke([1., 1., 1., 1.], 0.378, 1, 0, 4., &[], 0.);
+    s.op(BEGIN_PATH, &[]);
+    s.op(MOVE_TO, &[68.906, 38.65]);
+    s.op(LINE_TO, &[66.388, 34.95]);
+    s.op(LINE_TO, &[71.424, 34.95]);
+    s.op(LINE_TO, &[68.906, 38.65]);
+    s.stroke([1., 1., 0., 1.], 0.605, 1, 1, 4., &[], 0.);
+    s.op(SAVE, &[]);
+    s.op(TRANSFORM, &[1., 0., 0., 1., 3.25, 0.]);
+    s.text("SPEED", "Ecam, monospace", 6., 9.282, 7.128, 0, 0, [0., 1., 0., 1.], 0.);
+    s.op(BEGIN_PATH, &[]);
+    s.op(MOVE_TO, &[0.706, 1.814]);
+    s.op(LINE_TO, &[31.633, 1.814]);
+    s.op(LINE_TO, &[31.633, 7.862]);
+    s.op(LINE_TO, &[0.706, 7.862]);
+    s.op(CLOSE_PATH, &[]);
+    s.stroke([0.902, 0.502, 0., 1.], 0.605, 1, 0, 4., &[], 0.);
+    s.op(RESTORE, &[]);
+    s.text("250", "Ecam, monospace", 6., 15.5, 100., 0, 0, [0., 1., 0., 1.], 0.);
+    s.op(RESTORE, &[]);
+
+    let mesh = tessellate(&s, "SCREEN_DU_PFDL", (w, h), &mut res);
+    let rgba = rgba_of(&soft::render(&mesh, &res, 4, &[], &[]));
+    save("real-pfd-capture", w, h, rgba.clone());
+    // The device-space bounding box of the stroked horizon/attitude
+    // geometry: scale 4.838 maps user coords ~34..107 to device ~164..518,
+    // y ~34..82 to ~164..397. If FILL/STROKE stopped reaching the vertex
+    // buffer (the reported fault), this box would be all background.
+    let mut lit = 0usize;
+    for y in 150..420 {
+        for x in 150..530 {
+            if pixel(&rgba, w, x, y) != [0, 0, 0, 255] {
+                lit += 1;
+            }
+        }
+    }
+    assert!(lit > 500, "only {lit} non-background pixels in the stroked geometry's bounding box");
+    // The FMA "SPEED" box is a stroked rect at device x 19.1..168.8, y
+    // 8.9..38.2 (scale 4.838 composed with a translate(3.25, 0), applied to
+    // its user-space corners). Its amber outline must be present near its
+    // left edge.
+    assert_eq!(pixel(&rgba, w, 19, 20), [230, 128, 0, 255], "the amber FMA box outline is missing or the wrong colour");
+}
+
+/// The same kind of check as [`real_pfd_capture_draws_its_vector_geometry`],
+/// against src/js/dom/tests/golden/ewd.txt's first submit (EGT gauge:
+/// CLIP_PATH nested inside a CLIP_RECT, three stroked ellipses, a rotated
+/// filled triangle under a real 45-degree rotation matrix).
+#[test]
+fn real_ewd_capture_draws_its_vector_geometry() {
+    if !have_package() {
+        return println!("the MSFS package is not on this machine; skipped");
+    }
+    let mut res = resources();
+    let (w, h) = (768, 1024);
+    let mut s = S::default();
+    s.op(SAVE, &[]);
+    s.op(CLIP_RECT, &[0., 0., 768., 1024.]);
+    s.text("620", "sans-serif", 23., 98.5, 111.7, 0, 0, [0., 1., 0., 1.], 0.);
+    s.op(BEGIN_PATH, &[]);
+    s.op(MOVE_TO, &[160., 100.]);
+    s.op(ELLIPSE, &[100., 100., 60., 60., 0., 0., -3.491, 1.]);
+    s.stroke([1., 1., 1., 1.], 2., 0, 0, 4., &[], 0.);
+    s.op(BEGIN_PATH, &[]);
+    s.op(MOVE_TO, &[158., 100.]);
+    s.op(ELLIPSE, &[100., 100., 58., 58., 0., 0., -0.349, 1.]);
+    s.stroke([1., 0., 0., 1.], 8., 0, 0, 4., &[], 0.);
+    s.op(BEGIN_PATH, &[]);
+    s.op(MOVE_TO, &[42., 100.]);
+    s.op(ELLIPSE, &[100., 100., 58., 58., 0., 3.142, 2.793, 1.]);
+    s.stroke([0., 1., 0., 1.], 3., 1, 0, 4., &[], 0.);
+    s.op(SAVE, &[]);
+    s.op(BEGIN_PATH, &[]);
+    s.op(MOVE_TO, &[0., 1000.]);
+    s.op(LINE_TO, &[0., 800.]);
+    s.op(LINE_TO, &[130., 800.]);
+    s.op(LINE_TO, &[130., 1000.]);
+    s.op(CLOSE_PATH, &[]);
+    s.op(CLIP_PATH, &[0.]);
+    s.op(BEGIN_PATH, &[]);
+    s.op(MOVE_TO, &[105., 800.]);
+    s.op(LINE_TO, &[105., 1000.]);
+    s.stroke([1., 1., 1., 1.], 2., 0, 0, 4., &[], 0.);
+    s.op(SAVE, &[]);
+    s.op(TRANSFORM, &[0.707, 0.707, -0.707, 0.707, 667.15, 189.358]);
+    s.op(BEGIN_PATH, &[]);
+    s.op(MOVE_TO, &[100., 900.]);
+    s.op(LINE_TO, &[110., 895.]);
+    s.op(LINE_TO, &[110., 905.]);
+    s.op(CLOSE_PATH, &[]);
+    s.fill([0., 1., 1., 1.], false);
+    s.op(RESTORE, &[]);
+    s.op(RESTORE, &[]);
+    s.op(RESTORE, &[]);
+
+    let mesh = tessellate(&s, "SCREEN_DU_EWD", (w, h), &mut res);
+    // Two levels of clip in one mesh: the whole-screen CLIP_RECT (a
+    // scissor) and the nested CLIP_PATH (a stencil path).
+    assert_eq!(mesh.clips.len(), 3);
+    assert!(mesh.clips[2].paths.len() == 1, "the nested CLIP_PATH did not become a stencil clip: {:?}", mesh.clips);
+    let rgba = rgba_of(&soft::render(&mesh, &res, 4, &[], &[]));
+    save("real-ewd-capture", w, h, rgba.clone());
+    let mut lit = 0usize;
+    for y in 20..1024 {
+        for x in 0..768 {
+            if pixel(&rgba, w, x, y) != [0, 0, 0, 255] {
+                lit += 1;
+            }
+        }
+    }
+    assert!(lit > 300, "only {lit} non-background pixels for the whole EGT gauge");
+    // The gauge's outer white ring passes through device (100, 40): user
+    // (100, 40) on the ellipse cx=100,cy=100,r=60 at angle -90 degrees (top).
+    assert_ne!(pixel(&rgba, w, 100, 40), [0, 0, 0, 255], "the gauge ring is missing");
+    // The rotated cyan triangle fill, well inside its bounds.
+    assert_eq!(pixel(&rgba, w, 105, 900), [0, 255, 255, 255]);
+}
+
+/// Two TEXT ops at the same y, different x (as "IDLE" and "+0.0" would be
+/// on an MFD line) under an anisotropic device scale (scale.0 != scale.1,
+/// as a screen whose device texture is not exactly proportional to its CSS
+/// size would have): checks that alone does not produce the
+/// y-grows-with-x skew described in the bug report (it does not: an
+/// anisotropic scale keeps b == c == 0, so [`super::tessellate::Tessellator::glyph_quads`]'s
+/// non-upright branch, taken here since `m.a != m.d`, still places every
+/// glyph through the same shear-free affine map).
+#[test]
+fn anisotropic_scale_does_not_skew_text() {
+    if !have_package() {
+        return println!("the MSFS package is not on this machine; skipped");
+    }
+    let mut res = resources();
+    let (w, h) = (400, 100);
+    let mut s = S::default();
+    s.text("IDLE", "Ecam", 20., 20., 50., 0, 0, WHITE, 0.);
+    s.text("+0.0", "Ecam", 20., 150., 50., 0, 0, WHITE, 0.);
+    let ops = s.parsed();
+    let mut t = Tessellator::default();
+    // A noticeably anisotropic device scale: 2x horizontally, 1x vertically.
+    let mesh = t.run(&ops, &s.strings, "SCREEN_DU_MFD", (w * 2, h), (2.0, 1.0), &mut res).ok().unwrap();
+    assert!(mesh.problems.is_empty(), "{:?}", mesh.problems);
+    let ys: Vec<f32> = mesh.vertices.iter().map(|v| v.y).collect();
+    let (min_y, max_y) = (ys.iter().cloned().fold(f32::INFINITY, f32::min), ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+    let rgba = rgba_of(&soft::render(&mesh, &res, 4, &[], &[]));
+    save("anisotropic-text", w * 2, h, rgba);
+    // With no rotation, both runs share the same baseline y regardless of x:
+    // the vertical spread across every glyph vertex should be small (within
+    // one glyph's own ascent/descent shape, not a whole line height).
+    assert!((max_y - min_y) < 30., "vertices span {} device px vertically: {:?}", max_y - min_y, ys);
+}
