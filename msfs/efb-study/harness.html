@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<!-- Not shipped. Reproduces the geometry study.js builds inside the EFB so the
+     built page can be looked at in a normal browser: a 1430x1000 document (what
+     the media queries resolve against) holding a 1000x699 app box scaled up to
+     fill it. Coherent GT's own quirks are not reproduced here -- this only
+     answers layout questions. -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 1430px; height: 1000px; overflow: hidden; background: #111; }
+  #ds-app {
+    width: 1000px; height: 699px;
+    transform: scale(1.43); transform-origin: top left;
+    overflow: hidden; position: relative;
+  }
+</style>
+</head>
+<body>
+<div id="ds-app"></div>
+<script src="study-app.js"></script>
+<script>
+fetch('study-app.html').then(function (r) { return r.text(); }).then(function (html) {
+  var doc = new DOMParser().parseFromString(html, 'text/html');
+  // The app's own stylesheet, left unscoped: nothing else is on this page.
+  doc.querySelectorAll('style').forEach(function (s) { document.head.appendChild(s); });
+  var host = document.getElementById('ds-app');
+  host.innerHTML = doc.body.innerHTML;
+  // The app sizes itself to the viewport; here it must fill the box instead.
+  var fix = document.createElement('style');
+  fix.textContent = '#ds-app > body, #ds-app { font: 15px "Segoe UI", sans-serif; color: #f2f2f2; }';
+  document.head.appendChild(fix);
+  window.__deepStudyStart();
+  // ?tab=breakers opens a tab other than Study, so each one can be looked at.
+  var want = new URLSearchParams(location.search).get('tab');
+  if (want) {
+    setTimeout(function () {
+      var b = host.querySelector('.tab-btn[data-tab="' + want + '"]');
+      if (b) b.click();
+    }, 1200);
+  }
+  window.__harnessReady = true;
+});
+</script>
+</body>
+</html>

@@ -531,6 +531,13 @@ def main():
 
     shutil.copyfile(FIXTURE, os.path.join(OUT, 'test', 'study-fixture.json'))
     shutil.copyfile(os.path.join(HERE, 'study.js'), os.path.join(OUT, 'study.js'))
+    # Not installed. Reproduces the geometry study.js builds inside the EFB --
+    # a 1430x1000 document holding a 1000x699 app box -- so the built page can
+    # be opened in an ordinary browser. It answers layout questions only;
+    # Coherent GT's own limits are not reproduced. It is copied rather than
+    # left in place because the absolute paths baked in above only resolve
+    # next to the built files.
+    shutil.copyfile(os.path.join(HERE, 'harness.html'), os.path.join(OUT, 'harness.html'))
 
     for name in ('study-app.html', 'study-app.js', 'study.js', 'test/study-fixture.json'):
         path = os.path.join(OUT, name.replace('/', os.sep))
