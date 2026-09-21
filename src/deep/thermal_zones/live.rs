@@ -109,9 +109,16 @@ const APU_FIRE_MAX_HEAT_W: f64 = 300_000.0;
 const APU_FIRE_MAX_SMOKE_KG_S: f64 = 0.008;
 const LAVATORY_FIRE_MAX_HEAT_W: f64 = 20_000.0;
 const LAVATORY_FIRE_MAX_SMOKE_KG_S: f64 = 0.002;
-const WING_DUCT_LEAK_MAX_HEAT_W: f64 = 30_000.0;
-const NACELLE_DUCT_LEAK_MAX_HEAT_W: f64 = 20_000.0;
 const APU_DUCT_LEAK_MAX_HEAT_W: f64 = 25_000.0;
+
+/// Wing/nacelle anti-ice duct bore, m: the WAI duct diameter
+/// `deep::pneumatic_ducts::network::WAI_DUCT_DIAMETER_M` cites from
+/// `wing_anti_ice.rs`'s own public `WAI_PIPE_VOLUME`/diameter figure --
+/// reused here for the nacelle duct too (no separate public nacelle
+/// anti-ice duct figure exists; it is the same class of small,
+/// pressure-regulated hot-air feed as the wing's, far smaller than the
+/// primary 4 in engine bleed duct `PYLON_BLEED_DUCT_BORE_M` cites).
+const ANTI_ICE_DUCT_BORE_M: f64 = 0.05;
 
 // ---------------------------------------------------------------------------
 // ATA 36: the pylon bleed duct leak, derived rather than assumed.
@@ -255,14 +262,37 @@ fn orifice_mass_flow_kg_s(discharge_coefficient: f64, area_m2: f64, upstream_pa:
 /// ventilation, so a reverse-sense term would be a rounding error dressed
 /// up as physics.
 fn pylon_bleed_leak_heat_w(severity: f64, duct_pa: f64, duct_k: f64, bay_air_k: f64, bay_pa: f64) -> f64 {
+    duct_leak_heat_w(severity, PYLON_BLEED_DUCT_BORE_M, PYLON_BLEED_LEAK_AREA_FRACTION_OF_BORE, duct_pa, duct_k, bay_air_k, bay_pa)
+}
+
+/// The same choked-orifice-crack derivation as [`pylon_bleed_leak_heat_w`],
+/// generalised over duct bore: a leak can only ever carry its own enthalpy
+/// *above the bay it escapes into*, so the heat this returns falls to zero
+/// as the bay approaches the duct's own temperature, and to zero outright
+/// once the source (`duct_pa`/`duct_k`) is itself cold (engine/APU shut
+/// down) -- properties no fixed wattage has.
+fn duct_leak_heat_w(severity: f64, bore_m: f64, leak_area_fraction_of_bore: f64, duct_pa: f64, duct_k: f64, bay_air_k: f64, bay_pa: f64) -> f64 {
     let severity = severity.clamp(0.0, 1.0);
     if severity <= 0.0 {
         return 0.0;
     }
-    let bore_area_m2 = std::f64::consts::PI / 4.0 * PYLON_BLEED_DUCT_BORE_M * PYLON_BLEED_DUCT_BORE_M;
-    let crack_area_m2 = severity * PYLON_BLEED_LEAK_AREA_FRACTION_OF_BORE * bore_area_m2;
+    let bore_area_m2 = std::f64::consts::PI / 4.0 * bore_m * bore_m;
+    let crack_area_m2 = severity * leak_area_fraction_of_bore * bore_area_m2;
     let mdot = orifice_mass_flow_kg_s(BLEED_LEAK_DISCHARGE_COEFFICIENT, crack_area_m2, duct_pa, duct_k, bay_pa);
     mdot * super::network::CP_AIR_J_PER_KG_K * (duct_k - bay_air_k).max(0.0)
+}
+
+/// Wing/nacelle anti-ice duct leak heat, W: the same choked-crack physics
+/// as the pylon bleed leak (`duct_leak_heat_w`), sized to the smaller WAI
+/// duct bore (`ANTI_ICE_DUCT_BORE_M`), fed from `Truth`'s own per-engine
+/// bleed port condition -- the anti-ice systems draw from the same
+/// pneumatic manifold the customer bleed does; no separate WAI-regulated
+/// pressure/temperature exists in `Truth`, so this reads the manifold
+/// condition directly, which is the same source and, since a real WAI
+/// pressure-regulating valve only ever throttles it down, an honestly
+/// conservative (not fabricated) upper bound on the leak's own heat.
+fn anti_ice_duct_leak_heat_w(severity: f64, duct_pa: f64, duct_k: f64, bay_air_k: f64, bay_pa: f64) -> f64 {
+    duct_leak_heat_w(severity, ANTI_ICE_DUCT_BORE_M, PYLON_BLEED_LEAK_AREA_FRACTION_OF_BORE, duct_pa, duct_k, bay_air_k, bay_pa)
 }
 
 fn f(ata: u16, n: u16) -> u64 {
@@ -392,18 +422,41 @@ impl ThermalZonesLive {
 
     /// ATA 30: wing/nacelle anti-ice duct leaks (heat) and nacelle vent
     /// scoop ice blockage (ventilation health).
-    fn apply_ice_and_duct_failures(&mut self, faults: &Faults) {
+    ///
+    /// The wing/nacelle leak heat used to be a fixed reference wattage
+    /// unbounded by the duct it came from -- the same defect
+    /// `pylon_bleed_leak_heat_w`'s own doc comment documents measuring a
+    /// full-severity `WING_DUCT_LEAK_MAX_HEAT_W` (since removed) driving
+    /// WingLeLeft to 853 C from a duct whose own air is at ~200-590 K,
+    /// which is not physically possible. Both wing and nacelle now use
+    /// [`anti_ice_duct_leak_heat_w`]: the same choked-orifice-crack
+    /// physics as the pylon fix, fed from the two engines on each wing's
+    /// own side (Airbus's public 1/2-left, 3/4-right numbering,
+    /// `topology_a380`'s own module doc) for the wing case, taking
+    /// whichever of the pair is at higher bleed pressure this tick (the
+    /// one actually dominating the shared manifold), or directly per
+    /// engine for the nacelle case.
+    fn apply_ice_and_duct_failures(&mut self, faults: &Faults, truth: &Truth) {
         let z = &self.a380.zones;
-        for (zone, id) in [(z.wing_le_left, f(30, 1)), (z.wing_le_right, f(30, 2))] {
+        let bay_pa = truth.environment.ambient_pressure_pa;
+        let wings: [(super::network::ZoneId, u64, [usize; 2]); 2] = [(z.wing_le_left, f(30, 1), [0, 1]), (z.wing_le_right, f(30, 2), [2, 3])];
+        for (zone, id, engines) in wings {
             let leak = faults.get(id);
             if leak > 0.0 {
-                self.a380.network.inject_heat_w(zone, leak * WING_DUCT_LEAK_MAX_HEAT_W);
+                let (a, b) = (engines[0], engines[1]);
+                let engine = if truth.engine_bleed_pressure_pa[a] >= truth.engine_bleed_pressure_pa[b] { a } else { b };
+                let bay_air_k = self.a380.network.air_temp_c(zone) + 273.15;
+                let heat_w = anti_ice_duct_leak_heat_w(leak, truth.engine_bleed_pressure_pa[engine], truth.engine_bleed_temp_k[engine], bay_air_k, bay_pa);
+                self.a380.network.inject_heat_w(zone, heat_w);
             }
         }
         for engine in 0..4usize {
             let leak = faults.get(f(30, 3 + engine as u16));
             if leak > 0.0 {
-                self.a380.network.inject_heat_w(z.nacelle_cowl[engine], leak * NACELLE_DUCT_LEAK_MAX_HEAT_W);
+                let zone = z.nacelle_cowl[engine];
+                let bay_air_k = self.a380.network.air_temp_c(zone) + 273.15;
+                let heat_w = anti_ice_duct_leak_heat_w(leak, truth.engine_bleed_pressure_pa[engine], truth.engine_bleed_temp_k[engine], bay_air_k, bay_pa);
+                self.a380.network.inject_heat_w(zone, heat_w);
             }
         }
         for engine in 0..4usize {
@@ -495,7 +548,7 @@ impl crate::deep::live::Area for ThermalZonesLive {
     fn tick(&mut self, truth: &Truth, faults: &Faults) {
         let fan_power = Self::fan_power_fraction(truth);
         self.apply_ventilation_failures(faults, fan_power);
-        self.apply_ice_and_duct_failures(faults);
+        self.apply_ice_and_duct_failures(faults, truth);
         self.apply_gear_door_failures(faults, truth.controls.gear_door_commanded_open);
         self.apply_insulation_failures(faults);
         // Heat/smoke sources are accumulated per tick and consumed by the
@@ -737,7 +790,13 @@ mod tests {
         // Failure 11_030_007 (engine 1 vent scoop ice blockage), effect:
         // "NacelleCowl1 loses its large ram-air ventilation term, so any
         // heat present (engine proximity, a duct leak) accumulates faster".
-        let truth = powered_ground_truth();
+        // Needs a running engine now: `anti_ice_duct_leak_heat_w` derives
+        // the leak from the engine's own real bleed port condition
+        // (`Truth::engine_bleed_pressure_pa`/`_temp_k`), so a duct leak on
+        // a cold, unpowered aircraft correctly delivers no heat at all --
+        // `powered_ground_truth` alone (AC power, engine off) is no longer
+        // enough to exercise this failure.
+        let truth = takeoff_truth();
         let leak_only = Faults::from_pairs([(f(30, 3), 1.0)]);
         let leak_and_blockage = Faults::from_pairs([(f(30, 3), 1.0), (f(30, 7), 1.0)]);
         let mut vented = live_system();
@@ -851,10 +910,39 @@ mod tests {
     }
 
     #[test]
+    fn a_wing_anti_ice_duct_leak_on_a_cold_aircraft_delivers_no_heat_and_running_engines_deliver_bounded_heat() {
+        // Regression for the same fixed-wattage defect as the pylon case
+        // above, but in `apply_ice_and_duct_failures`/`anti_ice_duct_leak_
+        // heat_w`: `WING_DUCT_LEAK_MAX_HEAT_W` (30 kW, since removed) drove
+        // a full-severity leak on a cold, shut-down aircraft to inject heat
+        // regardless, and separately (PROGRESS.md, measured) settled
+        // WingLeLeft at 853 C from a duct whose own air was only ever
+        // 200-590 K -- a bay cannot end up hotter than the air leaking into
+        // it. Both properties are asserted directly here for the wing case.
+        let cold = Truth::default();
+        let mut cold_leaking = live_system();
+        run(cold_leaking.as_mut(), &cold, &Faults::from_pairs([(f(30, 1), 1.0)]), 2000);
+        let mut cold_healthy = live_system();
+        run(cold_healthy.as_mut(), &cold, &Faults::default(), 2000);
+        let leaking_c = published(cold_leaking.as_ref())["THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C"];
+        let healthy_c = published(cold_healthy.as_ref())["THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C"];
+        assert!((leaking_c - healthy_c).abs() < 0.01, "a full-severity wing duct leak on a shut-down aircraft must not warm the bay at all: leaking {leaking_c} vs healthy {healthy_c}");
+
+        let hot = takeoff_truth();
+        let mut hot_leaking = live_system();
+        run(hot_leaking.as_mut(), &hot, &Faults::from_pairs([(f(30, 1), 1.0)]), 2000);
+        let hot_leaking_c = published(hot_leaking.as_ref())["THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C"];
+        assert!(hot_leaking_c > healthy_c + 10.0, "a running engine's leak must actually heat the wing bay: {hot_leaking_c} vs healthy {healthy_c}");
+        assert!(hot_leaking_c < TAKEOFF_IP8_K - 273.15, "and never past the duct feeding it: {hot_leaking_c} C");
+    }
+
+    #[test]
     fn a_pylon_bay_never_gets_hotter_than_the_air_leaking_into_it() {
         // The conservation property the fixed-wattage form does not have,
-        // and the reason it had to go: `WING_DUCT_LEAK_MAX_HEAT_W` still
-        // settles WingLeLeft at 853 C from a duct whose air is at 200 C
+        // and the reason it had to go: the old `WING_DUCT_LEAK_MAX_HEAT_W`
+        // (removed, see `a_wing_anti_ice_duct_leak_on_a_cold_aircraft_
+        // delivers_no_heat_and_running_engines_deliver_bounded_heat` above)
+        // settled WingLeLeft at 853 C from a duct whose air was at 200 C
         // (measured; PROGRESS.md). Here the driving term is
         // mdot*cp*(T_duct - T_bay), so it closes off as the bay
         // approaches the duct, whatever the duct is. Run at a

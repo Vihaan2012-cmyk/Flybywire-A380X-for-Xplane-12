@@ -218,9 +218,6 @@ fn register_fire_failures(r: &mut Registry) {
 // ---------------------------------------------------------------------------
 
 fn register_ice_and_duct_failures(r: &mut Registry) {
-    const WING_DUCT_LEAK_MAX_HEAT_W: f64 = 30_000.0; // GENERIC: order of magnitude of a hot bleed anti-ice duct's own leak enthalpy flow, same class of figure as physics::bays.rs's own bleed-leak sizing
-    const NACELLE_DUCT_LEAK_MAX_HEAT_W: f64 = 20_000.0;
-
     let wings = [("WingLeLeft", "wing_le_left", 1u16), ("WingLeRight", "wing_le_right", 2u16)];
     for (zone_name, field, n) in wings {
         let component_id = format!("30_thermal.{field}_antiice_duct");
@@ -238,8 +235,8 @@ fn register_ice_and_duct_failures(r: &mut Registry) {
             ata: 30,
             name: format!("{zone_name} anti-ice duct leak"),
             component: component_id,
-            model_field: format!("thermal_zones::network::Zone.injected_heat_w (via ThermalNetwork::inject_heat_w(zones.{field}, magnitude*{WING_DUCT_LEAK_MAX_HEAT_W}))"),
-            magnitude: format!("0..1, fraction of the reference {WING_DUCT_LEAK_MAX_HEAT_W:.0} W full-severity duct leak"),
+            model_field: format!("thermal_zones::network::Zone.injected_heat_w (via ThermalNetwork::inject_heat_w(zones.{field}, live::anti_ice_duct_leak_heat_w(magnitude, ..)))"),
+            magnitude: "0..1, fraction of a full-severity crack (2% of the 50 mm WAI duct bore) at the wing's own side engine bleed port condition (Truth::engine_bleed_pressure_pa/_temp_k, higher-pressure of the pair) -- no fixed reference wattage: the leak's heat is the crack's own choked-orifice enthalpy flow above the bay, so it is zero with the source engines shut down and bounded by the duct's own temperature".to_string(),
             effect: format!("{zone_name}'s structure/air temperature rises well past its normal transient anti-ice cycle, threatening its registered insulation/wiring components (e.g. WingLeLeftAntiIceDuctInsulation)."),
         });
     }
@@ -264,8 +261,8 @@ fn register_ice_and_duct_failures(r: &mut Registry) {
             ata: 30,
             name: format!("Engine {engine} nacelle anti-ice duct leak"),
             component: component_id.clone(),
-            model_field: format!("thermal_zones::network::Zone.injected_heat_w (via ThermalNetwork::inject_heat_w(zones.{field}, magnitude*{NACELLE_DUCT_LEAK_MAX_HEAT_W}))"),
-            magnitude: format!("0..1, fraction of the reference {NACELLE_DUCT_LEAK_MAX_HEAT_W:.0} W full-severity duct leak"),
+            model_field: format!("thermal_zones::network::Zone.injected_heat_w (via ThermalNetwork::inject_heat_w(zones.{field}, live::anti_ice_duct_leak_heat_w(magnitude, ..)))"),
+            magnitude: "0..1, fraction of a full-severity crack (2% of the 50 mm WAI-class duct bore) at this engine's own bleed port condition (Truth::engine_bleed_pressure_pa/_temp_k) -- no fixed reference wattage: the leak's heat is the crack's own choked-orifice enthalpy flow above the bay, zero with the engine shut down".to_string(),
             effect: format!("NacelleCowl{engine} runs hot, threatening NacelleCowl{engine}Wiring."),
         });
         r.failure(FailureDef {
