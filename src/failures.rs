@@ -1550,9 +1550,25 @@ impl Failures {
 // X-Plane: commands and datarefs.
 // ---------------------------------------------------------------------------
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
 extern "system" {
     fn LoadLibraryA(name: *const c_char) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+}
+
+/// Not Windows -- the MSFS wasm build compiles this file. There is no
+/// XPLM_64.dll in that process, and these answer as the real calls do for
+/// a DLL that is not there: a null module, so `xplm_symbol` returns `None`.
+#[cfg(not(windows))]
+#[allow(non_snake_case)]
+unsafe fn LoadLibraryA(_name: *const c_char) -> *mut c_void {
+    std::ptr::null_mut()
+}
+#[cfg(not(windows))]
+#[allow(non_snake_case)]
+unsafe fn GetProcAddress(_module: *mut c_void, _name: *const c_char) -> *mut c_void {
+    std::ptr::null_mut()
 }
 
 fn xplm_symbol(name: &str) -> Option<*mut c_void> {
