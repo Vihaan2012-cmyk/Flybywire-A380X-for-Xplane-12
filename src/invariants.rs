@@ -113,6 +113,16 @@ pub fn bound_for(name: &str) -> Bound {
         return Bound::TemperatureFloor(-273.15);
     }
 
+    // Creep life is a Miner's-rule damage sum (physics::damage), not a
+    // normalised fraction: 1.0 is the point the bearing-wear failure arms
+    // and 2.0 the point the next one does, and it keeps counting past both.
+    // Live, every engine sat at 1.3-1.8 and the generic rule below clamped
+    // all four to 1, hiding the real state from the Study page and from
+    // anything else reading the variable.
+    if n.contains("CREEP_LIFE_FRACTION") {
+        return Bound::NonNegative;
+    }
+
     // A normalized 0..1 fraction, so MSFS's 0..100-scaled percent simvars
     // are not caught here by accident.
     // Only explicit fractions: a "ratio" is not bounded by 1 in general
@@ -450,6 +460,8 @@ mod tests {
         assert_eq!(bound_for("AMBIENT TEMPERATURE"), Bound::TemperatureFloor(-273.15));
         assert_eq!(bound_for("APU EGT"), Bound::None); // not in the table: unmatched name, no false positive
         assert_eq!(bound_for("VALVE OPEN FRACTION"), Bound::Range(0.0, 1.0));
+        // Damage sums count past 1 by design (damage.rs arms at >= 1 and >= 2).
+        assert_eq!(bound_for("ENGINE_CREEP_LIFE_FRACTION:3"), Bound::NonNegative);
         assert_eq!(bound_for("COMPRESSOR PRESSURE RATIO"), Bound::NonNegative);
         assert_eq!(bound_for("PRESSURE ALTITUDE"), Bound::None);
     }
