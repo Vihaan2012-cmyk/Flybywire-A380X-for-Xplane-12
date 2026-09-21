@@ -1107,7 +1107,11 @@ impl Plugin {
         // first tick.
         let persistence = persistence::Persistence::new(&crate::xp::system_path().unwrap_or_else(|| ".".into()));
         let mut damage = physics::damage::Damage::new(&mut vars, Some(xplm));
-        damage.engines = persistence.state.engines;
+        let (loaded_engines, engine_wear_rejections) = physics::damage::load_engines(persistence.state.engines);
+        damage.engines = loaded_engines;
+        for reason in &engine_wear_rejections {
+            log(&format!("persisted engine wear: {reason}"));
+        }
         wear::publish(persistence.state.wear.clone());
         // Physics workstream 6: per-wheel tyre model, built alongside
         // damage (it re-arms damage.rs's own per-leg tyre-burst ids at
@@ -1142,8 +1146,40 @@ impl Plugin {
         // Restore the persisted active/deferred failure set now that
         // `Failures::new()` (inside `Correctness::new`) has registered every
         // id, including this workstream's own catalogue.
-        failures::replace(persistence.state.active_failure_ids.iter().copied());
-        failures::restore_magnitudes(persistence.state.active_failure_magnitudes.iter().map(|(&id, &m)| (id, m)));
+        //
+        // Provenance gate (docs/analysis/bug-hunt-2026-09-21.md's follow-up:
+        // a healthy, powered, parked aircraft came back with 79 failures
+        // armed, most of them ids no live coupling was currently deriving).
+        // Two mechanisms write straight into the crew-armed set from live
+        // physics rather than from the Study/EFB/remote-user path --
+        // `physics::damage::Damage::arm` and `Breakers::pre_systems`'s
+        // per-tick `!closed` mirror -- and `active_failure_ids` is saved
+        // from `failures::active_ids()`, which is the *effective* set
+        // (crew armed OR physics-derived OR component-level OR deep-derived,
+        // `failures.rs`'s `State::effective`), not the crew's own subset.
+        // Restoring that union straight into the crew-armed bucket promotes
+        // whatever a previous session's physics happened to conclude into
+        // something this session treats as deliberately armed forever,
+        // because nothing but a human clearing it from the Study panel ever
+        // removes it again. An id either of those two modules can derive is
+        // therefore never trusted from disk: it is left for this session's
+        // own first tick of real physics to reach on its own -- which, on a
+        // healthy aircraft, means it never arms at all.
+        let derived_ids: std::collections::BTreeSet<u64> = breakers::known_failure_ids().into_iter().chain(physics::damage::Damage::derived_failure_ids()).collect();
+        let (restored_ids, dropped_ids): (Vec<u64>, Vec<u64>) = persistence.state.active_failure_ids.iter().copied().partition(|id| !derived_ids.contains(id));
+        let (restored_magnitudes, dropped_magnitudes): (Vec<(u64, f64)>, Vec<(u64, f64)>) =
+            persistence.state.active_failure_magnitudes.iter().map(|(&id, &m)| (id, m)).partition(|(id, _)| !derived_ids.contains(id));
+        if !dropped_ids.is_empty() || !dropped_magnitudes.is_empty() {
+            let mut dropped: Vec<u64> = dropped_ids.iter().copied().chain(dropped_magnitudes.iter().map(|(id, _)| *id)).collect();
+            dropped.sort_unstable();
+            dropped.dedup();
+            log(&format!(
+                "persisted failure set: dropped {} physics-derived id(s) instead of restoring them as crew-armed (re-derived live instead, not trusted from disk): {dropped:?}",
+                dropped.len()
+            ));
+        }
+        failures::replace(restored_ids);
+        failures::restore_magnitudes(restored_magnitudes);
         // [slot new: radios]
         let radios = radios::Radios::new(&mut vars, xplm);
         // [slot new: surveillance]

@@ -933,6 +933,19 @@ pub fn catalog() -> &'static [BreakerDef] {
     CATALOG.get_or_init(build_catalog)
 }
 
+/// Every FlyByWire failure id a breaker in this catalogue can set
+/// (`Breakers::pre_systems`'s `crate::failures::set_active(fail, !closed)`,
+/// called every tick from this breaker's own live current/voltage physics,
+/// never from the crew). Persistence must never restore one of these into
+/// the crew-armed set: an open breaker is re-derived from this session's
+/// own physics on its own first tick, and treating a *previous* session's
+/// open breaker as something the crew armed is exactly the bug this
+/// function exists to let the restore path filter out
+/// (`docs/analysis/bug-hunt-2026-09-21.md`'s 2026-09-21 follow-up).
+pub fn known_failure_ids() -> std::collections::BTreeSet<u64> {
+    catalog().iter().flat_map(|d| d.failures.iter().copied()).collect()
+}
+
 /// Synthetic circuit numbers for a catalogue entry with no `panel_node`,
 /// well above both `circuits::SYSTEMS_CFG`'s own numbers and
 /// `circuits::PANEL_ONLY_BASE`'s range.
