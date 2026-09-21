@@ -13,9 +13,18 @@
 #   .\install.ps1 -Package "D:\...\flybywire-aircraft-a380-842"
 #   .\install.ps1 -Remove
 
+#   .\install.ps1 -Scale 2        sharper tablet (see below)
+#   .\install.ps1 -Scale 1        put the tablet back
+#
+# -Scale is the one thing here that edits a FlyByWire file: panel.cfg, to
+# enlarge the EFB's render target. The original is copied to
+# panel.cfg.deepstudy-backup first and -Remove puts it back.
+
 param(
     [string]$Package,
-    [switch]$Remove
+    [switch]$Remove,
+    [ValidateRange(1, 4)]
+    [int]$Scale = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,8 +59,12 @@ $importLines = @(
 )
 $ours = @('study.js', 'study-app.js', 'study-app.html', 'test/study-fixture.json')
 
+$panelPath = Join-Path $Package 'SimObjects\AirPlanes\FlyByWire_A380_842\panel\panel.cfg'
+$panelBackup = "$panelPath.deepstudy-backup"
+$panelRel = 'SimObjects/AirPlanes/FlyByWire_A380_842/panel/panel.cfg'
+
 function Set-LayoutEntries {
-    param([string[]]$Names, [switch]$Delete)
+    param([string[]]$Names, [switch]$Delete, [string[]]$Extra = @())
 
     $layout = Get-Content $layoutPath -Raw | ConvertFrom-Json
     $content = [System.Collections.ArrayList]::new()
@@ -60,11 +73,13 @@ function Set-LayoutEntries {
     # efb.html always needs its recorded size refreshed: we just changed it.
     $paths = @($Names) + @('efb.html')
 
-    foreach ($name in $paths) {
-        $rel = "html_ui/Pages/VCockpit/Instruments/A380X/EFB/$name"
+    foreach ($name in ($paths + $Extra)) {
+        # $Extra entries are already package-relative; ours are EFB-relative.
+        $rel = if ($Extra -contains $name) { $name }
+               else { "html_ui/Pages/VCockpit/Instruments/A380X/EFB/$name" }
         $existing = $content | Where-Object { $_.path -eq $rel }
 
-        if ($Delete -and $name -ne 'efb.html') {
+        if ($Delete -and $name -ne 'efb.html' -and ($Extra -notcontains $name)) {
             foreach ($e in @($existing)) { $content.Remove($e) }
             continue
         }
@@ -92,16 +107,57 @@ function Set-LayoutEntries {
     [System.IO.File]::WriteAllText($layoutPath, $json, (New-Object System.Text.UTF8Encoding $false))
 }
 
+function Set-EfbScale {
+    # Enlarge the EFB's render target by $Factor.
+    #
+    # [VCockpit15] holds three numbers. size_mm is how big the panel is in
+    # the cockpit and must not change -- it is the physical screen. What
+    # changes is pixel_size, the render target, and the rectangle the gauge
+    # is drawn into, which has to match it or the page ends up in one corner.
+    #
+    # study.js scales the document back down to 1430x1000 so nothing is laid
+    # out differently; the drawing is simply finer. Without that half of this
+    # is worse than useless -- FlyByWire's pages would come out half size.
+    param([int]$Factor)
+
+    if (-not (Test-Path $panelPath)) { throw "No panel.cfg at $panelPath" }
+    if (-not (Test-Path $panelBackup)) { Copy-Item $panelPath $panelBackup }
+
+    # Always from the backup, so -Scale is an absolute setting rather than
+    # something that compounds each time it is run.
+    $text = [System.IO.File]::ReadAllText($panelBackup)
+    $w = 1430 * $Factor
+    $h = 1000 * $Factor
+
+    $before = $text
+    $text = $text -replace '(?m)^pixel_size=1430,1000\s*$', "pixel_size=$w,$h"
+    $text = $text -replace '(?m)^(htmlgauge00=A380X/EFB/efb\.html,\s*0,0,)1430,1000\s*$', "`${1}$w,$h"
+    if ($Factor -ne 1 -and $text -eq $before) {
+        throw "panel.cfg does not have the [VCockpit15] lines this expected -- has FlyByWire changed it?"
+    }
+
+    # No BOM: the original has none and MSFS is particular about these files.
+    [System.IO.File]::WriteAllText($panelPath, $text, (New-Object System.Text.UTF8Encoding $false))
+    Write-Host "panel.cfg: EFB render target now ${w}x${h}"
+}
+
 if ($Remove) {
     foreach ($name in $ours) {
         $p = Join-Path $efbDir $name
         if (Test-Path $p) { Remove-Item $p -Force }
     }
     (Get-Content $htmlPath) | Where-Object { $_ -notmatch 'study\.js' } | ForEach-Object { $_ } | Out-String | ForEach-Object { [System.IO.File]::WriteAllText($htmlPath, $_, (New-Object System.Text.UTF8Encoding $false)) }
-    Set-LayoutEntries -Names $ours -Delete
+    if (Test-Path $panelBackup) {
+        Copy-Item $panelBackup $panelPath -Force
+        Remove-Item $panelBackup -Force
+        Write-Host "panel.cfg restored from backup"
+    }
+    Set-LayoutEntries -Names $ours -Delete -Extra @($panelRel)
     Write-Host "Removed. efb.js was never touched."
     exit 0
 }
+
+if ($Scale -gt 0) { Set-EfbScale -Factor $Scale }
 
 $dist = Join-Path $here 'dist'
 if (-not (Test-Path (Join-Path $dist 'study-app.html'))) { throw "Run build.sh first: dist/ is missing." }
@@ -121,7 +177,7 @@ foreach ($line in $importLines) {
     }
 }
 
-Set-LayoutEntries -Names $ours
+Set-LayoutEntries -Names $ours -Extra @($panelRel)
 Write-Host "layout.json updated"
 Write-Host ""
 Write-Host "Done. efb.js untouched. Reload the aircraft and use the STUDY button."

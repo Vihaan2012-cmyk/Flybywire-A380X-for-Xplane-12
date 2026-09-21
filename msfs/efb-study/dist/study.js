@@ -279,8 +279,41 @@
     slot.parentElement.insertBefore(btn, slot.nextSibling);
   }
 
+  // -------------------------------------------------------- a sharper screen
+  //
+  // The tablet is a 1430x1000 render target -- panel.cfg, [VCockpit15] --
+  // and that is every pixel it has, ours and FlyByWire's alike. Text on it
+  // is as sharp as that and no sharper.
+  //
+  // install.ps1 -Scale enlarges the target. On its own that buys nothing:
+  // the page would simply lay itself out in more CSS pixels, so a 15px line
+  // would still be 15 device pixels tall, just physically smaller on the
+  // panel. FlyByWire's own EFB would shrink with it -- its sizes are fixed,
+  // 282 rem lengths against a default root -- so this is not optional.
+  //
+  // Instead the document is pinned back to the 1430x1000 it was written for
+  // and scaled up to fill the larger target. The layout is unchanged, every
+  // element is drawn with the factor's worth of extra pixels, and neither
+  // their pages nor ours have to know it happened.
+  function applyScale() {
+    var scale = window.innerWidth / 1430;
+    if (!(scale > 1.01)) return;
+    var st = document.createElement('style');
+    st.id = 'deepstudy-scale';
+    st.textContent =
+      'html, body { width: 1430px; height: 1000px; margin: 0; overflow: hidden; }' +
+      'body { transform: scale(' + scale + '); transform-origin: 0 0; }' +
+      // Tailwind's viewport-sized utilities would still measure the real
+      // target rather than the box we just pinned, so restate those two.
+      '.h-screen { height: 1000px; } .w-screen { width: 1430px; }' +
+      // Ours is fixed-positioned in 100vw/100vh, same problem.
+      '#deepstudy { width: 1430px; height: 1000px; }';
+    document.head.appendChild(st);
+  }
+
   function attach() {
     if (!document.body) { setTimeout(attach, 150); return; }
+    applyScale();
     placeButton();
     setInterval(placeButton, 1500);
   }
