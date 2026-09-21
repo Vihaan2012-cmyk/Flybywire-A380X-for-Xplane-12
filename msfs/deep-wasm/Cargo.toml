@@ -1,0 +1,26 @@
+# Standalone, like ../lvar-bench and for the same reason: this crate targets
+# wasm32-wasip1 and links against the proprietary MSFS SDK, and must never be
+# pulled into the X-Plane plugin build. The empty [workspace] table makes that
+# structural -- cargo stops walking up the directory tree here.
+[workspace]
+
+[package]
+name = "deep_wasm"
+version = "0.1.0"
+edition = "2021"
+description = "The deep systems layer as a fifth WASM module beside FlyByWire's four, for the A380X in MSFS"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+
+[dependencies]
+# FlyByWire's own fork of the MSFS bindings -- the same git dependency their
+# shipping a380_systems_wasm uses.
+msfs = { git = "https://github.com/flybywiresim/msfs-rs", branch = "main" }
+
+[profile.release]
+# Same shape as FlyByWire's workspace release profile.
+lto = true
+strip = true
