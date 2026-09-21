@@ -337,8 +337,21 @@ impl Frame {
 impl Renderer {
     /// Bind OpenGL. Must run with X-Plane's plugin context current, which is
     /// the case inside drawing callbacks.
+    ///
+    /// Before this, `xphfbw.displaySafeMode` (the app's "Use display safe
+    /// mode" checkbox, app/ui/index.html) was read by nobody on the plugin
+    /// side: a pilot who ticked it because their screens stayed black or
+    /// flickered saw no change at all, since nothing in this module ever
+    /// looked at the setting. The multisampled framebuffer this constructor
+    /// makes is the one hardware-dependent piece of the display path (an
+    /// FBO with a 4x `GL_MAX_SAMPLES` renderbuffer, [`make_multisample`]);
+    /// safe mode now skips it, falling back to the plain, always-available
+    /// path already in [`Renderer::draw`] (the `_ =>` arm, straight into
+    /// X-Plane's target with no anti-aliasing and no clip paths) -- exactly
+    /// what the checkbox's own tooltip promises.
     pub fn new(xp: AvionicsApi) -> Result<Self, String> {
         let gl = unsafe { Fns::load()? };
+        let safe_mode = display_safe_mode();
         let mut r = Renderer {
             gl,
             xp,
@@ -354,7 +367,11 @@ impl Renderer {
             gl_error_warned: std::collections::HashSet::new(),
             target_multisampled: None,
         };
-        r.multisample = unsafe { r.make_multisample() };
+        if safe_mode {
+            crate::log("display: xphfbw.displaySafeMode is on; skipping the multisampled framebuffer (no anti-aliasing, no clip paths)");
+        } else {
+            r.multisample = unsafe { r.make_multisample() };
+        }
         Ok(r)
     }
 
@@ -987,6 +1004,67 @@ impl Renderer {
             }
         }
         (gl.disable)(GL_STENCIL_TEST);
+    }
+}
+
+/// `xphfbw.displaySafeMode` out of a parsed xphfbw.json map: `true`/`"true"`
+/// only (matching `app_settings.rs`'s `as_bool`, which this intentionally
+/// duplicates rather than importing -- `app_settings.rs` is outside this
+/// module's ownership, and `AppSettings` does not carry this key today).
+/// Anything else (missing, malformed, a stray number) is "off", the
+/// checkbox's own default (`app/ui/index.html`'s `DEFAULTS`).
+fn parse_display_safe_mode(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    match map.get("displaySafeMode") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s == "true",
+        _ => false,
+    }
+}
+
+/// Reads `xphfbw.json` fresh (this runs once, in [`Renderer::new`], not per
+/// frame): `false` with no X-Plane folder known yet (unit tests, or called
+/// before `xp::system_path` can resolve) or no readable/parsable file, same
+/// fallback `app_settings.rs::load_from_path` uses for a missing install.
+fn display_safe_mode() -> bool {
+    let Some(root) = crate::xp::system_path() else { return false };
+    let path = crate::settings_files::app_settings_path(&root);
+    let map = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    parse_display_safe_mode(&map)
+}
+
+#[cfg(test)]
+mod safe_mode_tests {
+    use super::parse_display_safe_mode;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn off_by_default_when_the_key_is_missing() {
+        let map = json!({}).as_object().cloned().unwrap();
+        assert!(!parse_display_safe_mode(&map));
+    }
+
+    #[test]
+    fn on_when_the_app_wrote_a_json_bool() {
+        let map = json!({"displaySafeMode": true}).as_object().cloned().unwrap();
+        assert!(parse_display_safe_mode(&map));
+    }
+
+    #[test]
+    fn on_when_the_app_wrote_a_string_true_like_its_other_booleans() {
+        let map = json!({"displaySafeMode": "true"}).as_object().cloned().unwrap();
+        assert!(parse_display_safe_mode(&map));
+    }
+
+    #[test]
+    fn off_for_anything_else() {
+        for v in [Value::Bool(false), Value::String("false".into()), Value::String("nonsense".into()), Value::Null] {
+            let map = json!({"displaySafeMode": v}).as_object().cloned().unwrap();
+            assert!(!parse_display_safe_mode(&map));
+        }
     }
 }
 
