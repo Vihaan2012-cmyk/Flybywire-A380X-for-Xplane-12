@@ -989,18 +989,14 @@ mod tests {
         // heat must reach this area's own ODLS and trip it.
         //
         // WingLeLeft (unlike a pylon) has no forced-ventilation link at
-        // all in `topology_a380::build`, so a full-severity 30 kW leak
-        // drives it far past this area's own absolute wing/fuselage ODLS
-        // threshold (`odls::OverheatDetectionLoop::THRESHOLD_WING_
-        // FUSELAGE_K`, ~124 C, replacing the old ambient-relative margin
-        // this comment used to cite). The >150 C setup value itself is
-        // `thermal_zones`' own known-unphysical number for this interim
-        // constant (that area's own 2026-09-20 PROGRESS.md: honest physics
-        // gives ~68 C, not 853 C -- a fix owed in that area, not this one,
-        // and not required for the setup check below to still hold, since
-        // even the honest 68 C figure would clear this area's 124 C
-        // threshold only if `thermal_zones` also fixes its own leak-model
-        // form; this test only proves the *read* side of the coupling).
+        // all in `topology_a380::build`, so a full-severity leak from a
+        // duct at take-off bleed condition has to carry it past this area's
+        // own absolute wing/fuselage ODLS threshold
+        // (`odls::OverheatDetectionLoop::THRESHOLD_WING_FUSELAGE_K`).
+        // `thermal_zones` used to inject a fixed 30 kW here regardless of
+        // engine state (853 C on a cold aircraft); it now derives the heat
+        // from the duct's real pressure and temperature, which is why this
+        // test has to supply a running engine.
         // A ram-vented pylon's own 40 kW leak, by contrast, settles only
         // ~75 K above ambient under this area's own 0.5 kg/s pylon vent
         // and does not confirm a trip at the pylon/strut class's higher
@@ -1008,14 +1004,32 @@ mod tests {
         let mut deep = crate::deep::live::Deep::new().with_area(live_system()).with_area(crate::deep::thermal_zones::live::live_system());
         let leak_id = f_thermal(30, 1); // thermal_zones' own WingLeLeft anti-ice duct leak id
         let armed = Faults::from_pairs([(leak_id, 1.0)]);
-        let truth = Truth { dt_s: 1.0, ..Truth::default() };
+        // The leak's heat is derived from the duct's real condition now (a
+        // choked crack fed from `engine_bleed_pressure_pa`/`_temp_k`), so a
+        // cold, unpowered aircraft leaks nothing -- the outcome the comment
+        // above predicted once `thermal_zones` fixed its leak-model form.
+        // Give it the running engine that area's own `takeoff_truth` uses:
+        // Trent 972 IP8 at take-off power, 970 kPa / 590 K.
+        let truth = Truth {
+            dt_s: 1.0,
+            engine_running: [true; 4],
+            engine_n1_frac: [1.0; 4],
+            engine_bleed_pressure_pa: [970_000.0; 4],
+            engine_bleed_temp_k: [590.0; 4],
+            ..Truth::default()
+        };
         let mut published = BTreeMap::new();
         for _ in 0..600 {
             deep.tick(truth.clone(), &armed, &mut |name, value| {
                 published.insert(name.to_string(), value);
             });
         }
-        assert!(published["THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C"] > 150.0, "setup: the thermal area's own leak failure must actually heat the bay, got {}", published["THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C"]);
+        // The precondition for the trip below is the loop's own threshold,
+        // not a number picked to pass: the bay has to be hotter than what
+        // the ODLS is set to notice.
+        let bay_k = published["THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C"] + 273.15;
+        let threshold_k = crate::deep::pneumatic_ducts::odls::OverheatDetectionLoop::THRESHOLD_WING_FUSELAGE_K;
+        assert!(bay_k > threshold_k, "setup: the thermal area's own leak failure must heat the bay past the ODLS threshold ({threshold_k:.1} K), got {bay_k:.1} K");
         assert_eq!(published["DEEP_PNEU_ODLS_WingLeLeft_TRIP"], 1.0, "the real bay heat must now reach this area's own ODLS and trip it");
 
         // The right wing never had anything leak into it.
