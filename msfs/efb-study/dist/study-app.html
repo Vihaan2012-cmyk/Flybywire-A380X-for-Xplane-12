@@ -587,6 +587,43 @@
      declaration was dropped
      -- see the CSS compat pass below. The app's own rule is correct and at
      1430x1000 its media queries never fire. */
+  /* Typography, restated as separate properties.
+
+     The app writes `font: 15px/1.35 "Segoe UI", system-ui, sans-serif` on
+     body and `font: <size> "Segoe UI"` on the nav buttons. `system-ui` is a
+     family keyword this engine need not know, and an unknown family
+     invalidates the whole shorthand -- which takes the size with it,
+     because `font` sets both at once. Everything then renders at whatever
+     the default is, which is how a seven-digit ATA number stopped fitting
+     the 70px column it was given and ran under the name beside it.
+
+     Split apart, a family the engine does not know costs only the family. */
+  #ds-app {
+    font-family: "Segoe UI", Tahoma, Verdana, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.35;
+  }
+  .study-nav button, .study-nav button .count {
+    font-family: "Segoe UI", Tahoma, Verdana, Arial, sans-serif;
+    font-size: 12px;
+  }
+
+  /* The chapter count is floated right. In a 210px column most chapter
+     names wrap, and a float placed after the text lands on the last line --
+     so the number drops onto a line of its own underneath. On the wide
+     window the app was written for the names do not wrap and the question
+     never comes up. A flex row puts the number back beside the name. */
+  .study-nav button {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .study-nav button .count { float: none; margin-left: 8px; flex: 0 0 auto; }
+
+  /* Seven digits, and 70px was measured against a font that is not the one
+     being used. Widen the column rather than shrink the number. */
+  .fail-row { grid-template-columns: 92px minmax(0, 1fr) auto; }
+  .fail-row .ata { white-space: nowrap; }
   /* FlyByWire's own tablet covers these, and the last three of them
      talk to the X-Plane plugin, which is not here. */
   .tab-btn[data-tab="flightplan"],

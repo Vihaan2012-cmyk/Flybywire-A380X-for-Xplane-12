@@ -141,6 +141,54 @@
     );
   }
 
+  // ----------------------------------------------------- what the DOM lacks
+  //
+  // Coherent GT 2.9.5 is not Chromium; it is Coherent Labs' own engine with
+  // its own subset of the DOM, and replaceChildren is not in it. The app
+  // calls it in seven places, every one of them the first thing a page does
+  // to clear its container. The call throws, the rest of that render never
+  // runs, and the page comes up blank under a heading that says how many
+  // rows it is about to draw -- which is exactly what Flight Controls,
+  // Landing Gear and the breaker list were doing.
+  //
+  // append() is here, so the replacement is the obvious one.
+  function polyfill() {
+    ['Element', 'Document', 'DocumentFragment'].forEach(function (name) {
+      var proto = window[name] && window[name].prototype;
+      if (!proto || proto.replaceChildren) return;
+      proto.replaceChildren = function () {
+        while (this.firstChild) this.removeChild(this.firstChild);
+        if (arguments.length) this.append.apply(this, arguments);
+      };
+    });
+  }
+
+  // ------------------------------------------------- giving the SVGs a size
+  //
+  // The synoptics are `.study-svg { width: 100%; height: auto; }`. A browser
+  // that works out a replaced element's intrinsic ratio from its viewBox
+  // gives them the right height; this engine does not, so they fall back to
+  // the default 150px and the diagram is drawn tiny and centred inside a
+  // letterbox. That is the "separate image" on the Fuel page.
+  //
+  // The ratio is written on every one of them, so read it and set the
+  // height. The app redraws its pages as values change, which replaces the
+  // element, so this runs on a timer rather than once.
+  function sizeDiagrams() {
+    var svgs = document.querySelectorAll('#' + HOST + ' svg.study-svg');
+    for (var i = 0; i < svgs.length; i++) {
+      var svg = svgs[i];
+      var box = (svg.getAttribute('viewBox') || '').split(/[\s,]+/);
+      if (box.length !== 4) continue;
+      var w = parseFloat(box[2]);
+      var h = parseFloat(box[3]);
+      var width = svg.clientWidth || svg.parentNode.clientWidth;
+      if (!(w > 0 && h > 0 && width > 0)) continue;
+      var want = Math.round(width * h / w) + 'px';
+      if (svg.style.height !== want) svg.style.height = want;
+    }
+  }
+
   function inject(host, html) {
     var doc = new DOMParser().parseFromString(html, 'text/html');
 
@@ -163,8 +211,10 @@
       fail(host, 'study-app.js did not load: no __deepStudyStart. Check that efb.html imports it and layout.json lists it.');
       return;
     }
+    polyfill();
     try {
       window.__deepStudyStart();
+      setInterval(sizeDiagrams, 400);
     } catch (e) {
       fail(host, 'Study app failed to start: ' + (e && e.stack ? e.stack : e));
     }
