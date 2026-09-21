@@ -496,6 +496,33 @@ fn rotate_small_angle(eps: [f64; 3], v: [f64; 3]) -> [f64; 3] {
     [v[0] + c[0], v[1] + c[1], v[2] + c[2]]
 }
 
+/// Fine leveling: the pitch/roll a real strapdown alignment derives from the
+/// sensed specific force at rest (any strapdown/AHRS alignment text, e.g.
+/// Titterton & Weston ch. 9; the same relation [`Adiru::state_derivative`]
+/// uses in reverse, `body_to_ned`'s `[0,0,-g]` case solved for pitch/roll).
+/// At rest (low dynamics -- the only regime this is called in, ground
+/// alignment) the accelerometers sense (the negative of) the local gravity
+/// vector, so `f_fwd = g*sin(pitch)`, `f_right = -g*sin(roll)*cos(pitch)`,
+/// `f_down = -g*cos(roll)*cos(pitch)`; the last two solve for roll via
+/// `atan2` without dividing by `cos(pitch)`, exact rather than small-angle.
+/// `f_body_g` is specific force in g (aviation forward/right/down);
+/// `misalign_eps_rad` is this unit's own fixed IMU-case-to-airframe
+/// mounting misalignment (see [`MOUNT_MISALIGNMENT_SIGMA_DEG`]), applied
+/// here the same way `mechanize` applies it to every other tick's specific
+/// force -- so leveling is *consistent* with the mounting a real, boresight-
+/// calibrated installation would level against, not a discontinuity from a
+/// truth passthrough that only starts seeing the misalignment once
+/// free-inertial mechanization begins (see the report, "the unrealistic
+/// leveling discontinuity" -- that jump was itself the second live-defect
+/// contributor, a spurious step onto a wrong reference the Schuler loop
+/// then took many minutes to null out).
+fn level_from_specific_force(f_body_g: [f64; 3], misalign_eps_rad: [f64; 3]) -> (f64, f64) {
+    let f = rotate_small_angle(misalign_eps_rad, f_body_g);
+    let pitch_rad = f[0].clamp(-1.0, 1.0).asin();
+    let roll_rad = (-f[1]).atan2(-f[2]);
+    (pitch_rad.to_degrees(), roll_rad.to_degrees())
+}
+
 fn add_scaled(a: [f64; 9], b: [f64; 9], scale: f64) -> [f64; 9] {
     let mut out = a;
     for i in 0..9 {
@@ -738,7 +765,30 @@ impl Adiru {
             lat_rad: 0.,
             lon_rad: 0.,
             alt_m: 0.,
-            heading_error_deg: GYROCOMPASS_INITIAL_ERROR_DEG,
+            // 0, not `GYROCOMPASS_INITIAL_ERROR_DEG` (the *start*-of-
+            // alignment coarse uncertainty): a freshly constructed unit
+            // whose very first `advance()` call already finds FBW's own
+            // `A32NX_ADIRS_ADIRU_<n>_STATE` at Aligned (2) -- exactly the
+            // "starting on the runway or in the air" case `advance`'s own
+            // doc comment describes -- never passes through this session's
+            // `!should_run`-with-`fbw_state==1` (Aligning) branch at all, so
+            // nothing here would ever decay this value from the coarse
+            // starting uncertainty toward the converged one; it would stay
+            // at the *start* value forever. FBW reporting the unit Aligned
+            // (not Aligning) is itself the claim that gyrocompass
+            // convergence has already happened -- honouring that claim
+            // means starting from the *converged* residual (this module's
+            // own `heading_error_decays_during_a_realistic_alignment` test:
+            // under 1 degree after a real 300s alignment), not the raw
+            // coarse-align value, which is exactly the live defect's root
+            // cause (see the report): a permanent, uncorrected ~6 degree
+            // heading bias baked into the mechanization at spawn, presented
+            // as valid NAV data. A unit that *is* observed going through a
+            // real Off->Aligning transition in this session still gets the
+            // coarse value explicitly (`advance`'s `fbw_state < 0.999`
+            // branch), so this default only affects the "already aligned
+            // before this plugin ever saw it" case.
+            heading_error_deg: 0.,
             seconds_aligning: 0.,
             last_p_sensed_xp: 0.,
             last_q_sensed_xp: 0.,
@@ -887,8 +937,33 @@ impl Adiru {
                 // spawn" instances of the identical root cause, fixed the
                 // same way here.
                 self.running = true;
-                self.pitch_deg = t.theta_xp;
-                self.roll_deg = t.phi_xp;
+                // Fine leveling from the sensed (misalignment-rotated)
+                // specific force, not a raw truth passthrough -- see
+                // `level_from_specific_force`'s doc comment for why the
+                // previous `t.theta_xp`/`t.phi_xp` passthrough was itself a
+                // live-defect contributor (a step onto an unmechanized
+                // reference the mounting misalignment then had to be
+                // Schuler-nulled out of over several minutes, rather than
+                // starting from the same reference `mechanize` uses every
+                // subsequent tick).
+                // Only on the ground: accelerometer leveling assumes low
+                // dynamics (specific force is gravity alone), which is true
+                // for a real ground alignment but not for a unit that
+                // starts already aligned *in the air* (FBW's own "or in the
+                // air" case) -- there, specific force includes real
+                // manoeuvring acceleration, so it would give the wrong
+                // attitude, and the existing truth passthrough (this
+                // module's best available estimate of an in-flight unit's
+                // already-converged solution) is kept.
+                if t.on_ground {
+                    let f_true_g = [t.g_axil, t.g_side, -t.g_nrml];
+                    let (pitch_deg, roll_deg) = level_from_specific_force(f_true_g, self.misalign_eps_rad);
+                    self.pitch_deg = pitch_deg;
+                    self.roll_deg = roll_deg;
+                } else {
+                    self.pitch_deg = t.theta_xp;
+                    self.roll_deg = t.phi_xp;
+                }
                 self.heading_deg = wrap_360(t.psi_xp + self.heading_error_deg);
                 self.lat_rad = t.lat_deg.to_radians();
                 self.lon_rad = t.lon_deg.to_radians();
@@ -2148,5 +2223,69 @@ mod tests {
             "must not start mechanizing before a real position exists, even if FBW's \
              own ADIRS already reports Aligned"
         );
+    }
+
+    /// The live-defect regression test (the PFD attitude sphere rolled tens
+    /// of degrees and the ND ground speed climbing without bound on a
+    /// parked, level, powered aircraft with a healthy, aligned IR -- see the
+    /// report). Unlike `run_stationary_hours` above (which calls
+    /// `mechanize`/`baro_inertial_correct`/`gpirs_correct` directly, with
+    /// `running` preset to `true`), this goes through the actual production
+    /// path (`update_for_test` -> `advance` -> `write`'s inputs), at a
+    /// realistic X-Plane frame `dt`, for 30 simulated minutes: a healthy,
+    /// already-aligned, powered, Nav-mode IR on a genuinely stationary,
+    /// level aircraft must hold attitude and ground speed near truth, not
+    /// merely "bounded".
+    #[test]
+    fn stationary_aligned_ir_holds_attitude_and_ground_speed_over_30_minutes() {
+        let mut a = Adiru::new_for_test(1);
+        let t = stationary_level_state(28.0); // representative mid-latitude airport
+        let dt = 1.0 / 30.0; // typical X-Plane frame time
+        let steps = (30.0 * 60.0 / dt) as u64;
+        for _ in 0..steps {
+            a.update_for_test(dt, &t, 2.0, true); // FBW state 2 = Aligned throughout
+        }
+        let ground_speed_kt =
+            (a.v_north * a.v_north + a.v_east * a.v_east).sqrt() * MS_TO_KNOT;
+        assert!(
+            a.pitch_deg.abs() < 0.1,
+            "a level, stationary, aligned IR must hold pitch within 0.1 deg over 30 min, got {:.3} deg",
+            a.pitch_deg
+        );
+        assert!(
+            a.roll_deg.abs() < 0.1,
+            "a level, stationary, aligned IR must hold roll within 0.1 deg over 30 min, got {:.3} deg",
+            a.roll_deg
+        );
+        assert!(
+            ground_speed_kt < 1.0,
+            "a stationary, aligned IR must not report a growing ground speed over 30 min, got {:.2} kt",
+            ground_speed_kt
+        );
+    }
+
+    /// The other half of the live defect: an IR that is *not* aligned (or
+    /// not yet running its free-inertial solution) must say so, not present
+    /// data as valid. `Adiru::write`'s `valid` argument is exactly
+    /// `should_run` (see `update`), which FBW's own ARINC/SSM stage (kept
+    /// unmodified) turns into the PFD's ATT/HDG flag.
+    #[test]
+    fn an_unaligned_ir_reports_invalid_not_a_plausible_value() {
+        let mut a = Adiru::new_for_test(1);
+        let t = stationary_level_state(45.0);
+        // fbw_state 1.0 == Aligning, not yet Aligned.
+        let should_run = a.update_for_test(1.0 / 30.0, &t, 1.0, true);
+        assert!(!should_run, "an aligning (not yet aligned) IR must not report valid data");
+
+        // Off (0.0) must likewise not be valid.
+        let mut b = Adiru::new_for_test(2);
+        let should_run_off = b.update_for_test(1.0 / 30.0, &t, 0.0, true);
+        assert!(!should_run_off, "an off IR must not report valid data");
+
+        // Aligned (2.0) but unpowered must also not be valid -- no bus, no
+        // free-inertial solution.
+        let mut c = Adiru::new_for_test(3);
+        let should_run_unpowered = c.update_for_test(1.0 / 30.0, &t, 2.0, false);
+        assert!(!should_run_unpowered, "an unpowered IR must not report valid data even if FBW reports it aligned");
     }
 }

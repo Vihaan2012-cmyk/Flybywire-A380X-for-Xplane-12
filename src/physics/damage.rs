@@ -270,6 +270,86 @@ pub struct EngineWear {
     toga_lever_seconds: f64,
 }
 
+impl EngineWear {
+    /// Reject a persisted `creep_life_fraction` this engine's own recorded
+    /// history could not have produced, instead of trusting the save file
+    /// blindly (`docs/analysis/bug-hunt-2026-09-21.md`'s follow-up: 1.3-1.8
+    /// loaded from `Output/preferences/fbw_a380x_airframe.json` and armed
+    /// 72_000+n -- "Engine n bearing wear" -- on the very first tick of a
+    /// session that had not yet run a single frame of its own physics, in
+    /// turn adding a full HPT-design-torque resistive load in
+    /// `physics::engine` that a starter sized for ordinary spin-up drag
+    /// cannot overcome: the engine never spools, N1/N2 pinned at exactly
+    /// 0.0, for a "failure" nothing this session concluded).
+    ///
+    /// Two independent, already-recorded signals, both anchored on the same
+    /// untrimmed EGT this struct's own `update_engines`/`update_engine_limits`
+    /// both read:
+    /// - Miner's rule (`update_engines`, `trent900::OVERTEMP_LIMIT_S`): a
+    ///   full exceedance budget (1.0 of `creep_life_fraction`) needs at
+    ///   least `OVERTEMP_LIMIT_S` seconds cumulatively above the untrimmed
+    ///   overtemperature limit, and none of that time can predate this
+    ///   engine's own recorded `hours` (creep only accrues while the engine
+    ///   reads "running"). `creep_life_fraction * OVERTEMP_LIMIT_S >
+    ///   hours * 3600.0` is a plain impossibility, not a threshold call.
+    /// - For a short-history engine (under one recorded hour -- so nothing
+    ///   it did could have been real cruise, only starts), the same
+    ///   untrimmed EGT is independently watched by `update_engine_limits`'s
+    ///   `ground_start_tgt`/`relight_tgt`/`cold_start` exceedance counters.
+    ///   A full exceedance budget of creep with every one of those still at
+    ///   zero means the two watchers of the same signal disagree
+    ///   completely: not proof by itself, but real, already-recorded
+    ///   evidence the value did not come from an overtemperature this
+    ///   engine's own limit-tracking would also have caught.
+    /// Either signal rejects. The value is clamped to 0.0 rather than
+    /// guessed at some smaller nonzero number -- there is no honest way to
+    /// recover what it should have been from what was saved -- and the
+    /// rejection is returned for the caller to log with the numbers that
+    /// triggered it, so *why* it accumulated stays visible instead of
+    /// silently vanishing.
+    fn plausibility_checked(mut self, engine: usize) -> (Self, Option<String>) {
+        if !(self.creep_life_fraction > 0.0) {
+            return (self, None);
+        }
+        let max_from_hours = self.hours * 3600.0 / trent900::OVERTEMP_LIMIT_S;
+        let short_history = self.hours < 1.0;
+        let no_start_tgt_exceedance =
+            self.exceedances.ground_start_tgt == 0 && self.exceedances.relight_tgt == 0 && self.exceedances.cold_start == 0;
+        let exceeds_hours_bound = self.creep_life_fraction > max_from_hours;
+        let unbacked_by_any_start_exceedance = self.creep_life_fraction >= 1.0 && short_history && no_start_tgt_exceedance;
+        if exceeds_hours_bound || unbacked_by_any_start_exceedance {
+            let reason = format!(
+                "engine {}: persisted creep_life_fraction {:.4} over {:.4} engine-hours ({} cycle(s), 0 ground-start/relight/cold-start TGT exceedances logged) is not physically reachable -- Miner's rule needs >= {:.1} s cumulatively above the {:.0} C untrimmed overtemperature limit for that much creep, and neither this engine's recorded running time nor its own start-TGT exceedance watch backs that; rejected on load, not carried into this session",
+                engine + 1,
+                self.creep_life_fraction,
+                self.hours,
+                self.cycles,
+                self.creep_life_fraction * trent900::OVERTEMP_LIMIT_S,
+                trent900::TGT_OVERTEMP_UNTRIMMED_C,
+            );
+            self.creep_life_fraction = 0.0;
+            self.compressor_efficiency_loss = 0.0;
+            return (self, Some(reason));
+        }
+        (self, None)
+    }
+}
+
+/// Validate a full persisted `[EngineWear; 4]` on load
+/// (`plausibility_checked`'s per-engine rule), returning the (possibly
+/// corrected) array and one log line per engine it had to reject.
+pub fn load_engines(saved: [EngineWear; 4]) -> ([EngineWear; 4], Vec<String>) {
+    let mut rejections = Vec::new();
+    let checked = std::array::from_fn(|i| {
+        let (wear, rejection) = saved[i].plausibility_checked(i);
+        if let Some(reason) = rejection {
+            rejections.push(reason);
+        }
+        wear
+    });
+    (checked, rejections)
+}
+
 impl Default for EngineWear {
     fn default() -> Self {
         Self {
@@ -486,6 +566,39 @@ impl Damage {
             failures::set_active(id, true);
             self.events.push(format!("exceedance: {description} (failure {id})"));
         }
+    }
+
+    /// Every failure id this module's own [`Damage::arm`] calls can set,
+    /// listed once so persistence can tell "this module derived it from
+    /// live physics" apart from "the crew armed it from the Study/EFB
+    /// panel" (`docs/analysis/bug-hunt-2026-09-21.md`'s follow-up: a
+    /// persisted `creep_life_fraction` armed 72_000..72_003 on the very
+    /// first tick of a fresh session, before this session's own physics had
+    /// run a single time, and there was nothing to tell that apart from a
+    /// deliberate arm once it reached disk). Kept as one literal list next
+    /// to the call sites it mirrors, so a new `self.arm(id, ...)` added
+    /// above without a matching entry here is a one-line diff to catch in
+    /// review, not a silent gap.
+    pub fn derived_failure_ids() -> Vec<u64> {
+        let mut ids = vec![
+            49_000, // APU EGT overtemperature damage
+            27_100, // flap overspeed
+            32_120, // gear overspeed
+            34_120, // VMO/MMO overspeed
+            32_110, 32_111, // wing gear brake wear-out
+            32_121, // hard landing
+            32_122, // tailstrike
+            32_123, // overweight landing
+        ];
+        for n in 0..4u64 {
+            ids.push(72_000 + n); // bearing wear (creep or oil starvation)
+            ids.push(72_004 + n); // compressor stall risk
+            ids.push(72_008 + n); // turbine overtemperature damage
+        }
+        for leg in 0..4u64 {
+            ids.push(32_101 + leg); // gear tyre burst (fuse-plug melt)
+        }
+        ids
     }
 
     /// EASA.E.012's remaining limits, recorded as exceedances: start and
@@ -968,6 +1081,60 @@ mod tests {
         }
         assert!(!crate::failures::active_ids().contains(&72_000), "the OEI limit is 10 minutes, not 5");
         crate::failures::replace([]);
+    }
+
+    /// The live defect this test pins: `Output/preferences/fbw_a380x_
+    /// airframe.json` loaded with `creep_life_fraction` 1.3-1.8 across all
+    /// four engines, accumulated over just 0.0685 recorded engine-hours and
+    /// 3 cycles with zero ground-start/relight/cold-start TGT exceedances
+    /// ever logged -- and `damage.rs` armed 72_000..72_003 ("Engine n
+    /// bearing wear") from it on the very first tick, before this session
+    /// ran a single frame of its own physics. `EngineWear::
+    /// plausibility_checked` must reject that value on load rather than
+    /// trust it.
+    #[test]
+    fn load_engines_rejects_creep_the_recorded_hours_cannot_support() {
+        let implausible = EngineWear { creep_life_fraction: 1.8147173309326168, hours: 0.068539646572537, cycles: 3, ..EngineWear::default() };
+        let saved = [implausible, EngineWear::default(), EngineWear::default(), EngineWear::default()];
+        let (checked, rejections) = load_engines(saved);
+        assert_eq!(checked[0].creep_life_fraction, 0.0, "the implausible value must not survive load");
+        assert_eq!(checked[0].compressor_efficiency_loss, 0.0);
+        assert_eq!(checked[0].hours, 0.068539646572537, "only the implausible field is corrected, not the whole record");
+        assert_eq!(checked[0].cycles, 3);
+        assert_eq!(rejections.len(), 1, "exactly engine 1 must be rejected");
+        assert!(rejections[0].contains("engine 1"), "{}", rejections[0]);
+        for e in &checked[1..] {
+            assert_eq!(e.creep_life_fraction, 0.0);
+        }
+    }
+
+    /// A real, physically-reachable creep value must survive load
+    /// unchanged: a long flight (5 recorded engine-hours) whose creep is
+    /// well under what `OVERTEMP_LIMIT_S`-based Miner's rule allows for
+    /// that many hours is not rejected just for being nonzero.
+    #[test]
+    fn load_engines_keeps_creep_the_recorded_hours_can_support() {
+        let plausible = EngineWear { creep_life_fraction: 0.3, hours: 5.0, cycles: 4, ..EngineWear::default() };
+        let saved = [plausible, EngineWear::default(), EngineWear::default(), EngineWear::default()];
+        let (checked, rejections) = load_engines(saved);
+        assert_eq!(checked[0].creep_life_fraction, 0.3);
+        assert!(rejections.is_empty(), "{rejections:?}");
+    }
+
+    /// A short-history engine (under a recorded hour, so nothing it did
+    /// could have been real cruise) that logged a real ground-start TGT
+    /// exceedance is not rejected just because its history is short: the
+    /// second signal (the independent exceedance watch) backs the creep
+    /// this time.
+    #[test]
+    fn load_engines_keeps_short_history_creep_backed_by_a_logged_exceedance() {
+        let mut exceedances = NO_EXCEEDANCES;
+        exceedances.ground_start_tgt = 1;
+        let backed = EngineWear { creep_life_fraction: 1.0, hours: 0.05, cycles: 1, exceedances, ..EngineWear::default() };
+        let saved = [backed, EngineWear::default(), EngineWear::default(), EngineWear::default()];
+        let (checked, rejections) = load_engines(saved);
+        assert_eq!(checked[0].creep_life_fraction, 1.0, "logged exceedances back this a genuine hot start");
+        assert!(rejections.is_empty(), "{rejections:?}");
     }
 
     #[test]
