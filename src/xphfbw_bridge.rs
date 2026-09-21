@@ -730,4 +730,53 @@ mod tests {
         plugin.downlinks[4].push(&Downlink::HEvent { name: "H".into() }.encode());
         assert_eq!(app.downlinks[4].drain().len(), 1);
     }
+
+    /// The regression test the EFB click investigation asked for
+    /// (`docs/deep/debug_screen_clicks.md`): a synthetic tap (down, then up)
+    /// on the EFB tablet, pushed onto the shared `input` ring exactly as
+    /// `Displays::dispatch_pointer` does (`src/display/mod.rs`), then
+    /// drained and decoded exactly as `app/src/views.rs::drain_input` does.
+    /// Proves the wire format survives a real `Session::create`/`open` pair
+    /// (not just `Input::encode`/`decode` in isolation, `records_round_trip`
+    /// above) and that the screen index a click on `SCREEN_EFB` carries is
+    /// the same index `xphfbw_bridge_views::SCREEN_ORDER` gives it — the
+    /// index `app/src/views.rs::screen_slot(EFB_SCREEN)` resolves the EFB's
+    /// own hand-made browser from (asserted `Some(15)` in that crate's own
+    /// test) — so a future reordering of either side's screen list alone
+    /// would be caught here too, not just by each crate's own ordering test.
+    #[test]
+    fn a_synthetic_click_on_the_efb_screen_round_trips_through_the_input_ring() {
+        use crate::xphfbw_bridge_views::{EFB_HEIGHT, EFB_SCREEN, EFB_WIDTH, SCREEN_ORDER};
+
+        let t = tag();
+        let plugin = Session::create(&t).unwrap();
+        let app = Session::open(&t).unwrap();
+
+        let efb = SCREEN_ORDER.iter().position(|s| *s == EFB_SCREEN).expect("SCREEN_EFB is in SCREEN_ORDER") as u32;
+
+        // The same sequence `Displays::mouse` produces for one tap: Down at
+        // the touch point, Up at (about) the same point (a real tap is
+        // rarely pixel-exact between the two).
+        let down = Input { screen: efb, kind: InputKind::Down, x: 120.5, y: 40.0, delta: 0. };
+        let up = Input { screen: efb, kind: InputKind::Up, x: 121.0, y: 41.0, delta: 0. };
+        assert!(plugin.input.push(&down.encode()));
+        assert!(plugin.input.push(&up.encode()));
+
+        let got: Vec<Input> = app.input.drain().iter().filter_map(|r| Input::decode(r)).collect();
+        assert_eq!(got, vec![down, up], "the down/up pair must survive the ring in order and unchanged");
+
+        for input in &got {
+            // Every decoded record names the EFB's own slot, not a
+            // panel.cfg view's index (those are a different numbering
+            // space entirely, `Uplink::Call`/`Loaded`'s `view`).
+            assert_eq!(input.screen, efb);
+            assert_eq!(SCREEN_ORDER[input.screen as usize], EFB_SCREEN);
+            // Inside the EFB's own CSS pixel bounds (`display/screens.rs`'s
+            // `SCREEN_EFB` entry, matched by `EFB_WIDTH`/`EFB_HEIGHT` here):
+            // a coordinate this test pushes that fell outside them would
+            // mean the two sides disagree about the tablet's size.
+            assert!(input.x >= 0. && input.x < EFB_WIDTH as f32);
+            assert!(input.y >= 0. && input.y < EFB_HEIGHT as f32);
+        }
+    }
 }
