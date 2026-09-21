@@ -808,7 +808,13 @@ const study = { pages: [], selected: 0, physics: false, vars: {}, pollTimer: nul
 function gateNames(gate, out) {
   if (!gate) return;
   if (gate.name) out.add(gate.name);
+  // deep::api::Cond's own JSON (area_alert_json/cond_json, src/study/web.rs):
+  // "a"/"b" name the two sides of a VarVar comparison, "gate" is Not's
+  // single child.
+  if (gate.a) out.add(gate.a);
+  if (gate.b) out.add(gate.b);
   if (gate.gates) gate.gates.forEach((g) => gateNames(g, out));
+  if (gate.gate) gateNames(gate.gate, out);
 }
 // Extra variables the ECAM-style FUEL and WHEEL schematics (renderFuelEcam,
 // renderGearEcam, below) read that are not already named by the page's own
@@ -854,19 +860,38 @@ function collectNames(page) {
   // variables the page schema itself does not list.
   if (page.kind === 'fuel') ecamFuelExtraNames().forEach((n) => out.add(n));
   if (page.kind === 'topology' && page.title === 'Landing Gear and Brakes') ecamGearExtraNames().forEach((n) => out.add(n));
+  // A deep area page's own ECAM alerts read variables its "groups" may not
+  // (an alert can trigger on a reading another area publishes), so its
+  // trigger conditions need their own names in the /vars poll.
+  (page.alerts || []).forEach((a) => gateNames(a.trigger, out));
   return [...out];
 }
 
+// deep::api::Cond's comparisons (lt/le/gt/ge/eq/ne), each either a variable
+// against a fixed value ("name"+"value") or two variables against each
+// other ("a"+"b", deep::api::Cond::VarVar) -- src/study/web.rs's cond_json.
+// A variable neither side has a reading for reads false, the same "no
+// reading is not zero" rule every other field here follows.
+const COND_CMP = {
+  lt: (a, b) => a < b, le: (a, b) => a <= b, gt: (a, b) => a > b,
+  ge: (a, b) => a >= b, eq: (a, b) => Math.abs(a - b) < 1e-9, ne: (a, b) => Math.abs(a - b) >= 1e-9,
+};
 function evalGate(gate, vars) {
   if (!gate) return false;
   const v = (n) => vars[n];
+  if (COND_CMP[gate.op]) {
+    const left = gate.a !== undefined ? v(gate.a) : v(gate.name);
+    const right = gate.b !== undefined ? v(gate.b) : gate.value;
+    return left !== undefined && right !== undefined && COND_CMP[gate.op](left, right);
+  }
   switch (gate.op) {
     case 'on': return (v(gate.name) ?? 0) !== 0;
     case 'off': return (v(gate.name) ?? 0) === 0;
-    case 'gt': return v(gate.name) !== undefined && v(gate.name) > gate.value;
     case 'absGt': return Math.abs(v(gate.name) ?? 0) > gate.value;
     case 'all': return gate.gates.every((g) => evalGate(g, vars));
     case 'any': return gate.gates.some((g) => evalGate(g, vars));
+    case 'not': return !evalGate(gate.gate, vars);
+    case 'always': return true;
     default: return false;
   }
 }
@@ -1498,12 +1523,75 @@ function renderAllVars(container, vars) {
   container.append(box);
 }
 
+// A `deep` area's own page (src/study/deep_page.rs, src/study/web.rs's
+// PageKind::Area arm): its registered components and failures
+// (deep::registry()), the ECAM alerts its failures can raise, and its own
+// published variables as the same group/field boxes every other page uses
+// (renderGroups, below) -- so live values there update the same way the
+// topology pages' do. Nothing here is drawn that page.components/
+// .failures/.alerts/.groups did not themselves carry.
+function areaSectionBox(title, rows) {
+  const box = el('div', { class: 'box' }, el('h2', { style: 'font-size:15px;margin:0 0 8px', text: title }));
+  rows.forEach((r) => box.append(r));
+  return box;
+}
+function renderArea(container, page, vars) {
+  const armed = page.failures.filter((f) => f.armed).length;
+  const triggered = page.alerts.filter((a) => evalGate(a.trigger, vars)).length;
+  container.append(el('div', {
+    class: 'box',
+    text: `${page.components.length} components  ·  ${page.failures.length} failures (${armed} armed)  ·  ${page.alerts.length} ECAM alerts (${triggered} triggered now)  ·  ${collectNames(page).length} published variables`,
+  }));
+
+  if (page.components.length) {
+    const grid = el('div', { class: 'study-grid-list' });
+    for (const c of page.components) {
+      const params = c.params.map((p) => p.name).join(', ') || 'no health parameters';
+      grid.append(el('div', { class: 'study-item-btn', title: params, text: `${c.name}  (ATA ${c.ata})` }));
+    }
+    container.append(areaSectionBox('Components', [grid]));
+  }
+
+  if (page.failures.length) {
+    const grid = el('div', { class: 'study-grid-list' });
+    for (const f of page.failures) {
+      const btn = el('button', {
+        class: 'study-item-btn' + (f.armed ? ' active' : ''), type: 'button',
+        title: f.magnitudeMeaning ? `${f.magnitudeMeaning} — ${f.effect}` : f.effect,
+        text: `${f.id} ${f.name}`,
+      });
+      btn.addEventListener('click', async () => {
+        await studyPost('/study/action', { kind: 'toggleFailure', id: f.id });
+        f.armed = !f.armed;
+        btn.classList.toggle('active', f.armed);
+      });
+      grid.append(btn);
+    }
+    container.append(areaSectionBox('Failures', [grid]));
+  }
+
+  if (page.alerts.length) {
+    const rows = page.alerts.map((a) => {
+      const on = evalGate(a.trigger, vars);
+      const row = el('div', { class: 'study-field-row' });
+      const name = el('span', { class: 'fname' });
+      name.append(el('span', { class: 'dot ' + (on ? 'warn' : '') }), document.createTextNode(`${a.title} (${a.level.toUpperCase()})`));
+      row.append(name, el('span', { class: 'fval', text: on ? 'TRIGGERED' : 'clear' }));
+      return row;
+    });
+    container.append(areaSectionBox('ECAM alerts', rows));
+  }
+
+  if (page.groups.length) renderGroups(container, page.groups, vars);
+  else container.append(el('div', { class: 'box', text: 'This area publishes no variables of its own (its failures/components still show above).' }));
+}
+
 function renderStudyNav() {
   const nav = document.getElementById('study-nav');
   nav.innerHTML = '';
   const groups = {};
   for (const p of study.pages.filter((p) => p.kind !== 'failures' && p.kind !== 'breakers' && p.kind !== 'groundServices')) (groups[p.menuGroup || ''] = groups[p.menuGroup || ''] || []).push(p);
-  const order = ['', 'Engines', 'Environmental', 'Hydraulics', 'Landing Gear', 'Fire'];
+  const order = ['', 'Engines', 'Environmental', 'Hydraulics', 'Landing Gear', 'Fire', 'Deep Systems'];
   for (const key of order) {
     if (!groups[key]) continue;
     if (key) nav.append(el('div', { class: 'study-nav-group', text: key }));
@@ -1576,6 +1664,7 @@ async function renderStudyContent() {
       else renderEngine(content, page, vars);
     } else if (page.kind === 'flightControls') renderFlightControls(content, page, vars);
     else if (page.kind === 'groundServices') renderGroundServices(content, page, vars);
+    else if (page.kind === 'area') renderArea(content, page, vars);
     else if (page.kind === 'all') renderAllVars(content, vars);
   };
   await poll();

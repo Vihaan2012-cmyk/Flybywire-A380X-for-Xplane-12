@@ -368,8 +368,14 @@ window.__deepStudyStart = function() {
       return;
     if (gate.name)
       out.add(gate.name);
+    if (gate.a)
+      out.add(gate.a);
+    if (gate.b)
+      out.add(gate.b);
     if (gate.gates)
       gate.gates.forEach((g) => gateNames(g, out));
+    if (gate.gate)
+      gateNames(gate.gate, out);
   }
   function ecamFuelExtraNames() {
     const names = ["A32NX_EFB_USING_METRIC_UNIT", "A32NX_OVHD_APU_MASTER_SW_PB_IS_ON"];
@@ -411,26 +417,42 @@ window.__deepStudyStart = function() {
       ecamFuelExtraNames().forEach((n) => out.add(n));
     if (page.kind === "topology" && page.title === "Landing Gear and Brakes")
       ecamGearExtraNames().forEach((n) => out.add(n));
+    (page.alerts || []).forEach((a) => gateNames(a.trigger, out));
     return [...out];
   }
+  const COND_CMP = {
+    lt: (a, b) => a < b,
+    le: (a, b) => a <= b,
+    gt: (a, b) => a > b,
+    ge: (a, b) => a >= b,
+    eq: (a, b) => Math.abs(a - b) < 1e-9,
+    ne: (a, b) => Math.abs(a - b) >= 1e-9
+  };
   function evalGate(gate, vars) {
     var _a, _b, _c;
     if (!gate)
       return false;
     const v = (n) => vars[n];
+    if (COND_CMP[gate.op]) {
+      const left = gate.a !== void 0 ? v(gate.a) : v(gate.name);
+      const right = gate.b !== void 0 ? v(gate.b) : gate.value;
+      return left !== void 0 && right !== void 0 && COND_CMP[gate.op](left, right);
+    }
     switch (gate.op) {
       case "on":
         return ((_a = v(gate.name)) != null ? _a : 0) !== 0;
       case "off":
         return ((_b = v(gate.name)) != null ? _b : 0) === 0;
-      case "gt":
-        return v(gate.name) !== void 0 && v(gate.name) > gate.value;
       case "absGt":
         return Math.abs((_c = v(gate.name)) != null ? _c : 0) > gate.value;
       case "all":
         return gate.gates.every((g) => evalGate(g, vars));
       case "any":
         return gate.gates.some((g) => evalGate(g, vars));
+      case "not":
+        return !evalGate(gate.gate, vars);
+      case "always":
+        return true;
       default:
         return false;
     }
@@ -996,13 +1018,67 @@ window.__deepStudyStart = function() {
       box.append(el("div", { class: "study-field-row" }, el("span", { class: "fname", text: n }), el("span", { class: "fval", text: String(vars[n]) })));
     container.append(box);
   }
+  function areaSectionBox(title, rows) {
+    const box = el("div", { class: "box" }, el("h2", { style: "font-size:15px;margin:0 0 8px", text: title }));
+    rows.forEach((r) => box.append(r));
+    return box;
+  }
+  function renderArea(container, page, vars) {
+    const armed = page.failures.filter((f) => f.armed).length;
+    const triggered = page.alerts.filter((a) => evalGate(a.trigger, vars)).length;
+    container.append(el("div", {
+      class: "box",
+      text: `${page.components.length} components  \xB7  ${page.failures.length} failures (${armed} armed)  \xB7  ${page.alerts.length} ECAM alerts (${triggered} triggered now)  \xB7  ${collectNames(page).length} published variables`
+    }));
+    if (page.components.length) {
+      const grid = el("div", { class: "study-grid-list" });
+      for (const c of page.components) {
+        const params = c.params.map((p) => p.name).join(", ") || "no health parameters";
+        grid.append(el("div", { class: "study-item-btn", title: params, text: `${c.name}  (ATA ${c.ata})` }));
+      }
+      container.append(areaSectionBox("Components", [grid]));
+    }
+    if (page.failures.length) {
+      const grid = el("div", { class: "study-grid-list" });
+      for (const f of page.failures) {
+        const btn = el("button", {
+          class: "study-item-btn" + (f.armed ? " active" : ""),
+          type: "button",
+          title: f.magnitudeMeaning ? `${f.magnitudeMeaning} \u2014 ${f.effect}` : f.effect,
+          text: `${f.id} ${f.name}`
+        });
+        btn.addEventListener("click", async () => {
+          await studyPost("/study/action", { kind: "toggleFailure", id: f.id });
+          f.armed = !f.armed;
+          btn.classList.toggle("active", f.armed);
+        });
+        grid.append(btn);
+      }
+      container.append(areaSectionBox("Failures", [grid]));
+    }
+    if (page.alerts.length) {
+      const rows = page.alerts.map((a) => {
+        const on = evalGate(a.trigger, vars);
+        const row = el("div", { class: "study-field-row" });
+        const name = el("span", { class: "fname" });
+        name.append(el("span", { class: "dot " + (on ? "warn" : "") }), document.createTextNode(`${a.title} (${a.level.toUpperCase()})`));
+        row.append(name, el("span", { class: "fval", text: on ? "TRIGGERED" : "clear" }));
+        return row;
+      });
+      container.append(areaSectionBox("ECAM alerts", rows));
+    }
+    if (page.groups.length)
+      renderGroups(container, page.groups, vars);
+    else
+      container.append(el("div", { class: "box", text: "This area publishes no variables of its own (its failures/components still show above)." }));
+  }
   function renderStudyNav() {
     const nav = document.getElementById("study-nav");
     nav.innerHTML = "";
     const groups = {};
     for (const p of study.pages.filter((p2) => p2.kind !== "failures" && p2.kind !== "breakers" && p2.kind !== "groundServices"))
       (groups[p.menuGroup || ""] = groups[p.menuGroup || ""] || []).push(p);
-    const order = ["", "Engines", "Environmental", "Hydraulics", "Landing Gear", "Fire"];
+    const order = ["", "Engines", "Environmental", "Hydraulics", "Landing Gear", "Fire", "Deep Systems"];
     for (const key of order) {
       if (!groups[key])
         continue;
@@ -1092,6 +1168,8 @@ window.__deepStudyStart = function() {
         renderFlightControls(content, page, vars);
       else if (page.kind === "groundServices")
         renderGroundServices(content, page, vars);
+      else if (page.kind === "area")
+        renderArea(content, page, vars);
       else if (page.kind === "all")
         renderAllVars(content, vars);
     };
