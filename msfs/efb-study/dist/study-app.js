@@ -1616,13 +1616,13 @@ window.__deepStudyStart = function() {
     const rating = el("span", { class: "fval", text: c.ratingA !== null && c.ratingA !== void 0 ? c.ratingA.toFixed(0) + " A" : "\u2014" });
     const current2 = el("span", { class: "fval", text: c.currentA !== null && c.currentA !== void 0 ? c.currentA.toFixed(1) + " A" : "\u2014" });
     const state = el("span", { class: "row", style: "margin:0;gap:6px" }, el("span", { class: "dot " + cbStateDot(c) }), el("span", { class: "label dim", style: "text-transform:none", text: cbStateLabel(c) }));
-    const hasDetail = c.consumers && c.consumers.length || c.basis;
+    const consumers = Array.isArray(c.consumers) ? c.consumers.join(", ") : c.consumer || "";
+    const hasDetail = consumers && consumers.length || c.basis;
     const info = hasDetail ? el("span", { class: "help cb-info", title: "Consumers and rating basis", text: "i" }) : el("span", {});
     row.append(cb, name, rating, current2, state, info);
     wrap.append(row);
     if (hasDetail) {
       const detail = el("div", { class: "cb-detail", hidden: "" });
-      const consumers = Array.isArray(c.consumers) ? c.consumers.join(", ") : c.consumers;
       if (consumers && consumers.length)
         detail.append(el("div", { text: `Consumers: ${consumers}` }));
       if (c.basis)

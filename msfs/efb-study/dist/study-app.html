@@ -61,7 +61,9 @@
   .apply { display: flex; justify-content: center; margin-top: 18px; }
   button {
     font-weight: 600; font-size: 14px; font-family: "Segoe UI", sans-serif; color: var(--text); background: transparent;
-    border: 2px solid var(--line); padding: 12px 20px; min-width: min(250px, 100%); cursor: pointer; text-transform: uppercase;
+    border: 2px solid var(--line); padding: 12px 20px; cursor: pointer; text-transform: uppercase;
+     
+    flex: 0 1 250px; min-width: 0;
   }
   button:hover { background: rgba(255,255,255,0.06); }
   button:disabled { opacity: 0.45; cursor: default; }
