@@ -33,7 +33,7 @@ use systems::simulation::VariableIdentifier;
 /// the primary reference; the GP7200's EASA.IM.E.026 Issue 03 (4 Jan 2013)
 /// figures are noted alongside in the docs table for when an engine choice
 /// is added.
-mod trent900 {
+pub(crate) mod trent900 {
     /// Maximum continuous TGT, unrestricted duration (°C).
     pub const TGT_MAX_CONTINUOUS_C: f64 = 850.0;
     /// Maximum take-off TGT, 5-minute limit (Note 5) (°C).

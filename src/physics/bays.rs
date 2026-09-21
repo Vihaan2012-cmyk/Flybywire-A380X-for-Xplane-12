@@ -561,6 +561,12 @@ mod tests {
 
     #[test]
     fn losing_the_main_avionics_extract_fan_raises_its_steady_state_temperature() {
+        // `failures::STATE` is process-wide and these tests arm into it;
+        // without this lock they race whatever else is asserting on a
+        // magnitude at the time (it wiped breakers.rs's own 29_103
+        // expectation in a full-suite run).
+        let _serial = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         crate::scenarios::reset_global_state();
         let ambient_c = 25.0;
         let h = external_h_w_m2k(0.0);

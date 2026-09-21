@@ -227,6 +227,12 @@ mod tests {
 
     #[test]
     fn disabled_never_triggers() {
+        // `failures::STATE` is process-wide and these tests arm into it;
+        // without this lock they race whatever else is asserting on a
+        // magnitude at the time (it wiped breakers.rs's own 29_103
+        // expectation in a full-suite run).
+        let _serial = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         let mut rf = RandomFailures::new(1);
         rf.config.enabled = false;
         let active = BTreeSet::new();
@@ -237,6 +243,8 @@ mod tests {
 
     #[test]
     fn the_same_seed_produces_the_same_sequence() {
+        let _serial = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         let active = BTreeSet::new();
         let run = |seed| {
             let mut rf = RandomFailures::new(seed);
@@ -253,6 +261,8 @@ mod tests {
 
     #[test]
     fn a_higher_rate_multiplier_triggers_sooner() {
+        let _serial = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         let active = BTreeSet::new();
         let time_to_first = |multiplier: f64| {
             let mut rf = RandomFailures::new(7);
@@ -270,6 +280,8 @@ mod tests {
 
     #[test]
     fn an_already_active_component_never_re_triggers() {
+        let _serial = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         let mut rf = RandomFailures::new(3);
         rf.config.enabled = true;
         rf.config.rate_multiplier = 1_000_000.0;
@@ -295,6 +307,8 @@ mod tests {
     /// time forward on a stationary airframe.
     #[test]
     fn damage_rs_armed_ids_are_never_drawn_by_the_mtbf_engine() {
+        let _serial = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         let damage_armed = |id: u64| {
             (32_100..=32_123).contains(&id) || (72_000..=72_011).contains(&id) || id == 34_120
         };
@@ -316,6 +330,8 @@ mod tests {
 
     #[test]
     fn zero_or_negative_delta_never_triggers() {
+        let _serial = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         let mut rf = RandomFailures::new(9);
         rf.config.enabled = true;
         rf.config.rate_multiplier = 1_000_000.0;
@@ -329,6 +345,8 @@ mod tests {
 
     #[test]
     fn syncs_from_app_settings_only_when_the_generation_moved() {
+        let _serial = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         let mut rf = RandomFailures::new(1);
         assert_eq!(rf.config, Config::default());
 
@@ -355,6 +373,8 @@ mod tests {
 
     #[test]
     fn apply_requests_prefers_a_queued_study_panel_request_over_app_settings() {
+        let _serial = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         let mut rf = RandomFailures::new(5);
         request_config(Config { enabled: true, rate_multiplier: 42.0 });
         rf.apply_requests();

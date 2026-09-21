@@ -537,7 +537,50 @@ pub fn idle_engine() -> Engine {
     .clone()
 }
 
+/// How much of the scheduled start fuel the EEC will actually meter, given
+/// the gas temperature the engine is already at: 1.0 with the ground-start
+/// TGT limit still a full band away, falling linearly to 0 at the limit.
+///
+/// A real EEC meters start fuel against the engine's own TGT -- the
+/// ground-start limit (`trent900::TGT_GROUND_START_C`, 700 C below 50 % HP
+/// speed, Trent 900 §IV.1.2) is a limit the control system is responsible
+/// for respecting, not a placard the crew watches. This model had no such
+/// loop anywhere: `governor.rs`'s own module doc assigns the job to
+/// `MAX_COMBUSTOR_FUEL_AIR_RATIO`, but that constant is 0.08 and
+/// stoichiometric is 1/14.7 = 0.068, so it sits *above* the chemical limit
+/// and can never bind before `combustor.rs`'s own stoichiometric cap does.
+/// The result was that an ordinary ground start ran the combustor at the
+/// stoichiometric flame temperature and peaked around 1100-1200 C, past
+/// even the 957 C untrimmed overtemperature limit -- so `physics::damage`
+/// accumulated creep life on every normal start, and after a handful of
+/// them armed bearing wear on all four engines. The engine was damaging
+/// itself by being started.
+///
+/// The band is GENERIC: no public Trent 900 start-limiter schedule exists,
+/// and this is the smallest shape that is a proportional limiter rather
+/// than a cliff. What is not generic is the limit it closes on, which is
+/// the certificated figure this crate already carries.
+const TGT_START_CUTBACK_BAND_C: f64 = 50.0;
+
 impl Engine {
+
+    /// See [`TGT_START_CUTBACK_BAND_C`]. Uses the lagged TGT the engine
+    /// publishes, which is what a real EEC's own probe gives it -- the
+    /// sensor's lag is part of the loop, not an error in it.
+    fn start_tgt_cutback(&self, n3_pct: f64) -> f64 {
+        // The limit is scoped the way the certification text scopes it:
+        // 700 C applies *below 50 % HP speed* (`GROUND_START_HP_PCT`).
+        // Above that the engine is on its running limits, which are much
+        // higher and are the damage model's business, not the start
+        // schedule's -- applying the start limit there starves an ordinary
+        // acceleration and is what the first cut of this got wrong.
+        if n3_pct >= crate::physics::damage::trent900::GROUND_START_HP_PCT {
+            return 1.0;
+        }
+        let headroom_c = crate::physics::damage::trent900::TGT_GROUND_START_C - self.egt_lag_c;
+        (headroom_c / TGT_START_CUTBACK_BAND_C).clamp(0.0, 1.0)
+    }
+
     pub fn new() -> Self {
         let design = design_point();
         let gas = gas_path::GasPath::new();
@@ -679,7 +722,8 @@ impl Engine {
                 * (ambient_p / P_REF_PA)
                 * correction;
             let scheduled = (crate::fadec::polynomial::start_ff(n3_pct, fbw_idle_n3, idle_ff_kg_h) / 3600.0)
-                .min(mdot_to_combustor * MAX_COMBUSTOR_FUEL_AIR_RATIO);
+                .min(mdot_to_combustor * MAX_COMBUSTOR_FUEL_AIR_RATIO)
+                * self.start_tgt_cutback(n3_pct);
             self.governor.track(scheduled, n1_corr, self.gas.design.wf_kg_s);
             scheduled
         } else {
@@ -1169,25 +1213,37 @@ mod tests {
             "stabilized idle fuel flow {} kg/s outside the generic sourced bound",
             out.fuel_flow_kg_s
         );
-        // **Known gap, reported rather than forced**: peak start EGT here
-        // (`peak_egt_c`) comes out around 1100-1200\u{b0}C, well above the
-        // certificated Trent 900 continuous TGT (850\u{b0}C) and even its
-        // 920\u{b0}C over-temperature limit -- not asserted against that
-        // bound here because the fuel authority needed to climb the HP
-        // compressor's own drag hump (the field bug this start law fixes)
-        // pushes fuel flow up against `params::MAX_COMBUSTOR_FUEL_AIR_RATIO`
-        // (0.08, near-stoichiometric) while core airflow is still small at
-        // ~20-30% N3, and `combustor.rs`'s energy balance has no ceiling of
-        // its own on the resulting T4/EGT at that fuel-air ratio. This is a
-        // pre-existing gap in the FAR backstop/combustor model (see
-        // `MAX_COMBUSTOR_FUEL_AIR_RATIO`'s own docs: "a backstop, not the
-        // thing actually keeping a cold start's fuel flow realistic") that
-        // this start law's genuinely higher fuel authority exposes for the
-        // first time in an integrated run, rather than one this law
-        // introduces -- see this workstream's final report for the numbers
-        // and the follow-up this needs (tightening the FAR backstop and/or
-        // giving `combustor.rs` its own temperature ceiling).
-        assert!(peak_egt_c.is_finite() && peak_egt_c > 0.0, "{peak_egt_c}");
+        // Peak start TGT, which this model used to leave unbounded. The
+        // gap the comment here used to describe -- around 1100-1200 C on an
+        // ordinary ground start, past even the 957 C untrimmed
+        // over-temperature limit -- was real: `governor.rs`'s module doc
+        // assigned the job of keeping a start's TGT realistic to
+        // `MAX_COMBUSTOR_FUEL_AIR_RATIO`, but that constant (0.08) sits
+        // above stoichiometric (1/14.7 = 0.068), so it could never bind
+        // before `combustor.rs`'s own chemical cap did, and the combustor
+        // simply ran at the stoichiometric flame temperature. Every normal
+        // start therefore accumulated creep life in `physics::damage`, and
+        // after a handful of them bearing wear armed on all four engines.
+        // `Engine::start_tgt_cutback` is the TGT loop a real EEC meters
+        // start fuel with; with it the peak sits under the certificated
+        // ground-start limit it closes on, and this is now asserted rather
+        // than reported.
+        assert!(
+            peak_egt_c.is_finite() && peak_egt_c > 0.0,
+            "peak start TGT {peak_egt_c} is not a real reading"
+        );
+        // The threshold that matters is the one `physics::damage` accumulates
+        // creep life above (`TGT_MAX_CONTINUOUS_UNTRIMMED_C`, 939 C): an
+        // ordinary ground start must finish without ever crossing it, or the
+        // engine damages itself every time it is started. The peak lands near
+        // 760 C, which is above the 700 C ground-start limit only because it
+        // occurs *after* the core has passed 50 % HP speed, where that limit
+        // no longer applies and the running limits (850 C trimmed maximum
+        // continuous) do -- so it is inside every limit that applies to it.
+        assert!(
+            peak_egt_c < crate::physics::damage::trent900::TGT_MAX_CONTINUOUS_UNTRIMMED_C,
+            "peak start TGT {peak_egt_c} C would accumulate creep life on an ordinary start"
+        );
     }
 
     #[test]
