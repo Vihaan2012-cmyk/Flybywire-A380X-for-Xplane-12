@@ -185,8 +185,18 @@ plugin can feed it before the consolidated `Truth` pass lands.
 | **`alpha_rad`** (flight controls) | `hinge_moment.rs`'s Ch_alpha term. | **Done, as `Truth::angle_of_attack_deg`** (`sim/flightmodel/position/alpha`, real, X-Plane SDK). Degrees rather than radians, matching every other angle already on `Truth` (`pitch_deg`); convert at the call site (`.to_radians()`) rather than carrying two units for the same reading. |
 
 Gated on "any AC bus live" for want of a named bus: the EHA/EBHA 247XP
-and AC-ESS supplies, and the per-computer PRIM/SEC buses. *(Untouched --
-no new bus-naming information surfaced this pass.)*
+and AC-ESS supplies. *(Untouched -- no new bus-naming information
+surfaced this pass.)*
+
+**Per-computer PRIM/SEC health: done** (2026-09-22 pass), as
+`Truth::prim_healthy`/`sec_healthy: [bool; 3]`. Not a bus-naming problem
+after all -- `src/prim.rs` already publishes `A32NX_PRIM_{1,2,3}_HEALTHY`/
+`A32NX_SEC_{1,2,3}_HEALTHY` every tick from FlyByWire's own compiled
+Simulink `prim_healthy`/`sec_healthy` discrete outputs, which already fold
+in both `FAILURE_PRIM`/`FAILURE_SEC` injection and each computer's own
+per-index power feed (108PH/247PP/DC_1); `deep::flight_controls::live` had
+just never been wired to read it, and collapsed all six computers to one
+bit off `ac_bus_volts` instead.
 
 ## Catalogue gaps found while wiring
 

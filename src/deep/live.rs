@@ -234,6 +234,17 @@ pub struct Truth {
     /// with the coarse solve, not because the coarse solve outranks them.
     pub ac_bus_volts: [f64; 4],
     pub dc_bus_volts: [f64; 2],
+    /// PRIM 1/2/3 and SEC 1/2/3 health, true = healthy, indexed like
+    /// `prim.rs`'s own `prim_discrete`/`sec_discrete` arrays (0 = PRIM1/
+    /// SEC1). Straight from FlyByWire's own compiled Simulink
+    /// `prim_healthy`/`sec_healthy` discrete outputs
+    /// (`A32NX_PRIM_{1,2,3}_HEALTHY` / `A32NX_SEC_{1,2,3}_HEALTHY`,
+    /// `src/prim.rs:1239,1653`), which already fold in both `FAILURE_PRIM`/
+    /// `FAILURE_SEC` injection and each computer's own per-index power feed
+    /// (108PH/247PP/DC_1, `src/prim.rs:1199,1641`) -- real per-computer
+    /// availability, not an approximation from `ac_bus_volts` above.
+    pub prim_healthy: [bool; 3],
+    pub sec_healthy: [bool; 3],
     /// Hydraulic system pressures, green and yellow, Pa -- FlyByWire's own,
     /// with the same standing as `ac_bus_volts` above.
     pub hydraulic_pressure_pa: [f64; 2],
@@ -548,6 +559,10 @@ impl Default for Truth {
             apu_bleed_pressure_pa: 101_325.0,
             ac_bus_volts: [0.0; 4],
             dc_bus_volts: [0.0; 2],
+            // A cold-and-dark aircraft has no live computer, matching
+            // `ac_bus_volts`/`dc_bus_volts` above reading no power either.
+            prim_healthy: [false; 3],
+            sec_healthy: [false; 3],
             hydraulic_pressure_pa: [0.0; 2],
             engine_n2_frac: [0.0; 4],
             engine_n3_frac: [0.0; 4],

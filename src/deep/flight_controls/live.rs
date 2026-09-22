@@ -53,6 +53,12 @@
 //! * **Ground-spoiler lever armed** -- `truth.controls.
 //!   ground_spoiler_lever_armed`. With the lever unarmed the ground-spoiler
 //!   logic could never deploy, so its own two failures were unreachable.
+//! * **Per-computer PRIM/SEC health** -- `truth.prim_healthy`/
+//!   `sec_healthy` (2026-09-22 pass). `ComputerHealth` used to collapse to
+//!   one bit shared by all six computers (any live AC bus at all), so
+//!   arming a single PRIM/SEC's own failure never changed which actuator
+//!   this area drove. Both fields are FlyByWire's own compiled Simulink
+//!   `prim_healthy`/`sec_healthy` discrete outputs, real per-computer.
 //!
 //! ## Still not on `Truth`
 //!
@@ -781,13 +787,18 @@ impl LiveArea for FlightControlsLive {
         let cmd = &truth.commanded_surfaces;
         let mut green_demand_m3_s = 0.0_f64;
         let mut yellow_demand_m3_s = 0.0_f64;
-        // Computer availability: this area does not model the PRIM/SEC
-        // power distribution (that is `deep::electrical`/
-        // `deep::avionics_network`) and `Truth` names no per-computer bus,
-        // so all six are treated as available while the aircraft has AC
-        // power at all, and unavailable when it has none.
-        let computers_powered = truth.ac_bus_volts.iter().any(|&v| v > AC_BUS_LIVE_V);
-        let health = ComputerHealth { prim: [computers_powered; 3], sec: [computers_powered; 3] };
+        // Any live AC bus at all -- for consumers that only care whether the
+        // aircraft has electrical power, not per-computer health (the
+        // rudder-trim motor-pump below).
+        let ac_bus_powered = truth.ac_bus_volts.iter().any(|&v| v > AC_BUS_LIVE_V);
+        // Per-computer PRIM/SEC health, straight from `Truth::prim_healthy`/
+        // `sec_healthy` -- FlyByWire's own compiled Simulink
+        // `prim_healthy`/`sec_healthy` discrete outputs (`src/prim.rs`'s
+        // `A32NX_PRIM_{1,2,3}_HEALTHY`/`A32NX_SEC_{1,2,3}_HEALTHY`), which
+        // already fold in both `FAILURE_PRIM`/`FAILURE_SEC` injection and
+        // each computer's own per-index power feed. Real per-computer
+        // availability, not an AC-bus-wide approximation.
+        let health = ComputerHealth { prim: truth.prim_healthy, sec: truth.sec_healthy };
 
         let aileron_span = (AILERON_MAX_DEG - AILERON_MIN_DEG).to_radians();
         let rudder_span = (2.0 * RUDDER_LIMIT_DEG).to_radians();
@@ -960,7 +971,7 @@ impl LiveArea for FlightControlsLive {
         self.monitor_fault.insert("THS".to_string(), ths_monitoring);
 
         // ---- Rudder trim: its own electric motor-pump, off any live AC bus.
-        let trim_power = if computers_powered { 1.0 } else { 0.0 };
+        let trim_power = if ac_bus_powered { 1.0 } else { 0.0 };
         self.angles.rudder_trim_deg = self
             .rudder_trim
             .step(
@@ -1084,6 +1095,10 @@ mod tests {
             altitude_ft: 5000.0,
             ac_bus_volts: [115.0; 4],
             dc_bus_volts: [28.0; 2],
+            // Every PRIM/SEC healthy by default; individual tests arm a
+            // computer's own failure by flipping one of these directly.
+            prim_healthy: [true; 3],
+            sec_healthy: [true; 3],
             hydraulic_pressure_pa: [HYDRAULIC_SUPPLY_PA; 2],
             ..Truth::default()
         };
@@ -1100,6 +1115,8 @@ mod tests {
             on_ground: true,
             ac_bus_volts: [115.0; 4],
             dc_bus_volts: [28.0; 2],
+            prim_healthy: [true; 3],
+            sec_healthy: [true; 3],
             hydraulic_pressure_pa: [HYDRAULIC_SUPPLY_PA; 2],
             ..Truth::default()
         }
@@ -1502,5 +1519,83 @@ mod tests {
         });
         assert!(published.contains_key("FCTL_AIL_L1_FAULT"));
         assert!(published.contains_key("FCTL_THS_DEFLECTION_DEG"));
+    }
+
+    // ---- Per-computer PRIM/SEC health (`Truth::prim_healthy`/
+    // `sec_healthy`) actually reaching `mode_for_surface`'s arbitration, not
+    // the old `ac_bus_volts`-wide collapse. ------------------------------
+
+    #[test]
+    fn prim1_and_sec1_down_moves_the_inboard_aileron_off_its_green_actuator() {
+        // `allocation::aileron_inboard`'s Green actuator answers to
+        // PRIM1|SEC1 only; its EHA actuator to PRIM2|SEC2. PRIM1 alone
+        // would fail over to SEC1 invisibly (same actuator, same Green
+        // circuit), so this has to take out SEC1 too to actually show the
+        // deep model stop driving that Green actuator and fall through to
+        // the EHA one -- the next entry in `aileron_inboard`'s own table.
+        //
+        // Only the inboard panels are commanded off neutral, so every other
+        // panel's rate (and therefore its contribution to
+        // `FCTL_GREEN_DEMAND_M3_S`) stays ~0 regardless of which computer
+        // would be driving it, isolating the effect to this one panel.
+        let mut truth = parked_truth();
+        for side in 0..2 {
+            truth.commanded_surfaces.ailerons_deg[side][0] = 20.0; // panel 0 = inboard
+        }
+
+        let healthy = run(&mut ids(), &truth, &Faults::default(), 3.0);
+        assert!(
+            healthy["FCTL_AIL_L3_DEFLECTION_DEG"] > 18.0,
+            "healthy inboard aileron should track its command: {} deg",
+            healthy["FCTL_AIL_L3_DEFLECTION_DEG"]
+        );
+        assert!(healthy["FCTL_GREEN_DEMAND_M3_S"] > 0.0, "the Green actuator should be the one driving it while healthy");
+
+        // Unarmed (the healthy run above) already proves the negative side;
+        // now arm PRIM1+SEC1's own failure and check it actually moves the
+        // allocation, not just the health bit.
+        truth.prim_healthy[0] = false;
+        truth.sec_healthy[0] = false;
+        let failed = run(&mut ids(), &truth, &Faults::default(), 3.0);
+        assert!(
+            failed["FCTL_AIL_L3_DEFLECTION_DEG"] > 18.0,
+            "the EHA actuator (PRIM2|SEC2) must still reach the command: {} deg",
+            failed["FCTL_AIL_L3_DEFLECTION_DEG"]
+        );
+        assert_eq!(
+            failed["FCTL_GREEN_DEMAND_M3_S"], 0.0,
+            "with PRIM1 and SEC1 both down, the deep model must stop driving the Green actuator -- no counted Green flow can be left"
+        );
+    }
+
+    #[test]
+    fn losing_every_flight_control_computer_still_collapses_every_actuator_to_damping() {
+        // Before this fix, `computers_powered` collapsed all six computers
+        // to unhealthy together whenever no AC bus was live, and every
+        // surface degraded accordingly. Now that per-computer health is
+        // real and independent of `ac_bus_volts`, this is the scenario that
+        // has to keep behaving exactly like that old collapse: every
+        // computer down (the real chain, in the sim, is AC/DC bus loss ->
+        // `src/prim.rs`'s own per-index power feed -> `prim_healthy`/
+        // `sec_healthy` false -> here; that chain is not what this test
+        // exercises, only that this crate still degrades everything the
+        // way it always did once no computer is left healthy at all --
+        // see `allocation.rs`'s own
+        // `losing_every_option_leaves_the_actuator_in_damping_not_a_panic`
+        // for the same claim at the allocation-table level).
+        let mut truth = parked_truth();
+        truth.prim_healthy = [false; 3];
+        truth.sec_healthy = [false; 3];
+        for side in 0..2 {
+            truth.commanded_surfaces.ailerons_deg[side] = [20.0; 3];
+        }
+        truth.commanded_surfaces.rudders_deg = [25.0, 25.0];
+
+        let out = run(&mut ids(), &truth, &Faults::default(), 3.0);
+        for name in ["FCTL_AIL_L1_DEFLECTION_DEG", "FCTL_AIL_L2_DEFLECTION_DEG", "FCTL_AIL_L3_DEFLECTION_DEG", "FCTL_RUD_UPPER_DEFLECTION_DEG", "FCTL_RUD_LOWER_DEFLECTION_DEG"] {
+            assert!(out[name].abs() < 1.0, "{name} should not move toward its command with no live computer at all: {} deg", out[name]);
+        }
+        assert_eq!(out["FCTL_GREEN_DEMAND_M3_S"], 0.0, "no computer left to drive any Green actuator");
+        assert_eq!(out["FCTL_YELLOW_DEMAND_M3_S"], 0.0, "no computer left to drive any Yellow actuator");
     }
 }
