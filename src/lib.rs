@@ -756,6 +756,9 @@ struct Plugin {
     /// The FCU and autothrust key events, as X-Plane commands.
     commands: afs_events::Commands,
     priority_takeover_commands: afs_events::PriorityTakeoverCommands,
+    /// The four cross-feed valve pushbuttons (`fuel.rs::Crossfeed`'s own
+    /// doc), as X-Plane commands.
+    crossfeed_commands: fuel::CrossfeedCommands,
     /// X-Plane's state the PRIMs read directly (FlyByWire's SimData).
     prim_refs: PrimRefs,
     /// MSFS's fuel system from FlyByWire's definition, with their transfer
@@ -1068,6 +1071,7 @@ impl Plugin {
         let prims = prim::Prims::new(&mut vars, start_state.into());
         let commands = afs_events::Commands::register(xplm);
         let priority_takeover_commands = afs_events::PriorityTakeoverCommands::register(xplm);
+        let crossfeed_commands = fuel::CrossfeedCommands::register(xplm);
         let prim_refs = PrimRefs::new(xplm);
         let fuel = match fuel::Fuel::new(&mut vars, xplm) {
             Ok(fuel) => Some(fuel),
@@ -1275,6 +1279,7 @@ impl Plugin {
             prims,
             commands,
             priority_takeover_commands,
+            crossfeed_commands,
             prim_refs,
             fuel,
             hydraulics,
@@ -2419,6 +2424,7 @@ pub unsafe extern "C" fn XPluginDisable() {
             }
             plugin.commands.release(xplm);
             plugin.priority_takeover_commands.release(xplm);
+            plugin.crossfeed_commands.release(xplm);
             // Physics workstream 6: save the airframe state on exit, so
             // wear/damage/MEL/failure history survives to the next start.
             if let Err(e) = plugin.persistence.save() {

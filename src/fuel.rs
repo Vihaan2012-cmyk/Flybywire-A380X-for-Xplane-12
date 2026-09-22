@@ -56,7 +56,7 @@ pub use crate::circuits::bus_power_variable;
 use crate::circuits::SYSTEMS_CFG;
 use crate::fuel_network::FuelNetwork;
 use crate::fuel_transfer::{apu_fuel_demand_gph, ApuFuelAspect, FuelVars, LegacyFuel};
-use crate::xp::{DataRef, Xplm};
+use crate::xp::{CommandRef, DataRef, Xplm};
 use crate::Vars;
 
 const FLIGHT_MODEL_CFG: &str = include_str!(
@@ -488,6 +488,108 @@ struct Jettison {
     nozzle_cda_m2: f64,
 }
 
+/// FUEL-0XX: the crew's own selection for each of the four cross-feed
+/// valves (`CrossFeedValve1..4`, `flight_model.cfg`'s `Valve.46..49`).
+/// Like `Jettison` above, FlyByWire has no compiled cross-feed switch
+/// anywhere in this port -- grepped this crate and `D:\fbw-aircraft`'s
+/// systems/TS and `flight_model.cfg` sources (`deep/plugin.rs`'s own
+/// sourcing table records the same gap) -- so this project defines its own
+/// variable, the same unprefixed MSFS-simvar-style shape as `FUEL JETTISON
+/// SWITCH`, one per valve.
+///
+/// One switch *per valve*, not one combined switch and not a per-pair
+/// switch: `flight_model.cfg`'s own topology (`Line.128..137`) wires each
+/// valve onto a distinct leg of the cross-feed manifold (`Junction{n}` <->
+/// `CrossFeedValve{n}` <-> `CrossFeedJunc{1,2}`), not two mechanically
+/// coupled pairs, and the real aircraft's own indications treat all four as
+/// independent: the SD `FuelPage.tsx` reads and draws
+/// `FUELSYSTEM VALVE OPEN:46..49` separately, and `ata28.ts`'s
+/// abnormal-sensed checklist raises a distinct "FUEL CROSSFEED VLV {n}
+/// FAULT" for each one. The MSFS failure catalogue's own 28_009 ("valve
+/// 1-2")/28_010 ("valve 3-4") pairing (`fuel_network.rs::refresh_catalogue_failures`)
+/// is a two-slot granularity limit on failure *injection* only -- that
+/// module's own comment already flags it as such -- not evidence about the
+/// cockpit control, so it is not modelled as a control constraint here.
+struct Crossfeed {
+    /// New here: no FBW L:var exists for this, so it is not under the
+    /// `A32NX_` namespace, the same reasoning `Jettison::switch` gives.
+    /// `net.set_crossfeed_selection` (its own doc) resolves each valve by
+    /// name itself, so there is no separate valve-index cache to keep in
+    /// sync with it here.
+    switch: [VariableIdentifier; 4],
+}
+
+// ---------------------------------------------------------------------
+// Cross-feed valve pushbuttons: one X-Plane command per valve
+// (`fbw/fuel/crossfeed/{1..4}/toggle`), modelled on afs_events.rs's own
+// pulsed-command pattern (`Commands`/`on_command`). The handler only
+// queues which valve was pressed; `Fuel::crossfeed` (above) applies it
+// against the *current* `FUEL CROSSFEED SWITCH:n` value on its own thread
+// next tick, so the L:var stays the single place state actually changes.
+//
+// The Study panel needs no second mechanism for this: `study/web.rs`'s
+// `apply_action` already has a generic `{"kind":"command","command":"..."}`
+// action (`crate::xp::command_once`) for exactly this shape of control, so
+// sending `{"kind":"command","command":"fbw/fuel/crossfeed/1/toggle"}`
+// drives the identical registered command a cockpit click or keybind
+// would -- one command, one handler, reached by two routes, rather than a
+// second action kind that could drift from it.
+// ---------------------------------------------------------------------
+
+static PENDING_CROSSFEED_TOGGLE: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+/// This tick's cockpit-command toggle requests (valve indices 0..4),
+/// cleared once taken.
+fn take_crossfeed_toggles() -> Vec<usize> {
+    PENDING_CROSSFEED_TOGGLE.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
+}
+
+/// The command name `CrossfeedCommands::register` creates and
+/// `study/web.rs`'s doc comment for `"kind":"command"` points at -- the
+/// one name both routes must agree on.
+pub(crate) fn crossfeed_command_name(n: usize) -> String {
+    format!("fbw/fuel/crossfeed/{n}/toggle")
+}
+
+/// XPLMCommandPhase: 0 = begin. A toggle only needs the press, not the
+/// release (unlike the held sidestick-priority commands in afs_events.rs).
+unsafe extern "C" fn on_crossfeed_command(_command: CommandRef, phase: std::ffi::c_int, refcon: *mut std::ffi::c_void) -> std::ffi::c_int {
+    if phase == 0 {
+        if let Ok(mut pending) = PENDING_CROSSFEED_TOGGLE.lock() {
+            pending.push(refcon as usize);
+        }
+    }
+    1
+}
+
+/// The four cross-feed valve toggle commands, unregistered when released --
+/// same lifecycle shape as `afs_events::Commands`.
+pub struct CrossfeedCommands {
+    registered: Vec<(CommandRef, usize)>,
+}
+
+unsafe impl Send for CrossfeedCommands {}
+
+impl CrossfeedCommands {
+    pub fn register(xplm: &Xplm) -> Self {
+        let mut registered = Vec::new();
+        for i in 0..4 {
+            let name = crossfeed_command_name(i + 1);
+            if let Some(command) = xplm.create_command(&name, &format!("FlyByWire cross-feed valve {} toggle", i + 1)) {
+                xplm.register_command_handler(command, on_crossfeed_command, i as *mut std::ffi::c_void);
+                registered.push((command, i));
+            }
+        }
+        Self { registered }
+    }
+
+    pub fn release(&mut self, xplm: &Xplm) {
+        for (command, i) in self.registered.drain(..) {
+            xplm.unregister_command_handler(command, on_crossfeed_command, i as *mut std::ffi::c_void);
+        }
+    }
+}
+
 /// MSFS's own state that X-Plane has no counterpart for, which FlyByWire's
 /// APU fuel aspect sets with key events and reads back.
 #[derive(Default)]
@@ -559,6 +661,7 @@ pub struct Fuel {
     /// FUEL-004: each network tank's temperature, Celsius, 1..11.
     temp_c: [f64; 11],
     jettison: Jettison,
+    crossfeed: Crossfeed,
     /// Read and write the FADEC's saved tank levels (`fbw_a380x_fuel.ini`).
     /// Off for the offline emulator, whose cases must not share a file.
     persist: bool,
@@ -642,6 +745,12 @@ impl Fuel {
                 fluids::JET_A_DENSITY_KG_M3_AT_15C,
             ),
         };
+        let crossfeed = Crossfeed {
+            // No FBW L:var: new here (see the struct doc). Same unprefixed,
+            // MSFS-simvar-style shape as `FUEL JETTISON SWITCH` above, one
+            // per valve.
+            switch: std::array::from_fn(|i| vars.get(format!("FUEL CROSSFEED SWITCH:{}", i + 1))),
+        };
         Ok(Self {
             net,
             legacy: LegacyFuel::new(),
@@ -658,6 +767,7 @@ impl Fuel {
             started: false,
             temp_c: [15.; 11],
             jettison,
+            crossfeed,
             persist: true,
         })
     }
@@ -766,6 +876,7 @@ impl Fuel {
 
         self.power_circuits(vars, circuits);
         self.jettison(vars, delta);
+        self.crossfeed(vars);
 
         // The APU fuel aspect, then the transfer logic.
         {
@@ -988,6 +1099,30 @@ impl Fuel {
         for (t, left) in jettison_shares(&tanks, want) {
             self.net.set_tank_gallons(t, left);
         }
+    }
+
+    /// FUEL-0XX: opens or shuts each cross-feed valve from its own
+    /// `FUEL CROSSFEED SWITCH:n` (`Crossfeed` struct doc above). Any
+    /// cockpit-command toggle queued since the last tick
+    /// (`CrossfeedCommands`/`on_crossfeed_command` below) is applied first,
+    /// against the var's *current* value -- so the L:var stays the single
+    /// place either route (this command, or the Study panel's existing
+    /// generic `{"kind":"command",...}` action invoking the identically
+    /// named command) actually changes state, never a second value that
+    /// could disagree with it. `set_crossfeed_selection` is the one place
+    /// this reaches the real valves (its own doc): the same reading also
+    /// reaches `Truth::controls::crossfeed_valve_selected`
+    /// (`deep/plugin.rs`), so `deep::fuel`'s shadow ledger and this network
+    /// can never disagree about whether the valves are actually open.
+    fn crossfeed(&mut self, vars: &mut Vars) {
+        for i in take_crossfeed_toggles() {
+            if let Some(&id) = self.crossfeed.switch.get(i) {
+                let open = vars.read(&id) != 0.;
+                vars.write(&id, if open { 0. } else { 1. });
+            }
+        }
+        let selected = std::array::from_fn(|i| vars.read(&self.crossfeed.switch[i]) != 0.);
+        self.net.set_crossfeed_selection(selected);
     }
 
     /// hyperrealism.md physics workstream 5: FUEL gap "pump outlet pressure
@@ -1548,6 +1683,45 @@ mod tests {
         assert!(full > half);
         assert!(half > empty);
         assert_eq!(empty, 0.);
+    }
+
+    /// The cross-feed toggle command's own handler: a begin-phase press
+    /// queues exactly its own valve index, a continue/end phase queues
+    /// nothing (unlike the held sidestick-priority commands, this is a
+    /// pulsed toggle), and each valve's command is independent of the
+    /// others'. Simulated the same way `afs_events.rs`'s own
+    /// `priority_takeover_tests` calls its command handler directly,
+    /// bypassing X-Plane's own command dispatch.
+    #[test]
+    fn crossfeed_command_handler_queues_only_its_own_valve_on_the_begin_phase() {
+        let _cleanup = take_crossfeed_toggles(); // drain any leftovers from another test
+        unsafe { on_crossfeed_command(std::ptr::null_mut(), 0, 2 as *mut std::ffi::c_void) };
+        assert_eq!(take_crossfeed_toggles(), vec![2], "valve 3's press (refcon 2) queued its own index");
+        assert!(take_crossfeed_toggles().is_empty(), "already drained");
+
+        // Continue (1) and end (2) phases: XPLMCommandOnce delivers these
+        // too, and neither must queue a second toggle for one press.
+        unsafe { on_crossfeed_command(std::ptr::null_mut(), 1, 0 as *mut std::ffi::c_void) };
+        unsafe { on_crossfeed_command(std::ptr::null_mut(), 2, 0 as *mut std::ffi::c_void) };
+        assert!(take_crossfeed_toggles().is_empty(), "continue/end phases must not queue");
+
+        unsafe { on_crossfeed_command(std::ptr::null_mut(), 0, 0 as *mut std::ffi::c_void) };
+        unsafe { on_crossfeed_command(std::ptr::null_mut(), 0, 3 as *mut std::ffi::c_void) };
+        assert_eq!(take_crossfeed_toggles(), vec![0, 3], "two different valves queue independently");
+    }
+
+    /// The command name `CrossfeedCommands::register` creates for each
+    /// valve is exactly what the Study panel's existing generic
+    /// `{"kind":"command","command":"..."}` action must send to reach the
+    /// same handler -- both routes are the same command, not two
+    /// mechanisms that could name it differently.
+    #[test]
+    fn crossfeed_command_names_are_stable_and_one_per_valve() {
+        let names: Vec<String> = (1..=4).map(crossfeed_command_name).collect();
+        assert_eq!(
+            names,
+            vec!["fbw/fuel/crossfeed/1/toggle", "fbw/fuel/crossfeed/2/toggle", "fbw/fuel/crossfeed/3/toggle", "fbw/fuel/crossfeed/4/toggle"]
+        );
     }
 
     // A leak/pump-loss failure case: with no driving pressure at all (pump

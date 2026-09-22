@@ -79,7 +79,7 @@
 //! | `apu_master_sw_on` | `A32NX_OVHD_APU_MASTER_SW_PB_IS_ON` != 0 (named for `deep::apu::live`'s own doc comment asking for exactly this) |
 //! | `apu_start_pb_on` | `A32NX_OVHD_APU_START_PB_IS_ON` != 0 |
 //! | `jettison_armed`, `jettison_valve_selected[0..2]` | `FUEL JETTISON SWITCH` != 0, the one combined arm/nozzle-valve switch `fuel.rs::Jettison` already reads (its own doc: FlyByWire has no real jettison switch anywhere in this port, so this plugin added the single var; "a future cockpit switch (converter) or the Study panel ... can drive it"). Both `Truth` fields read the same switch, since no separate per-side selector exists yet -- a real simplification, not two independently faked values |
-//! | `crossfeed_valve_selected[0..4]` | **unsourced** -- grepped this crate and `D:\fbw-aircraft`'s systems/TS and `flight_model.cfg` sources; `CrossFeedValve1..4` (`Valve.46..49`) exist in the ported network but nothing anywhere -- not FlyByWire's compiled systems, not this port's own `fuel.rs::handle_event` (which only ever forwards `FUELSYSTEM_PUMP_*` events), not any cockpit command -- ever toggles them. `Controls::default()`'s `false` is honest: the crossfeed valves really are always shut in this port today |
+//! | `crossfeed_valve_selected[0..4]` | `FUEL CROSSFEED SWITCH:1..4` != 0, one project-owned switch per valve (`fuel.rs::Crossfeed`'s own doc: FlyByWire has no compiled cross-feed switch anywhere in this port, so this plugin added one per valve, the same unprefixed MSFS-simvar-style shape as `FUEL JETTISON SWITCH` above -- not one combined switch or a per-pair one, since the real aircraft's own SD `FuelPage.tsx` and `ata28.ts` abnormal-sensed checklist never gang two of the four valves together). Settable from a cockpit command/keybind (`fbw/fuel/crossfeed/1..4/toggle`, `fuel::CrossfeedCommands`) or the Study panel's existing generic `{"kind":"command",...}` action, and drives the real valves in `fuel_network.rs::set_crossfeed_selection` from the identical reading, so this and the real network can never disagree |
 //! | `cargo_door_commanded_open[0..2]` (`[fwd, aft]`) | `A32NX_{FWD,AFT}_DOOR_CARGO_POSITION` / 100, the same two real FlyByWire actuator variables `src/doors.rs::DoorModel::update_model` already reads to clip the 3D cargo-door animation |
 //! | `cargo_door_commanded_open[2]` (bulk) | **unsourced** -- no bulk-cargo-door LVar exists in this port (the A380 model here carries no separate bulk-compartment door) |
 //! | `water_demand_l_s[0..2]` | **unsourced** -- no galley/lavatory water-draw simvar or LVar was found anywhere in this crate or `D:\fbw-aircraft`'s systems sources; `Controls::default()`'s `[0.0, 0.0]` (no one drawing water) is the honest reading, not an invented demand |
@@ -335,6 +335,14 @@ struct ControlIds {
     /// has no separate bulk compartment door), so `Controls::
     /// cargo_door_commanded_open[2]` stays unsourced.
     cargo_door_position: [VariableIdentifier; 2],
+    /// `FUEL CROSSFEED SWITCH:1..4`, the four per-valve switches
+    /// `fuel.rs::Crossfeed` already reads (that struct's own doc: no FBW
+    /// L:var exists for cross-feed at all, so this plugin added one per
+    /// valve, kept unprefixed MSFS-simvar-style like `FUEL JETTISON
+    /// SWITCH`). Read here too through the same shared `Vars` registry, so
+    /// this resolves to the identical four `VariableIdentifier`s `fuel.rs`
+    /// already registered, not four more that could disagree with them.
+    crossfeed_switch: [VariableIdentifier; 4],
 }
 
 impl ControlIds {
@@ -359,6 +367,7 @@ impl ControlIds {
             cabin_temp_c: vars.get("COND_MAIN_DECK_1_TEMP".to_owned()),
             fuel_jettison_switch: vars.get("FUEL JETTISON SWITCH".to_owned()),
             cargo_door_position: ["FWD", "AFT"].map(|s| vars.get(format!("{s}_DOOR_CARGO_POSITION"))),
+            crossfeed_switch: [1, 2, 3, 4].map(|n| vars.get(format!("FUEL CROSSFEED SWITCH:{n}"))),
         }
     }
 }
@@ -751,13 +760,22 @@ impl DeepLayer {
 
             controls.cargo_door_commanded_open[0] = (vars.read(&c.cargo_door_position[0]) / 100.0).clamp(0.0, 1.0);
             controls.cargo_door_commanded_open[1] = (vars.read(&c.cargo_door_position[1]) / 100.0).clamp(0.0, 1.0);
-            // `cargo_door_commanded_open[2]` (bulk), `crossfeed_valve_selected`
-            // and `water_demand_l_s` have no publisher anywhere in this port
-            // (grepped this crate and `D:\fbw-aircraft`'s systems/config
-            // sources for a crossfeed valve switch, a bulk cargo door LVar
-            // and a galley/lavatory water-draw simvar; none exist -- see
-            // this module's own sourcing table). Left at `default.controls`,
-            // already copied in above, rather than invented.
+            // `crossfeed_valve_selected`: now real (`fuel.rs::Crossfeed`'s
+            // own doc -- four independent `FUEL CROSSFEED SWITCH:n`
+            // switches, one per valve, since the real aircraft's own SD
+            // page and abnormal-sensed checklist never gang two of the
+            // four cross-feed valves together). This is the same reading
+            // `fuel_network.rs::set_crossfeed_selection` drives the real
+            // valves from (`fuel.rs::Fuel::crossfeed`), so the two fuel
+            // models can never disagree about whether they're open.
+            controls.crossfeed_valve_selected = c.crossfeed_switch.map(|id| vars.read(&id) != 0.0);
+            // `cargo_door_commanded_open[2]` (bulk) and `water_demand_l_s`
+            // still have no publisher anywhere in this port (grepped this
+            // crate and `D:\fbw-aircraft`'s systems/config sources for a
+            // bulk cargo door LVar and a galley/lavatory water-draw simvar;
+            // neither exists -- see this module's own sourcing table).
+            // Left at `default.controls`, already copied in above, rather
+            // than invented.
         }
         // `sim/cockpit2/controls/speedbrake_ratio`, through the exact
         // function `Prims::read` uses for `SimReadings::spoilers_armed`, so
@@ -1090,9 +1108,13 @@ mod tests {
     /// `jettison_armed`/`jettison_valve_selected` and
     /// `cargo_door_commanded_open` are real reads now (this pass's own
     /// fix), not permanently `Controls::default()`. `crossfeed_valve_selected`
-    /// and `water_demand_l_s` genuinely have no publisher in this port (this
-    /// module's own sourcing table) and must stay at their documented
-    /// default regardless of what else is written.
+    /// now has a publisher too (`fuel.rs::Crossfeed`'s `FUEL CROSSFEED
+    /// SWITCH:n`) -- covered by its own test below, since this rig's cold
+    /// state and this test's other writes never touch it, so its readings
+    /// here stay at `Controls::default()`'s `false` for an unrelated
+    /// reason than before. `water_demand_l_s` genuinely still has no
+    /// publisher in this port (this module's own sourcing table) and must
+    /// stay at its documented default regardless of what else is written.
     #[test]
     fn jettison_and_cargo_door_controls_read_their_real_variables_and_unsourced_ones_stay_at_default() {
         let (xplm, mut vars) = rig();
@@ -1102,7 +1124,7 @@ mod tests {
         assert!(!cold.controls.jettison_armed, "nothing written yet: jettison must read unarmed");
         assert_eq!(cold.controls.jettison_valve_selected, [false; 2]);
         assert_eq!(cold.controls.cargo_door_commanded_open, [0.0; 3]);
-        assert_eq!(cold.controls.crossfeed_valve_selected, [false; 4], "no publisher exists; must stay at Controls::default()");
+        assert_eq!(cold.controls.crossfeed_valve_selected, [false; 4], "nothing written yet: every crossfeed switch must read unselected");
         assert_eq!(cold.controls.water_demand_l_s, [0.0; 2], "no publisher exists; must stay at Controls::default()");
 
         set(&mut vars, "FUEL JETTISON SWITCH", 1.0);
@@ -1114,9 +1136,34 @@ mod tests {
         assert!((t.controls.cargo_door_commanded_open[0] - 0.55).abs() < 1e-9, "fwd cargo door percent must convert to a 0..1 fraction: {}", t.controls.cargo_door_commanded_open[0]);
         assert!((t.controls.cargo_door_commanded_open[1] - 0.20).abs() < 1e-9, "aft cargo door percent must convert to a 0..1 fraction: {}", t.controls.cargo_door_commanded_open[1]);
         assert_eq!(t.controls.cargo_door_commanded_open[2], 0.0, "no bulk cargo door LVar exists in this port");
-        // Still unsourced even with other controls now live.
+        // This test never sets a `FUEL CROSSFEED SWITCH:n`, so the now-real
+        // publisher still reads every valve unselected here -- proven live
+        // (not merely defaulted) by `crossfeed_valve_selected_reads_its_own_
+        // per_valve_switch` below.
         assert_eq!(t.controls.crossfeed_valve_selected, [false; 4]);
         assert_eq!(t.controls.water_demand_l_s, [0.0; 2]);
+    }
+
+    /// `crossfeed_valve_selected` (this pass's own fix): four independent
+    /// `FUEL CROSSFEED SWITCH:n` reads, one per valve -- selecting one
+    /// valve must not select its neighbours, and deselecting it again must
+    /// clear only that one.
+    #[test]
+    fn crossfeed_valve_selected_reads_its_own_per_valve_switch() {
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+
+        let cold = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert_eq!(cold.controls.crossfeed_valve_selected, [false; 4]);
+
+        set(&mut vars, "FUEL CROSSFEED SWITCH:1", 1.0);
+        set(&mut vars, "FUEL CROSSFEED SWITCH:3", 1.0);
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert_eq!(t.controls.crossfeed_valve_selected, [true, false, true, false], "valves 1 and 3 selected, 2 and 4 must stay clear");
+
+        set(&mut vars, "FUEL CROSSFEED SWITCH:1", 0.0);
+        let t2 = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert_eq!(t2.controls.crossfeed_valve_selected, [false, false, true, false], "deselecting valve 1 must not touch valve 3");
     }
 
     /// The oil tank level reaches the areas, and a tank nobody has written

@@ -1541,6 +1541,40 @@ impl FuelNetwork {
         self.valve_n.get(&n).map_or(0.0, |&i| self.valve_open[i])
     }
 
+    /// Opens or shuts each of the four cross-feed valves (`CrossFeedValve1
+    /// ..4`, `Valve.46..49`) from the crew's own per-valve selection --
+    /// `fuel.rs::Crossfeed`'s `FUEL CROSSFEED SWITCH:1..4` on the real
+    /// plugin, a plain `[bool; 4]` here so this network stays testable
+    /// without `Vars`/`Xplm`. Four independent calls, not one combined
+    /// switch or a per-pair one: the real aircraft's own SD `FuelPage.tsx`
+    /// reads and draws all four valves independently
+    /// (`FUELSYSTEM VALVE OPEN:46..49`) and `ata28.ts`'s abnormal-sensed
+    /// checklist raises a separate "FUEL CROSSFEED VLV {n} FAULT" for each
+    /// one -- the real indications never gang two valves together, so
+    /// anything coarser would be a fabrication the fault list itself
+    /// contradicts. (The MSFS failure catalogue's own 28_009/28_010
+    /// pairing above, `refresh_catalogue_failures`'s own comment, is a two-slot
+    /// granularity limit on failure *injection* only, not evidence about
+    /// the cockpit control.)
+    ///
+    /// This is the one place either fuel model's crossfeed selection
+    /// reaches the real valves: `deep::fuel::live.rs`'s own
+    /// `crossfeed_open` and this network's valve state both derive from
+    /// the same `Truth::controls::crossfeed_valve_selected` /
+    /// `FUEL CROSSFEED SWITCH:n` reading (`deep/plugin.rs`'s sourcing
+    /// table, `fuel.rs::Fuel::crossfeed`), so the two models can never
+    /// disagree about whether the valves are actually open.
+    pub fn set_crossfeed_selection(&mut self, selected: [bool; 4]) {
+        for (i, &open) in selected.iter().enumerate() {
+            let Some(v) = self.valve_index(&format!("CrossFeedValve{}", i + 1)) else { continue };
+            if open {
+                self.open_valve(v);
+            } else {
+                self.close_valve(v);
+            }
+        }
+    }
+
     // ----- triggers --------------------------------------------------------
 
     pub fn trigger_count(&self) -> usize {
@@ -3217,6 +3251,49 @@ Trigger.2 = Name:Start#Condition:Autostart_Enabled#EffectTrue:StartPump.Pump
         failures::set_active(28_009, false);
         run(&mut net, 10.0, 0.1, [0.0; 4], 0.0);
         assert!(net.valve_open(46) > 0.9, "clearing the failure lets it move again");
+    }
+
+    /// FUEL-0XX (`set_crossfeed_selection`'s own doc): selecting a
+    /// cross-feed valve opens it and deselecting shuts it, and the four
+    /// valves are independent of each other -- selecting 1 and 3 must never
+    /// move 2 or 4.
+    #[test]
+    fn set_crossfeed_selection_opens_and_shuts_each_valve_independently() {
+        // `run`/`net.update` read the process-global failure catalogue
+        // every tick (`refresh_catalogue_failures`), so any test exercising
+        // a real network must serialise against every other test that can
+        // set 28_009/28_010 active, the same guard
+        // `catalogue_crossfeed_valve_failure_freezes_position` above takes.
+        let _g = failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        failures::Failures::new();
+        let Some(mut net) = a380_taxi() else { return };
+        // The valves' starting position depends on the taxi flight state;
+        // force a known closed baseline before asserting anything about a
+        // selection driving them.
+        for v in [46, 47, 48, 49] {
+            net.close_valve(v);
+        }
+        run(&mut net, 5.0, 0.1, [0.0; 4], 0.0);
+        assert_eq!(
+            [net.valve_open(46), net.valve_open(47), net.valve_open(48), net.valve_open(49)],
+            [0.0; 4],
+            "closed baseline"
+        );
+
+        net.set_crossfeed_selection([true, false, true, false]);
+        run(&mut net, 5.0, 0.1, [0.0; 4], 0.0);
+        assert!(net.valve_open(46) > 0.9, "CrossFeedValve1 selected: must open");
+        assert_eq!(net.valve_open(47), 0.0, "CrossFeedValve2 not selected: must stay shut");
+        assert!(net.valve_open(48) > 0.9, "CrossFeedValve3 selected: must open");
+        assert_eq!(net.valve_open(49), 0.0, "CrossFeedValve4 not selected: must stay shut");
+
+        net.set_crossfeed_selection([false; 4]);
+        run(&mut net, 5.0, 0.1, [0.0; 4], 0.0);
+        assert_eq!(
+            [net.valve_open(46), net.valve_open(47), net.valve_open(48), net.valve_open(49)],
+            [0.0; 4],
+            "deselecting every valve shuts them all again"
+        );
     }
 
     // ------------------------------------------------------------------

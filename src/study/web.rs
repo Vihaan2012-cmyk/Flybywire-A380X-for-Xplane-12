@@ -771,7 +771,12 @@ fn breaker_number(def: &crate::breakers::BreakerDef) -> usize {
 /// `{"kind":"pullBreaker","id":"tr-1"}`/`{"kind":"resetBreaker","id":"tr-1"}`
 /// (`breakers.rs`'s catalogue, by its own string id -- `apply_requests` on
 /// the next tick), `{"kind":"resetAllBreakers"}`,
-/// `{"kind":"command","command":"fbw/efb/ground/gpu"}`,
+/// `{"kind":"command","command":"fbw/efb/ground/gpu"}` -- also how the four
+/// cross-feed valve pushbuttons are driven
+/// (`{"kind":"command","command":"fbw/fuel/crossfeed/1/toggle"}` etc,
+/// `fuel::crossfeed_command_name`/`fuel::CrossfeedCommands`; no separate
+/// action kind, since this generic one already reaches an X-Plane command
+/// by name, the same one a cockpit click or keybind fires) --
 /// `{"kind":"serviceOxygen"}`. There is no `"kind":"physics"`: the
 /// PHYSICS/SCHEMATIC toggle is purely which fields a page shows (already in
 /// `/study/pages`' `groups` vs the page's own schematic/topology), the same
@@ -1131,6 +1136,26 @@ mod tests {
         assert!(apply_action(r#"{"kind":"toggleBreaker","id":1}"#).is_ok());
         assert!(apply_action(r#"{"kind":"command","command":"fbw/efb/ground/gpu"}"#).is_ok());
         assert!(apply_action(r#"{"kind":"serviceOxygen"}"#).is_ok());
+    }
+
+    /// The cross-feed valve pushbuttons need no new action kind: the
+    /// existing generic `"command"` kind already reaches an X-Plane command
+    /// by name (`crate::xp::command_once`), and `fuel::CrossfeedCommands`
+    /// registers exactly the name `fuel::crossfeed_command_name` builds --
+    /// so a Study panel click and a cockpit click/keybind fire the one same
+    /// registered command, never two mechanisms that could drift apart.
+    /// This proves the *name* the two routes must agree on is the one
+    /// `apply_action` actually accepts; the command's own effect (queuing a
+    /// valve toggle) is `fuel.rs`'s own
+    /// `crossfeed_command_handler_queues_only_its_own_valve_on_the_begin_phase`.
+    #[test]
+    fn crossfeed_command_action_names_match_what_crossfeedcommands_registers() {
+        for n in 1..=4 {
+            let name = crate::fuel::crossfeed_command_name(n);
+            assert_eq!(name, format!("fbw/fuel/crossfeed/{n}/toggle"));
+            let body = format!(r#"{{"kind":"command","command":"{name}"}}"#);
+            assert!(apply_action(&body).is_ok(), "the Study panel's own action for valve {n} must be accepted");
+        }
     }
 
     /// Every `deep` area's page carries the four sections item 2 of the
