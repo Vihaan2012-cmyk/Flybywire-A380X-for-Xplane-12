@@ -872,7 +872,7 @@ impl Adiru {
         // keeps this unit in the "not running" branch below -- which
         // continuously copies `t.lat_deg`/`lon_deg`/`alt_m` truth into this
         // struct -- until a real position exists to start mechanizing from.
-        let should_run = fbw_state >= 1.999 && powered && t.placed;
+        let mut should_run = fbw_state >= 1.999 && powered && t.placed;
 
         if !should_run {
             // Not aligned, or unpowered: no free-inertial solution. Re-seed
@@ -983,6 +983,80 @@ impl Adiru {
             // without GPIRS damping.
             if nav_mode && gps_valid {
                 self.gpirs_correct(dt, t);
+            }
+
+            // BITE-style fault check: nothing between here and `mechanize`
+            // guards a single bad tick's *sensed* rate/force from producing
+            // a wildly-wrong (or outright non-finite) mechanized state --
+            // see the report's live-defect analysis. The real, causal fix is
+            // rejecting an implausible raw reading before it ever reaches
+            // `mechanize` (`TrueStateSource::read`'s new `plausible` gate,
+            // below); this is the second, independent layer a real IRU also
+            // has: its own BITE monitors the mechanized *solution* and
+            // faults/re-aligns rather than keep annunciating a corrupted
+            // one, in case some other, unanticipated corruption source ever
+            // reaches this state (a NaN from a future change, an addon
+            // stuffing a garbage value into a shared dataref this module
+            // doesn't own, etc.) -- "don't fake values" cuts the other way
+            // too: continuing to integrate and *publish* a state this
+            // module can already tell is unphysical would itself be
+            // presenting fabricated data as valid, exactly the live defect
+            // (PFD attitude sphere rolled tens of degrees with no ATT/HDG
+            // flag). `MAX_PLAUSIBLE_*` below are generous ceilings no real,
+            // physically-possible aircraft state can reach (a stationary or
+            // in-flight A380 never approaches Mach 3 groundspeed or a
+            // sustained >45 degree bank/pitch outside a deliberate
+            // aerobatic maneuver this airframe cannot perform) -- this is a
+            // sanity fault threshold, not a plausible-looking clamp of the
+            // published number: on a fault this unit stops publishing
+            // `valid` data and re-aligns from truth, it does not keep
+            // reporting a truncated/clamped version of the bad value as if
+            // it were real.
+            const MAX_PLAUSIBLE_GROUND_SPEED_MS: f64 = 600.0; // ~1166 kt
+            const MAX_PLAUSIBLE_VERTICAL_SPEED_MS: f64 = 200.0; // ~39,000 fpm
+            const MAX_PLAUSIBLE_BANK_PITCH_DEG: f64 = 80.0;
+            let mechanization_finite = self.pitch_deg.is_finite()
+                && self.roll_deg.is_finite()
+                && self.heading_deg.is_finite()
+                && self.v_north.is_finite()
+                && self.v_east.is_finite()
+                && self.v_down.is_finite()
+                && self.lat_rad.is_finite()
+                && self.lon_rad.is_finite()
+                && self.alt_m.is_finite();
+            let mechanization_plausible = mechanization_finite
+                && self.pitch_deg.abs() <= MAX_PLAUSIBLE_BANK_PITCH_DEG
+                && self.roll_deg.abs() <= MAX_PLAUSIBLE_BANK_PITCH_DEG
+                && (self.v_north * self.v_north + self.v_east * self.v_east).sqrt()
+                    <= MAX_PLAUSIBLE_GROUND_SPEED_MS
+                && self.v_down.abs() <= MAX_PLAUSIBLE_VERTICAL_SPEED_MS;
+            if !mechanization_plausible {
+                // Fault: stop presenting this tick (and until realignment
+                // completes) as valid data, and re-seed from truth exactly
+                // like a real power-loss/re-align event (the same reset the
+                // `!should_run` branch above performs) -- this unit lost its
+                // free-inertial solution and must gyrocompass again, the
+                // same honest consequence a real ADIRU has for an
+                // unrecoverable BITE fault.
+                self.running = false;
+                should_run = false;
+                self.pitch_deg = t.theta_xp;
+                self.roll_deg = t.phi_xp;
+                self.heading_deg = t.psi_xp;
+                self.seconds_aligning = 0.;
+                self.heading_error_deg = GYROCOMPASS_INITIAL_ERROR_DEG;
+                self.lat_rad = t.lat_deg.to_radians();
+                self.lon_rad = t.lon_deg.to_radians();
+                self.alt_m = t.alt_m;
+                self.v_north = 0.;
+                self.v_east = 0.;
+                self.v_down = 0.;
+                self.last_p_sensed_xp = 0.;
+                self.last_q_sensed_xp = 0.;
+                self.last_r_sensed_xp = 0.;
+                self.last_omega_body_rad_s = [0., 0., 0.];
+                self.position_error_m = 0.;
+                self.drift_rate_smoothed_nm_hr = 0.;
             }
         }
 
@@ -1530,6 +1604,32 @@ fn agl_looks_placed(agl_ft: f64) -> bool {
     agl_ft.is_finite() && (-1_000.0..=100_000.0).contains(&agl_ft)
 }
 
+/// Rejects a raw X-Plane reading that is non-finite or outside a generous
+/// physical plausibility bound, holding `*last` (the previous *plausible*
+/// reading, not a synthetic replacement) instead -- the same "reject a bad
+/// sample, don't integrate it" principle [`agl_looks_placed`] already
+/// applies to position/altitude, extended to every other truth channel
+/// [`Adiru::mechanize`] feeds straight into the strapdown integration every
+/// tick with no prior guard at all (see the report's live-defect analysis:
+/// `sim/flightmodel/position/local_vx`/`local_vz` -- X-Plane's own
+/// finite-differenced velocity -- can read a one-tick spike across an
+/// aircraft placement/teleport event, and nothing between that reading and
+/// `mechanize`'s Earth-rate/transport-rate term
+/// (`t.v_north_ms`/`t.v_east_ms` in `om_in_n`) checked it was even finite,
+/// let alone plausible; one such tick injects an arbitrarily large synthetic
+/// body rate into every ADIRU's gyrocompassing in the same tick, since all 3
+/// share this one `TrueState` -- matching the live symptom of near-identical
+/// runaway values on all 3 IRs at once). This holds the last *plausible*
+/// sample rather than fabricating a value for a rejected one -- a real
+/// ADIRU's own input monitor does the same (reject/hold a glitched sample,
+/// don't invent a replacement).
+fn plausible(last: &mut f64, val: f64, max_abs: f64) -> f64 {
+    if val.is_finite() && val.abs() <= max_abs {
+        *last = val;
+    }
+    *last
+}
+
 /// The datarefs read once per tick to build [`TrueState`]. Looked up once at
 /// construction, like the rest of the plugin's per-module dataref caches
 /// (e.g. `sensors.rs`).
@@ -1571,6 +1671,19 @@ struct TrueStateSource {
     last_valid_alt_m: f64,
     last_valid_v_north_ms: f64,
     last_valid_v_east_ms: f64,
+    /// Last *plausible* (finite, within [`Self::read`]'s generous bounds)
+    /// reading of each channel `mechanize`/`update_adr` consume directly,
+    /// for [`plausible`] to hold on a rejected sample. See [`plausible`]'s
+    /// doc comment for why these had no guard at all before.
+    last_p_deg_s: f64,
+    last_q_deg_s: f64,
+    last_r_deg_s: f64,
+    last_g_axil: f64,
+    last_g_side: f64,
+    last_g_nrml: f64,
+    last_theta_deg: f64,
+    last_phi_deg: f64,
+    last_psi_deg: f64,
 }
 impl TrueStateSource {
     fn new(xplm: &Xplm) -> Self {
@@ -1602,6 +1715,15 @@ impl TrueStateSource {
             last_valid_alt_m: 0.,
             last_valid_v_north_ms: 0.,
             last_valid_v_east_ms: 0.,
+            last_p_deg_s: 0.,
+            last_q_deg_s: 0.,
+            last_r_deg_s: 0.,
+            last_g_axil: 0.,
+            last_g_side: 0.,
+            last_g_nrml: -1., // at rest, level: reaction force supports 1g up.
+            last_theta_deg: 0.,
+            last_phi_deg: 0.,
+            last_psi_deg: 0.,
         }
     }
 
@@ -1611,13 +1733,27 @@ impl TrueStateSource {
 
         let agl_ft = f(self.y_agl) * M_TO_FT;
         let placed = agl_looks_placed(agl_ft);
-        if placed {
+        // Generous plausibility ceilings for X-Plane's own truth channels
+        // (see [`plausible`]): body rates in deg/s, specific force in g,
+        // Euler angles in degrees. None of these bound anything a real
+        // aircraft (let alone a parked or cruising A380) can actually do --
+        // they exist only to reject a garbage/glitched instantaneous sample
+        // (e.g. a placement-teleport velocity spike propagating into
+        // `om_in_n`'s body-rate term below), never to shape real flight
+        // data.
+        let v_north_raw_ms = -f(self.local_vz);
+        let v_east_raw_ms = f(self.local_vx);
+        let v_plausible = placed
+            && v_north_raw_ms.is_finite()
+            && v_east_raw_ms.is_finite()
+            && v_north_raw_ms.hypot(v_east_raw_ms) <= 600.0; // ~1166 kt
+        if v_plausible {
             // OpenGL local frame: +x east, +z south.
             self.last_valid_lat_deg = d(self.latitude);
             self.last_valid_lon_deg = d(self.longitude);
             self.last_valid_alt_m = f(self.elevation);
-            self.last_valid_v_north_ms = -f(self.local_vz);
-            self.last_valid_v_east_ms = f(self.local_vx);
+            self.last_valid_v_north_ms = v_north_raw_ms;
+            self.last_valid_v_east_ms = v_east_raw_ms;
         }
         let (lat_deg, lon_deg, alt_m, v_north_ms, v_east_ms) = (
             self.last_valid_lat_deg,
@@ -1628,15 +1764,15 @@ impl TrueStateSource {
         );
 
         TrueState {
-            p_xp: f(self.p),
-            q_xp: f(self.q),
-            r_xp: f(self.r),
-            g_axil: f(self.g_axil),
-            g_side: f(self.g_side),
-            g_nrml: f(self.g_nrml),
-            theta_xp: f(self.theta),
-            phi_xp: f(self.phi),
-            psi_xp: f(self.psi),
+            p_xp: plausible(&mut self.last_p_deg_s, f(self.p), 1000.0),
+            q_xp: plausible(&mut self.last_q_deg_s, f(self.q), 1000.0),
+            r_xp: plausible(&mut self.last_r_deg_s, f(self.r), 1000.0),
+            g_axil: plausible(&mut self.last_g_axil, f(self.g_axil), 20.0),
+            g_side: plausible(&mut self.last_g_side, f(self.g_side), 20.0),
+            g_nrml: plausible(&mut self.last_g_nrml, f(self.g_nrml), 20.0),
+            theta_xp: plausible(&mut self.last_theta_deg, f(self.theta), 180.0),
+            phi_xp: plausible(&mut self.last_phi_deg, f(self.phi), 180.0),
+            psi_xp: plausible(&mut self.last_psi_deg, f(self.psi), 360.0),
             lat_deg,
             lon_deg,
             alt_m,
@@ -2287,5 +2423,133 @@ mod tests {
         let mut c = Adiru::new_for_test(3);
         let should_run_unpowered = c.update_for_test(1.0 / 30.0, &t, 2.0, false);
         assert!(!should_run_unpowered, "an unpowered IR must not report valid data even if FBW reports it aligned");
+    }
+
+    /// [`plausible`] in isolation: holds the last plausible sample on a
+    /// rejected (non-finite or out-of-bound) one, doesn't fabricate any
+    /// other value, and accepts a normal in-bound reading immediately.
+    #[test]
+    fn plausible_holds_the_last_good_reading_and_rejects_garbage() {
+        let mut last = 1.0_f64;
+        assert_eq!(plausible(&mut last, 2.0, 10.0), 2.0, "an in-bound reading is accepted");
+        assert_eq!(plausible(&mut last, f64::NAN, 10.0), 2.0, "NaN is rejected, last good is held");
+        assert_eq!(plausible(&mut last, f64::INFINITY, 10.0), 2.0, "infinity is rejected");
+        assert_eq!(plausible(&mut last, 1_000.0, 10.0), 2.0, "an out-of-bound reading is rejected");
+        assert_eq!(plausible(&mut last, -3.0, 10.0), -3.0, "a later in-bound reading is accepted");
+    }
+
+    /// The live-defect regression test's other half: this reproduces the
+    /// *mechanism* (see the report) -- a real X-Plane quirk (a one-tick
+    /// `local_vx`/`local_vz` spike across an aircraft placement/teleport
+    /// event) handing `Adiru::advance` a single wildly-implausible velocity
+    /// reading, which `om_in_n`'s Earth-rate/transport-rate term
+    /// (`Adiru::mechanize`) turns into an enormous synthetic body rate for
+    /// that one tick -- enough to corrupt pitch/roll by tens of degrees in a
+    /// single RK4 step, exactly the observed "PFD attitude sphere rolled
+    /// tens of degrees... with no ATT/HDG flags". This feeds the bad
+    /// `TrueState` straight to `Adiru::advance` (bypassing
+    /// `TrueStateSource`'s own new `plausible` gate) to prove the second,
+    /// independent layer -- `advance`'s own post-mechanize BITE check --
+    /// catches it even if some other, unanticipated corruption source ever
+    /// reaches this state: the corrupted tick must not be published as
+    /// valid, and the unit must recover on subsequent good ticks, not stay
+    /// poisoned the way a permanently-NaN state would.
+    #[test]
+    fn a_one_tick_velocity_spike_faults_the_ir_instead_of_corrupting_it_forever() {
+        let mut a = Adiru::new_for_test(1);
+        let mut t = stationary_level_state(30.0);
+        let dt = 1.0 / 30.0;
+
+        // Run normally for a few seconds so the unit is genuinely mechanizing.
+        for _ in 0..90 {
+            assert!(a.update_for_test(dt, &t, 2.0, true));
+        }
+        assert!(a.pitch_deg.abs() < 0.1 && a.roll_deg.abs() < 0.1);
+
+        // One tick of a placement/teleport-style velocity spike, in the
+        // same v_north_ms/v_east_ms channel `TrueStateSource::read` freezes
+        // -- see the report and `plausible`'s doc comment. X-Plane's own
+        // `local_vx`/`local_vz` are a raw finite difference of position, so
+        // a scenery-load/teleport position jump of even a few km in one
+        // frame produces a spike of this order, not a small one.
+        t.v_north_ms = 5.0e8;
+        t.v_east_ms = -3.0e8;
+        let should_run_bad_tick = a.update_for_test(dt, &t, 2.0, true);
+        assert!(
+            !should_run_bad_tick,
+            "a mechanization result this implausible must fault, not be published as valid data"
+        );
+        assert!(a.pitch_deg.is_finite(), "the fault reset must leave a finite state, not NaN");
+        assert!(a.roll_deg.is_finite(), "the fault reset must leave a finite state, not NaN");
+
+        // Truth returns to normal; the unit re-aligns and must recover, not
+        // stay poisoned -- an IR that faulted once and never came back
+        // would be exactly as useless to a pilot as one that silently kept
+        // publishing the garbage value.
+        t.v_north_ms = 0.;
+        t.v_east_ms = 0.;
+        let mut recovered = false;
+        for _ in 0..(30 * 30) {
+            // Re-align (fbw_state 1 -> 2) the same way a real Off->Aligning
+            // ->Aligned cycle would after a BITE fault forces a realign.
+            if a.update_for_test(dt, &t, 2.0, true) {
+                recovered = true;
+            }
+        }
+        assert!(recovered, "the IR must resume publishing valid data after the fault clears");
+        let ground_speed_kt = (a.v_north * a.v_north + a.v_east * a.v_east).sqrt() * MS_TO_KNOT;
+        assert!(
+            a.pitch_deg.is_finite() && a.pitch_deg.abs() < 5.0,
+            "pitch must recover to near-level, not stay diverged, got {:.3} deg",
+            a.pitch_deg
+        );
+        assert!(
+            a.roll_deg.is_finite() && a.roll_deg.abs() < 5.0,
+            "roll must recover to near-level, not stay diverged, got {:.3} deg",
+            a.roll_deg
+        );
+        assert!(
+            ground_speed_kt.is_finite() && ground_speed_kt < 50.0,
+            "ground speed must recover, not stay at a runaway value, got {:.2} kt",
+            ground_speed_kt
+        );
+    }
+
+    /// The non-finite case specifically (the task's explicit bar: "a
+    /// non-finite input does not poison the state permanently") -- a NaN
+    /// specific-force reading (e.g. a divide-by-zero somewhere upstream in
+    /// X-Plane's own force computation, or any other source this module
+    /// cannot anticipate) must not enter the mechanization and stay there
+    /// across every subsequent tick the way an unguarded integrator would.
+    #[test]
+    fn a_non_finite_reading_does_not_poison_the_state_forever() {
+        let mut a = Adiru::new_for_test(1);
+        let mut t = stationary_level_state(30.0);
+        let dt = 1.0 / 30.0;
+        for _ in 0..30 {
+            a.update_for_test(dt, &t, 2.0, true);
+        }
+
+        t.g_axil = f64::NAN;
+        let should_run_bad_tick = a.update_for_test(dt, &t, 2.0, true);
+        // Whether or not this exact tick's inputs happen to trip the
+        // plausibility fault (a NaN specific force need not immediately
+        // move pitch/roll/velocity out of bounds on the very first RK4
+        // step), the state itself must never become non-finite and must
+        // never stay that way.
+        assert!(a.pitch_deg.is_finite(), "pitch must never go non-finite");
+        assert!(a.roll_deg.is_finite(), "roll must never go non-finite");
+        assert!(a.v_north.is_finite(), "v_north must never go non-finite");
+        assert!(a.v_east.is_finite(), "v_east must never go non-finite");
+        let _ = should_run_bad_tick;
+
+        t.g_axil = 0.; // truth returns to normal
+        for _ in 0..(30 * 30) {
+            a.update_for_test(dt, &t, 2.0, true);
+        }
+        assert!(a.pitch_deg.is_finite() && a.pitch_deg.abs() < 5.0);
+        assert!(a.roll_deg.is_finite() && a.roll_deg.abs() < 5.0);
+        let ground_speed_kt = (a.v_north * a.v_north + a.v_east * a.v_east).sqrt() * MS_TO_KNOT;
+        assert!(ground_speed_kt.is_finite() && ground_speed_kt < 50.0);
     }
 }
