@@ -771,7 +771,9 @@ impl Load {
     /// The mean of the decay over `[t, t + dt]` has a closed form, so this
     /// costs one extra `exp` and is exact at any frame length:
     ///
-    ///     mean = 1 + (m - 1) * (tau / dt) * (exp(-t/tau) - exp(-(t+dt)/tau))
+    /// ```text
+    /// mean = 1 + (m - 1) * (tau / dt) * (exp(-t/tau) - exp(-(t+dt)/tau))
+    /// ```
     ///
     /// It conserves the inrush's own charge exactly -- summed over any
     /// partition of the transient it gives the same integral -- and tends

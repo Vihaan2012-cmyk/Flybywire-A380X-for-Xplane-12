@@ -737,6 +737,7 @@ impl Renderer {
             (self.xp.bind_texture)(gpu.texture, 0);
             (gl.pixel_store)(GL_UNPACK_ALIGNMENT, 4);
             if gpu.size != (width, height) {
+                crate::perf::UPLOADED_BYTES.fetch_add(width as u64 * height as u64 * 4, std::sync::atomic::Ordering::Relaxed);
                 (gl.tex_image)(GL_TEXTURE_2D, 0, GL_RGBA8, width as c_int, height as c_int, 0, GL_BGRA, GL_UNSIGNED_BYTE, pixels.as_ptr().cast());
                 self.texture_parameters(GL_LINEAR, 1);
                 gpu.size = (width, height);
@@ -762,14 +763,37 @@ impl Renderer {
             return;
         }
         unsafe {
-            if gpu.texture == 0 {
+            let fresh = gpu.texture == 0;
+            if fresh {
                 gpu.texture = self.new_texture();
             }
             (self.xp.bind_texture)(gpu.texture, 0);
             (self.gl.pixel_store)(GL_UNPACK_ALIGNMENT, 4);
-            (self.gl.tex_image)(GL_TEXTURE_2D, 0, GL_RGBA8, width as c_int, height as c_int, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.as_ptr().cast());
-            self.texture_parameters(GL_LINEAR, 1);
-            gpu.size = (width, height);
+            crate::perf::UPLOADED_BYTES.fetch_add(width as u64 * height as u64 * 4, std::sync::atomic::Ordering::Relaxed);
+            if !fresh && gpu.size == (width, height) {
+                // Same size as last time, which is the normal case: the ND's
+                // terrain and weather pictures are a fixed 768x1024 canvas
+                // and only their contents change. `glTexImage2D` would
+                // reallocate the texture's storage on every update -- twice
+                // a picture with both NDs drawn -- and drivers orphan the old
+                // allocation rather than reuse it, which churns and fragments
+                // video memory for a picture whose shape never changed.
+                (self.gl.tex_sub_image)(
+                    GL_TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    width as c_int,
+                    height as c_int,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    rgba.as_ptr().cast(),
+                );
+            } else {
+                (self.gl.tex_image)(GL_TEXTURE_2D, 0, GL_RGBA8, width as c_int, height as c_int, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.as_ptr().cast());
+                self.texture_parameters(GL_LINEAR, 1);
+                gpu.size = (width, height);
+            }
         }
     }
 

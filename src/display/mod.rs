@@ -107,6 +107,27 @@ struct BridgeScreen {
 /// every frame (58 MB) took X-Plane down to 2-3 fps. Screens take turns.
 const UPLOAD_BUDGET_BYTES: usize = 12 << 20;
 /// A screen is refreshed at most this often (the instruments' own 30 Hz).
+/// `FBW_SCREENS=off` draws no cockpit display at all: no upload, no quad,
+/// no underlay. Purely a measuring tool -- run once with it and once
+/// without, and the difference in frame time is what the twenty screens
+/// actually cost, which no timer inside the plugin can tell you. The
+/// browser views keep running and the systems keep working; only the
+/// drawing stops, so the aircraft is still flyable with blank displays.
+fn screens_disabled() -> bool {
+    use std::sync::OnceLock;
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| {
+        let off = std::env::var("FBW_SCREENS").is_ok_and(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "off" || v == "0" || v == "false" || v == "no"
+        });
+        if off {
+            crate::log("screens: FBW_SCREENS=off, drawing no cockpit displays (measuring what they cost)");
+        }
+        off
+    })
+}
+
 const UPLOAD_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
 /// A screen that has waited this long is refreshed even over the budget, so
 /// a big one (the FCU's 2560x1280) never starves.
@@ -459,6 +480,9 @@ impl Displays {
 
     /// Draw a screen, from its device's X-Plane draw callback.
     fn draw_screen(&mut self, index: usize) {
+        if screens_disabled() {
+            return;
+        }
         let (Some(xplm), Some(api)) = (self.xplm, self.api) else { return };
         // Nothing to draw for when another aircraft is loaded.
         let handle = self.screens[index].handle;
