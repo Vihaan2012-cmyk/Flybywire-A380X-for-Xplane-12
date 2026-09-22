@@ -78,6 +78,11 @@
 //! | *(manual galley-shed pushbutton)* | **not added** -- `deep::electrical`'s own load-management already computes an automatic `galley_shed_commanded` from the power budget; no real *manual* shed switch was found in this port, and duplicating the automatic one under a different name would invite the two to drift |
 //! | `apu_master_sw_on` | `A32NX_OVHD_APU_MASTER_SW_PB_IS_ON` != 0 (named for `deep::apu::live`'s own doc comment asking for exactly this) |
 //! | `apu_start_pb_on` | `A32NX_OVHD_APU_START_PB_IS_ON` != 0 |
+//! | `jettison_armed`, `jettison_valve_selected[0..2]` | `FUEL JETTISON SWITCH` != 0, the one combined arm/nozzle-valve switch `fuel.rs::Jettison` already reads (its own doc: FlyByWire has no real jettison switch anywhere in this port, so this plugin added the single var; "a future cockpit switch (converter) or the Study panel ... can drive it"). Both `Truth` fields read the same switch, since no separate per-side selector exists yet -- a real simplification, not two independently faked values |
+//! | `crossfeed_valve_selected[0..4]` | **unsourced** -- grepped this crate and `D:\fbw-aircraft`'s systems/TS and `flight_model.cfg` sources; `CrossFeedValve1..4` (`Valve.46..49`) exist in the ported network but nothing anywhere -- not FlyByWire's compiled systems, not this port's own `fuel.rs::handle_event` (which only ever forwards `FUELSYSTEM_PUMP_*` events), not any cockpit command -- ever toggles them. `Controls::default()`'s `false` is honest: the crossfeed valves really are always shut in this port today |
+//! | `cargo_door_commanded_open[0..2]` (`[fwd, aft]`) | `A32NX_{FWD,AFT}_DOOR_CARGO_POSITION` / 100, the same two real FlyByWire actuator variables `src/doors.rs::DoorModel::update_model` already reads to clip the 3D cargo-door animation |
+//! | `cargo_door_commanded_open[2]` (bulk) | **unsourced** -- no bulk-cargo-door LVar exists in this port (the A380 model here carries no separate bulk-compartment door) |
+//! | `water_demand_l_s[0..2]` | **unsourced** -- no galley/lavatory water-draw simvar or LVar was found anywhere in this crate or `D:\fbw-aircraft`'s systems sources; `Controls::default()`'s `[0.0, 0.0]` (no one drawing water) is the honest reading, not an invented demand |
 //!
 //! Nothing here derives a value it cannot read. Where a dataref is missing
 //! (an older SDK target, or the offline harness) the reading degrades to
@@ -314,6 +319,22 @@ struct ControlIds {
     /// temperature, for `Truth::cabin_pressure_pa`/`cabin_temp_k`.
     cabin_delta_pressure: VariableIdentifier,
     cabin_temp_c: VariableIdentifier,
+    /// `FUEL JETTISON SWITCH`, the single combined arm/nozzle-valve switch
+    /// `fuel.rs::Jettison` already reads (that struct's own doc: no FBW
+    /// L:var exists for jettison at all, so this plugin added one, kept
+    /// unprefixed MSFS-simvar-style). Read here too through the same shared
+    /// `Vars` registry -- `vars.get` deduplicates by exact name, so this
+    /// resolves to the identical `VariableIdentifier` `fuel.rs` already
+    /// registered, not a second variable that could disagree with it.
+    fuel_jettison_switch: VariableIdentifier,
+    /// `A32NX_{FWD,AFT}_DOOR_CARGO_POSITION`, percent: FlyByWire's own
+    /// commanded cargo-door target, the same two variables `src/doors.rs`'s
+    /// `DoorModel::update_model` already reads (divided by 100 there too)
+    /// to clip the 3D cargo-door animation to FlyByWire's own actuator.
+    /// There is no bulk-cargo-door LVar in this port (the A380 model here
+    /// has no separate bulk compartment door), so `Controls::
+    /// cargo_door_commanded_open[2]` stays unsourced.
+    cargo_door_position: [VariableIdentifier; 2],
 }
 
 impl ControlIds {
@@ -336,6 +357,8 @@ impl ControlIds {
             lgciu_gear_compressed: ["NOSE", "LEFT", "RIGHT"].map(|s| vars.get(format!("LGCIU_1_{s}_GEAR_COMPRESSED"))),
             cabin_delta_pressure: vars.get("PRESS_CPC_1_CABIN_DELTA_PRESSURE".to_owned()),
             cabin_temp_c: vars.get("COND_MAIN_DECK_1_TEMP".to_owned()),
+            fuel_jettison_switch: vars.get("FUEL JETTISON SWITCH".to_owned()),
+            cargo_door_position: ["FWD", "AFT"].map(|s| vars.get(format!("{s}_DOOR_CARGO_POSITION"))),
         }
     }
 }
@@ -715,6 +738,26 @@ impl DeepLayer {
             // `rain_removal_selected` has no real source in this port (see
             // this module's `Controls` sourcing table) and is left at
             // `default.controls`'s value, already copied in above.
+
+            // FUEL-001 (`fuel.rs::Jettison`'s own doc): one combined switch,
+            // not the two-stage arm-guard-plus-per-side-pushbutton panel a
+            // real A380 has. Both are driven from it rather than leaving
+            // `jettison_valve_selected` permanently false, which is the
+            // honest reading of what this port actually has to select
+            // jettison with today.
+            let jettison_switch_on = vars.read(&c.fuel_jettison_switch) != 0.0;
+            controls.jettison_armed = jettison_switch_on;
+            controls.jettison_valve_selected = [jettison_switch_on; 2];
+
+            controls.cargo_door_commanded_open[0] = (vars.read(&c.cargo_door_position[0]) / 100.0).clamp(0.0, 1.0);
+            controls.cargo_door_commanded_open[1] = (vars.read(&c.cargo_door_position[1]) / 100.0).clamp(0.0, 1.0);
+            // `cargo_door_commanded_open[2]` (bulk), `crossfeed_valve_selected`
+            // and `water_demand_l_s` have no publisher anywhere in this port
+            // (grepped this crate and `D:\fbw-aircraft`'s systems/config
+            // sources for a crossfeed valve switch, a bulk cargo door LVar
+            // and a galley/lavatory water-draw simvar; none exist -- see
+            // this module's own sourcing table). Left at `default.controls`,
+            // already copied in above, rather than invented.
         }
         // `sim/cockpit2/controls/speedbrake_ratio`, through the exact
         // function `Prims::read` uses for `SimReadings::spoilers_armed`, so
@@ -1042,6 +1085,38 @@ mod tests {
             assert!((c - (420.0 + (i + 1) as f64 - 273.15)).abs() < 1e-9, "engine {} read {c} C", i + 1);
         }
         assert_ne!(t.engine_bleed_temp_k[1], 421.0 + 1.0, "engine 2 is bled from HP6 this tick");
+    }
+
+    /// `jettison_armed`/`jettison_valve_selected` and
+    /// `cargo_door_commanded_open` are real reads now (this pass's own
+    /// fix), not permanently `Controls::default()`. `crossfeed_valve_selected`
+    /// and `water_demand_l_s` genuinely have no publisher in this port (this
+    /// module's own sourcing table) and must stay at their documented
+    /// default regardless of what else is written.
+    #[test]
+    fn jettison_and_cargo_door_controls_read_their_real_variables_and_unsourced_ones_stay_at_default() {
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+
+        let cold = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert!(!cold.controls.jettison_armed, "nothing written yet: jettison must read unarmed");
+        assert_eq!(cold.controls.jettison_valve_selected, [false; 2]);
+        assert_eq!(cold.controls.cargo_door_commanded_open, [0.0; 3]);
+        assert_eq!(cold.controls.crossfeed_valve_selected, [false; 4], "no publisher exists; must stay at Controls::default()");
+        assert_eq!(cold.controls.water_demand_l_s, [0.0; 2], "no publisher exists; must stay at Controls::default()");
+
+        set(&mut vars, "FUEL JETTISON SWITCH", 1.0);
+        set(&mut vars, "FWD_DOOR_CARGO_POSITION", 55.0);
+        set(&mut vars, "AFT_DOOR_CARGO_POSITION", 20.0);
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert!(t.controls.jettison_armed, "the one real jettison switch must arm jettison once selected");
+        assert_eq!(t.controls.jettison_valve_selected, [true, true], "both nozzle valves follow the same single switch: no separate per-side selector exists in this port");
+        assert!((t.controls.cargo_door_commanded_open[0] - 0.55).abs() < 1e-9, "fwd cargo door percent must convert to a 0..1 fraction: {}", t.controls.cargo_door_commanded_open[0]);
+        assert!((t.controls.cargo_door_commanded_open[1] - 0.20).abs() < 1e-9, "aft cargo door percent must convert to a 0..1 fraction: {}", t.controls.cargo_door_commanded_open[1]);
+        assert_eq!(t.controls.cargo_door_commanded_open[2], 0.0, "no bulk cargo door LVar exists in this port");
+        // Still unsourced even with other controls now live.
+        assert_eq!(t.controls.crossfeed_valve_selected, [false; 4]);
+        assert_eq!(t.controls.water_demand_l_s, [0.0; 2]);
     }
 
     /// The oil tank level reaches the areas, and a tank nobody has written

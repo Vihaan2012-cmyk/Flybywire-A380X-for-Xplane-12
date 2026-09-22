@@ -67,17 +67,26 @@ const ATA: u16 = 28;
 const N_TANKS: usize = 11;
 const N_ENGINES: usize = 4;
 
-/// Jet A-1 density at 15 C, kg/m^3. ASTM D1655 / DEF STAN 91-091 allow
-/// 775..840; 804 is the standard reference figure used for the
-/// volume-to-mass conversion in flight planning, and is what the FQMS's
-/// densitometer is compared against when it fails
-/// (`gauging::indicated_mass_kg`'s `default_density_kg_m3`).
-const REFERENCE_DENSITY_15C_KG_M3: f64 = 804.0;
-/// Volumetric thermal expansion coefficient of kerosene, 1/K -- the same
-/// ~9e-4 /K figure `gauging.rs`'s own doc cites from
-/// `physics::fluids::jet_a_density_kg_m3`, restated here rather than called
-/// so this directory stays self-contained (`mod.rs`).
-const FUEL_THERMAL_EXPANSION_PER_K: f64 = 9.0e-4;
+/// Jet A-1 density at 15 C, kg/m^3. This directory used to restate its own
+/// figure here (804.0, "the standard reference figure used for the
+/// volume-to-mass conversion in flight planning") independently of
+/// `src/fuel.rs:164`'s `JET_A_LBS_PER_GAL = 6.699` (itself MSFS/FlyByWire's
+/// own Jet A weight constant) and `src/fuel_network.rs:124`'s
+/// `JET_A_LBS_PER_GAL = 6.7` (that module's own SDK-default fallback for an
+/// unrecognised/generic `fuel_type`, overridden with the real 6.699 figure
+/// at construction, `fuel.rs:570`) -- three numbers about 0.15% apart, ASTM
+/// D1655/DEF STAN 91-091 allow 775..840 kg/m^3 so none of the three was
+/// wrong, but none was cited precisely enough to prefer either. Rather than
+/// pick a fourth, this now calls the one already-derived, precisely cited
+/// constant the rest of the crate uses for the same real aircraft's fuel:
+/// `physics::fluids::JET_A_DENSITY_KG_M3_AT_15C` = 802.5 kg/m^3, converted
+/// directly from `fuel.rs`'s own MSFS-sourced 6.699 lb/US gal (that
+/// module's own doc comment shows the conversion). `fuel_network.rs`'s 6.7
+/// is left alone: it is the SDK's own generic default for an unspecified
+/// MSFS `fuel_type`, not a second claim about this aircraft's real fuel,
+/// and it is already overridden by the same 6.699 figure wherever this
+/// crate actually flies the A380X.
+use crate::physics::fluids::JET_A_DENSITY_KG_M3_AT_15C as REFERENCE_DENSITY_15C_KG_M3;
 /// Specific heat of kerosene, J/(kg*K) (standard value for Jet A/A-1 near
 /// ambient; the same 2010 figure `engine_accessories::fuel::common` cites
 /// independently for the same fluid).
@@ -140,16 +149,65 @@ const LEAK_CONFIRM_WINDOWS: u32 = 3;
 /// pick.
 const FULL_LOAD_FRACTION: f64 = 0.95;
 
-/// Reference transfer rate the three shortfall detectors compare against,
-/// kg/s. Only the *ratio* of achieved to required reaches
-/// `cg_transfer::TransferFaultDetector::update` (it tests
-/// `achieved < required * (1 - tolerance)`), and
-/// `cg_transfer::achieved_transfer_rate_kg_s` is linear in its nominal
-/// rate, so this value cancels exactly out of every detection decision: it
-/// is a scale, not a claim about how fast the real A380 transfers fuel. No
-/// mass is moved between tanks on it -- see this module's own PROGRESS
-/// note.
-const TRANSFER_REFERENCE_RATE_KG_S: f64 = 1.0;
+// ---------------------------------------------------------------------------
+// Real transfer rates: the nominal (fully healthy) mass flow each transfer
+// path can deliver, kg/s -- what both the shortfall detectors compare
+// against *and* what `tick_transfers` actually moves between tanks now
+// (previously a placeholder `1.0` that only ever cancelled out of the
+// detectors' own ratio test; see git history). `achieved_transfer_rate_kg_s`
+// derates this by the path's own valve/pump/gallery health, so a failed
+// pump or a stuck valve genuinely delivers less real mass, not just a lower
+// number in a fault-detection ratio.
+//
+// The figures are FlyByWire's own `flight_model.cfg` `[FUEL_SYSTEM]`
+// numbers, read the same way `src/fuel_network.rs` already parses them, and
+// combined with that module's own documented (if undocumented-by-Asobo)
+// flow formula -- reused by reference, not by owning a second live
+// simulation of the network (see `tick_transfers`'s own doc for why not
+// instantiating a second `FuelNetwork` here is the honest call).
+//
+// SDK-documented baseline (`fuel_network.rs`'s own module doc, "Flow"): a
+// line carries at most `FuelFlowAt1PSI` (lb/s per psi) times its pressure.
+// `fuel_network.rs`'s own doc ("Undocumented MSFS behaviour" #1) and its
+// `intersection_pump_degradation_and_stuck_crossfeed_valve_starve_engine`
+// test both show the *actually used* mass flow is that baseline multiplied
+// by `DEFAULT_LINE_FLOW_GAIN` (60): FBW's own PR #9045 tuned the A380X's
+// transfer lines to beat cruise fuel burn, well past the raw SDK unit.
+// `nominal_transfer_rate_kg_s` below is exactly that: `FuelFlowAt1PSI *
+// gain * pressure_psi`, in lb/s, converted to kg/s -- no separate gal/h or
+// density round-trip needed, since `FuelFlowAt1PSI` is already a mass-flow
+// constant (lb/s per psi).
+const LINE_FLOW_GAIN: f64 = crate::fuel_network::DEFAULT_LINE_FLOW_GAIN;
+const LB_TO_KG: f64 = 0.45359237;
+
+/// The single delivery line into a feed tank's own gallery inlet --
+/// `flight_model.cfg` `Line.75`/`Line.80`
+/// (`FeedTank1FwdXferValve1ToFeedTank1`/`FeedTank4FwdXferValve1ToFeedTank4`),
+/// `FuelFlowAt1PSI:0.00175`. Feed2/Feed3 have two such lines each (double
+/// the capacity); this single-line figure is used uniformly here as the
+/// bottleneck every transfer path shares on its way into *a* feed tank --
+/// conservative for Feed2/Feed3, exact for Feed1/Feed4.
+const FEED_LINE_FUEL_FLOW_AT_1PSI: f64 = 0.00175;
+
+/// Trim pump rated pressure, psi -- `flight_model.cfg` `Pump.19`/`Pump.20`
+/// (`TrimTankPumpLeft`/`TrimTankPumpRight`), `Pressure:53.28`.
+const TRIM_PUMP_PRESSURE_PSI: f64 = 53.28;
+/// Inner/mid wing-tank transfer pump rated pressure, psi -- `Pump.10`,
+/// `Pump.11`, `Pump.12`, `Pump.13`, `Pump.15`, `Pump.16`, `Pump.17`,
+/// `Pump.18` (`Left`/`RightMidTankPump{Fwd,Aft}`,
+/// `Left`/`RightInnerTankPump{Fwd,Aft}`), all `Pressure:36.8`. Used as the
+/// CG-transfer and cross-feed paths' own representative driving pressure:
+/// the outer tanks' own pumps are weaker (`Pump.9`/`Pump.14`, `14.72` psi),
+/// but outer-tank transfer is the last, shortest stage of the sequence
+/// `outer_tank_retention_active` gates, and cross-feed draws on the same
+/// gallery network the inner/mid pumps feed.
+const WING_TRANSFER_PUMP_PRESSURE_PSI: f64 = 36.8;
+
+/// `FuelFlowAt1PSI * gain * pressure_psi`, in lb/s, to kg/s: see this
+/// section's own doc.
+fn nominal_transfer_rate_kg_s(pressure_psi: f64) -> f64 {
+    (FEED_LINE_FUEL_FLOW_AT_1PSI * LINE_FLOW_GAIN * pressure_psi.max(0.0) * LB_TO_KG).max(0.0)
+}
 /// Shortfall tolerance and confirm time for the three detectors, matching
 /// the `confirm(..)` each corresponding `EcamAlert` in `registry.rs`
 /// already carries (1 s trim, 5 s auto-CG, 2 s cross-feed), so the detector
@@ -338,10 +396,13 @@ impl TankState {
         }
     }
 
-    /// Density of this tank's fuel at its current bulk temperature, from
-    /// the reference density and kerosene's own volumetric expansion.
+    /// Density of this tank's fuel at its current bulk temperature: the one
+    /// canonical `physics::fluids::jet_a_density_kg_m3` the rest of the
+    /// crate uses for this same real aircraft's fuel (see
+    /// `REFERENCE_DENSITY_15C_KG_M3`'s own doc), not a second, locally
+    /// restated copy of its expansion formula.
     fn density_kg_m3(&self) -> f64 {
-        (REFERENCE_DENSITY_15C_KG_M3 / (1.0 + FUEL_THERMAL_EXPANSION_PER_K * (self.temp_c - 15.0))).max(1.0)
+        crate::physics::fluids::jet_a_density_kg_m3(self.temp_c).max(1.0)
     }
 
     fn fill_fraction(&self) -> f64 {
@@ -516,11 +577,16 @@ impl FuelLive {
 
     /// Put `kg` of fuel at `temp_c` into one tank: refuelling, or the
     /// plugin synchronising this system with the aircraft's real fuel load
-    /// once `Truth` carries it.
+    /// once `Truth` carries it. Floored at zero and capped at the tank's own
+    /// structural capacity at `temp_c`'s density -- a load request above
+    /// what the tank can physically hold is clamped, not passed straight
+    /// through (a tank cannot hold more fuel than its own box volume times
+    /// the fuel's own density, whatever the caller asks for).
     pub fn load_tank(&mut self, tank: Tank, kg: f64, temp_c: f64) {
         let i = ALL_TANKS.iter().position(|&t| t == tank).expect("every tank is in ALL_TANKS");
-        self.tanks[i].mass_kg = kg.max(0.0);
         self.tanks[i].temp_c = temp_c;
+        let capacity_kg = self.tanks[i].shape.capacity_m3() * self.tanks[i].density_kg_m3();
+        self.tanks[i].mass_kg = kg.max(0.0).min(capacity_kg.max(0.0));
     }
 
     pub fn tank_mass_kg(&self, tank: Tank) -> f64 {
@@ -828,9 +894,71 @@ impl FuelLive {
         total
     }
 
+    /// Moves up to `want_kg` of real mass from tank `from` to tank `to`,
+    /// capped by what `from` actually has and by the room left in `to`'s own
+    /// structural capacity at its current bulk temperature's density (the
+    /// same capacity `fill_fraction`/`load_tank` use) -- never drained
+    /// below zero, never filled past capacity, and total system mass is
+    /// conserved exactly: whatever leaves `from` is exactly what enters
+    /// `to`, nothing created or destroyed in between. Returns the kg
+    /// actually moved.
+    fn move_fuel(&mut self, from: usize, to: usize, want_kg: f64) -> f64 {
+        let want = want_kg.max(0.0);
+        if want <= 0.0 || from == to {
+            return 0.0;
+        }
+        let available = self.tanks[from].mass_kg.max(0.0);
+        let to_capacity_kg = self.tanks[to].shape.capacity_m3() * self.tanks[to].density_kg_m3();
+        let room = (to_capacity_kg - self.tanks[to].mass_kg).max(0.0);
+        let moved = want.min(available).min(room);
+        self.tanks[from].mass_kg -= moved;
+        self.tanks[to].mass_kg += moved;
+        moved
+    }
+
+    /// The source tank a wing side's own CG-transfer sequence draws from
+    /// this tick: inner first, then mid, then outer once retention has
+    /// released it -- `None` once the whole side is dry. Mirrors
+    /// `LegacyFuel.ts`'s own real ordering (inner/mid transfer first, outer
+    /// last) that `cg_transfer.rs`'s module doc already credits to
+    /// `fuel_transfer.rs`; this is the same priority applied to *this*
+    /// ledger's own tanks.
+    fn cg_source_index(&self, inner: Tank, mid: Tank, outer: Tank, outer_retained: bool) -> Option<usize> {
+        let idx = |t: Tank| ALL_TANKS.iter().position(|&x| x == t).expect("every tank is in ALL_TANKS");
+        let (i, m, o) = (idx(inner), idx(mid), idx(outer));
+        if self.tanks[i].mass_kg > 0.0 {
+            Some(i)
+        } else if self.tanks[m].mass_kg > 0.0 {
+            Some(m)
+        } else if !outer_retained && self.tanks[o].mass_kg > 0.0 {
+            Some(o)
+        } else {
+            None
+        }
+    }
+
     /// The transfer paths: each one's `TransferFaults` from the failures
-    /// registered against its own valves and pumps, then the shortfall
-    /// detector `registry.rs` wires to its ECAM alert.
+    /// registered against its own valves and pumps, the shortfall detector
+    /// `registry.rs` wires to its ECAM alert, and now the real mass each
+    /// path actually moves at `achieved_transfer_rate_kg_s`'s own delivered
+    /// rate (see the `nominal_transfer_rate_kg_s` section for where that
+    /// rate comes from).
+    ///
+    /// This does not route through a second, live `fuel_network::
+    /// FuelNetwork`: that module's own tanks, pumps and valves already
+    /// drive the real aircraft's weight through `crate::fuel::FuelSystem`,
+    /// and this ledger's eleven tanks are necessarily a separate, seeded
+    /// shadow of them (`FuelLive::seed_default_fuel_load`'s own doc: `Truth`
+    /// carries no per-tank quantity for this area to read back from the
+    /// live network). Owning a second `FuelNetwork` instance here, with its
+    /// own topology and its own cockpit-driven valve/pump state, would be
+    /// exactly the second fuel model this pass was told not to add -- two
+    /// ledgers that could disagree about where the mass is. Instead, this
+    /// reuses the *numbers* `fuel_network.rs` already parses from FlyByWire's
+    /// own cfg (pump pressure, line `FuelFlowAt1PSI`) and the same flow
+    /// formula that module's own tests already exercise, so a failed pump or
+    /// valve here and in the live network are rated against the same real
+    /// figures, without a second stateful topology to keep in sync.
     fn tick_transfers(&mut self, truth: &Truth, faults: &Faults, dt: f64, gallery_leak_fraction: f64) {
         let worst = |ids: &[u64]| ids.iter().map(|&id| faults.get(id)).fold(0.0f64, f64::max);
 
@@ -845,14 +973,29 @@ impl FuelLive {
         // Trim transfer: the two trim pumps in parallel (both must degrade
         // for the path to lose flow), in series with the inlet valves and
         // the line isolation valves.
+        let trim_nominal = nominal_transfer_rate_kg_s(TRIM_PUMP_PRESSURE_PSI);
         let trim_pump_loss = self.ids.trim_pump.iter().map(|&id| faults.get(id)).fold(f64::INFINITY, f64::min);
         let trim = TransferFaults {
             valve_stuck_fraction: worst(&self.ids.trim_inlet).min(1.0).max(worst(&self.ids.trim_iso)),
             pump_degradation_fraction: if trim_pump_loss.is_finite() { trim_pump_loss } else { 0.0 },
             gallery_leak_fraction,
         };
-        let achieved = cg_transfer::achieved_transfer_rate_kg_s(TRANSFER_REFERENCE_RATE_KG_S, &trim);
-        self.trim_fault = self.trim_detector.update(TRANSFER_REFERENCE_RATE_KG_S, achieved, TRANSFER_TOLERANCE, 1.0, dt);
+        let achieved = cg_transfer::achieved_transfer_rate_kg_s(trim_nominal, &trim);
+        self.trim_fault = self.trim_detector.update(trim_nominal, achieved, TRANSFER_TOLERANCE, 1.0, dt);
+
+        // Real mass: the trim tank feeds forward into the four feed tanks
+        // (`Pump.19`/`20`'s own `TankFuelRequired:Trim`, draining through
+        // the inlet/iso valves and both galleries to reach every feed tank),
+        // split evenly across whichever of the four still have room. A dry
+        // trim tank or a fully failed path both floor `moved` at zero
+        // through `move_fuel`'s own availability/capacity caps.
+        if let Some(trim_idx) = ALL_TANKS.iter().position(|&t| t == Tank::Trim) {
+            let feed_indices = [Tank::Feed1, Tank::Feed2, Tank::Feed3, Tank::Feed4].map(|t| ALL_TANKS.iter().position(|&x| x == t).expect("feed tanks are in ALL_TANKS"));
+            let share = achieved * dt / feed_indices.len() as f64;
+            for feed_idx in feed_indices {
+                self.move_fuel(trim_idx, feed_idx, share);
+            }
+        }
 
         // Automatic CG control through the outer/inner/mid transfer valves.
         // The sequence is only *required* while the outer tanks are still
@@ -860,27 +1003,79 @@ impl FuelLive {
         // which, with any fuel on board at all, is the whole flight.
         let inner_fill = self.fill_of(Tank::LeftInner).max(self.fill_of(Tank::RightInner));
         let mid_fill = self.fill_of(Tank::LeftMid).max(self.fill_of(Tank::RightMid));
-        let cg_required = self.true_fob_kg() > 0.0 || cg_transfer::outer_tank_retention_active(inner_fill, mid_fill, OUTER_RETENTION_UNTIL_FRACTION);
+        let outer_retained = cg_transfer::outer_tank_retention_active(inner_fill, mid_fill, OUTER_RETENTION_UNTIL_FRACTION);
+        let cg_required = self.true_fob_kg() > 0.0 || outer_retained;
+        let cg_nominal = nominal_transfer_rate_kg_s(WING_TRANSFER_PUMP_PRESSURE_PSI);
         let cg = TransferFaults {
             valve_stuck_fraction: worst(&self.ids.outer_xfer).max(worst(&self.ids.inner_xfer)).max(worst(&self.ids.mid_xfer)),
             pump_degradation_fraction: 0.0,
             gallery_leak_fraction,
         };
-        let cg_required_rate = if cg_required { TRANSFER_REFERENCE_RATE_KG_S } else { 0.0 };
+        let cg_required_rate = if cg_required { cg_nominal } else { 0.0 };
         let cg_achieved = cg_transfer::achieved_transfer_rate_kg_s(cg_required_rate, &cg);
         self.cg_fault = self.cg_detector.update(cg_required_rate, cg_achieved, TRANSFER_TOLERANCE, 5.0, dt);
 
-        // Wing cross-feed: required either because the crew has selected at
-        // least one of the four cross-feed valves open
+        // Real mass: each wing side independently, inner/mid/outer (by
+        // `cg_source_index`'s own priority) into that side's own two feed
+        // tanks, split evenly between them. `cg_achieved` is this path's own
+        // per-side delivered rate (`WING_TRANSFER_PUMP_PRESSURE_PSI` is one
+        // side's own pump), so both sides run it independently rather than
+        // splitting one combined budget between them.
+        let sides = [(Tank::LeftInner, Tank::LeftMid, Tank::LeftOuter, [Tank::Feed1, Tank::Feed2]), (Tank::RightInner, Tank::RightMid, Tank::RightOuter, [Tank::Feed3, Tank::Feed4])];
+        for (inner, mid, outer, feeds) in sides {
+            if let Some(src) = self.cg_source_index(inner, mid, outer, outer_retained) {
+                let share = cg_achieved * dt / feeds.len() as f64;
+                for feed in feeds {
+                    let feed_idx = ALL_TANKS.iter().position(|&x| x == feed).expect("feed tanks are in ALL_TANKS");
+                    self.move_fuel(src, feed_idx, share);
+                }
+            }
+        }
+
+        // Wing cross-feed: the fault detector treats a transfer as
+        // *required* either because the crew has selected at least one of
+        // the four cross-feed valves open
         // (`Truth::controls::crossfeed_valve_selected`) or because the
-        // wings are genuinely out of balance.
+        // wings are genuinely out of balance -- the same shape as before.
+        // Real mass only ever moves when the valve is actually selected
+        // open, though: an imbalance alone raises the fault (the crew has
+        // not corrected it) but cannot open a valve nobody has selected, so
+        // it must not move fuel on its own -- a closed valve passes zero
+        // flow regardless of how unbalanced the wings are.
         let (left, right) = self.wing_masses_kg();
         self.crossfeed_open = truth.controls.crossfeed_valve_selected.iter().any(|&s| s);
         let xfeed_required = self.crossfeed_open || cg_transfer::wing_balance_transfer_needed(left, right, WING_IMBALANCE_LIMIT_KG);
+        let xfeed_nominal = nominal_transfer_rate_kg_s(WING_TRANSFER_PUMP_PRESSURE_PSI);
         let xfeed = TransferFaults { valve_stuck_fraction: worst(&self.ids.crossfeed), pump_degradation_fraction: 0.0, gallery_leak_fraction };
-        let xfeed_required_rate = if xfeed_required { TRANSFER_REFERENCE_RATE_KG_S } else { 0.0 };
+        let xfeed_required_rate = if xfeed_required { xfeed_nominal } else { 0.0 };
         let xfeed_achieved = cg_transfer::achieved_transfer_rate_kg_s(xfeed_required_rate, &xfeed);
         self.crossfeed_fault = self.crossfeed_detector.update(xfeed_required_rate, xfeed_achieved, TRANSFER_TOLERANCE, 2.0, dt);
+
+        // Real mass: only while the valve is actually selected open, from
+        // whichever side is heavy into whichever side is light, using each
+        // side's own most-full/least-full feed tank as the physical
+        // manifold (`CrossFeedValve1..4` all terminate on the feed-tank
+        // galleries, `flight_model.cfg` `Line.132..137`) -- recomputed after
+        // the trim/CG moves above, so cross-feed reacts to this tick's own
+        // post-transfer imbalance, not a stale one from the top of the
+        // function.
+        if self.crossfeed_open {
+            // `xfeed_required_rate` is `xfeed_nominal` whenever
+            // `crossfeed_open` is true (it is one of `xfeed_required`'s own
+            // two conditions), so `xfeed_achieved` above already is this
+            // path's real delivered rate with the valve open -- reused
+            // rather than recomputed.
+            let xfeed_move_rate = xfeed_achieved;
+            let (left_now, right_now) = self.wing_masses_kg();
+            if let Some(heavy) = cg_transfer::heavy_side(left_now, right_now, WING_IMBALANCE_LIMIT_KG) {
+                let (heavy_feeds, light_feeds): (&[Tank], &[Tank]) =
+                    if heavy == cg_transfer::HeavySide::Left { (&[Tank::Feed1, Tank::Feed2], &[Tank::Feed3, Tank::Feed4]) } else { (&[Tank::Feed3, Tank::Feed4], &[Tank::Feed1, Tank::Feed2]) };
+                let idx_of = |t: Tank| ALL_TANKS.iter().position(|&x| x == t).expect("feed tanks are in ALL_TANKS");
+                let source = heavy_feeds.iter().map(|&t| idx_of(t)).max_by(|&a, &b| self.tanks[a].mass_kg.total_cmp(&self.tanks[b].mass_kg)).expect("heavy_feeds is non-empty");
+                let dest = light_feeds.iter().map(|&t| idx_of(t)).min_by(|&a, &b| self.tanks[a].mass_kg.total_cmp(&self.tanks[b].mass_kg)).expect("light_feeds is non-empty");
+                self.move_fuel(source, dest, xfeed_move_rate * dt);
+            }
+        }
     }
 
     fn fill_of(&self, tank: Tank) -> f64 {
@@ -1259,10 +1454,26 @@ mod tests {
         assert_eq!(out.get("FUEL_LEAK_DETECTED"), Some(&0.0), "a commanded jettison is accounted for, not a leak");
     }
 
+    /// Every tank that now feeds a feed tank by real transfer (trim, and
+    /// each wing's own inner/mid/outer sequence) rather than by burn --
+    /// drained to zero so a test that wants to isolate burn's own effect on
+    /// a feed tank is not also seeing this pass's other fix, real transfer
+    /// mass movement, replenishing it in the background.
+    fn drain_transfer_sources(live: &mut FuelLive) {
+        for tank in [Tank::Trim, Tank::LeftOuter, Tank::LeftMid, Tank::LeftInner, Tank::RightInner, Tank::RightMid, Tank::RightOuter] {
+            live.load_tank(tank, 0.0, 15.0);
+        }
+    }
+
     /// The whole point of this pass: a feed tank drains at the engine's
     /// own real fuel flow (`Truth::engine_fuel_flow_kg_s`), not at a
     /// derived, fan-speed-based guess, and the aircraft starts with fuel
-    /// on board in the first place instead of dry tanks.
+    /// on board in the first place instead of dry tanks. Isolated from this
+    /// same pass's other fix (trim/CG transfer now moves real mass into the
+    /// feed tanks) by draining every non-feed tank first -- an empty source
+    /// genuinely cannot replenish anything (`move_fuel`'s own availability
+    /// cap), so what is left is burn alone, which is what this test means
+    /// to measure.
     #[test]
     fn a_feed_tank_drains_at_the_engines_real_burn_from_a_seeded_load() {
         let mut live = FuelLive::new();
@@ -1275,6 +1486,7 @@ mod tests {
         // (`FULL_LOAD_FRACTION` of each tank's own capacity) no longer does.
         let feed2_before = live.tank_mass_kg(Tank::Feed2);
         assert!(before > 0.0, "a live aircraft must not start with dry tanks: {before} kg");
+        drain_transfer_sources(&mut live);
 
         let mut truth = Truth::default();
         truth.dt_s = 1.0;
@@ -1290,6 +1502,7 @@ mod tests {
         // A fan spinning with no engine fuel flow reported must not burn
         // anything -- this is not the fan-speed-derived guess it replaced.
         let mut idle = FuelLive::new();
+        drain_transfer_sources(&mut idle);
         let idle_before = idle.tank_mass_kg(Tank::Feed2);
         let mut idle_truth = Truth::default();
         idle_truth.dt_s = 1.0;
@@ -1474,5 +1687,190 @@ mod tests {
             assert_eq!(id / 1_000 % 1_000, ATA as u64);
         }
         assert_eq!(a.baffle[0], failure_id(Area::Fuel, ATA, 1), "the first tank's baffle failure is the area's first id");
+    }
+
+    // -----------------------------------------------------------------
+    // Real transfer mass movement (this pass's own fix).
+    // -----------------------------------------------------------------
+
+    /// Trim/CG transfer moving real mass into a deliberately drained feed
+    /// tank, and the aircraft's total fuel unchanged by it: moving fuel
+    /// between tanks must conserve mass exactly, not just approximately.
+    /// Reverting `tick_transfers`' mass movement (back to fault detection
+    /// only) makes `moved_into_feed1` exactly `0.0`, which fails this
+    /// test's own first assertion.
+    #[test]
+    fn a_transfer_tick_moves_real_mass_and_conserves_total_fuel() {
+        let mut live = FuelLive::new(); // every tank seeded near-full
+        for feed in [Tank::Feed1, Tank::Feed2, Tank::Feed3, Tank::Feed4] {
+            live.load_tank(feed, 100.0, 10.0);
+        }
+        let before = live.true_fob_kg();
+        let mut truth = Truth::default();
+        truth.dt_s = 1.0;
+        for _ in 0..30 {
+            live.tick(&truth, &Faults::default());
+        }
+        let after = live.true_fob_kg();
+        let moved_into_feed1 = live.tank_mass_kg(Tank::Feed1) - 100.0;
+        assert!(moved_into_feed1 > 1.0, "trim/CG transfer must move real mass into a drained feed tank, not zero: {moved_into_feed1} kg");
+        assert!((before - after).abs() < 1e-6, "moving fuel between tanks must conserve total system mass exactly: {before} -> {after}");
+    }
+
+    /// A degraded trim pump moves measurably less mass than a healthy one,
+    /// and a fully failed pair moves none -- the yardstick the task set for
+    /// this whole pass. Both trim pumps are failed together
+    /// (`TransferFaults::pump_degradation_fraction` takes the *healthier*
+    /// of the two, `tick_transfers`' own `trim_pump_loss`, matching
+    /// `registry.rs`'s documented "both together stop trim transfer"
+    /// redundancy), so a single failed pump alone would be masked by its
+    /// twin -- this exercises the path actually losing flow, not the
+    /// redundancy. Reverting the mass-movement fix collapses `healthy`,
+    /// `degraded` and `failed` to the same `0.0`, which fails every
+    /// assertion here except the final one.
+    #[test]
+    fn a_degraded_trim_pump_moves_less_mass_than_a_healthy_one_and_a_failed_pair_moves_none() {
+        let feed_total_kg = |pump_magnitude: f64| -> f64 {
+            let mut live = FuelLive::new();
+            live.load_tank(Tank::Trim, 20_000.0, 10.0);
+            for feed in [Tank::Feed1, Tank::Feed2, Tank::Feed3, Tank::Feed4] {
+                live.load_tank(feed, 0.0, 10.0);
+            }
+            // Drain every CG-transfer source so only the trim path can feed
+            // the feed tanks this tick -- an unrelated fix (CG transfer)
+            // must not be what this test is actually measuring.
+            for tank in [Tank::LeftOuter, Tank::LeftMid, Tank::LeftInner, Tank::RightInner, Tank::RightMid, Tank::RightOuter] {
+                live.load_tank(tank, 0.0, 10.0);
+            }
+            let (id0, id1) = (live.ids.trim_pump[0], live.ids.trim_pump[1]);
+            let faults = Faults::from_pairs([(id0, pump_magnitude), (id1, pump_magnitude)]);
+            let mut truth = Truth::default();
+            truth.dt_s = 1.0;
+            for _ in 0..20 {
+                live.tick(&truth, &faults);
+            }
+            [Tank::Feed1, Tank::Feed2, Tank::Feed3, Tank::Feed4].iter().map(|&t| live.tank_mass_kg(t)).sum()
+        };
+
+        let healthy = feed_total_kg(0.0);
+        let degraded = feed_total_kg(0.6);
+        let failed = feed_total_kg(1.0);
+
+        assert!(healthy > 1.0, "a healthy trim path must move real, measurable mass: {healthy} kg");
+        assert!(degraded < healthy - 1.0, "a degraded trim pump must move measurably less than a healthy one: {degraded} vs {healthy}");
+        assert!(degraded > 1.0, "a partially degraded pump pair still moves some fuel: {degraded} kg");
+        assert_eq!(failed, 0.0, "both trim pumps fully failed must move exactly zero mass");
+    }
+
+    /// Cross-feed selected on the overhead rebalances the wings for real;
+    /// selected off, an identical imbalance is left untouched -- the fault
+    /// flag may still trip either way (an uncorrected imbalance is still a
+    /// real fault), but a shut valve passes no flow. Reverting the
+    /// movement gate back to firing on `xfeed_required` (imbalance alone)
+    /// instead of `crossfeed_open` would move fuel in the "shut" case too,
+    /// failing the second assertion; reverting mass movement entirely
+    /// fails the first.
+    #[test]
+    fn crossfeed_selected_rebalances_the_wings_and_shut_does_not() {
+        let light_side_total_kg = |crossfeed_selected: bool| -> f64 {
+            let mut live = FuelLive::new();
+            for tank in [Tank::Trim, Tank::LeftOuter, Tank::LeftMid, Tank::LeftInner, Tank::RightInner, Tank::RightMid, Tank::RightOuter] {
+                live.load_tank(tank, 0.0, 10.0);
+            }
+            // Left wing heavy, right wing light, well past
+            // `WING_IMBALANCE_LIMIT_KG`, with plenty of capacity headroom
+            // on the light side to receive real mass.
+            live.load_tank(Tank::Feed1, 30_000.0, 10.0);
+            live.load_tank(Tank::Feed2, 30_000.0, 10.0);
+            live.load_tank(Tank::Feed3, 1_000.0, 10.0);
+            live.load_tank(Tank::Feed4, 1_000.0, 10.0);
+            let mut truth = if crossfeed_selected { crossfeed_selected_truth() } else { Truth::default() };
+            truth.dt_s = 1.0;
+            for _ in 0..60 {
+                live.tick(&truth, &Faults::default());
+            }
+            live.tank_mass_kg(Tank::Feed3) + live.tank_mass_kg(Tank::Feed4)
+        };
+
+        let open = light_side_total_kg(true);
+        let shut = light_side_total_kg(false);
+
+        assert!(open > 2_000.0 + 10.0, "cross-feed selected must move real mass into the light side: {open} kg (started at 2000)");
+        assert_eq!(shut, 2_000.0, "cross-feed shut must not move any fuel into the light side, however unbalanced the wings are");
+    }
+
+    /// Jettison armed and both nozzle valves selected reduces total fuel at
+    /// the real rate `FUEL_JETTISON_FLOW_KG_S` publishes; with nothing
+    /// commanded (no burn, no leak, no jettison), total fuel must not move
+    /// at all -- transfers alone only ever redistribute it. Reverting
+    /// either `tick_jettison`'s own mass subtraction or the `Truth::
+    /// controls` wiring this pass added would leave `after_armed` equal to
+    /// `before_armed`.
+    #[test]
+    fn jettison_armed_and_selected_reduces_total_fuel_at_a_real_rate_and_not_otherwise() {
+        let mut armed = FuelLive::new();
+        full_tanks(&mut armed, 10.0);
+        let before_armed = armed.true_fob_kg();
+        let out = run(&mut armed, &jettison_selected_truth(), &Faults::default(), 10.0);
+        let after_armed = armed.true_fob_kg();
+        let flow_kg_s = out["FUEL_JETTISON_FLOW_KG_S:1"] + out["FUEL_JETTISON_FLOW_KG_S:2"];
+        assert!(flow_kg_s > 0.0, "a commanded jettison must show a real, nonzero published flow");
+        assert!(before_armed - after_armed > 1.0, "jettison armed and selected must reduce total fuel at a real rate: {before_armed} -> {after_armed}");
+
+        let mut idle = FuelLive::new();
+        full_tanks(&mut idle, 10.0);
+        let before_idle = idle.true_fob_kg();
+        run(&mut idle, &Truth::default(), &Faults::default(), 10.0);
+        let after_idle = idle.true_fob_kg();
+        assert!((after_idle - before_idle).abs() < 1e-6, "with nothing commanded, total fuel must not change: {before_idle} -> {after_idle}");
+    }
+
+    /// A tank cannot be loaded, or transferred into, past its own
+    /// structural capacity, and never holds negative fuel -- the two flags
+    /// this pass's own bullet 4 raised against `load_tank`. Reverting
+    /// `load_tank`'s capacity clamp lets the first assertion see roughly
+    /// ten times the tank's real capacity.
+    #[test]
+    fn a_tank_cannot_exceed_capacity_or_go_negative() {
+        let mut live = FuelLive::new();
+        let capacity_kg = TankShape::of(Tank::Feed1).capacity_m3() * crate::physics::fluids::jet_a_density_kg_m3(10.0);
+
+        live.load_tank(Tank::Feed1, capacity_kg * 10.0, 10.0);
+        let loaded = live.tank_mass_kg(Tank::Feed1);
+        assert!(loaded <= capacity_kg + 1e-6, "load_tank must not let a tank hold more than its own capacity: {loaded} > {capacity_kg}");
+        assert!(loaded.is_finite());
+
+        live.load_tank(Tank::Feed1, -500.0, 10.0);
+        assert_eq!(live.tank_mass_kg(Tank::Feed1), 0.0, "load_tank must floor a negative request at zero");
+
+        // A transfer must not push a near-full destination past capacity
+        // either: fill the trim tank (source) and Feed1 (destination, one
+        // kilogram short of full) and run real transfers for a while.
+        let trim_capacity_kg = TankShape::of(Tank::Trim).capacity_m3() * crate::physics::fluids::jet_a_density_kg_m3(10.0);
+        live.load_tank(Tank::Trim, trim_capacity_kg, 10.0);
+        live.load_tank(Tank::Feed1, capacity_kg - 1.0, 10.0);
+        let mut truth = Truth::default();
+        truth.dt_s = 1.0;
+        for _ in 0..50 {
+            live.tick(&truth, &Faults::default());
+        }
+        // A generous relative slack (0.1% of capacity, ~22 kg here) rather
+        // than a tight absolute one: each tick's own transfer was capped
+        // against *that tick's* density-based capacity (`move_fuel`'s own
+        // doc), and fifty ticks of ordinary thermal drift between the fill
+        // temperature and the ambient skin can move the *current* capacity
+        // bar by a similar small amount by the time this reads it back --
+        // the same tolerance `fill_fraction`'s own `.clamp(0.0, 1.0)`
+        // already accepts. A reverted capacity cap would overshoot by
+        // orders of magnitude more than this, not a fraction of a percent.
+        let live_capacity_kg = TankShape::of(Tank::Feed1).capacity_m3() * crate::physics::fluids::jet_a_density_kg_m3(live.tank_temp_c(Tank::Feed1));
+        assert!(
+            live.tank_mass_kg(Tank::Feed1) <= live_capacity_kg * 1.001,
+            "a transfer must not push a tank past its own capacity: {} > {live_capacity_kg}",
+            live.tank_mass_kg(Tank::Feed1)
+        );
+        for &t in ALL_TANKS.iter() {
+            assert!(live.tank_mass_kg(t) >= 0.0, "{t:?} must never go negative: {}", live.tank_mass_kg(t));
+        }
     }
 }
