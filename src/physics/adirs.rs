@@ -1630,6 +1630,34 @@ fn plausible(last: &mut f64, val: f64, max_abs: f64) -> f64 {
     *last
 }
 
+/// Range form of [`plausible`], for the air-data channels whose implausible
+/// values are not symmetric about zero, so a magnitude bound cannot express
+/// them. [`Adiru::update_adr`] consumed all four of these straight off the
+/// dataref with no guard, and two of the paths are worse than a transient:
+///
+/// * Static air temperature below absolute zero makes `sat_k` negative, so
+///   `(GAMMA_AIR * R_AIR * sat_k).sqrt()` is NaN, and that NaN is published
+///   as true airspeed (`adr_tas_ms`) and total air temperature.
+/// * A non-finite Mach or static pressure makes `qc_true` NaN, which lands
+///   in `frozen_static_pressure_pa`. That field is *persistent*, and its
+///   "not yet frozen" sentinel is `== 0.0`, which NaN fails -- so while a
+///   probe is iced over, one bad tick poisons static pressure, CAS and Mach
+///   for the rest of the session, with no path back even once the sim's own
+///   reading recovers.
+///
+/// The bounds are garbage-rejection bounds, deliberately far outside
+/// anything the atmosphere does (the coldest temperature ever measured in
+/// the atmosphere is about -143 C, at the mesopause, well above this
+/// module's 100,000 ft placement ceiling; the highest sea-level pressure on
+/// record is about 108.5 kPa). They are not a flight envelope and must never
+/// shape a real reading -- same intent as [`plausible`]'s ceilings.
+fn plausible_in(last: &mut f64, val: f64, lo: f64, hi: f64) -> f64 {
+    if val.is_finite() && (lo..=hi).contains(&val) {
+        *last = val;
+    }
+    *last
+}
+
 /// The datarefs read once per tick to build [`TrueState`]. Looked up once at
 /// construction, like the rest of the plugin's per-module dataref caches
 /// (e.g. `sensors.rs`).
@@ -1684,6 +1712,14 @@ struct TrueStateSource {
     last_theta_deg: f64,
     last_phi_deg: f64,
     last_psi_deg: f64,
+    /// Same, for the air-data channels [`plausible_in`] guards. Seeded to
+    /// ISA sea level so that a missing dataref (`find` returned `None`, so
+    /// every read is a flat 0.0) holds a breathable atmosphere rather than
+    /// the vacuum a raw 0 Pa would assert.
+    last_static_pa: f64,
+    last_sat_c: f64,
+    last_mach: f64,
+    last_alpha_deg: f64,
 }
 impl TrueStateSource {
     fn new(xplm: &Xplm) -> Self {
@@ -1724,6 +1760,10 @@ impl TrueStateSource {
             last_theta_deg: 0.,
             last_phi_deg: 0.,
             last_psi_deg: 0.,
+            last_static_pa: 101_325., // ISA sea level.
+            last_sat_c: 15.,          // ISA sea level.
+            last_mach: 0.,
+            last_alpha_deg: 0.,
         }
     }
 
@@ -1776,10 +1816,17 @@ impl TrueStateSource {
             lat_deg,
             lon_deg,
             alt_m,
-            static_pressure_pa: f(self.static_pressure_pa),
-            sat_c: f(self.sat_c),
-            mach: f(self.mach),
-            alpha_deg: f(self.alpha),
+            // Absolute pressure has no negative half, and reaching exactly
+            // 0.0 would also defeat `update_adr`'s frozen-static sentinel.
+            static_pressure_pa: plausible_in(
+                &mut self.last_static_pa,
+                f(self.static_pressure_pa),
+                100.,
+                120_000.,
+            ),
+            sat_c: plausible_in(&mut self.last_sat_c, f(self.sat_c), -200., 100.),
+            mach: plausible_in(&mut self.last_mach, f(self.mach), 0., 6.),
+            alpha_deg: plausible_in(&mut self.last_alpha_deg, f(self.alpha), -180., 180.),
             // Not placed yet is parked, same call `start_state.rs` makes.
             on_ground: !placed || f(self.on_ground) != 0.,
             placed,
@@ -2463,6 +2510,94 @@ mod tests {
         assert_eq!(plausible(&mut last, f64::INFINITY, 10.0), 2.0, "infinity is rejected");
         assert_eq!(plausible(&mut last, 1_000.0, 10.0), 2.0, "an out-of-bound reading is rejected");
         assert_eq!(plausible(&mut last, -3.0, 10.0), -3.0, "a later in-bound reading is accepted");
+    }
+
+    /// [`plausible_in`] in isolation. The point of the range form is the
+    /// asymmetry: 0.0 and -40.0 are perfectly ordinary readings for some
+    /// channels and impossible for others, which a magnitude bound cannot
+    /// distinguish.
+    #[test]
+    fn plausible_in_rejects_out_of_range_readings_on_either_side() {
+        let mut last = 101_325.0_f64;
+        assert_eq!(plausible_in(&mut last, 22_632.0, 100., 120_000.), 22_632.0, "cruise static pressure is accepted");
+        assert_eq!(plausible_in(&mut last, 0.0, 100., 120_000.), 22_632.0, "0 Pa is finite but not an atmosphere");
+        assert_eq!(plausible_in(&mut last, -5.0, 100., 120_000.), 22_632.0, "negative absolute pressure is rejected");
+        assert_eq!(plausible_in(&mut last, f64::NAN, 100., 120_000.), 22_632.0, "NaN is rejected, last good is held");
+        assert_eq!(plausible_in(&mut last, 1.0e9, 100., 120_000.), 22_632.0, "an absurd high reading is rejected");
+        assert_eq!(plausible_in(&mut last, 101_325.0, 100., 120_000.), 101_325.0, "a later in-range reading is accepted");
+
+        // The same bound the read path uses for SAT keeps `sat_c + 273.15`
+        // strictly positive, which is the whole reason it exists.
+        let mut sat = 15.0_f64;
+        assert_eq!(plausible_in(&mut sat, -300.0, -200., 100.), 15.0, "below absolute zero is rejected");
+        assert_eq!(plausible_in(&mut sat, -70.0, -200., 100.), -70.0, "a cruise-level SAT is accepted");
+    }
+
+    /// Why [`plausible_in`] guards SAT: without it, a static air temperature
+    /// below absolute zero takes the square root of a negative number and
+    /// publishes NaN as true airspeed and total air temperature. This feeds
+    /// `update_adr` directly, bypassing the read-path guard, to show the
+    /// hazard is real rather than theoretical.
+    #[test]
+    fn a_sub_absolute_zero_sat_would_publish_nan_airspeed() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
+        let mut a = Adiru::new_for_test(1);
+        let mut t = stationary_level_state(45.0);
+        t.sat_c = -300.0;
+        a.update_adr(1.0 / 30.0, &t, true);
+        assert!(!a.adr_tas_ms.is_finite(), "sqrt of a negative absolute temperature is NaN");
+        // TAT is not NaN here -- stationary, so the recovery term is 1.0 and
+        // it simply carries the impossible temperature straight through.
+        assert!(a.adr_tat_c < -273.15, "and TAT reports a sub-absolute-zero temperature: {}", a.adr_tat_c);
+
+        // With the guard in front of it, the same reading never arrives.
+        let mut last = 15.0_f64;
+        let mut good = stationary_level_state(45.0);
+        good.sat_c = plausible_in(&mut last, -300.0, -200., 100.);
+        let mut b = Adiru::new_for_test(2);
+        b.update_adr(1.0 / 30.0, &good, true);
+        assert!(b.adr_tas_ms.is_finite(), "the held ISA reading keeps the speed of sound real");
+        assert!(b.adr_tat_c > -273.15, "and TAT stays a physical temperature: {}", b.adr_tat_c);
+    }
+
+    /// Why [`plausible_in`] guards Mach and static pressure: the NaN does
+    /// not merely pass through, it *sticks*. `qc_true` carries it into
+    /// `frozen_static_pressure_pa`, and while the static source is iced over
+    /// the only path that re-seeds that field is its `== 0.0` sentinel,
+    /// which NaN never matches. So one bad tick poisons static pressure, CAS
+    /// and Mach for the rest of the session even after the sim's own reading
+    /// recovers -- which is why the guard has to sit at the source, in
+    /// `TrueStateSource::read`, and not downstream. (If a later change also
+    /// makes that sentinel NaN-aware, update this test deliberately.)
+    #[test]
+    fn a_nan_mach_permanently_poisons_a_blocked_static_source() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
+        let dt = 1.0 / 30.0;
+        let mut a = Adiru::new_for_test(1);
+        let mut t = stationary_level_state(45.0);
+        a.static_ice_kg = PROBE_BLOCK_MASS_KG; // static ports iced over
+        t.mach = f64::NAN;
+        a.update_adr(dt, &t, true);
+        assert!(!a.adr_static_pa.is_finite(), "the NaN reaches the frozen static pressure");
+
+        t.mach = 0.0; // the sim recovers
+        for _ in 0..100 {
+            a.update_adr(dt, &t, true);
+        }
+        assert!(!a.adr_static_pa.is_finite(), "and there is no way back while the source is blocked");
+
+        // Guarded at the source, the poisoning tick never happens.
+        let mut last = 0.0_f64;
+        let mut good = stationary_level_state(45.0);
+        good.mach = plausible_in(&mut last, f64::NAN, 0., 6.);
+        let mut b = Adiru::new_for_test(2);
+        b.static_ice_kg = PROBE_BLOCK_MASS_KG;
+        b.update_adr(dt, &good, true);
+        assert!(b.adr_static_pa.is_finite(), "a rejected sample holds the last good Mach instead");
     }
 
     /// The live-defect regression test's other half: this reproduces the
