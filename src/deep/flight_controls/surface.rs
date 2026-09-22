@@ -136,7 +136,6 @@ pub struct SurfaceOutput {
     pub rate_rad_s: f64,
     pub hinge_moment_nm: f64,
     pub actuator_torque_nm: f64,
-    pub actuator_capacity_nm: f64,
     pub at_stop: bool,
     /// True when the actuators' combined torque ceiling is below what the
     /// aerodynamics demand and the surface has drifted meaningfully off its
@@ -233,7 +232,6 @@ impl<const N: usize> ControlSurface<N> {
         dt: f64,
     ) -> SurfaceOutput {
         let mut actuator_torque = 0.0;
-        let mut actuator_capacity = 0.0;
         let mut servo = ServoLoad::NONE;
         let mut jam_damping = 0.0;
         let mut any_saturated = false;
@@ -246,7 +244,6 @@ impl<const N: usize> ControlSurface<N> {
                 pressure_fractions[i],
                 &actuator_faults[i],
             );
-            actuator_capacity += out.max_torque_nm;
             any_saturated |= out.saturated;
             if !surface_faults.disconnected {
                 actuator_torque += out.torque_nm;
@@ -304,7 +301,6 @@ impl<const N: usize> ControlSurface<N> {
             rate_rad_s: self.rate_rad_s,
             hinge_moment_nm: hinge_m,
             actuator_torque_nm: actuator_torque,
-            actuator_capacity_nm: actuator_capacity,
             at_stop,
             blown_back,
         }

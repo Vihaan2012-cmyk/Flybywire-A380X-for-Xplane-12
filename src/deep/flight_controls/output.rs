@@ -41,7 +41,15 @@ impl SurfaceState {
     }
 
     pub fn from_ths_output(o: &super::ths::ThsOutput) -> Self {
-        Self { angle_deg: o.angle_rad * RAD_DEG, rate_deg_s: o.rate_rad_s * RAD_DEG, hinge_torque_nm: o.hinge_moment_nm, blown_back: false }
+        // `ThsOutput` carries no saturated/drifted flag of its own (unlike
+        // `surface::SurfaceOutput::blown_back`, which is
+        // `saturated && drifted off command`); `at_stop` -- the screw
+        // against one of its travel limits -- is the nearest real signal
+        // this module has, and is a strict improvement on the hardcoded
+        // `false` that could never be true no matter what the THS did. It
+        // is not a perfect match: a THS legitimately trimmed to full
+        // authority also reads `at_stop` with nothing wrong at all.
+        Self { angle_deg: o.angle_rad * RAD_DEG, rate_deg_s: o.rate_rad_s * RAD_DEG, hinge_torque_nm: o.hinge_moment_nm, blown_back: o.at_stop }
     }
 }
 
@@ -92,6 +100,15 @@ mod tests {
         let t = ThsOutput { angle_rad: -PI / 18.0, ..Default::default() };
         let ts = SurfaceState::from_ths_output(&t);
         assert!((ts.angle_deg + 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ths_blown_back_tracks_at_stop_instead_of_being_hardcoded() {
+        let running = ThsOutput { at_stop: false, ..Default::default() };
+        assert!(!SurfaceState::from_ths_output(&running).blown_back);
+
+        let stopped = ThsOutput { at_stop: true, ..Default::default() };
+        assert!(SurfaceState::from_ths_output(&stopped).blown_back, "at_stop must reach blown_back, not a hardcoded false");
     }
 
     #[test]
