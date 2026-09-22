@@ -123,6 +123,18 @@ pub fn bound_for(name: &str) -> Bound {
         return Bound::NonNegative;
     }
 
+    // Gear-strut life fraction is also a Miner's-rule damage sum
+    // (deep/gear_structure/strut.rs: `life_fraction_consumed +=
+    // ratio.powf(FATIGUE_EXPONENT) / FATIGUE_REFERENCE_CYCLES`, unclamped
+    // in its own physics), not a normalised fraction: once a strut's
+    // cumulative fatigue exceeds its budget the value is meant to keep
+    // rising past 1.0, and the generic FRACTION rule below was pinning it
+    // at 1.0 and hiding the real state from the Study page and from the
+    // gear-structure failure model.
+    if n.contains("STRUT_LIFE_FRACTION") {
+        return Bound::NonNegative;
+    }
+
     // A normalized 0..1 fraction, so MSFS's 0..100-scaled percent simvars
     // are not caught here by accident.
     // Only explicit fractions: a "ratio" is not bounded by 1 in general
@@ -462,8 +474,26 @@ mod tests {
         assert_eq!(bound_for("VALVE OPEN FRACTION"), Bound::Range(0.0, 1.0));
         // Damage sums count past 1 by design (damage.rs arms at >= 1 and >= 2).
         assert_eq!(bound_for("ENGINE_CREEP_LIFE_FRACTION:3"), Bound::NonNegative);
+        // Same shape: gear-strut fatigue is a Miner's-rule sum, not a
+        // normalised fraction (strut.rs `life_fraction_consumed`).
+        assert_eq!(bound_for("GEAR_STRUT_LIFE_FRACTION:2"), Bound::NonNegative);
         assert_eq!(bound_for("COMPRESSOR PRESSURE RATIO"), Bound::NonNegative);
         assert_eq!(bound_for("PRESSURE ALTITUDE"), Bound::None);
+    }
+
+    #[test]
+    fn gear_strut_life_fraction_is_not_clamped_to_one() {
+        let _guard = setup();
+        // A strut that has burned through 160% of its Miner's-rule fatigue
+        // budget must be published as 1.6, not silently pinned at 1.0 by
+        // the generic 0..1 FRACTION rule -- that pin is exactly what hid
+        // the real state live (see the comment on the STRUT_LIFE_FRACTION
+        // case in `bound_for`). Reverting that case makes this fail: the
+        // generic FRACTION rule matches first and clamps to 1.0.
+        let bound = bound_for("GEAR_STRUT_LIFE_FRACTION:1");
+        let out = check("GEAR_STRUT_LIFE_FRACTION:1", 1.6, bound, "test");
+        assert_eq!(out, 1.6);
+        assert_eq!(violation_count(), 0);
     }
 
     #[test]
