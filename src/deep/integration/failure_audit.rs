@@ -953,6 +953,201 @@ pub fn components_without_failures(r: &crate::deep::api::Registry) -> Vec<String
 }
 
 // ---------------------------------------------------------------------------
+// The legacy catalogue (`failures.rs::extra`, ids below 100 000).
+// ---------------------------------------------------------------------------
+//
+// Everything above audits only `deep::registry()`: ids `>= 1_000_000`, armed
+// through the `Faults` struct passed directly into `Deep::step`/`tick`. The
+// legacy catalogue (`failures::extra::extra_failures()`) is not reachable
+// that way at all -- `deep::live` areas never look at it, and in production
+// `Faults` is itself *built from* `failures::active_magnitudes()`, filtered
+// to the deep ids (`deep/plugin.rs`: `Faults::from_pairs(failures::
+// active_magnitudes().into_iter().filter(|(id, _)| self.failure_ids.
+// contains(id)))`). The legacy side of that same global state is read
+// straight by the older, non-`deep` physics modules (`fuel_network.rs`,
+// `physics/bays.rs`, `physics/tyre.rs`, `breakers.rs`, ... -- see the audit
+// below for the full list found), which have no `Area::publish`-style
+// harness this file can drive the way `sweep`/`baseline`/`diff_against` do
+// for `deep`. Building an equivalent differential runtime harness across
+// every legacy physics module is a materially bigger job than this file's
+// scope, so this section proves the *weaker*, static half of the same
+// question instead, in the same spirit `alerts_reading_unpublished`/
+// `reachability` above already prove a static half for ECAM triggers: not
+// "arming this changes something," but "something in this codebase has
+// even claimed to read this hook back."
+//
+// That claim is checkable because it is already this codebase's own
+// convention, not an invented heuristic: every hook family that *has* been
+// wired documents itself by citing its exact `Effect::Hook { var: "..." }`
+// string next to the `failures::magnitude`/`is_active` call that consumes
+// it -- see `fuel_network.rs`'s comment on `pump_tank_derate`'s neighbour
+// field ("`Effect::Hook { var: "FAIL_FUEL_HOOK", .. }`) and
+// `physics/bays.rs`'s comment on `ENGINE_BLEED_LEAK_FAILURE_IDS`
+// ("`Effect::Hook { var: "FAIL_BLEED_DUCT_LEAK_HOOK", owner: Owner::Air }`).
+// So: if a hook var's exact string never appears anywhere outside
+// `failures.rs` (which only *registers*/*arms* it, never reads it back),
+// nothing in the tree has even claimed to consume it -- the strongest form
+// of "inert" this file can prove without running the legacy physics stack.
+// A var that *is* mentioned elsewhere is not proven live by this check
+// alone (the mention could be stale prose); it is excluded from the dead
+// list as "not provably dead," which is the conservative direction to err
+// in for a report that must not fake a worse number than the evidence
+// supports.
+//
+// `FAIL_ENGINE_COMPONENT_HOOK` is the one family where this coarse,
+// whole-family check is too blunt to use alone: it is shared by 56 ids (14
+// per-engine component kinds x 4 engines), and only some of those kinds are
+// wired (`engine_commands.rs` reads `failures::magnitude(79_004 + i)` for
+// one of the 14). [`id_literal_referenced`] does the same textual check one
+// id at a time instead of one hook var at a time, so that family's count is
+// not all-or-nothing.
+
+/// Every `.rs` file under `src/`, concatenated, except `failures.rs` and
+/// this file (`failure_audit.rs`) itself. `failures.rs` only
+/// *registers*/*arms* a hook id (`extra::extra_failures`, `extra::drive`);
+/// a mention there is not evidence anything reads it back, so it must be
+/// excluded or every hook var would trivially "self-match" its own
+/// registration and the check below would never find anything inert. This
+/// file is excluded for the same reason from the opposite direction: the
+/// tests below compare specific var names by exact quoted string (`f.var ==
+/// "FAIL_..._HOOK"`) for the revert-check pins, and those literals would
+/// otherwise "self-match" here even for a family nothing physical reads --
+/// this was caught live the first time this audit ran (`FAIL_BUS_SHORT_HOOK`
+/// showed up as "referenced" purely because this file's own `== "FAIL_BUS_
+/// SHORT_HOOK"` comparison is a literal containing the exact quoted needle,
+/// not because anything outside failures.rs reads it).
+fn source_outside_failures_rs() -> String {
+    fn walk(dir: &std::path::Path, out: &mut String) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && path.file_name().is_some_and(|n| n != "failures.rs" && n != "failure_audit.rs")
+            {
+                if let Ok(s) = std::fs::read_to_string(&path) {
+                    out.push_str(&s);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")), &mut out);
+    out
+}
+
+/// One legacy hook-variable family: every id `extra_failures()` files under
+/// the same `Effect::Hook { var, .. }`, and whether that var's exact string
+/// appears anywhere outside `failures.rs`/this file.
+pub struct LegacyHookFamily {
+    pub var: String,
+    pub owner: &'static str,
+    pub ids: Vec<u64>,
+    /// `false` means: nothing outside `failures.rs`/this file mentions this
+    /// hook var's own name at all. A family sharing its var across several
+    /// ids (`FAIL_HYDRAULIC_HOOK`, `FAIL_ENGINE_COMPONENT_HOOK`, ...) can
+    /// still be individually wired per id via `failures::magnitude`/
+    /// `is_active`/`active_ids` on the bare numeric id, with no mention of
+    /// the var name at all (`breakers.rs` reads `FAIL_HYDRAULIC_HOOK`'s
+    /// 29_103 that way) -- see `dead_ids` for the precise, id-by-id answer;
+    /// this field is the coarser, whole-family signal alone.
+    pub referenced_elsewhere: bool,
+    /// The subset of `ids` where *neither* the family's var name *nor* that
+    /// id's own numeric literal (see [`id_literal_referenced`]) appears
+    /// anywhere outside `failures.rs`/this file. This is the precise,
+    /// per-id confirmed-dead list; `referenced_elsewhere` alone
+    /// undercounts live ids for a shared-var family and overcounts dead
+    /// ones for nothing (a var-name mention doesn't prove every sibling id
+    /// is wired) -- `dead_ids` is what the total in the audit report
+    /// should sum, not `ids.len()` gated on `referenced_elsewhere`.
+    pub dead_ids: Vec<u64>,
+}
+
+/// Group `failures::extra::extra_failures()`'s `Effect::Hook` entries by
+/// their shared var, and check each against `source` (pass
+/// [`source_outside_failures_rs`]'s result; the tests below share one read
+/// of the tree across several checks rather than re-walking `src/` per
+/// family).
+pub fn legacy_hook_families(source: &str) -> Vec<LegacyHookFamily> {
+    use crate::failures::extra::{extra_failures, Effect};
+    let mut by_var: BTreeMap<String, (&'static str, Vec<u64>)> = BTreeMap::new();
+    for f in extra_failures() {
+        if let Effect::Hook { var, owner } = f.effect {
+            by_var.entry(var.to_owned()).or_insert_with(|| (owner.label(), Vec::new())).1.push(f.id);
+        }
+    }
+    by_var
+        .into_iter()
+        .map(|(var, (owner, mut ids))| {
+            ids.sort_unstable();
+            let needle = format!("\"{var}\"");
+            let referenced_elsewhere = source.contains(&needle);
+            // Always check every id by its own number, whether or not the
+            // family's var-name string is cited anywhere: most wired
+            // families in this codebase (FAIL_HYDRAULIC_HOOK via
+            // breakers.rs, FAIL_ENGINE_COMPONENT_HOOK via engine_commands.rs
+            // / damage.rs) are read through `failures::magnitude`/
+            // `is_active`/`active_ids` on the bare numeric id and never cite
+            // the hook var's own name at all, so `referenced_elsewhere` is
+            // false for them precisely because they *are* wired that way --
+            // gating the per-id check on it (an earlier version of this
+            // function did) silently skipped the real check for exactly the
+            // families that most need it, reporting FAIL_ENGINE_COMPONENT_
+            // HOOK as 100% dead when `79_004` is read on line 499 of
+            // `engine_commands.rs`. And even a family whose var name *is*
+            // cited (`FAIL_FUEL_HOOK`) still needs the per-id check, since a
+            // var-name mention proves only that *something* in the family is
+            // read, not that every sibling id is (`fuel_network.rs` reads
+            // 28_000..28_011 but not the mid/inner-tank pump ids
+            // 28_102..28_109 also filed under `FAIL_FUEL_HOOK`).
+            let dead_ids: Vec<u64> = ids.iter().copied().filter(|&id| !id_literal_referenced(source, id)).collect();
+            LegacyHookFamily { var, owner, ids, referenced_elsewhere, dead_ids }
+        })
+        .collect()
+}
+
+/// Whether `id` itself -- not just the hook var its family shares -- occurs
+/// as a numeric literal anywhere in `source`, written either plain
+/// (`79004`) or with this codebase's own thousands-grouping convention
+/// (`79_004`). Boundary-checked so e.g. id `4` does not match inside `1004`.
+///
+/// Known blind spot, not fixed here: a consumer that reaches a sibling id
+/// by arithmetic on a loop variable (`engine_commands.rs`'s
+/// `failures::magnitude(79_004 + i as u64)`, `fuel_network.rs`'s
+/// `failures::magnitude(28_000 + k as u64)`) only ever spells out the
+/// *base* id as a literal -- `79_005`/`79_006`/`79_007` never appear in the
+/// source text at all even though the loop demonstrably reads them at
+/// runtime. This function has no way to evaluate that arithmetic, so it
+/// under-counts "referenced" (equivalently, over-counts "dead") for exactly
+/// that shape of consumer. The audit's own report is written to read
+/// accordingly: "this id's own number was never found in the tree," not
+/// "this id is certainly never consumed" -- a real differential run
+/// (arming `failures::set_magnitude(id, m)` and diffing the owning
+/// module's output, the way [`sweep`] does for `deep::registry()`) would be
+/// needed to close this gap, and is out of this file's current scope (see
+/// the module-level doc comment on the legacy-catalogue section above for
+/// why).
+pub fn id_literal_referenced(source: &str, id: u64) -> bool {
+    let plain = id.to_string();
+    let mut grouped = String::new();
+    for (i, b) in plain.bytes().enumerate() {
+        if i > 0 && (plain.len() - i) % 3 == 0 {
+            grouped.push('_');
+        }
+        grouped.push(b as char);
+    }
+    [plain, grouped].iter().any(|needle| {
+        source.match_indices(needle.as_str()).any(|(i, m)| {
+            let before_digit = source[..i].chars().next_back().is_some_and(|c| c.is_ascii_digit());
+            let after_digit = source[i + m.len()..].chars().next().is_some_and(|c| c.is_ascii_digit());
+            !before_digit && !after_digit
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Reporting.
 // ---------------------------------------------------------------------------
 
@@ -1299,5 +1494,101 @@ mod tests {
         for k in unraised.iter().take(80) {
             println!("AUDIT   alert with no raised_by: {k}");
         }
+    }
+
+    /// The legacy-catalogue widening: runs on every `cargo test` (pure
+    /// string scanning over the tree, no sweep, seconds not minutes), so
+    /// unlike `deep_failure_audit_full_sweep` this one is never `#[ignore]`d
+    /// and its verdict is not something a human has to remember to go run.
+    ///
+    /// Reverting `legacy_hook_families`/`id_literal_referenced`/
+    /// `source_outside_failures_rs` to always report "referenced" (e.g. by
+    /// forgetting to exclude `failures.rs`/this file from the scan, so every
+    /// hook var or id trivially "self-matches" its own registration or this
+    /// test's own comparisons) makes the `known_dead_family_has_a_nonempty_
+    /// dead_ids_list` assertion fail: `FAIL_ADIRU_SENSOR_HOOK` would stop
+    /// showing up as dead. Reverting it to always report "not referenced"
+    /// (e.g. an empty/broken source scan) makes `known_wired_ids_are_not_
+    /// flagged_dead` fail instead: `FAIL_FUEL_HOOK`'s ids would show up as
+    /// dead even though `fuel_network.rs` demonstrably reads them.
+    #[test]
+    fn legacy_catalogue_hook_families_are_audited() {
+        let source = source_outside_failures_rs();
+        let families = legacy_hook_families(&source);
+        assert!(!families.is_empty(), "extra_failures() must carry at least one Effect::Hook family for this audit to mean anything");
+
+        let total_ids: usize = families.iter().map(|f| f.ids.len()).sum();
+        let total_dead: usize = families.iter().map(|f| f.dead_ids.len()).sum();
+        println!("AUDIT legacy hook families {} | ids {total_ids} | confirmed dead by this file's static check {total_dead}", families.len());
+        println!(
+            "AUDIT   (compare to the 38-across-seven-families / ~40-per-engine figures already established for this catalogue by other means)"
+        );
+        for f in &families {
+            println!(
+                "AUDIT   {:<28} {:<10} {:>3} ids  dead {:>3}  referenced_elsewhere(whole var)={}",
+                f.var,
+                f.owner,
+                f.ids.len(),
+                f.dead_ids.len(),
+                f.referenced_elsewhere
+            );
+            if !f.dead_ids.is_empty() && f.dead_ids.len() != f.ids.len() {
+                // A partly-dead family: this is exactly the
+                // FAIL_ENGINE_COMPONENT_HOOK/FAIL_HYDRAULIC_HOOK shape --
+                // the var name (or some sibling id) is cited somewhere, but
+                // not every id in the family is.
+                println!("AUDIT     dead ids: {:?}", f.dead_ids);
+            }
+        }
+
+        // Pins this test to actually distinguishing three cases -- a fully
+        // dead family, a fully wired one, and a partly-wired shared-var
+        // family -- not reporting the same answer for everything (see the
+        // doc comment above for what reverting each half looks like).
+        let bus_short = families.iter().find(|f| f.var == "FAIL_BUS_SHORT_HOOK").expect("FAIL_BUS_SHORT_HOOK is in the catalogue today");
+        assert_eq!(
+            bus_short.dead_ids.len(),
+            bus_short.ids.len(),
+            "known_dead_family_has_a_nonempty_dead_ids_list: nothing outside failures.rs/this file reads any of FAIL_BUS_SHORT_HOOK's 18 ids today -- if this now fails, either it got wired (update the pin) or the exclusion of failures.rs/this file broke"
+        );
+        assert!(!bus_short.dead_ids.is_empty(), "sanity: the family above must be nonempty for the equality check to mean anything");
+        // A finer pin on the bug this test itself caught mid-session:
+        // FAIL_ENGINE_COMPONENT_HOOK's var name is never cited anywhere (so
+        // `referenced_elsewhere` alone would call the whole 72-id family
+        // dead), yet `engine_commands.rs:499` demonstrably reads id 79_004
+        // by its bare number. The per-id check must find that regardless of
+        // the whole-family signal -- an earlier version of this function
+        // gated the per-id check on `referenced_elsewhere` and got this
+        // exact case wrong.
+        let engine_component = families.iter().find(|f| f.var == "FAIL_ENGINE_COMPONENT_HOOK").expect("FAIL_ENGINE_COMPONENT_HOOK is in the catalogue today");
+        assert!(
+            !engine_component.dead_ids.contains(&79_004),
+            "known_wired_ids_are_not_flagged_dead: FAIL_ENGINE_COMPONENT_HOOK id 79_004 (engine 1 oil leak) is read by engine_commands.rs -- if this now fails, the per-id check regressed to being gated on the whole-family signal again"
+        );
+        assert!(
+            engine_component.dead_ids.contains(&72_002),
+            "FAIL_ENGINE_COMPONENT_HOOK id 72_002 (engine 3 bearing wear) is not read anywhere yet -- if this now fails, it got wired: update this pin and the finding in the audit report"
+        );
+        let fuel = families.iter().find(|f| f.var == "FAIL_FUEL_HOOK").expect("FAIL_FUEL_HOOK is in the catalogue today");
+        assert!(fuel.referenced_elsewhere, "known_wired_ids_are_not_flagged_dead: fuel_network.rs demonstrably reads failures::magnitude for these ids");
+        // FAIL_FUEL_HOOK turns out to be a genuinely mixed family, not a
+        // fully-wired one: fuel_network.rs's own `refresh_catalogue_
+        // failures` reads 28_000..28_011 (feed-tank-derate loop, trim pump,
+        // both cross-feeds, jettison) but the mid/inner-tank pump ids
+        // 28_102..28_109 (`failures.rs`'s own fuel() list) are not read by
+        // that loop or anywhere else today -- a real, causal gap this
+        // audit exists to surface, not a false positive to paper over.
+        // Pinning one *specific*, demonstrably-consumed id (28_008, the
+        // trim pump -- `fuel_network.rs:1808`) is the correct-granularity
+        // check; asserting the whole family's `dead_ids` is empty would be
+        // asserting something this catalogue does not actually make true.
+        assert!(
+            !fuel.dead_ids.contains(&28_008),
+            "known_wired_ids_are_not_flagged_dead: FAIL_FUEL_HOOK id 28_008 (trim pump) is read by fuel_network.rs -- if this now fails, the source scan is broken"
+        );
+        assert!(
+            fuel.dead_ids.contains(&28_102),
+            "FAIL_FUEL_HOOK id 28_102 (mid tank fwd pump) is not read anywhere yet -- if this now fails, it got wired: update this pin and the finding in the audit report"
+        );
     }
 }

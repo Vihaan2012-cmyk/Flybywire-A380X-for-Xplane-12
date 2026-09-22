@@ -188,9 +188,27 @@ impl Path {
         let p1 = m.apply(c1x, c1y);
         let p2 = m.apply(c2x, c2y);
         let p3 = m.apply(x, y);
-        let Some(p0) = self.last_point() else {
-            self.move_to(p1);
-            return self.cubic_to(m, [c1x, c1y, c2x, c2y, x, y]);
+        let p0 = match self.last_point() {
+            Some(p0) => p0,
+            // Canvas: a curve with no current point starts one at the first
+            // control point, then draws the rest of the curve from there.
+            // `move_to` silently no-ops on a non-finite point (stream.rs's
+            // parser is meant to keep that from happening at all now, but
+            // `p1` is the *transformed* point -- an otherwise-finite input
+            // combined with an extreme transform can still overflow to
+            // Inf/NaN here). Recursing back into `cubic_to` with the same,
+            // unchanged arguments in that case would hit this exact branch
+            // again forever: `last_point` would still be `None` because
+            // `move_to` never added anything. Look the point up once more
+            // instead, and drop the whole curve segment if it is still
+            // unset -- there is nothing sane to draw it from.
+            None => {
+                self.move_to(p1);
+                match self.last_point() {
+                    Some(p0) => p0,
+                    None => return,
+                }
+            }
         };
         let d = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| ((a[0] - 2. * b[0] + c[0]).powi(2) + (a[1] - 2. * b[1] + c[1]).powi(2)).sqrt();
         let dd = d(p0, p1, p2).max(d(p1, p2, p3));
@@ -393,6 +411,24 @@ mod tests {
         assert_eq!(p.subpaths.len(), 2);
         assert!(p.subpaths[0].closed);
         assert_eq!(p.subpaths[1].points, vec![[0., 0.], [0., 10.]]);
+    }
+
+    #[test]
+    fn a_cubic_with_no_current_point_and_a_non_finite_first_control_terminates() {
+        // `p1` (the transformed first control point) can be non-finite even
+        // when its raw operands are finite, if the transform in force
+        // overflows (an extreme scale times an ordinary coordinate). With no
+        // current point yet, `cubic_to` used to recurse into itself with the
+        // very same, unchanged arguments to establish one -- since
+        // `last_point()` would still read None after `move_to` silently
+        // no-ops on a non-finite point, that recursion never terminated.
+        // Reverting the fix (back to the recursive
+        // `self.move_to(p1); return self.cubic_to(m, ...)` fallback) hangs
+        // this test instead of letting it return.
+        let overflow = Affine::scale(f64::MAX, f64::MAX);
+        let mut p = Path::default();
+        p.cubic_to(&overflow, [2., 2., 0., 0., 1., 1.]);
+        assert!(p.subpaths.is_empty(), "a curve with no sane starting point must be dropped, not hang");
     }
 
     #[test]
