@@ -2633,6 +2633,9 @@ mod tests {
 
     #[test]
     fn parser_tolerates_case_comments_spaces_and_continuations() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let text = "
 [fuel]
 FUEL_TYPE = 2
@@ -2693,6 +2696,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn tank_pump_derate_reduces_pump_pressure_and_flow() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut net = FuelNetwork::from_cfg(DERATE_TEST_CFG).unwrap();
         net.set_tank_gallons(1, 50.0);
         net.pump_on(1);
@@ -2790,6 +2796,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn tank_pump_derate_is_clamped_and_ignores_unknown_tanks() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut net = FuelNetwork::from_cfg(DERATE_TEST_CFG).unwrap();
         net.set_tank_gallons(1, 50.0);
         net.pump_on(1);
@@ -2814,6 +2823,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn engines_drain_their_feed_tanks_at_the_demanded_rate() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         let before = all_quantities(&net);
         let demand = [1000.0, 1500.0, 2000.0, 3000.0];
@@ -2839,6 +2851,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn fbw_style_extra_tank_draw_is_refilled_through_lp_valve_line() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         // FBW's FADEC burns straight from tanks 12..15 and passes no demand.
         let Some(mut net) = a380_taxi() else { return };
         let feed_before = net.tank_total_gallons(FEED[0]);
@@ -2855,6 +2870,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn closing_an_lp_valve_starves_that_engine() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         let demand = [3000.0; 4];
         run(&mut net, 5.0, 0.05, demand, 0.0);
@@ -2882,6 +2900,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn inner_tank_transfer_pump_fills_feed_tank() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         let before = all_quantities(&net);
         net.pump_on(12); // LeftInnerTankPumpFwd
@@ -2905,6 +2926,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn fbw_trigger_1_starts_the_inner_transfer() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         let before = net.tank_total_gallons(FEED[0]);
         net.handle_key_event("K:FUELSYSTEM_TRIGGER_TOGGLE", 1, 0);
@@ -2941,6 +2965,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn outer_tank_emergency_transfer_runs_by_gravity() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         let before = all_quantities(&net);
         net.open_valve(52); // LeftOuterEmerTransferValve
@@ -2962,6 +2989,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn outer_tank_pump_transfer_via_trigger_35() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         let before = all_quantities(&net);
         net.trigger_on(35);
@@ -2976,6 +3006,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn trim_tank_transfers_to_feed_tank() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         let before = all_quantities(&net);
         net.trigger_on(24); // TrimTankTransferToFeedTank1
@@ -2997,6 +3030,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn crossfeed_feeds_an_engine_whose_feed_tank_is_empty() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         net.set_tank_gallons(FEED[1], 0.0);
         let demand = [1000.0; 4];
@@ -3019,6 +3055,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn apu_feed_needs_its_pump() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         let burn = net.apu_burn_rate_gph();
         net.handle_key_event("FUELSYSTEM_PUMP_ON", 21, 0);
@@ -3033,6 +3072,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn unpowered_circuits_stop_pumps_and_freeze_valves() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         net.set_fuel_pump_circuit_powered(1, false);
         net.update(0.1, [0.0; 4], 0.0);
@@ -3046,6 +3088,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn long_run_conserves_fuel_and_respects_limits() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = a380_taxi() else { return };
         let initial = net.total_fuel_gallons();
         net.trigger_on(1);
@@ -3097,6 +3142,9 @@ Valve.1 = Name:Valve#DestinationLine:ValveToEng
 
     #[test]
     fn junction_option_listing_an_input_closes_other_inputs() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         // The SDK's P-51 selector: each option names one tank's input line.
         let text = "
 [FUEL_SYSTEM]
@@ -3132,6 +3180,9 @@ Pump.1 = Name:BoosterPump#Pressure:11#DestinationLine:BoosterPumpToEngine#Type:E
 
     #[test]
     fn automatic_triggers_with_delay_and_priority_fill() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let text = "
 [FUEL_SYSTEM]
 Version = 5
@@ -3175,7 +3226,7 @@ Trigger.2 = Name:Start#Condition:Autostart_Enabled#EffectTrue:StartPump.Pump
     /// line", singular).
     #[test]
     fn catalogue_feed_pump_failure_kills_one_pump_not_its_sibling() {
-        let _g = failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = failures::tests::serial();
         failures::Failures::new();
         let Some(mut net) = a380_taxi() else { return };
         net.update(1.0, [0.0; 4], 0.0);
@@ -3193,7 +3244,7 @@ Trigger.2 = Name:Start#Condition:Autostart_Enabled#EffectTrue:StartPump.Pump
     /// loses its own pressure while its opposite number keeps working.
     #[test]
     fn every_fuel_element_failure_acts_on_a_real_element() {
-        let _g = failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = failures::tests::serial();
         failures::Failures::new();
         let Some(mut net) = a380_taxi() else { return };
         for &(id, name, pump, elements) in failures::extra::FUEL_ELEMENTS {
@@ -3220,7 +3271,7 @@ Trigger.2 = Name:Start#Condition:Autostart_Enabled#EffectTrue:StartPump.Pump
     /// item doesn't distinguish left/right.
     #[test]
     fn catalogue_trim_pump_failure_kills_both_trim_pumps() {
-        let _g = failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = failures::tests::serial();
         failures::Failures::new();
         let Some(mut net) = a380_taxi() else { return };
         net.pump_on(19);
@@ -3240,7 +3291,7 @@ Trigger.2 = Name:Start#Condition:Autostart_Enabled#EffectTrue:StartPump.Pump
     /// or closed.
     #[test]
     fn catalogue_crossfeed_valve_failure_freezes_position() {
-        let _g = failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = failures::tests::serial();
         failures::Failures::new();
         let Some(mut net) = a380_taxi() else { return };
         assert_eq!(net.valve_open(46), 0.0, "CrossFeedValve1 starts closed");
@@ -3264,7 +3315,7 @@ Trigger.2 = Name:Start#Condition:Autostart_Enabled#EffectTrue:StartPump.Pump
         // a real network must serialise against every other test that can
         // set 28_009/28_010 active, the same guard
         // `catalogue_crossfeed_valve_failure_freezes_position` above takes.
-        let _g = failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = failures::tests::serial();
         failures::Failures::new();
         let Some(mut net) = a380_taxi() else { return };
         // The valves' starting position depends on the taxi flight state;
@@ -3397,7 +3448,7 @@ Line.4 = Name:Line4#Source:XfeedPump#Destination:CrossFeedValve1#FuelFlowAt1PSI:
     /// valve-stuck fractions before `update` is ever called.
     #[test]
     fn intersection_pump_degradation_and_stuck_crossfeed_valve_starve_engine() {
-        let _g = failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = failures::tests::serial();
         failures::Failures::new();
         failures::reset_all();
         let demand = [1000.0, 0.0, 0.0, 0.0];
@@ -3464,7 +3515,7 @@ Line.4 = Name:Line4#Source:XfeedPump#Destination:CrossFeedValve1#FuelFlowAt1PSI:
     /// single-cause reason, not the three-way interaction).
     #[test]
     fn intersection_starvation_vanishes_when_crossfeed_link_to_engine_is_cut() {
-        let _g = failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = failures::tests::serial();
         failures::Failures::new();
         failures::reset_all();
         let demand = [1000.0, 0.0, 0.0, 0.0];

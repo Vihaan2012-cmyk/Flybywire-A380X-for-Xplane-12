@@ -1976,6 +1976,9 @@ mod tests {
 
     #[test]
     fn heading_error_decays_during_a_realistic_alignment() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut a = Adiru::new_for_test(1);
         let t = stationary_level_state(45.0);
         // Off -> Aligning at t=0.
@@ -1991,6 +1994,9 @@ mod tests {
 
     #[test]
     fn unheated_pitot_blocks_in_icing_conditions_and_freezes_its_reading() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut a = Adiru::new_for_test(1);
         let mut t = stationary_level_state(45.0);
         t.sat_c = -10.0; // icing conditions
@@ -2023,7 +2029,7 @@ mod tests {
     /// why the heater has no power flowing.
     #[test]
     fn a_heater_open_circuit_ices_the_probe_even_when_powered_and_airborne() {
-        let _guard = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::failures::tests::serial();
         let _f = crate::failures::Failures::new();
         crate::failures::replace([]);
         crate::failures::set_active(30_000, true); // ADIRU 1
@@ -2050,6 +2056,9 @@ mod tests {
 
     #[test]
     fn heated_probes_never_ice_up() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut a = Adiru::new_for_test(1);
         let mut t = stationary_level_state(45.0);
         t.sat_c = -30.0;
@@ -2097,7 +2106,7 @@ mod tests {
     /// single factor is sufficient on its own; only the combination is.
     #[test]
     fn degraded_probe_heater_ices_only_when_combined_with_cold_high_lwc_and_high_tas() {
-        let _guard = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::failures::tests::serial();
         let _f = crate::failures::Failures::new();
         crate::failures::reset_all();
         crate::failures::replace([]);
@@ -2173,6 +2182,9 @@ mod tests {
 
     #[test]
     fn static_pressure_at_zero_position_error_matches_isa_and_true_pressure() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         // At alpha = 3 degrees (this module's zero-error reference, see
         // `update_adr`) and no icing, the sensed static pressure should
         // equal the true ISA pressure fed in, and via FBW's own
@@ -2266,6 +2278,9 @@ mod tests {
 
     #[test]
     fn adiru_starting_already_aligned_does_not_spike_vertical_speed_on_the_ground() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         // Regression test for the reported bug (docs/deep/debug_vs.md): a
         // real X-Plane 12 session showed about -8800 ft/min on the PFD with
         // the aircraft on the ground and not descending. FBW's own ADIRS
@@ -2299,6 +2314,9 @@ mod tests {
 
     #[test]
     fn adiru_starting_already_aligned_also_syncs_position_heading_and_ground_speed() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         // Same root cause as the vertical-speed spike above, for the other
         // "ADIRUS output wrong at spawn" symptoms it also caused: without
         // the sync, `lat_rad`/`lon_rad` would start at 0N/0E ("Null Island")
@@ -2342,6 +2360,9 @@ mod tests {
 
     #[test]
     fn should_run_waits_for_x_plane_to_place_the_aircraft_even_when_fbw_reports_aligned() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         // The other half of the same fix: `should_run` must not go true off
         // FBW's own immediate "Aligned" state alone -- it must also wait for
         // a real X-Plane placement, or the running-transition sync above
@@ -2374,6 +2395,9 @@ mod tests {
     /// merely "bounded".
     #[test]
     fn stationary_aligned_ir_holds_attitude_and_ground_speed_over_30_minutes() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut a = Adiru::new_for_test(1);
         let t = stationary_level_state(28.0); // representative mid-latitude airport
         let dt = 1.0 / 30.0; // typical X-Plane frame time
@@ -2407,6 +2431,9 @@ mod tests {
     /// unmodified) turns into the PFD's ATT/HDG flag.
     #[test]
     fn an_unaligned_ir_reports_invalid_not_a_plausible_value() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut a = Adiru::new_for_test(1);
         let t = stationary_level_state(45.0);
         // fbw_state 1.0 == Aligning, not yet Aligned.
@@ -2456,6 +2483,9 @@ mod tests {
     /// poisoned the way a permanently-NaN state would.
     #[test]
     fn a_one_tick_velocity_spike_faults_the_ir_instead_of_corrupting_it_forever() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut a = Adiru::new_for_test(1);
         let mut t = stationary_level_state(30.0);
         let dt = 1.0 / 30.0;
@@ -2523,6 +2553,9 @@ mod tests {
     /// across every subsequent tick the way an unguarded integrator would.
     #[test]
     fn a_non_finite_reading_does_not_poison_the_state_forever() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut a = Adiru::new_for_test(1);
         let mut t = stationary_level_state(30.0);
         let dt = 1.0 / 30.0;

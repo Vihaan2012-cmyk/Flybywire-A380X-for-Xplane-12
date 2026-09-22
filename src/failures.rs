@@ -1241,6 +1241,8 @@ pub fn armed_magnitude(id: u64) -> f64 {
 }
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+    #[cfg(test)]
+    tests::assert_serial_held();
     STATE.lock().ok().map(|mut s| f(&mut s))
 }
 
@@ -1751,6 +1753,75 @@ pub(crate) mod tests {
     /// tests touching it take turns.
     pub static SERIAL: Mutex<()> = Mutex::new(());
 
+    thread_local! {
+        /// Set for the lifetime of a `SerialGuard` held on *this* thread.
+        /// `with_state` (under `#[cfg(test)]`) checks this and panics if a
+        /// test reaches the process-wide failure state without having taken
+        /// `serial()` first -- see that guard's doc comment for why this
+        /// matters more than an ordinary "don't forget the lock" convention.
+        static HOLDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// RAII handle on [`SERIAL`]: holds the lock and marks this thread as
+    /// entitled to touch the process-wide failure state until dropped.
+    #[must_use]
+    pub struct SerialGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for SerialGuard {
+        fn drop(&mut self) {
+            HOLDS.with(|h| h.set(false));
+        }
+    }
+
+    /// Take the one lock that serialises every test touching
+    /// `crate::failures`' process-wide state -- directly (`set_active`,
+    /// `replace`, ...) or transitively, through model code that writes into
+    /// it on the caller's behalf (`Breakers::pre_systems` mirroring pulled
+    /// breakers, `physics::damage::Damage::arm`, ...). There is no
+    /// thread-local isolation, only process isolation (see the module's own
+    /// emulator note), so any test that reaches the state without holding
+    /// this lock can corrupt a neighbour running in parallel -- `with_state`
+    /// asserts that in debug/test builds instead of letting it happen
+    /// silently.
+    ///
+    /// A poisoned lock (an unrelated test panicked while holding it) must
+    /// not cascade into every other test that shares it, so this recovers
+    /// the guard from a poison error the same way the crate's pre-existing
+    /// call sites already did.
+    pub fn serial() -> SerialGuard {
+        let lock = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        HOLDS.with(|h| h.set(true));
+        SerialGuard { _lock: lock }
+    }
+
+    /// `with_state`'s `#[cfg(test)]` check: panics unless this thread is
+    /// currently inside a `serial()` guard.
+    ///
+    /// Deliberately per-thread, not per-process: a test that spawns child
+    /// threads which themselves reach into the failure state would need
+    /// those children to take the guard too (it is a `std::sync::Mutex`, so
+    /// any thread can lock it) -- weakening this to a process-wide flag
+    /// would defeat the point of catching *unsynchronised* access. As of
+    /// this writing no such test exists: `deep::integration::failure_audit`
+    /// is the crate's one user of `std::thread::scope`, and its workers
+    /// operate on locally-built `Deep`/`Faults` values that never call back
+    /// into `crate::failures` (see `deep/live.rs`'s module doc: an area
+    /// never depends on the failure system).
+    pub(super) fn assert_serial_held() {
+        let held = HOLDS.with(|h| h.get());
+        assert!(
+            held,
+            "crate::failures' process-wide state was reached without holding \
+             crate::failures::tests::serial(). This test (or code it calls, \
+             directly or transitively through model code such as \
+             Breakers::pre_systems or physics::damage::Damage::arm) touches \
+             the shared failure state; take `let _g = crate::failures::tests::serial();` \
+             at the top of the test before doing so."
+        );
+    }
+
     #[test]
     fn every_registration_is_unique_and_counted() {
         let f = a380_failures();
@@ -1796,7 +1867,7 @@ pub(crate) mod tests {
     /// entry points, and never collide with the systems' own ids.
     #[test]
     fn the_computer_failure_ids_are_registered_and_toggle_like_the_others() {
-        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = serial();
         assert_eq!(COMPUTER_FAILURES.len(), 11);
         let computer_ids: BTreeSet<u64> = COMPUTER_FAILURES.iter().map(|(id, _)| *id).collect();
         assert_eq!(computer_ids.len(), 11, "no duplicate computer ids");
@@ -1828,7 +1899,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_array_dataref_replaces_the_set_and_ignores_unknown_ids() {
-        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = serial();
         let _f = Failures::new();
         let mut values = [29_000, 12_345, 26_001];
         unsafe { set_array(std::ptr::null_mut(), values.as_mut_ptr(), 0, 3) };
@@ -1852,7 +1923,7 @@ pub(crate) mod tests {
 
     #[test]
     fn an_engine_fire_failure_reaches_the_systems() {
-        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = serial();
         let mut vars = TestVars::default();
         let mut sim = Simulation::new(StartState::Cruise, A380::new, &mut vars);
         let mut failures = Failures::new();
@@ -1878,7 +1949,7 @@ pub(crate) mod tests {
     /// ENG ON FIRE:1, and the fire detection unit reports it.
     #[test]
     fn an_engine_fire_is_detected_through_the_fire_aspect() {
-        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = serial();
         let mut vars = TestVars::default();
         let mut sim = Simulation::new(StartState::Apron, A380::new, &mut vars);
         let mut aspects = crate::aspects::a380(&mut vars);
@@ -1932,7 +2003,7 @@ pub(crate) mod tests {
     /// which threw away every frame's output.
     #[test]
     fn a_cold_apron_start_powers_the_ac_buses_from_external_power() {
-        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = serial();
         // Zero ambient air first, as a host can report before its first frame,
         // then ISA sea level.
         for ambient in [false, true] {
@@ -1965,7 +2036,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_green_reservoir_leak_drains_the_green_reservoir() {
-        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = serial();
         let run = |leak: bool| {
             let mut vars = TestVars::default();
             let mut sim = Simulation::new(StartState::Cruise, A380::new, &mut vars);

@@ -832,6 +832,9 @@ mod tests {
 
     #[test]
     fn cruise_inner_tank_transfer_starts_below_and_stops_at_ts_thresholds() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = network("cruise.FLT") else { return };
         for (t, g) in [(1, 2700.0), (3, 9600.0), (4, 12000.0), (7, 12000.0), (8, 9600.0), (10, 2700.0), (11, 3000.0)] {
             net.set_tank_gallons(t, g);
@@ -882,6 +885,9 @@ mod tests {
 
     #[test]
     fn trim_transfer_runs_until_trim_tank_is_empty() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = network("cruise.FLT") else { return };
         for (t, g) in [(1, 800.0), (10, 800.0), (11, 1500.0), (3, 0.0), (4, 0.0), (7, 0.0), (8, 0.0)] {
             net.set_tank_gallons(t, g);
@@ -918,6 +924,9 @@ mod tests {
 
     #[test]
     fn cg_above_target_starts_cg_transfer_to_inner_tanks() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = network("cruise.FLT") else { return };
         for (t, g) in [(4, 6000.0), (7, 6000.0), (3, 5000.0), (8, 5000.0), (11, 3000.0)] {
             net.set_tank_gallons(t, g);
@@ -944,6 +953,9 @@ mod tests {
 
     #[test]
     fn nothing_transfers_on_ground_and_refuel_closes_valves() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = network("taxi.flt") else { return };
         net.set_tank_gallons(4, 5000.0);
         net.set_tank_gallons(7, 5000.0);
@@ -971,6 +983,9 @@ mod tests {
 
     #[test]
     fn apu_aspect_opens_valve_and_pump_on_availability_edge() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let Some(mut net) = network("apron.FLT") else { return };
         net.set_tank_gallons(9, 3000.0);
         net.set_tank_gallons(16, 1.0);
@@ -1023,7 +1038,7 @@ mod tests {
     /// nothing.
     #[test]
     fn catalogue_apu_fuel_control_fault_overfuels() {
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         crate::failures::Failures::new();
         let Some(net) = network("taxi.flt") else { return };
         let mut vars = FakeVars::default();

@@ -1291,7 +1291,7 @@ mod tests {
     /// (not `update_with`) reads them.
     #[test]
     fn the_fcdc_failure_ids_reach_the_fcdc_through_the_global_failures_state() {
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         let _failures = crate::failures::Failures::new();
         let mut rig = Rig::new(true, 0., 0.);
         network_up(&mut rig.vars);

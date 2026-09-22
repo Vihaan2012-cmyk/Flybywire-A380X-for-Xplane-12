@@ -179,7 +179,7 @@ mod tests {
         // another test's arm-then-read and silently disarms it -- which is
         // what it was doing to
         // `breakers::bearing_wear_magnitude_predicts_current_by_the_back_emf_relation`.
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         crate::scenarios::reset_global_state();
         crate::failures::reset_all();
 

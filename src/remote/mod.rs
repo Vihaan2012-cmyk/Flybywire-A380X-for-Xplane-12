@@ -110,7 +110,7 @@ mod tests {
         // bridge could add, and a frame of lag moves a switch-over: every
         // bus's powered state must change on the very frame it does in the
         // plugin, as ground power comes and goes.
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         let state = StartState::Apron;
         let mut local_vars = TestVars::default();
         let mut local = Simulation::new(state, A380::new, &mut local_vars);
@@ -177,7 +177,7 @@ mod tests {
     fn powered_preset_against_real_systems_energises_ac_bus_1() {
         use crate::extra_backend::aircraft_presets::AircraftPresets;
         use crate::extra_backend::sim::test_xplane::FakeXplane;
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut systems = Simulation::new(StartState::Apron, A380::new, &mut vars);
         let mut presets = AircraftPresets::new(&mut vars);
@@ -256,7 +256,7 @@ mod tests {
     fn powered_preset_against_real_systems_pressurises_hydraulics_and_bleed_air() {
         use crate::extra_backend::aircraft_presets::AircraftPresets;
         use crate::extra_backend::sim::test_xplane::FakeXplane;
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut systems = Simulation::new(StartState::Apron, A380::new, &mut vars);
         let mut presets = AircraftPresets::new(&mut vars);

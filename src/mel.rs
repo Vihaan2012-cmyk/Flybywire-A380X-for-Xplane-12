@@ -375,6 +375,9 @@ mod tests {
 
     #[test]
     fn repair_clears_the_deferral() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut mel = Mel::new();
         mel.deferred.insert(5, Deferral { id: 5, deferred_at_hours: 0.0, expires_at_hours: 100.0, mel_ref: None });
         assert!(mel.is_deferred(5));

@@ -1479,7 +1479,7 @@ mod tests {
         // failures.rs's own doc comment describes for this ("tests touching
         // it take turns"); take it for the whole test, matching the
         // established pattern.
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut circuits = crate::circuits::Circuits::new(&mut vars);
         let _f = crate::failures::Failures::new();
@@ -1508,7 +1508,7 @@ mod tests {
         // test elsewhere in the crate that has that same id armed. Take the
         // same test-serialization lock so this test's blanket touch of that
         // global cannot race one of those.
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut circuits = crate::circuits::Circuits::new(&mut vars);
         let mut b = Breakers::new(&mut vars);
@@ -1534,7 +1534,7 @@ mod tests {
         // touches every catalogued breaker's bridged failure id on the
         // shared global `failures::STATE`, not just "hyd-epump-ga" (which
         // has none of its own, but its neighbours in the catalogue do).
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut circuits = crate::circuits::Circuits::new(&mut vars);
         let mut b = Breakers::new(&mut vars);
@@ -1760,7 +1760,7 @@ mod tests {
         // Same shared-global-state hazard as the `pre_systems` tests above:
         // `Failures::new()` clears the process-wide `failures::STATE`
         // outright, and `set_magnitude` writes into it too. Take the lock.
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         let _f = crate::failures::Failures::new();
         crate::failures::set_magnitude(29_103, 0.6);
         assert_eq!(bearing_overcurrent_multiplier("hyd-epump-ga"), 4.0);

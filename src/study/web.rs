@@ -959,6 +959,9 @@ mod tests {
 
     #[test]
     fn every_menu_item_becomes_one_json_page() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let v: Value = serde_json::from_str(&pages_json()).unwrap();
         let pages = v["pages"].as_array().unwrap();
         assert_eq!(pages.len(), ITEMS.len());
@@ -970,6 +973,9 @@ mod tests {
 
     #[test]
     fn box_pages_carry_their_fields() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let v: Value = serde_json::from_str(&pages_json()).unwrap();
         let pages = v["pages"].as_array().unwrap();
         let apu = &pages[super::super::item_of(PageKind::Apu)];
@@ -983,6 +989,9 @@ mod tests {
 
     #[test]
     fn electrical_and_hydraulics_carry_a_topology() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let v: Value = serde_json::from_str(&pages_json()).unwrap();
         let pages = v["pages"].as_array().unwrap();
         for kind in [PageKind::Electrical, PageKind::Hydraulics] {
@@ -1001,6 +1010,9 @@ mod tests {
 
     #[test]
     fn engine_pages_carry_stations_and_summaries() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let v: Value = serde_json::from_str(&pages_json()).unwrap();
         let pages = v["pages"].as_array().unwrap();
         let e2 = &pages[super::super::item_of(PageKind::Engine(2))];
@@ -1014,6 +1026,9 @@ mod tests {
 
     #[test]
     fn fuel_page_carries_all_eleven_tanks() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let v: Value = serde_json::from_str(&pages_json()).unwrap();
         let pages = v["pages"].as_array().unwrap();
         let fuel = &pages[super::super::item_of(PageKind::Fuel)];
@@ -1023,6 +1038,9 @@ mod tests {
 
     #[test]
     fn failures_and_breakers_pages_defer_to_their_own_endpoint() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let v: Value = serde_json::from_str(&pages_json()).unwrap();
         let pages = v["pages"].as_array().unwrap();
         assert_eq!(pages[super::super::item_of(PageKind::Failures)]["kind"], "failures");
@@ -1031,6 +1049,9 @@ mod tests {
 
     #[test]
     fn failures_json_lists_every_registered_id_once() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let v: Value = serde_json::from_str(&failures_json()).unwrap();
         let list = v["failures"].as_array().unwrap();
         // FlyByWire's, the computers' and the extra catalogue's.
@@ -1127,6 +1148,9 @@ mod tests {
 
     #[test]
     fn apply_action_rejects_bad_input_but_accepts_every_known_kind() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         assert!(apply_action("not json").is_err());
         assert!(apply_action(r#"{"kind":"nonsense"}"#).is_err());
         assert!(apply_action(r#"{"kind":"toggleFailure"}"#).is_err(), "missing id");
@@ -1165,6 +1189,9 @@ mod tests {
     /// stale.
     #[test]
     fn every_deep_area_page_carries_its_four_sections() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let v: Value = serde_json::from_str(&pages_json()).unwrap();
         let pages = v["pages"].as_array().unwrap();
         let mut any_components = false;
@@ -1196,6 +1223,9 @@ mod tests {
     /// rather than asserting a toggle took hold.)
     #[test]
     fn a_deep_areas_failure_reports_armed_from_the_same_active_set_study_failures_uses() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let area = deep_page::AREA_LIST[0].0;
         let f = deep_page::failures_of(area).first().copied().expect("this area has failures");
         let active = crate::failures::active_ids();
@@ -1212,6 +1242,9 @@ mod tests {
     /// to find their names for the `/vars` poll.
     #[test]
     fn a_deep_areas_groups_carry_real_field_names_the_vars_poll_can_use() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let v: Value = serde_json::from_str(&pages_json()).unwrap();
         let pages = v["pages"].as_array().unwrap();
         let page = &pages[super::super::item_of(PageKind::Area(crate::deep::api::Area::Wiring))];

@@ -1571,6 +1571,9 @@ mod tests {
 
     #[test]
     fn a_dead_dc_ess_bus_stops_the_apu_pump() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let run = |dc_ess: bool| {
             let mut net = FuelNetwork::from_cfg(FLIGHT_MODEL_CFG).unwrap();
             net.apply_flt_state(APRON_FLT);

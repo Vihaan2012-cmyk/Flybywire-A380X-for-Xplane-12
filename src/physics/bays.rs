@@ -402,6 +402,9 @@ mod tests {
 
     #[test]
     fn main_avionics_bay_reaches_its_hand_computed_steady_state() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         crate::scenarios::reset_global_state();
         let h = external_h_w_m2k(0.0); // on ground, TAS 0 -> h = 10 W/m^2K
         let predicted = steady_state_c(&MAIN_AVIONICS, MAIN_AVIONICS.baseline_avionics_w, 1.0, 25.0, h);
@@ -423,7 +426,7 @@ mod tests {
         // `failures::STATE` is process-global, so this test and any other
         // touching it must take turns -- the same lock breakers.rs already
         // uses for exactly this reason.
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         crate::scenarios::reset_global_state();
         // `36_000` ("Engine 1 bleed duct leak") is a real id in
         // `failures.rs`'s own catalogue; `set_active`/`set_magnitude` only
@@ -565,7 +568,7 @@ mod tests {
         // without this lock they race whatever else is asserting on a
         // magnitude at the time (it wiped breakers.rs's own 29_103
         // expectation in a full-suite run).
-        let _serial = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::failures::tests::serial();
 
         crate::scenarios::reset_global_state();
         let ambient_c = 25.0;

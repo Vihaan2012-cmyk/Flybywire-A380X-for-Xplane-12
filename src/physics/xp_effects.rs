@@ -304,6 +304,9 @@ mod tests {
 
     #[test]
     fn engine_fire_boolean_drives_the_intensity_interface_with_no_xplane_host() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut fx = XpEffects::new(&mut vars, None);
         vars.write(&fx.eng_on_fire[1], 1.0); // engine 2
@@ -331,6 +334,9 @@ mod tests {
 
     #[test]
     fn apu_or_mlg_fire_alone_requests_cockpit_smoke_on_then_off() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut fx = XpEffects::new(&mut vars, None);
         assert!(!fx.was_apu_or_mlg_fire);
@@ -346,7 +352,7 @@ mod tests {
 
     #[test]
     fn a_green_reservoir_leak_failure_is_tracked_and_clears_on_repair() {
-        let _guard = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::failures::tests::serial();
         let _f = crate::failures::Failures::new();
         failures::replace([]);
         let mut vars = TestVars::default();

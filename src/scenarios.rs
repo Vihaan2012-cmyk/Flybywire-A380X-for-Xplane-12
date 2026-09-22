@@ -87,7 +87,7 @@ mod tests {
         // `failures::STATE` is process-global, so this test and any other
         // touching it must take turns -- the same lock breakers.rs already
         // uses for exactly this reason.
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         let _f = crate::failures::Failures::new();
         crate::failures::set_active(24_020, true);
         assert!(crate::failures::active_ids().contains(&24_020), "setup: id should be active before reset");
@@ -100,6 +100,9 @@ mod tests {
     /// survive a reset.
     #[test]
     fn reset_global_state_clears_queued_breaker_requests() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         crate::breakers::request_pull("TEST-NONEXISTENT-BREAKER".to_string());
         reset_global_state();
         // No public "peek the queue" accessor exists (by design: only the

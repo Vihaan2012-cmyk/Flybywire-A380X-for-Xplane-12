@@ -1029,7 +1029,7 @@ mod tests {
     /// takeoff time limit is exceeded.
     #[test]
     fn sustained_egt_above_mct_arms_bearing_wear_after_the_takeoff_time_limit() {
-        let _guard = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::failures::tests::serial();
         // `arm` -> `failures::set_active` is a no-op for an id that hasn't
         // been registered yet (failures.rs:849), and nothing in this test's
         // own path (`Damage::new`, `update`) registers 72_000 -- only
@@ -1067,7 +1067,7 @@ mod tests {
     /// armed it just past 5 minutes when one engine is out.
     #[test]
     fn an_engine_out_extends_the_takeoff_time_limit_to_ten_minutes() {
-        let _guard = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::failures::tests::serial();
         crate::failures::replace([]);
         let mut vars = TestVars::default();
         let mut d = Damage::new(&mut vars, None);
@@ -1139,6 +1139,9 @@ mod tests {
 
     #[test]
     fn egt_at_or_below_max_continuous_never_accumulates_creep() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut d = Damage::new(&mut vars, None);
         for n in 0..4 {
@@ -1163,6 +1166,9 @@ mod tests {
     /// cycle on each false-to-true transition.
     #[test]
     fn engine_hours_and_cycles_accumulate_while_running() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut d = Damage::new(&mut vars, None);
         vars.write(&d.egt[0], 20.0); // cold
@@ -1216,7 +1222,7 @@ mod tests {
     /// the sim log showed it doing.
     #[test]
     fn a_cold_apron_start_does_not_arm_an_overweight_landing() {
-        let _guard = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::failures::tests::serial();
         crate::failures::replace([]);
         let mut vars = TestVars::default();
         let mut d = Damage::new(&mut vars, None);
@@ -1240,7 +1246,7 @@ mod tests {
     /// from heat or from running dry.
     #[test]
     fn an_oil_leak_starves_the_bearings_and_arms_bearing_wear() {
-        let _guard = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::failures::tests::serial();
         let _f = crate::failures::Failures::new();
         crate::failures::replace([]);
         crate::failures::set_active(79_004, true); // engine 1 oil leak
@@ -1272,7 +1278,7 @@ mod tests {
     /// quantity: the oil is still there.
     #[test]
     fn a_pump_fault_caps_oil_pressure_without_draining_quantity() {
-        let _guard = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::failures::tests::serial();
         let _f = crate::failures::Failures::new();
         crate::failures::replace([]);
         crate::failures::set_active(79_000, true); // engine 1 oil pump fault
@@ -1291,7 +1297,7 @@ mod tests {
     /// leak-then-low-pressure chain as the per-engine one above (79_004).
     #[test]
     fn an_apu_oil_leak_drains_quantity_and_drops_oil_pressure() {
-        let _guard = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::failures::tests::serial();
         let _f = crate::failures::Failures::new();
         crate::failures::replace([]);
         crate::failures::set_active(49_004, true);

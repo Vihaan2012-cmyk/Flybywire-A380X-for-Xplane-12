@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn two_sources_combine_by_the_parameters_own_rule() {
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         reset_all();
         let _f = crate::failures::Failures::new();
         let h = register("test.a", &[LOSS, LEAK]);
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn a_failures_magnitude_scales_its_displacement_from_healthy() {
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         reset_all();
         let _f = crate::failures::Failures::new();
         let h = register("test.b", &[LOSS]);
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn a_progressing_setting_worsens_to_its_limit() {
-        let _g = crate::failures::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::failures::tests::serial();
         reset_all();
         let h = register("test.c", &[LOSS]);
         set_direct("test.c", "efficiency_loss", 0.1, 0.2).unwrap();
@@ -401,6 +401,9 @@ mod tests {
 
     #[test]
     fn a_degraded_component_drives_its_failure_like_arming_it() {
+        // `failures::STATE` is process-wide and this test reaches it (directly, or
+        // through model code such as `Breakers::pre_systems` / `Damage::arm`).
+        let _serial = crate::failures::tests::serial();
         reset_all();
         crate::failures::reset_for_tests();
         crate::failures::register_component_catalogue();
