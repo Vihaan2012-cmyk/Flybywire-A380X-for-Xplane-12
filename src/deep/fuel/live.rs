@@ -55,6 +55,7 @@
 
 use crate::deep::api::{failure_id, Area, Registry};
 use crate::deep::live::{Faults, Truth};
+use crate::weight_balance;
 
 use super::cg_transfer::{self, TransferFaultDetector, TransferFaults};
 use super::gauging::{self, ProbeFault};
@@ -490,6 +491,23 @@ pub struct FuelLive {
     filter_water_fraction: [f64; N_ENGINES],
     filter_heater_failed: [bool; N_ENGINES],
     indicated_fob_kg: f64,
+    /// Each of the eleven real tanks' own `Position` from `flight_model.cfg`
+    /// (`weight_balance::parse`'s own `Balance::tanks`, `Tank.1`..`Tank.11`
+    /// order, matching `ALL_TANKS`), feet from the reference datum. Resolved
+    /// once at construction -- this is FlyByWire's own real geometry, not a
+    /// per-tick reparse -- and used only to feed `fuel_cg_ft`'s call into
+    /// `weight_balance::centre_of_gravity`, the crate's one real arm/moment
+    /// computation, rather than a second one duplicated in this directory.
+    tank_positions_ft: Vec<[f64; 3]>,
+    /// The eleven tanks' own longitudinal centre of gravity this tick, feet
+    /// from `weight_balance`'s reference datum (its own sign convention:
+    /// more positive is further forward). This is fuel-only -- it does not
+    /// include the empty aircraft or payload, so it is not `weight_balance::
+    /// WeightBalance`'s own published aircraft CG -- but it is a real
+    /// consequence of trim/CG transfer's own mass movement: without it nothing
+    /// in this directory ever showed the sole reason trim transfer exists
+    /// (moving the CG), even once the mass itself started moving for real.
+    fuel_cg_ft: f64,
     /// Inputs `Truth` does not carry; see [`FuelCommands`].
     pub commands: FuelCommands,
     /// Fuel grade uplifted this sector. `JetA1` is the international
@@ -533,6 +551,8 @@ impl FuelLive {
             filter_water_fraction: [0.0; N_ENGINES],
             filter_heater_failed: [false; N_ENGINES],
             indicated_fob_kg: 0.0,
+            tank_positions_ft: weight_balance::parse(weight_balance::FLIGHT_MODEL_CFG).tanks.into_iter().take(N_TANKS).collect(),
+            fuel_cg_ft: 0.0,
             commands: FuelCommands::default(),
             fuel_type: FuelType::JetA1,
         };
@@ -811,6 +831,13 @@ impl crate::deep::live::Area for FuelLive {
         // ---- Transfer paths ----------------------------------------------
         self.tick_transfers(truth, faults, dt, gallery_leak_fraction);
 
+        // The fuel-only longitudinal CG, from `weight_balance`'s own real
+        // arm/moment computation over this tick's own (just-moved) tank
+        // masses -- the one place trim/CG transfer's mass movement actually
+        // consumes for the purpose the real component exists for.
+        let masses = self.tanks.iter().zip(self.tank_positions_ft.iter()).map(|(t, &position)| weight_balance::Mass { pounds: t.mass_kg / weight_balance::LB_TO_KG, position });
+        self.fuel_cg_ft = weight_balance::centre_of_gravity(masses).1[0];
+
         // ---- Jettison ----------------------------------------------------
         self.tick_jettison(truth, faults, dt);
 
@@ -850,6 +877,7 @@ impl crate::deep::live::Area for FuelLive {
         out("FUEL_TOTAL_FOB_KG", self.indicated_fob_kg);
         out("FUEL_TOTAL_TRUE_FOB_KG", self.true_fob_kg());
         out("FUEL_TOTAL_LEAK_KG_S", self.total_leak_kg_s);
+        out("FUEL_CG_LONGITUDINAL_FT", self.fuel_cg_ft);
         for (i, tank) in self.tanks.iter().enumerate() {
             let n = i + 1;
             out(&format!("FUEL_TANK_QTY_KG:{n}"), tank.indicated_mass_kg);
@@ -1823,6 +1851,39 @@ mod tests {
         run(&mut idle, &Truth::default(), &Faults::default(), 10.0);
         let after_idle = idle.true_fob_kg();
         assert!((after_idle - before_idle).abs() < 1e-6, "with nothing commanded, total fuel must not change: {before_idle} -> {after_idle}");
+    }
+
+    /// Trim transfer exists to move the CG -- the whole reason this pass
+    /// also had to connect the mass movement to `weight_balance::
+    /// centre_of_gravity` rather than let the moved mass go unconsumed.
+    /// The trim tank sits at the aircraft's most aft real position
+    /// (`flight_model.cfg` `Tank.11`, `-87.14`) and the feed tanks sit far
+    /// forward of it (`-7.45`..`-25.0`), so draining the trim tank into them
+    /// must move `FUEL_CG_LONGITUDINAL_FT` forward (`weight_balance`'s own
+    /// sign convention: more positive is further forward, its module doc).
+    #[test]
+    fn trim_transfer_moves_the_published_fuel_cg_forward() {
+        let mut live = FuelLive::new();
+        live.load_tank(Tank::Trim, 6_000.0, 10.0);
+        for feed in [Tank::Feed1, Tank::Feed2, Tank::Feed3, Tank::Feed4] {
+            live.load_tank(feed, 0.0, 10.0);
+        }
+        for tank in [Tank::LeftOuter, Tank::LeftMid, Tank::LeftInner, Tank::RightInner, Tank::RightMid, Tank::RightOuter] {
+            live.load_tank(tank, 0.0, 10.0);
+        }
+        let mut truth = Truth::default();
+        truth.dt_s = 1.0;
+        // One tick first: `fuel_cg_ft` is only ever computed inside `tick`,
+        // so reading it beforehand would just be its `0.0` construction
+        // default, not a real "before" CG.
+        live.tick(&truth, &Faults::default());
+        let before = live.fuel_cg_ft;
+        for _ in 0..59 {
+            live.tick(&truth, &Faults::default());
+        }
+        let after = live.fuel_cg_ft;
+        assert!(live.tank_mass_kg(Tank::Trim) < 6_000.0, "the trim tank must actually have drained some mass forward");
+        assert!(after > before + 0.01, "trim transfer must move the published fuel CG forward as it drains: {before} -> {after} ft");
     }
 
     /// A tank cannot be loaded, or transferred into, past its own
