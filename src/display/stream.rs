@@ -223,6 +223,28 @@ impl Reader<'_> {
     }
 }
 
+/// A path-defining coordinate op is dropped whole (never appended to `out`)
+/// when any of its operands is NaN/Inf, rather than let a bad number reach
+/// lyon's tessellator -- a panic or a hang, see `Path::cubic_to`'s "no
+/// current point" fallback in path.rs -- or corrupt the transform/clip state
+/// that every later op in the stream reads through. Operands are still
+/// consumed from `ops` as normal (`r.nums()` never fails on a non-finite
+/// value, only on a short stream), so the rest of the stream stays aligned;
+/// only this one primitive is skipped. This mirrors the choice
+/// `Path::move_to`/`line_to` already make one point at a time: the
+/// surrounding path/transform/clip state is left exactly as if the bad op
+/// had never been sent, which is less surprising than substituting an
+/// arbitrary coordinate (e.g. 0,0, which could draw a spurious line across
+/// the screen or reset a clip/transform to something never requested), and
+/// cheaper than abandoning the whole in-progress sub-path for what is
+/// typically one glitched tick out of many good ones -- the stream is
+/// rebuilt fresh from live simvars next tick, so the visible damage is at
+/// most a dropped segment for one frame.
+#[inline]
+fn all_finite(vals: &[f64]) -> bool {
+    vals.iter().all(|v| v.is_finite())
+}
+
 /// Read a whole stream. `strings` is how many strings came with it.
 pub fn parse(ops: &[f64], strings: usize) -> Result<Vec<Op>, StreamError> {
     use opcode::*;
@@ -237,21 +259,57 @@ pub fn parse(ops: &[f64], strings: usize) -> Result<Vec<Op>, StreamError> {
         let op = match code as u32 {
             SAVE => Op::Save,
             RESTORE => Op::Restore,
-            TRANSFORM => Op::Transform(r.nums()?),
-            SET_TRANSFORM => Op::SetTransform(r.nums()?),
+            TRANSFORM => {
+                let t = r.nums::<6>()?;
+                if !all_finite(&t) {
+                    continue;
+                }
+                Op::Transform(t)
+            }
+            SET_TRANSFORM => {
+                let t = r.nums::<6>()?;
+                if !all_finite(&t) {
+                    continue;
+                }
+                Op::SetTransform(t)
+            }
             GLOBAL_ALPHA => Op::GlobalAlpha(r.num()?),
-            CLIP_RECT => Op::ClipRect(r.nums()?),
+            CLIP_RECT => {
+                let rect = r.nums::<4>()?;
+                if !all_finite(&rect) {
+                    continue;
+                }
+                Op::ClipRect(rect)
+            }
             BEGIN_PATH => Op::BeginPath,
             MOVE_TO => {
                 let [x, y] = r.nums()?;
+                if !x.is_finite() || !y.is_finite() {
+                    continue;
+                }
                 Op::MoveTo(x, y)
             }
             LINE_TO => {
                 let [x, y] = r.nums()?;
+                if !x.is_finite() || !y.is_finite() {
+                    continue;
+                }
                 Op::LineTo(x, y)
             }
-            QUAD_TO => Op::QuadTo(r.nums()?),
-            CUBIC_TO => Op::CubicTo(r.nums()?),
+            QUAD_TO => {
+                let q = r.nums::<4>()?;
+                if !all_finite(&q) {
+                    continue;
+                }
+                Op::QuadTo(q)
+            }
+            CUBIC_TO => {
+                let c = r.nums::<6>()?;
+                if !all_finite(&c) {
+                    continue;
+                }
+                Op::CubicTo(c)
+            }
             ARC => {
                 let [cx, cy, radius, start, end] = r.nums()?;
                 Op::Arc { cx, cy, r: radius, start, end, ccw: r.flag()? }
@@ -260,7 +318,13 @@ pub fn parse(ops: &[f64], strings: usize) -> Result<Vec<Op>, StreamError> {
                 let [cx, cy, rx, ry, rotation, start, end] = r.nums()?;
                 Op::Ellipse { cx, cy, rx, ry, rotation, start, end, ccw: r.flag()? }
             }
-            RECT => Op::Rect(r.nums()?),
+            RECT => {
+                let rect = r.nums::<4>()?;
+                if !all_finite(&rect) {
+                    continue;
+                }
+                Op::Rect(rect)
+            }
             CLOSE_PATH => Op::ClosePath,
             FILL => {
                 let colour = r.colour()?;
@@ -377,5 +441,47 @@ mod tests {
         assert!(parse(&[40., 3., 0., 0., 1., 1., 0., 0., 1., 1.], 3).is_err());
         // A dash count that is not a count.
         assert!(parse(&[21., 1., 1., 1., 1., 1., 0., 0., 10., -1., 0.], 0).is_err());
+    }
+
+    /// A NaN/Inf in a path-defining coordinate op must not reach `out` at
+    /// all: the whole primitive is dropped (not just clamped), the stream
+    /// stays aligned (the operands are still consumed), and parsing does not
+    /// error out over it -- one glitched op must not blank the rest of a
+    /// gauge's stream. Reverting the guards in `parse` (the ops going back
+    /// to `Op::X(r.nums()?)` with no finiteness check) makes every assertion
+    /// here fail: MOVE_TO/LINE_TO/QUAD_TO/CUBIC_TO/RECT would each appear in
+    /// `parsed` carrying a NaN or Inf operand instead of being absent.
+    #[test]
+    fn non_finite_path_coordinates_are_dropped_not_pushed() {
+        use opcode::*;
+        let ops = [
+            MOVE_TO as f64, f64::NAN, 0., //
+            LINE_TO as f64, f64::INFINITY, 0., //
+            QUAD_TO as f64, f64::NAN, 0., 0., 0., //
+            CUBIC_TO as f64, f64::NAN, 0., 0., 0., 0., 0., //
+            RECT as f64, f64::NAN, 0., 10., 10., //
+            CLOSE_PATH as f64,
+        ];
+        let parsed = parse(&ops, 0).unwrap();
+        assert_eq!(parsed, vec![Op::ClosePath], "every NaN/Inf coordinate op must be dropped, leaving only ClosePath");
+    }
+
+    /// Same guard for the ops that carry state forward to every later op in
+    /// the stream (the transform and the clip rect): a NaN here must not
+    /// silently poison `state.m`/the active clip for the rest of the
+    /// stream. Reverting the guard makes this fail because `parsed` would
+    /// then contain the corrupt Transform/ClipRect instead of skipping
+    /// straight to Save.
+    #[test]
+    fn non_finite_transform_and_clip_are_dropped_not_applied() {
+        use opcode::*;
+        let ops = [
+            TRANSFORM as f64, f64::NAN, 0., 0., 1., 0., 0., //
+            SET_TRANSFORM as f64, 0., f64::NAN, 0., 1., 0., 0., //
+            CLIP_RECT as f64, f64::NAN, 0., 10., 10., //
+            SAVE as f64,
+        ];
+        let parsed = parse(&ops, 0).unwrap();
+        assert_eq!(parsed, vec![Op::Save], "every NaN transform/clip op must be dropped, leaving only Save");
     }
 }
