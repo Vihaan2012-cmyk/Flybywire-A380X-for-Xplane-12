@@ -31,6 +31,7 @@
 //! | `apu_bleed_pressure_pa` | `A32NX_APU_BLEED_AIR_PRESSURE`, FlyByWire's own ARINC 429 word (psi absolute) |
 //! | `ac_bus_volts[i]` | `A32NX_ELEC_AC_{1..4}_BUS_POTENTIAL`, FlyByWire's own electrical system |
 //! | `dc_bus_volts[i]` | `A32NX_ELEC_DC_{1,2}_BUS_POTENTIAL`, ditto |
+//! | `prim_healthy[i]`, `sec_healthy[i]` | `A32NX_PRIM_{1,2,3}_HEALTHY` / `A32NX_SEC_{1,2,3}_HEALTHY`, `src/prim.rs`'s own per-tick write of FlyByWire's compiled Simulink `prim_healthy`/`sec_healthy` discrete outputs -- already folds in `FAILURE_PRIM`/`FAILURE_SEC` injection and each computer's own per-index power feed (108PH/247PP/DC_1), so this is real per-computer health, not derived from `ac_bus_volts` above |
 //! | `hydraulic_pressure_pa[i]` | `A32NX_HYD_{GREEN,YELLOW}_SYSTEM_1_SECTION_PRESSURE` (psi), FlyByWire's own hydraulic system |
 //! | `engine_n2_frac[i]`, `engine_n3_frac[i]` | `ENGINE_N2:n` / `ENGINE_N3:n`, divided by 100 -- the same `physics::engine` output as N1, written by `engine_commands.rs` right after it |
 //! | `engine_hp_port_pressure_pa[i]`, `engine_hp_port_temp_k[i]` | `ENGINE_HP_PORT_{PRESSURE_PA,TEMP_K}:n`, unconditionally (unlike `engine_bleed_*` above, which already picks IP8 or HP6 by which port is bled) |
@@ -379,6 +380,11 @@ struct Ids {
     apu_bleed_air_pressure: VariableIdentifier,
     ac_bus_potential: [VariableIdentifier; 4],
     dc_bus_potential: [VariableIdentifier; 2],
+    /// `A32NX_PRIM_{1,2,3}_HEALTHY` / `A32NX_SEC_{1,2,3}_HEALTHY`, written
+    /// every tick by `src/prim.rs` from FlyByWire's own compiled Simulink
+    /// discrete outputs. See `Truth::prim_healthy`/`sec_healthy`'s own doc.
+    prim_healthy: [VariableIdentifier; 3],
+    sec_healthy: [VariableIdentifier; 3],
     /// Green and yellow, in `Truth::hydraulic_pressure_pa`'s order.
     hydraulic_pressure_psi: [VariableIdentifier; 2],
     /// `TYRE_PRESSURE_PA:n`, which `physics::tyre` writes from its own
@@ -542,6 +548,8 @@ impl DeepLayer {
             apu_bleed_air_pressure: vars.get("APU_BLEED_AIR_PRESSURE".to_owned()),
             ac_bus_potential: [1, 2, 3, 4].map(|n| vars.get(format!("ELEC_AC_{n}_BUS_POTENTIAL"))),
             dc_bus_potential: [1, 2].map(|n| vars.get(format!("ELEC_DC_{n}_BUS_POTENTIAL"))),
+            prim_healthy: [1, 2, 3].map(|n| vars.get(format!("PRIM_{n}_HEALTHY"))),
+            sec_healthy: [1, 2, 3].map(|n| vars.get(format!("SEC_{n}_HEALTHY"))),
             hydraulic_pressure_psi: ["GREEN", "YELLOW"].map(|c| vars.get(format!("HYD_{c}_SYSTEM_1_SECTION_PRESSURE"))),
             tyre_pressure_pa: std::array::from_fn(|i| vars.get(format!("TYRE_PRESSURE_PA:{}", i + 1))),
             door_open_percent: DOOR_POINTS.map(|p| vars.get(format!("INTERACTIVE POINT OPEN:{p}"))),
@@ -893,6 +901,8 @@ impl DeepLayer {
             apu_bleed_pressure_pa,
             ac_bus_volts: std::array::from_fn(|i| vars.read(&self.ids.ac_bus_potential[i])),
             dc_bus_volts: std::array::from_fn(|i| vars.read(&self.ids.dc_bus_potential[i])),
+            prim_healthy: std::array::from_fn(|i| vars.read(&self.ids.prim_healthy[i]) != 0.0),
+            sec_healthy: std::array::from_fn(|i| vars.read(&self.ids.sec_healthy[i]) != 0.0),
             hydraulic_pressure_pa: std::array::from_fn(|i| vars.read(&self.ids.hydraulic_pressure_psi[i]) * PSI_TO_PA),
             engine_n2_frac,
             engine_n3_frac,
@@ -1023,6 +1033,33 @@ mod tests {
         assert!(!t.apu_running);
         assert_eq!(t.ac_bus_volts, [0.0; 4]);
         assert_eq!(t.hydraulic_pressure_pa, [0.0; 2]);
+        // No PRIM/SEC has published a healthy discrete yet: a cold aircraft
+        // has no live computer, the same "not a gap" reasoning as
+        // `apu_running`/`ac_bus_volts` above.
+        assert_eq!(t.prim_healthy, [false; 3]);
+        assert_eq!(t.sec_healthy, [false; 3]);
+    }
+
+    /// `src/prim.rs` writes `A32NX_PRIM_{n}_HEALTHY`/`A32NX_SEC_{n}_HEALTHY`
+    /// every tick from FlyByWire's own compiled Simulink discrete outputs;
+    /// this only proves `Truth` reads the six variables back correctly, not
+    /// prim.rs's own health computation (covered by prim.rs's own tests at
+    /// prim.rs:2061-2089).
+    #[test]
+    fn prim_and_sec_health_reach_truth_per_computer() {
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+        // PRIM 2 and SEC 3 unhealthy, everyone else healthy -- proves this
+        // is read per-computer, not collapsed to one bit.
+        set(&mut vars, "A32NX_PRIM_1_HEALTHY", 1.0);
+        set(&mut vars, "A32NX_PRIM_2_HEALTHY", 0.0);
+        set(&mut vars, "A32NX_PRIM_3_HEALTHY", 1.0);
+        set(&mut vars, "A32NX_SEC_1_HEALTHY", 1.0);
+        set(&mut vars, "A32NX_SEC_2_HEALTHY", 1.0);
+        set(&mut vars, "A32NX_SEC_3_HEALTHY", 0.0);
+        let t = layer.truth(&mut vars, Some(xplm), 0.0);
+        assert_eq!(t.prim_healthy, [true, false, true]);
+        assert_eq!(t.sec_healthy, [true, true, false]);
     }
 
     #[test]

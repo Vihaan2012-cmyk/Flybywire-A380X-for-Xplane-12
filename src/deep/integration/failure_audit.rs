@@ -169,6 +169,9 @@ fn cruise() -> Truth {
         apu_bleed_pressure_pa: 21_662.0,
         ac_bus_volts: [115.0; 4],
         dc_bus_volts: [28.0; 2],
+        // Every PRIM/SEC healthy: an ordinary cruise, nothing failed.
+        prim_healthy: [true; 3],
+        sec_healthy: [true; 3],
         // 5000 psi, the A380's own system pressure.
         hydraulic_pressure_pa: [34_474_000.0; 2],
         gpu_plugged_in: false,
