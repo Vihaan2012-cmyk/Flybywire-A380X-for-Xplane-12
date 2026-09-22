@@ -239,10 +239,37 @@ impl TrimmableHorizontalStabilizer {
         let motor_jam_torque = gear * (g.jam_torque_nm + y.jam_torque_nm);
         let motor_jam_damping = gear * gear * (g.jam_damping_nm_s_per_rad + y.jam_damping_nm_s_per_rad);
 
-        // The no-back engages whenever neither motor is actively commanded
-        // (a small residual damping torque from an idling motor does not
-        // count as "driving").
-        let driving = modes[0] == ActuatorMode::Active || modes[1] == ActuatorMode::Active;
+        // The no-back engages unless the drive is genuinely both commanded
+        // *and* actually capable of holding the screw: `modes[i] ==
+        // Active` alone is the caller's *intent* (the FCU/pedestal wheel
+        // wants a trim change), not whether the motors can deliver on it.
+        // Under total hydraulic loss to both motors, `PowerControlUnit`'s
+        // own torque ceiling (`max_torque_nm`) collapses to ~0 regardless
+        // of `modes`, so gate on the combined ceiling against
+        // `no_back_active_threshold_nm` too -- the field's own doc:
+        // "Combined motor torque magnitude below which the drive is
+        // considered 'not actively trimming'". Using instantaneous
+        // *delivered* torque instead would spuriously engage the no-back
+        // mid-trim (the servo law legitimately delivers ~0 net torque once
+        // the screw is running at the commanded rate against no
+        // resistance), which the ceiling does not.
+        // The no-back engages unless the drive is genuinely both commanded
+        // *and* actually capable of holding the screw: `modes[i] ==
+        // Active` alone is the caller's *intent* (the FCU/pedestal wheel
+        // wants a trim change), not whether the motors can deliver on it.
+        // Under total hydraulic loss to both motors, `PowerControlUnit`'s
+        // own torque ceiling (`max_torque_nm`) collapses to ~0 regardless
+        // of `modes`, so gate on the combined ceiling against
+        // `no_back_active_threshold_nm` too -- the field's own doc:
+        // "Combined motor torque magnitude below which the drive is
+        // considered 'not actively trimming'". Using instantaneous
+        // *delivered* torque instead would spuriously engage the no-back
+        // mid-trim (the servo law legitimately delivers ~0 net torque once
+        // the screw is running at the commanded rate against no
+        // resistance), which the ceiling does not.
+        let motor_capacity_nm = gear * (g.max_torque_nm + y.max_torque_nm);
+        let driving = (modes[0] == ActuatorMode::Active || modes[1] == ActuatorMode::Active)
+            && motor_capacity_nm > self.no_back_active_threshold_nm;
         if driving {
             self.no_back_lock_angle = None;
         } else if self.no_back_lock_angle.is_none() {
@@ -489,6 +516,46 @@ mod tests {
             failed_drift = (fo.angle_rad - held).abs();
         }
         assert!(failed_drift > healthy_drift * 2.0, "failed {failed_drift} vs healthy {healthy_drift}");
+    }
+
+    #[test]
+    fn the_no_back_brake_engages_on_lost_torque_capacity_even_while_still_commanded_active() {
+        // AD 2000-15-15 / Alaska 261: the exact scenario is total hydraulic
+        // loss to the THS while the FCU/pedestal wheel is still asking for
+        // Active (nobody told the mode to go Damping). Before this fix the
+        // no-back engaged purely off `modes[i] == Active`, so it never took
+        // hold here no matter how little torque the motors could actually
+        // deliver.
+        let mut ths = TrimmableHorizontalStabilizer::new_generic();
+        let target = 4.0_f64.to_radians();
+        for _ in 0..20_000 {
+            ths.step(ACTIVE, target, [1.0, 1.0], &ThsFaults::default(), &calm_aero(), DT);
+        }
+        let held_angle = ths.angle_rad();
+        let aero = AeroInputs { dynamic_pressure_pa: 15000.0, alpha_rad: 0.02, mach: 0.5, mach_crit: DEFAULT_MACH_CRIT };
+        let mut out = ThsOutput::default();
+        for _ in 0..5000 {
+            // Both motors at zero supply pressure: `PowerControlUnit`'s own
+            // torque ceiling collapses to 0 regardless of `modes`, which
+            // must still be `ACTIVE` here -- the caller never lowered it.
+            out = ths.step(ACTIVE, target, [0.0, 0.0], &ThsFaults::default(), &aero, DT);
+        }
+        assert!(out.no_back_engaged, "unpowered but still commanded Active: the no-back must still take hold");
+        assert!(
+            (out.angle_rad - held_angle).abs() < 0.01,
+            "and actually hold against the airload with nothing else able to: drifted to {}",
+            out.angle_rad.to_degrees()
+        );
+    }
+
+    #[test]
+    fn the_no_back_brake_stays_disengaged_while_genuinely_powered_and_active() {
+        // Guards the fix above against a broken capacity check that
+        // engages the no-back unconditionally: a healthy, fully powered,
+        // actively-commanded THS must still trim freely.
+        let mut ths = TrimmableHorizontalStabilizer::new_generic();
+        let out = ths.step(ACTIVE, 4.0_f64.to_radians(), [1.0, 1.0], &ThsFaults::default(), &calm_aero(), DT);
+        assert!(!out.no_back_engaged, "a healthy, powered, actively-commanded THS must not have its no-back engaged");
     }
 
     #[test]
