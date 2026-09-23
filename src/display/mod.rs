@@ -566,7 +566,6 @@ impl Displays {
         let height = header.height.load(Ordering::Relaxed);
         let now = std::time::Instant::now();
         let waited = bs.last_upload_at.map_or(UPLOAD_MAX_WAIT, |t| now - t);
-        let bytes = width as usize * height as usize * 4;
         // A screen with no dimming regions (SCREEN_ISIS_1, Clock, RTPI, BAT,
         // SCREEN_EFB) dims in its own drawing rather than through this
         // mechanism (`ScreenDef::dimming`'s doc comment) and is never
@@ -577,31 +576,47 @@ impl Displays {
         let dark = !brightness.is_empty() && brightness.iter().all(|b| *b <= 0.);
         let due = header.frame.load(Ordering::Relaxed) != bs.last_uploaded
             && waited >= UPLOAD_MIN_INTERVAL
-            && (bytes <= self.upload_budget || waited >= UPLOAD_MAX_WAIT)
             && !(dark && bs.last_upload_at.is_some());
         if due && header.writing.load(Ordering::Relaxed) == 0 {
-            bs.last_upload_at = Some(now);
             let frame = header.frame.load(Ordering::Relaxed);
             let dirty = read_dirty_rects(header);
             let rects = xphfbw::plan_upload(frame, bs.last_uploaded, bs.force_full, &dirty, width, height);
-            if !rects.is_empty() {
-                let area: usize = rects.iter().map(|r| r[2] as usize * r[3] as usize * 4).sum();
-                self.upload_budget = self.upload_budget.saturating_sub(area);
-                let pixels = bs.block.pixels();
-                if let Some(Ok(renderer)) = self.renderer.as_mut() {
-                    renderer.bridge_upload(&mut bs.gpu, width, height, pixels, &rects);
+            // What this upload actually costs, which is what the frame's
+            // budget has to be charged.
+            //
+            // The budget used to be spent against the screen's *whole* area
+            // instead, however little of it had changed. Six 768x1024
+            // display units are charged 18.9 MB of the 24 MB that way before
+            // the MFD's turn, so its 1646x1024 never fitted in what was left
+            // and it only ever uploaded when UPLOAD_MAX_WAIT let it past --
+            // about six frames a second, alone among the screens, which is
+            // exactly how it looked. Its dirty rects are a scratchpad line
+            // and a softkey or two; they always fitted.
+            let area: usize = rects.iter().map(|r| r[2] as usize * r[3] as usize * 4).sum();
+            // Out of budget with time still on the clock: leave
+            // `last_uploaded`/`last_upload_at` untouched so this same
+            // upload is reconsidered next frame rather than dropped, and
+            // fall through to draw what is already on the GPU.
+            if area <= self.upload_budget || waited >= UPLOAD_MAX_WAIT {
+                bs.last_upload_at = Some(now);
+                if !rects.is_empty() {
+                    self.upload_budget = self.upload_budget.saturating_sub(area);
+                    let pixels = bs.block.pixels();
+                    if let Some(Ok(renderer)) = self.renderer.as_mut() {
+                        renderer.bridge_upload(&mut bs.gpu, width, height, pixels, &rects);
+                    }
                 }
-            }
-            // Rule 6: re-read `frame`; if it moved during the upload above,
-            // the rectangles just copied may already be stale, so the next
-            // upload is forced to be a full one instead of trusting the
-            // next dirty rects alone.
-            let frame_after = bs.block.header().frame.load(Ordering::Relaxed);
-            if xphfbw::torn_by_a_new_publish(frame, frame_after) {
-                bs.force_full = true;
-            } else {
-                bs.force_full = false;
-                bs.last_uploaded = frame;
+                // Rule 6: re-read `frame`; if it moved during the upload
+                // above, the rectangles just copied may already be stale, so
+                // the next upload is forced to be a full one instead of
+                // trusting the next dirty rects alone.
+                let frame_after = bs.block.header().frame.load(Ordering::Relaxed);
+                if xphfbw::torn_by_a_new_publish(frame, frame_after) {
+                    bs.force_full = true;
+                } else {
+                    bs.force_full = false;
+                    bs.last_uploaded = frame;
+                }
             }
         }
         // The NDs: FlyByWire's terrain gauge (or the weather radar) under
