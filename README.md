@@ -54,29 +54,37 @@ FlyByWire's systems code this builds on adds about 128,700 lines of Rust
 
 ## Failures by ATA chapter
 
-The table below is the original catalogue, carried over from FlyByWire's own failures
-and this project's first physics layer. The deep-systems areas add a further 5,195 on
-top of it, registered per component rather than per chapter — see `src/deep/*/registry.rs`
-and the Study pages for those.
-
+Every failure, from the original catalogue and from the deep-systems areas alike, is
+classified by ATA chapter.
 
 | ATA | Chapter | Failures |
 |---|---|---|
-| 21 | Air conditioning / pressurisation | 54 |
-| 22 | Autoflight | 3 |
-| 24 | Electrical power | 47 |
-| 26 | Fire protection | 18 |
-| 27 | Flight controls | 9 |
-| 28 | Fuel | 49 |
-| 29 | Hydraulic power | 24 |
-| 30 | Ice and rain protection | 3 |
-| 32 | Landing gear | 35 |
-| 34 | Navigation | 22 |
-| 36 | Pneumatic | 19 |
-| 49 | APU | 5 |
-| 72–80 | Engine (per engine, × 4) | 72 |
-| | **Subtotal** | **360** |
-| | Deep-systems areas | **5,195** |
+| 21 | Air conditioning / pressurisation | 465 |
+| 22 | Autoflight | 27 |
+| 23 | Communications | 48 |
+| 24 | Electrical power | 967 |
+| 25 | Equipment / furnishings | 48 |
+| 26 | Fire protection | 274 |
+| 27 | Flight controls | 433 |
+| 28 | Fuel | 1,008 |
+| 29 | Hydraulic power | 176 |
+| 30 | Ice and rain protection | 124 |
+| 31 | Indicating / recording | 18 |
+| 32 | Landing gear | 405 |
+| 33 | Lights | 90 |
+| 34 | Navigation | 247 |
+| 35 | Oxygen | 49 |
+| 36 | Pneumatic | 115 |
+| 38 | Water / waste | 19 |
+| 42 | Integrated modular avionics | 153 |
+| 44 | Cabin systems | 35 |
+| 49 | APU | 54 |
+| 52 | Doors | 77 |
+| 53 | Fuselage | 5 |
+| 56 | Windows | 3 |
+| 57 | Wings | 2 |
+| 71–80 | Power plant / engine (per engine, × 4) | 622 |
+| 91 | Wiring | 91 |
 | | **Total** | **5,555** |
 
 Every failure is also a component with a continuous `loss` level (0–100 %), so partial
@@ -120,19 +128,22 @@ component maps is in progress.
 The CL650 is the reference for study-level depth in X-Plane. The comparison below is at
 the feature level.
 
-| Area | CL650 | This project today | Planned |
-|---|---|---|---|
-| Single failures | ~1,375 (≈ 700 electrical) | 360 | ~2,500 |
-| Electrical | Per-load network, every load can fail or short | FlyByWire buses/contactors + 265 breakers; loads lumped per bus | Per-load network with fault currents and wiring zones |
-| Engine gas path | Stage-level compressors, maps, surge | Thermodynamic spools + oil + hot section, TCDS-calibrated | Spool matching, maps, stage damage, surge |
-| Hydraulics | Line/volume network | FlyByWire circuits and pumps | Line/volume network with fluid thermal model |
-| Pneumatic / air conditioning | Simpler | FlyByWire packs + air cycle machine, real engine bleed ports | Duct network with leaks and overheat loops |
-| Flight control logic | Business jet | Full Airbus fly-by-wire laws (FlyByWire) | Actuator hinge moments, jams, runaways |
-| Wear, MEL, persistence | Not modelled | Wear, damage creep, MEL, persistent airframe | — |
+| Area | CL650 | This project today |
+|---|---|---|
+| Single failures | ~1,375 (≈ 700 electrical) | **5,555** (967 electrical, 1,008 fuel) |
+| Electrical | Per-load network, every load can fail or short | Per-load network with fault currents and wiring zones, 399 breakers, 91 wiring failures |
+| Engine gas path | Stage-level compressors, maps, surge | Thermodynamic spools + oil + hot section, TCDS-calibrated; fuel system, ignition, starting, VSVs, bleed valves, vibration, reversers, dual-channel EEC |
+| Hydraulics | Line/volume network | Line network with pumps, reservoirs and leaks (176 failures) |
+| Pneumatic / air conditioning | Simpler | FlyByWire packs + air cycle machine, real engine bleed ports, duct network (115 + 465 failures) |
+| Flight control logic | Business jet | Full Airbus fly-by-wire laws (FlyByWire) + actuator and high-lift models (433 failures) |
+| Landing gear | Tyres, brakes, retraction | Gear structure with strut loads, fatigue and collapse (405 failures) |
+| Avionics network | Not modelled at this depth | ARINC 653 partitions, module and bay faults (153 failures) |
+| Wear, MEL, persistence | Not modelled | Wear, damage creep, MEL, persistent airframe |
 
-Ahead today: air conditioning and pressurisation, pneumatics, flight-control logic,
-landing gear/tyres/brakes, wear/MEL. Behind today: electrical per-load depth, engine gas
-path, hydraulic plumbing.
+Where it is still behind: the CL650's electrical model fails and shorts individual
+loads with real fault currents, and its systems have had years of tuning against the
+real aircraft. Failure *count* is not depth, and this table is a feature comparison,
+not a claim to have overtaken it.
 
 ## Roadmap
 
