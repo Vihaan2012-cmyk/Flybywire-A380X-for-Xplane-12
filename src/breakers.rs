@@ -1121,12 +1121,53 @@ fn real_current_var(id: &str) -> Option<&'static str> {
         "hyd-epump-gb" => Some("A32NX_HYD_GB_EPUMP_CURRENT"),
         "hyd-epump-ya" => Some("A32NX_HYD_YA_EPUMP_CURRENT"),
         "hyd-epump-yb" => Some("A32NX_HYD_YB_EPUMP_CURRENT"),
-        _ => id.strip_prefix("sys-").and_then(|n| n.parse::<usize>().ok()).and_then(fuel_pump_current_var),
+        // The absorbed `sys-<circuit>` fuel pumps deliberately are NOT
+        // here, though `fuel.rs` does publish a real current for them --
+        // see [`fuel_pump_current_var`], which explains why the two numbers
+        // cannot be compared.
+        _ => None,
     }
 }
 
-/// `fuel.rs` already publishes each fuel pump's own real, PID/hydraulic-
-/// derived motor current as `FUEL_PUMP_CURRENT_A:<pump index>`
+/// **Not wired into [`real_current_var`], on purpose.** A published
+/// current may only be compared against a rating derived the same way, and
+/// for these two it is not:
+///
+/// * `fuel.rs` computes `FUEL_PUMP_CURRENT_A:<n>` from the pump's real
+///   delivered hydraulic power at `FUEL_PUMP_VOLTAGE_V` = 115 V, the
+///   aircraft's AC motor bus;
+/// * [`absorbed_systems_cfg`] rates the breaker at the systems.cfg `Power:`
+///   field over its bus voltage, and every fuel pump in that file carries
+///   the same `Power:3, 5, 20.0` placeholder -- MSFS's own 5 W, 28 V DC
+///   token for a circuit it only needs to switch, with the comment
+///   "Fuel Pump 5W" written next to it. That is 0.179 A.
+///
+/// A feed pump carrying one engine's cruise fuel flow runs 30 psi at about
+/// 1660 gal/h, which is 361 W of delivered hydraulic power and so 4.19 A on
+/// the 115 V basis -- **23.4 times** the 0.179 A rating, past the 10x
+/// magnetic pickup, so the breaker fired instantly the moment the pump
+/// carried real fuel, and its partner tripped straight after it picking up
+/// the flow. Both FEED 4 pumps went that way in flight. The unit test that
+/// covered this wiring wrote its current as `rated * 0.44`, i.e. it assumed
+/// the very compatibility that does not hold, so it could not catch it.
+///
+/// The fix is not a bigger rating pulled out of the air: nothing in
+/// FlyByWire or the aircraft config states these motors' real full-load
+/// current, and the 5 W token is not it. So the trip curve runs on the one
+/// self-consistent basis available -- `rated_a` times the published load
+/// multipliers (`published_load_current_multiplier`,
+/// `published_hydraulic_power_current_multiplier`,
+/// `bearing_overcurrent_multiplier`), which are *fractions of rated* and so
+/// carry every cavitation/wear/hydraulic-load coupling across unharmed. The
+/// real amp figure stays published for the Study panel to show; it just no
+/// longer rates a breaker it was never on the same scale as.
+///
+/// Kept (not deleted) because the mapping itself is correct and is what a
+/// real rating for these pumps would be compared against; the day one
+/// exists, wiring it back is this function plus a rating.
+///
+/// `fuel.rs` publishes each fuel pump's own real, PID/hydraulic-derived
+/// motor current as `FUEL_PUMP_CURRENT_A:<pump index>`
 /// (`fuel.rs`'s `pump_current`, written from `fluids::pump_current_a`) --
 /// the same class of real per-consumer current `real_current_var`'s own doc
 /// already wires for the 4 electric hydraulic pumps, just not previously
@@ -1139,6 +1180,7 @@ fn real_current_var(id: &str) -> Option<&'static str> {
 /// mapping rather than assuming N==index. Resolved once (this whole
 /// catalogue is built once, `CATALOG`), so leaking the formatted name here
 /// costs at most one string per real fuel-pump breaker, not per tick.
+#[allow(dead_code)]
 fn fuel_pump_current_var(circuit_number: usize) -> Option<&'static str> {
     static MAP: std::sync::OnceLock<HashMap<usize, &'static str>> = std::sync::OnceLock::new();
     let map = MAP.get_or_init(|| {
@@ -1771,57 +1813,58 @@ mod tests {
         assert_eq!(bearing_overcurrent_multiplier("sys-2"), 1.0);
     }
 
-    /// Superseded by real-current wiring (docs/physics/breakers.md "Actual
-    /// current + thermal ambient"): "sys-2" (circuit 2, a real fuel pump,
-    /// `CIRCUIT_FUEL_PUMP:1`) is now mapped by [`fuel_pump_current_var`] to
-    /// FlyByWire's own `FUEL_PUMP_CURRENT_A:1` (`fuel.rs`'s real,
-    /// `fluids::pump_current_a`-derived motor current, which already folds
-    /// in the pump's own cavitation-reduced hydraulic power), so it now
-    /// takes the *real-current* branch of `post_systems`, not the synthetic
-    /// `rated * ... * published_hydraulic_power_current_multiplier`
-    /// estimate branch the old version of this test exercised. This test
-    /// checks that new contract directly: writing straight to the real
-    /// dataref (standing in for fuel.rs's own publish, since this unit-test
-    /// binary never runs the fuel network) is read back verbatim by the
-    /// breaker, undercurrent alone never trips, and -- decoupled -- a fresh
-    /// instance with the dataref never written reads back 0, not a
-    /// synthetic rated estimate.
+    /// The regression that grounded both FEED 4 pumps in flight, and the
+    /// contract that replaced it ([`fuel_pump_current_var`]'s doc has the
+    /// full arithmetic). A fuel pump's breaker is rated from systems.cfg's
+    /// `Power:3, 5, 20.0` placeholder over a 28 V bus -- 0.179 A -- while
+    /// `fuel.rs` publishes that pump's real motor current on the 115 V AC
+    /// basis, 4.19 A once it carries an engine's cruise fuel flow. Feeding
+    /// the second into a curve rated by the first is a ratio of 23.4,
+    /// past the 10x magnetic pickup, so the breaker fired the instant the
+    /// pump did its job.
+    ///
+    /// The test the wiring shipped with wrote its current as `rated * 0.44`
+    /// and so assumed the very compatibility that does not hold. This one
+    /// asserts the scales instead of assuming them: no fuel pump takes the
+    /// real-current branch, and a pump carrying its design flow all day
+    /// keeps its breaker.
     #[test]
-    fn fuel_pump_current_now_reads_the_real_fbw_dataref_not_the_synthetic_estimate() {
+    fn a_fuel_pump_carrying_its_design_flow_keeps_its_breaker() {
         let mut vars = TestVars::default();
         let mut b = Breakers::new(&mut vars);
+
+        // No `sys-<n>` fuel pump may take the real-current branch: its
+        // rating is not on that number's scale.
+        for (i, live) in b.live.iter().enumerate() {
+            let def = &b.defs[live.def_index];
+            if def.id.starts_with("sys-") {
+                assert!(
+                    live.real_current_id.is_none(),
+                    "{} ({}) is rated from systems.cfg's 5 W/28 V token, so it must not be tripped by a 115 V motor current",
+                    def.id,
+                    def.name
+                );
+                let _ = i;
+            }
+        }
+
+        // The measured operating point of a feed pump moving one engine's
+        // cruise fuel flow (fuel_network's own model: 30 psi, 1660 gal/h ->
+        // 361 W delivered -> 4.19 A at 115 V and 0.75 motor efficiency).
+        // Nothing may turn that into a trip.
         let i = *b.by_id.get("sys-2").expect("circuit 2 is a real fuel pump");
         let rated = b.defs[b.live[i].def_index].rating_a;
-        let real_current_id = b.live[i].real_current_id.clone().expect("sys-2 (a fuel pump) must now be wired to fuel.rs's real FUEL_PUMP_CURRENT_A dataref");
-
-        // A cavitating pump moving little fluid draws LESS than rated
-        // current (fuel.rs's own real hydraulic-power-derived figure) --
-        // the breaker must read that value straight through, not scale it.
-        vars.write(&real_current_id, rated * 0.44);
-        b.post_systems(&mut vars, 1.0 / 60.0);
-        let current = vars.read(&b.live[i].current_id);
-        assert!((current - rated * 0.44).abs() < 1e-9, "must read the real dataref verbatim, got {current}");
-        assert!(current < rated, "a cavitating pump moving little fluid must draw LESS than rated current, not more");
-
-        // Undercurrent alone (no bearing wear, no severe fault) must never
-        // trip a thermal-magnetic breaker.
-        for _ in 0..3600 {
+        assert!(rated < 0.2, "systems.cfg's placeholder really is this small: {rated} A");
+        for _ in 0..(3600 * 60) {
             b.post_systems(&mut vars, 1.0 / 60.0);
         }
-        assert!(b.closed(&mut vars, i), "cavitation alone (reduced current) must never trip a thermal-magnetic breaker");
-
-        // Decouple: a fresh instance with the real dataref never written
-        // (fuel.rs's publisher absent) reads back 0 current, not a
-        // synthetic rated estimate -- the same contract every real-current
-        // breaker has (`without_the_real_current_feed_the_same_window_
-        // never_trips`).
-        let mut vars2 = TestVars::default();
-        let mut b2 = Breakers::new(&mut vars2);
-        let i2 = *b2.by_id.get("sys-2").unwrap();
-        b2.post_systems(&mut vars2, 1.0 / 60.0);
-        assert_eq!(vars2.read(&b2.live[i2].current_id), 0., "with no real current fed, published current must be 0, not a synthetic estimate");
+        assert!(b.closed(&mut vars, i), "a healthy fuel pump must still have its breaker after an hour of running");
+        let current = vars.read(&b.live[i].current_id);
+        assert!(
+            (current - rated).abs() < 1e-9,
+            "with no load coupling published, a fuel pump draws exactly its rated current, got {current} against {rated}"
+        );
     }
-
 
     #[test]
     fn snapshot_reports_every_field_the_study_panel_json_needs() {

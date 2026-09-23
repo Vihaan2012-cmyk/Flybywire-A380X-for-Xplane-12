@@ -568,6 +568,54 @@ audited and left that way deliberately (not invented as a measurement) --
 FlyByWire's Rust with a *per-consumer* (as opposed to per-bus-aggregate)
 published current.
 
+### The rating and the current must be on the same basis
+
+A published current may only be fed to the trip curve if the breaker's
+`rating_a` was derived the same way. This is not a formality -- it is the
+one mistake this section has already made in flight.
+
+The absorbed `systems.cfg` fuel pumps were wired to `fuel.rs`'s real
+`FUEL_PUMP_CURRENT_A:<n>`, which is the pump's delivered hydraulic power at
+`FUEL_PUMP_VOLTAGE_V` = 115 V, the AC motor bus. Their `rating_a`, though,
+comes from `absorbed_systems_cfg`: the `Power:` field over the bus voltage,
+and every fuel pump line in that file carries the same `Power:3, 5, 20.0`
+placeholder -- MSFS's 5 W, 28 V DC token for a circuit it only needs to
+switch, with `; Fuel Pump 5W` written beside it. That is 0.179 A.
+
+A feed pump carrying one engine's cruise fuel flow runs 30 psi at about
+1660 gal/h: 361 W delivered, so 4.19 A on the 115 V basis. Against 0.179 A
+that is a ratio of **23.4**, past the 10x magnetic pickup, so the breaker
+fired the instant the pump carried real fuel -- and its partner tripped
+straight after it, picking up the flow. Both FEED 4 pumps went that way in
+flight.
+
+The test that shipped with the wiring wrote its current as `rated * 0.44`,
+so it assumed the very compatibility that does not hold and could not catch
+it. Its replacement,
+`breakers::tests::a_fuel_pump_carrying_its_design_flow_keeps_its_breaker`,
+asserts the scales instead: no `sys-<n>` breaker may take the real-current
+branch, and a pump at its measured design point keeps its breaker for an
+hour.
+
+So, before adding a `real_current_var` arm, check two things:
+
+1. **Same voltage.** The dataref's amps and the rating's amps must be on
+   the same bus. A 115 V AC motor current cannot rate against a 28 V DC
+   circuit token.
+2. **A real rating, not a placeholder.** `basis` saying "real, from FBW's
+   own embedded systems.cfg Power field" means the *provenance* is real; it
+   does not mean the number describes the physical consumer. Where the
+   consumer's own full-load current is not stated anywhere in FlyByWire or
+   the aircraft config, there is no rating to trip against, and the honest
+   answer is the multiplier path -- `rated_a` times
+   `bearing_overcurrent_multiplier` /
+   `published_load_current_multiplier` /
+   `published_hydraulic_power_current_multiplier`. Those are *fractions of
+   rated*, so every cavitation, wear and hydraulic-load coupling survives
+   on whatever basis the rating happens to be on, and nothing is invented.
+   Publish the real amps for the Study panel regardless; displaying a
+   number is not the same as rating a breaker with it.
+
 ### Thermal ambient
 
 `physics::electrical::trip_step_with_ambient(heat, ratio, delta,
