@@ -34,7 +34,7 @@ index 0000000..d57eb64
 +
 +import { ArraySubject, FSComponent, MappedSubject, Subject, VNode } from '@microsoft/msfs-sdk';
 +import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
-+import { FmsData, getSimBriefOfp } from '@flybywiresim/fbw-sdk';
++import { FmsData, getSimBriefOfp, ISimbriefData } from '@flybywiresim/fbw-sdk';
 +import { AbstractOitFltOpsPageProps } from '../../OIT';
 +import { Button } from '../../../MsfsAvionicsCommon/UiWidgets/Button';
 +import { DropdownMenu } from '../../../MsfsAvionicsCommon/UiWidgets/DropdownMenu';
@@ -858,7 +858,7 @@ new file mode 100644
 index 0000000..c7ef591
 --- /dev/null
 +++ b/fbw-a380x/src/systems/instruments/src/OIT/Pages/FltOps/OitFltOpsTakeoffPerformance.tsx
-@@ -0,0 +1,539 @@
+@@ -0,0 +1,586 @@
 +//  Copyright (c) 2025 FlyByWire Simulations
 +//  SPDX-License-Identifier: GPL-3.0
 +
@@ -1097,7 +1097,7 @@ index 0000000..c7ef591
 +   */
 +  private async syncSimbrief(): Promise<void> {
 +    this.databaseMessage.set('SIMBRIEF REQUEST SENT');
-+    let ofp;
++    let ofp: ISimbriefData;
 +    try {
 +      ofp = await getSimBriefOfp();
 +    } catch (e) {

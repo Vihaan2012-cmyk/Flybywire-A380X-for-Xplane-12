@@ -38,6 +38,29 @@ Windows. The pieces workstream D's patches depend on:
   while writing this doc; if it needs the same environment workaround as
   `build.js` scripts do (see below), wrap it the same way.
 
+### Editing a patch file by hand
+
+A unified diff's `@@ -a,b +c,d @@` header states how many lines the hunk
+covers, and `git apply` believes it. Add or remove lines in the body without
+correcting those counts and the patch still applies, silently, writing a file
+that simply stops at whatever the header claimed -- `git apply --check` does
+not catch it either. A new-file hunk (`@@ -0,0 +1,N @@`) truncates at N lines,
+and the only sign is the build: "Unexpected end of file" pointing at line
+N + 1.
+
+That is how `SYNC SIMBRIEF` first failed to ship: the hunk had grown from 539
+lines to 586 and still said 539, so `OitFltOpsTakeoffPerformance.tsx` was
+written 539 lines long and the OIT was the one instrument of sixteen that did
+not build. Nothing else complained -- `mach` reported the other fifteen as
+success and exited 0, and the stale `oit.js` from the previous build stayed
+in place.
+
+So after editing a patch here, either re-take it with `git diff` inside
+`D:bw-aircraft` (the way it was made), or recompute every hunk header:
+`b` is the number of body lines starting with a space or `-`, `d` the number
+starting with a space or `+`. Then check the applied file's length and its
+last line before building.
+
 All of the above write into `fbw-a380x/out/flybywire-aircraft-a380-842/html_ui`,
 which is:
 
