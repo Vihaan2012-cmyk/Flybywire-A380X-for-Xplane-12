@@ -105,7 +105,7 @@ struct BridgeScreen {
 /// Screen pixels copied into X-Plane's textures in one X-Plane frame, at
 /// most: each copy stalls X-Plane's GPU, and 15 screens refreshed in full
 /// every frame (58 MB) took X-Plane down to 2-3 fps. Screens take turns.
-const UPLOAD_BUDGET_BYTES: usize = 12 << 20;
+const UPLOAD_BUDGET_BYTES: usize = 24 << 20;
 /// A screen is refreshed at most this often (the instruments' own 30 Hz).
 /// `FBW_SCREENS=off` draws no cockpit display at all: no upload, no quad,
 /// no underlay. Purely a measuring tool -- run once with it and once
@@ -128,7 +128,13 @@ fn screens_disabled() -> bool {
     })
 }
 
-const UPLOAD_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+/// The shortest gap between two uploads of one screen: 16 ms, so a screen
+/// can follow a 60 fps frame rather than the 30 Hz the previous 33 ms
+/// allowed. Only a screen whose contents actually changed uploads at all
+/// (rule 6's dirty rectangles), so the cost of the higher ceiling is paid
+/// only where something is moving -- a cursor being dragged across the MFD,
+/// an ND sweeping -- and a static screen still uploads nothing.
+const UPLOAD_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 /// A screen that has waited this long is refreshed even over the budget, so
 /// a big one (the FCU's 2560x1280) never starves.
 const UPLOAD_MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
@@ -728,6 +734,16 @@ impl Displays {
     }
 
     fn mouse(&mut self, screen: usize, x: c_int, y: c_int, status: c_int, button: i32) {
+        // X-Plane gives no position with a release on an avionics device: the
+        // up always arrives at (0,0), whatever the press and drags said.
+        // Forwarded as it comes, the page sees the press on a button and the
+        // release in its top-left corner, so no click is ever synthesised --
+        // the cursor tracks the mouse and nothing can be pressed. A release
+        // therefore happens where the pointer last was.
+        let (x, y) = match (status, self.screens[screen].hover) {
+            (xp::MOUSE_UP, Some((hx, hy))) if x == 0 && y == 0 && (hx, hy) != (0, 0) => (hx, hy),
+            _ => (x, y),
+        };
         let (kind, input_kind) = match status {
             xp::MOUSE_DOWN => {
                 self.screens[screen].pressed = true;
