@@ -128,6 +128,12 @@ component maps is in progress.
 The CL650 is the reference for study-level depth in X-Plane. The comparison below is at
 the feature level.
 
+A caveat on the left-hand column: it is written from public material and from using the
+aircraft, not from its internals, which are encrypted. Where it says something is
+"simpler" or gives no mechanism, that is the limit of what can be checked from outside
+— not a measured finding. The right-hand column is counted from this repository's own
+code and catalogue.
+
 | Area | CL650 | This project today |
 |---|---|---|
 | Single failures | ~1,375 (≈ 700 electrical) | **5,555** (967 electrical, 1,008 fuel) |
@@ -138,7 +144,7 @@ the feature level.
 | Flight control logic | Business jet | Full Airbus fly-by-wire laws (FlyByWire) + actuator and high-lift models (433 failures) |
 | Landing gear | Tyres, brakes, retraction | Gear structure with strut loads, fatigue and collapse (405 failures) |
 | Avionics network | Not modelled at this depth | ARINC 653 partitions, module and bay faults (153 failures) |
-| Wear, MEL, persistence | Not modelled | Wear, damage creep, MEL, persistent airframe |
+| Wear, MEL, persistence | Full aircraft state persistence — every part of the aircraft's state is restored on reload | Wear, damage creep, MEL with per-unit placarding, persistent airframe |
 
 Where it is still behind: the CL650 has had years of tuning against the real
 aircraft, and its documentation, checklists and failure behaviour have been exercised
