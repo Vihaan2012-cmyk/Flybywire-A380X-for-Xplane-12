@@ -625,11 +625,37 @@ pub(crate) fn direct_call(name: &str, args_json: &str) -> Option<CallReply> {
     })
 }
 
-/// `fetch(url, {method, body})` to SimBridge (`http://localhost:8380`, fbw-common
-/// simbridge/common.ts): the terrain API map data implements, and `/health`
-/// listing that service (SimBridge's health.controller.ts checks `api` and
-/// `mcdu`; only the API is here, so only it is listed, as up). Anything else
-/// is not found. The reply is `{status, body}`.
+/// Whether this plugin answers `url` out of its own data rather than the
+/// network. Both of these are FlyByWire asking a local service for
+/// something this port implements in Rust instead:
+///
+/// * SimBridge, FlyByWire's own companion server, at `localhost:8380`
+///   (fbw-common `simbridge/common.ts`) -- the terrain API `src/mapdata`
+///   implements, and the `/health` it checks first;
+/// * Navigraph's AMDB, answered from the user's local data by
+///   `src/oans/plugin.rs`.
+///
+/// Everything else is a real address and belongs on the network, so the
+/// test is by host: a loopback address is ours, anything else is not.
+fn answered_locally(url: &str) -> bool {
+    let host = url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
+/// `fetch(url, {method, body})`.
+///
+/// SimBridge's address and Navigraph's AMDB are answered here, out of this
+/// plugin's own data. Everything else goes to the network through
+/// [`crate::net`] -- until it did, every other URL came back 404, which is
+/// what stopped FlyByWire's SimBrief support working in this port. The MFD's
+/// own CPNY F-PLN REQUEST (`FlightManagementComputer::cpnyFplnRequest`)
+/// downloads the OFP and uplinks it as a flight plan without any help from
+/// this side; it was only ever the fetch that failed.
+///
+/// A network request answers [`CallReply::Pending`], which the runtime
+/// re-issues on later ticks until it resolves, so nothing waits on a round
+/// trip inside a frame. The reply, either way, is `{status, body}`.
 fn simbridge_fetch(args_json: &str) -> CallReply {
     let args: Vec<serde_json::Value> = serde_json::from_str(args_json).unwrap_or_default();
     let s = |i: usize| args.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -639,6 +665,15 @@ fn simbridge_fetch(args_json: &str) -> CallReply {
     if let Some((status, text)) = crate::oans::plugin::oans_request(&method, &url, &body) {
         return CallReply::Resolved(serde_json::json!({ "status": status, "body": text }).to_string());
     }
+    if !answered_locally(&url) {
+        let method = if method.is_empty() { "GET".to_string() } else { method };
+        return match crate::net::poll(args_json, &method, &url, &body) {
+            Some((status, text)) => CallReply::Resolved(serde_json::json!({ "status": status, "body": text }).to_string()),
+            // The runtime asks again next tick with these same arguments,
+            // which is how `net::poll` recognises the same request.
+            None => CallReply::Pending(0),
+        };
+    }
     let path = url.splitn(4, '/').nth(3).map(|p| format!("/{p}")).unwrap_or_default();
     let (status, text) = if path.split('?').next() == Some("/health") {
         (200, r#"{"status":"ok","info":{"api":{"status":"up"}},"error":{},"details":{"api":{"status":"up"}}}"#.to_string())
@@ -646,6 +681,24 @@ fn simbridge_fetch(args_json: &str) -> CallReply {
         crate::mapdata::plugin::simbridge_request(&method, &path, &body).unwrap_or((404, String::new()))
     };
     CallReply::Resolved(serde_json::json!({ "status": status, "body": text }).to_string())
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::answered_locally;
+
+    #[test]
+    fn only_loopback_is_answered_out_of_local_data() {
+        // SimBridge and the services this port implements for it.
+        assert!(answered_locally("http://localhost:8380/health"));
+        assert!(answered_locally("http://localhost:8380/api/v1/terrain/ndmap"));
+        assert!(answered_locally("http://127.0.0.1:8380/health"));
+        // Real addresses, which have to reach the network. SimBrief is the
+        // one that matters: answering it locally is what returned 404 and
+        // broke the MFD's CPNY F-PLN REQUEST.
+        assert!(!answered_locally("https://www.simbrief.com/api/xml.fetcher.php?userid=1&json=v2"));
+        assert!(!answered_locally("https://api.navigraph.com/v1/charts"));
+    }
 }
 
 #[link(name = "kernel32")]

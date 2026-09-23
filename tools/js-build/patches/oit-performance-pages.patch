@@ -34,7 +34,7 @@ index 0000000..d57eb64
 +
 +import { ArraySubject, FSComponent, MappedSubject, Subject, VNode } from '@microsoft/msfs-sdk';
 +import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
-+import { FmsData } from '@flybywiresim/fbw-sdk';
++import { FmsData, getSimBriefOfp } from '@flybywiresim/fbw-sdk';
 +import { AbstractOitFltOpsPageProps } from '../../OIT';
 +import { Button } from '../../../MsfsAvionicsCommon/UiWidgets/Button';
 +import { DropdownMenu } from '../../../MsfsAvionicsCommon/UiWidgets/DropdownMenu';
@@ -1082,6 +1082,52 @@ index 0000000..c7ef591
 +    this.refreshWeights();
 +  }
 +
++  /**
++   * SYNC SIMBRIEF: the departure and runway off the pilot's own OFP, through
++   * FlyByWire's `getSimBriefOfp` -- the same fetch, and the same stored user
++   * id (`CONFIG_OVERRIDE_SIMBRIEF_USERID`), the MFD's CPNY F-PLN REQUEST
++   * uses. Nothing here re-implements SimBrief.
++   *
++   * The OFP's weights are shown but never written into the weight fields.
++   * Those read the aircraft's actual loadsheet and fuel state; the OFP's are
++   * what was *planned*, and quietly swapping a plan for a measurement is how
++   * a crew ends up computing take-off performance for a load the aircraft is
++   * not carrying. They are reported side by side instead, for the crew to
++   * compare.
++   */
++  private async syncSimbrief(): Promise<void> {
++    this.databaseMessage.set('SIMBRIEF REQUEST SENT');
++    let ofp;
++    try {
++      ofp = await getSimBriefOfp();
++    } catch (e) {
++      // The usual cause by far is no user id stored yet, which
++      // `getSimBriefOfp` reports by name.
++      this.databaseMessage.set(`SIMBRIEF: ${String(e instanceof Error ? e.message : e).toUpperCase()}`);
++      return;
++    }
++
++    const origin = ofp.origin?.icao ?? null;
++    if (!origin) {
++      this.databaseMessage.set('SIMBRIEF OFP HAS NO DEPARTURE');
++      return;
++    }
++    if (this.airport.get() === origin) {
++      this.selectRunway(ofp.origin.runway || null);
++    } else {
++      this.airport.set(origin);
++    }
++
++    const planned = Number(ofp.weights?.estTakeOffWeight);
++    this.databaseMessage.set(
++      Number.isFinite(planned) && planned > 0
++        ? `SIMBRIEF ${origin}/${ofp.origin.runway || '--'} - PLANNED TOW ${Math.round(planned / 1000)} T (WEIGHTS BELOW ARE THE AIRCRAFT'S OWN)`
++        : `SIMBRIEF ${origin}/${ofp.origin.runway || '--'}`,
++    );
++    this.refreshConditions();
++    this.refreshWeights();
++  }
++
 +  /** Re-read the ambient state and recompute the wind components. */
 +  private refreshConditions(): void {
 +    const weather = readWeather();
@@ -1185,8 +1231,9 @@ index 0000000..c7ef591
 +              />
 +              <Button
 +                label="SYNC SIMBRIEF"
-+                onClick={() => {}}
-+                disabled={Subject.create(true)}
++                onClick={() => {
++                  this.syncSimbrief().catch(() => this.databaseMessage.set('SIMBRIEF REQUEST FAILED'));
++                }}
 +                containerStyle="width: 220px;"
 +              />
 +            </div>
