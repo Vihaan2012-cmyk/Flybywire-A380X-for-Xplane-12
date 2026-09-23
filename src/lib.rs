@@ -696,6 +696,18 @@ fn mapping(name: &str) -> Option<(&'static str, Kind, fn(f64) -> f64)> {
         // to tell whether the viewer sits in the flight deck).
         "CAMERA STATE" => ("sim/graphics/view/view_is_external", Int, |v| if v != 0. { 3. } else { 2. }),
         "GEAR HANDLE POSITION" => ("sim/cockpit2/controls/gear_handle_down", Int, identity),
+        // The captain's and first officer's altimeter settings, inches of
+        // mercury. Without these the baro knobs turn X-Plane's own altimeter
+        // -- the converter gives them `sim/instruments/barometer_up`/`_down`
+        // -- while FlyByWire's PFDs read a variable nothing fed, so the
+        // displayed QNH never moved and the knob looked dead.
+        "KOHLSMAN SETTING HG" => ("sim/cockpit2/gauges/actuators/barometer_setting_in_hg_pilot", Float, identity),
+        "KOHLSMAN SETTING HG:1" => ("sim/cockpit2/gauges/actuators/barometer_setting_in_hg_pilot", Float, identity),
+        "KOHLSMAN SETTING HG:2" => ("sim/cockpit2/gauges/actuators/barometer_setting_in_hg_copilot", Float, identity),
+        // STD is its own state on an Airbus, not a 29.92 setting.
+        "KOHLSMAN SETTING STD" => ("sim/cockpit2/gauges/actuators/barometer_setting_is_std_pilot", Int, identity),
+        "KOHLSMAN SETTING STD:1" => ("sim/cockpit2/gauges/actuators/barometer_setting_is_std_pilot", Int, identity),
+        "KOHLSMAN SETTING STD:2" => ("sim/cockpit2/gauges/actuators/barometer_setting_is_std_copilot", Int, identity),
         // Held as a ratio: FlyByWire reads it in "percent over 100".
         "STRUCTURAL ICE PCT" => ("sim/flightmodel/failures/frm_ice", Float, identity),
         "PLANE ALT ABOVE GROUND" => ("sim/flightmodel/position/y_agl", Float, |v| v * M_TO_FT),

@@ -230,7 +230,18 @@ impl WeightBalance {
         // The crew stations (18 and 19, "CAPTAIN" and "FIRST OFFICER") are
         // no payload station of FlyByWire's; they keep the cfg's weight, as
         // MSFS loads it.
-        for (id, station) in stations.iter().zip(&balance.stations).skip(17) {
+        // Every station starts at the cfg's own `station_load`, as MSFS
+        // loads it. Stations 18 and 19 ("CAPTAIN"/"FIRST OFFICER") are no
+        // payload station of FlyByWire's and simply keep theirs; the rest
+        // are FlyByWire's to change, and its payload module syncs its
+        // boarding L:Vars from these A:Vars, so a seed here is what the EFB
+        // then shows and edits rather than something it fights.
+        //
+        // Seeding only the crew left the aircraft permanently empty -- a
+        // 2 lb payload on a 300 t airframe -- because nothing else ever
+        // wrote them: FlyByWire boards to what the EFB asks for, and the
+        // EFB had asked for nothing.
+        for (id, station) in stations.iter().zip(&balance.stations) {
             vars.write(id, station.pounds);
         }
         let mut p = Published::default();
@@ -318,7 +329,16 @@ impl WeightBalance {
             crate::log(&format!("weight/balance: FlyByWire's payload is live ({payload_lb:.0} lb); driving X-Plane's from here"));
         }
         let skip_stations = skip_stations || !self.payload_reported;
-        match (has_stations && !skip_stations, self.m_stations.filter(|_| !skip_stations), self.m_fixed.filter(|_| !skip_stations)) {
+        // X-Plane takes the payload either as one total (`m_fixed`) or per
+        // station (`m_stations`). The per-station array is what crashed the
+        // converted A380 -- rewriting all nine every tick puts the aircraft
+        // on its belly within a minute (bisected: with this write skipped it
+        // stands indefinitely). The total is enough here, because the centre
+        // of gravity is written explicitly below from every cfg station's
+        // own arm, so nothing is lost by not spreading the mass across
+        // X-Plane's own nine.
+        let use_stations = false;
+        match (use_stations && has_stations && !skip_stations, self.m_stations.filter(|_| !skip_stations), self.m_fixed.filter(|_| !skip_stations)) {
             (true, Some(d), _) => {
                 // Each group in the .acf station the converter made for it.
                 let mut kg = [0f32; XPLANE_STATIONS];
