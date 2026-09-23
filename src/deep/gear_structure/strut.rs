@@ -544,7 +544,21 @@ impl Strut {
             self.collapsed = true;
         }
         if !inputs.locked_down && tick_peak_force > UNLOCKED_COLLAPSE_FRACTION * self.limit_load_n {
+            if !self.collapsed {
+                crate::log(&format!(
+                    "gear: leg folding - not downlocked while carrying {:.0} N ({:.0}% of the {:.0} N limit, threshold {:.0}%); on_ground={} sink={:.2} m/s",
+                    tick_peak_force,
+                    100.0 * tick_peak_force / self.limit_load_n.max(1.0),
+                    self.limit_load_n,
+                    100.0 * UNLOCKED_COLLAPSE_FRACTION,
+                    inputs.on_ground,
+                    inputs.sink_speed_ms
+                ));
+            }
             self.collapsed = true;
+        }
+        if ultimate_ratio >= 1.0 && !self.collapsed {
+            crate::log(&format!("gear: leg folding - ultimate load exceeded, ratio {ultimate_ratio:.2}"));
         }
 
         // Miner's rule fatigue: a bounce back to full extension while still

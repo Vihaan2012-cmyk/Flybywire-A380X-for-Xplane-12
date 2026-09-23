@@ -115,6 +115,11 @@ pub fn parse(cfg: &str) -> Balance {
 /// X-Plane's station count (`sim/flightmodel/weight/m_stations` is float[9]).
 pub const XPLANE_STATIONS: usize = 9;
 
+/// The payload, in pounds, above which FlyByWire is taken to have actually
+/// published one. Two crew at ~170 lb each clear this; the 2 lb an
+/// unpopulated loadsheet reports does not.
+const MIN_REPORTED_PAYLOAD_LB: f64 = 100.;
+
 fn kind_class(kind: u32) -> u32 {
     // Captain and first officer (1, 2) are one kind.
     if kind == 2 { 1 } else { kind }
@@ -206,6 +211,13 @@ pub struct WeightBalance {
     _published: Published,
     payload_kg: Value,
     gross_kg: Value,
+    /// Last CG offset handed to X-Plane, so the log speaks on a real move.
+    last_offset_m: f64,
+    /// Last total weight reported, so the log speaks when the load changes.
+    last_total_lb: f64,
+    /// Whether FlyByWire has ever published a payload, so its silent zero is
+    /// never mistaken for an empty aircraft.
+    payload_reported: bool,
     cg_z_ft: Value,
 }
 
@@ -239,6 +251,9 @@ impl WeightBalance {
             payload_kg,
             gross_kg,
             cg_z_ft,
+            last_offset_m: f64::NEG_INFINITY,
+            last_total_lb: f64::NEG_INFINITY,
+            payload_reported: false,
         }
     }
 
@@ -264,7 +279,46 @@ impl WeightBalance {
             xplm.get_vf(d, &mut max);
             max.iter().any(|&m| m > 0.)
         });
-        match (has_stations, self.m_stations, self.m_fixed) {
+        // This module is what crashes the converted A380 (with its writes
+        // skipped the aircraft stands indefinitely; with them it falls over
+        // 35-60 s after every load, gear and struts healthy throughout).
+        // Report every mass it hands X-Plane, and which branch took it.
+        if (total_lb - self.last_total_lb).abs() > 500. {
+            self.last_total_lb = total_lb;
+            let kg_preview: Vec<i64> = self
+                .groups
+                .iter()
+                .map(|g| (g.iter().map(|&i| stations_lb[i]).sum::<f64>() * LB_TO_KG).round() as i64)
+                .collect();
+            crate::log(&format!(
+                "weight/balance -> X-Plane: total {total_lb:.0} lb, payload {payload_lb:.0} lb, cg {:.2} ft, has_stations {has_stations}, m_stations {}, m_fixed {}, station kg {kg_preview:?}",
+                cg[0],
+                self.m_stations.is_some(),
+                self.m_fixed.is_some()
+            ));
+        }
+        let skip_stations = crate::xp_writes_skip("weight-stations");
+        let skip_cg = crate::xp_writes_skip("weight-cg");
+        // FlyByWire's payload variables are among the ones nothing feeds in
+        // this port, so before the loadsheet has been applied they all read
+        // zero -- and zero here does not mean "an empty aircraft", it means
+        // "nobody has said yet". Stamping that onto X-Plane's own payload
+        // every tick is what crashes the converted A380 35-60 s after every
+        // load: with this write skipped it stands indefinitely, with it the
+        // aircraft falls over while its gear and struts measure healthy
+        // throughout (bisected against every other write the plugin makes).
+        //
+        // So the payload is only driven once FlyByWire has published one.
+        // Until then X-Plane keeps whatever the .acf and the user's own
+        // loadsheet put there. The latch stays set for the session on the
+        // first real figure, so unloading to genuinely empty still passes
+        // through afterwards.
+        if !self.payload_reported && payload_lb > MIN_REPORTED_PAYLOAD_LB {
+            self.payload_reported = true;
+            crate::log(&format!("weight/balance: FlyByWire's payload is live ({payload_lb:.0} lb); driving X-Plane's from here"));
+        }
+        let skip_stations = skip_stations || !self.payload_reported;
+        match (has_stations && !skip_stations, self.m_stations.filter(|_| !skip_stations), self.m_fixed.filter(|_| !skip_stations)) {
             (true, Some(d), _) => {
                 // Each group in the .acf station the converter made for it.
                 let mut kg = [0f32; XPLANE_STATIONS];
@@ -276,8 +330,25 @@ impl WeightBalance {
             (_, _, Some(d)) => xplm.set_f(d, payload_kg as f32),
             _ => {}
         }
-        if let (Some(d), Some(r), true) = (self.cg_offset_z, self.reference_z, total_lb > 0.) {
-            let offset = xplane_cg_offset_z(cg[0], b.datum[0], xplm.get_f(r) as f64);
+        if let (Some(d), Some(r), true) = (self.cg_offset_z.filter(|_| !skip_cg), self.reference_z, total_lb > 0.) {
+            let reference = xplm.get_f(r) as f64;
+            let offset = xplane_cg_offset_z(cg[0], b.datum[0], reference);
+            // This module is the one that crashes the converted A380: with
+            // its writes skipped the aircraft sits indefinitely, with them
+            // it falls over 35-60 s after every load, while the gear and
+            // struts measure healthy throughout. Report what it hands
+            // X-Plane the first time and whenever it moves appreciably.
+            if (offset - self.last_offset_m).abs() > 0.05 {
+                self.last_offset_m = offset;
+                crate::log(&format!(
+                    "weight/balance -> X-Plane: cg_offset_z {offset:.3} m (cg {:.2} ft, datum {:.2} ft, acf_cgZ_original {reference:.2} ft), total {:.0} lb, payload {:.0} lb, stations {:?}",
+                    cg[0],
+                    b.datum[0],
+                    total_lb,
+                    payload_lb,
+                    stations_lb.iter().map(|v| v.round() as i64).collect::<Vec<_>>()
+                ));
+            }
             xplm.set_f(d, offset as f32);
         }
         published::set(self.payload_kg, payload_kg);

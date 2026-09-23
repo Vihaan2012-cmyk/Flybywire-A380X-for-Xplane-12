@@ -301,6 +301,12 @@ pub struct Handling {
     gear_lever: Lever,
     park_lever: Lever,
     ticks: u64,
+    /// Lowest gear deployment this run has handed X-Plane, so the log says
+    /// it once per new low rather than every tick.
+    gear_deploy_floor: f64,
+    /// Whether FlyByWire's landing gear has ever published a position, so
+    /// its silent initial zero is never mistaken for "gear up".
+    gear_reported: bool,
 }
 
 unsafe impl Send for Handling {}
@@ -354,6 +360,8 @@ impl Handling {
             gear_lever: Lever::new("fbw/cockpit/lever_landing_gear"),
             park_lever: Lever::new("fbw/cockpit/lever_parking_brake"),
             ticks: 0,
+            gear_deploy_floor: f64::INFINITY,
+            gear_reported: false,
         };
         handling.register(xplm);
         handling
@@ -542,7 +550,45 @@ impl Handling {
             read(&ids.door_right),
         );
         if let Some(d) = r.gear_deploy {
-            xplm.set_vf(d, &deploy.map(|v| v as f32));
+            // Telling X-Plane's flight model the gear is anything less than
+            // down, while the aircraft is sitting on it, retracts the legs
+            // under its own weight and X-Plane calls that a crash. The three
+            // positions come from FlyByWire's hydraulic landing gear
+            // (`GEAR_{CENTER,LEFT,RIGHT}_POSITION`, percent), so a tick
+            // where they read low for any reason is worth seeing: the
+            // converted A380 crashes 35-60 s after every load with this
+            // plugin and never without it, and every other path has been
+            // ruled out (the failure mirroring, the deep gear collapse, plug
+            // forces, weight and balance).
+            // FlyByWire's gear positions are percentages its hydraulic
+            // landing gear publishes. Before that system has run they are
+            // all still zero, and zero here does not mean "gear up" -- it
+            // means "nobody has said yet". Handing that to X-Plane retracts
+            // the legs in the flight model while the aircraft's whole weight
+            // is standing on them, which X-Plane rightly calls a crash.
+            //
+            // So the gear is only ever driven once the systems have reported
+            // a real position at least once. Until then the .acf's own value
+            // stands, which is gear down -- the state an aircraft sitting on
+            // its wheels is actually in. The latch is set for the rest of
+            // the session by the first plausible reading, so a genuine
+            // retraction or a real gear failure afterwards still passes
+            // through untouched.
+            let (c, l, rr) = (read(&ids.gear_center), read(&ids.gear_left), read(&ids.gear_right));
+            if !self.gear_reported && (c > 0. || l > 0. || rr > 0.) {
+                self.gear_reported = true;
+            }
+            let lowest = deploy.iter().cloned().fold(f64::INFINITY, f64::min);
+            if lowest < 0.99 && self.gear_deploy_floor > lowest {
+                self.gear_deploy_floor = lowest;
+                crate::log(&format!(
+                    "gear deploy -> X-Plane: {deploy:?} (GEAR_CENTER/LEFT/RIGHT_POSITION {c:.1}/{l:.1}/{rr:.1}%, handle_down={handle_down}, systems have reported: {})",
+                    self.gear_reported
+                ));
+            }
+            if self.gear_reported {
+                xplm.set_vf(d, &deploy.map(|v| v as f32));
+            }
         }
         if let Some(d) = r.gear_handle_down {
             xplm.set_i(d, handle_down as c_int);

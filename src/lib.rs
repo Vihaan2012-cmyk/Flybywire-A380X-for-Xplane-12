@@ -585,6 +585,55 @@ impl SimulatorReaderWriter for Vars {
 /// aircraft's own. MSFS's are written with spaces ("TURB ENG CORRECTED N1:1");
 /// the aircraft's never are. A few simulator names without spaces are known by
 /// their X-Plane mapping.
+/// Whether `FBW_XP_EFFECTS=off` asked the plugin not to write X-Plane's own
+/// failure datarefs this run (see the call site in `update`).
+pub fn xp_effects_disabled() -> bool {
+    use std::sync::OnceLock;
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| {
+        let off = std::env::var("FBW_XP_EFFECTS").is_ok_and(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "off" | "0" | "false" | "no")
+        });
+        if off {
+            log("xp effects: FBW_XP_EFFECTS=off, not writing X-Plane's failure datarefs");
+        }
+        off
+    })
+}
+
+/// Whether `FBW_DEEP=off` asked this run to skip the deep-systems areas.
+pub fn deep_disabled() -> bool {
+    use std::sync::OnceLock;
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| {
+        let off = std::env::var("FBW_DEEP").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "off" | "0" | "false" | "no"));
+        if off {
+            log("deep: FBW_DEEP=off, the deep-systems areas are not ticking this run");
+        }
+        off
+    })
+}
+
+/// Which of the plugin's writes into X-Plane's own physics this run skips.
+///
+/// `FBW_XP_WRITES=off` skips all three; a comma list of `surfaces`,
+/// `handling` or `weight` skips just those. A bisecting tool: the converted
+/// A380 crashes 35-60 s after every load, and with all three off it sat
+/// clean for ten minutes, so the fault is in one of them.
+pub fn xp_writes_skip(part: &str) -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<String> = OnceLock::new();
+    let v = V.get_or_init(|| {
+        let v = std::env::var("FBW_XP_WRITES").unwrap_or_default().trim().to_ascii_lowercase();
+        if !v.is_empty() {
+            log(&format!("xp writes: FBW_XP_WRITES={v}"));
+        }
+        v
+    });
+    matches!(v.as_str(), "off" | "0" | "false" | "no") || v.split(',').any(|p| p.trim() == part)
+}
+
 fn is_simulator_variable(name: &str) -> bool {
     name.contains(' ') || mapping(name).is_some()
 }
@@ -1528,7 +1577,14 @@ impl Plugin {
         for line in self.tyres.events.drain(..) {
             log(&line);
         }
-        self.xp_effects.update(&mut self.vars, Some(xplm));
+        // `FBW_XP_EFFECTS=off` stops the plugin mirroring its own failure
+        // state onto X-Plane's (`sim/operation/failures/rel_*`). A bisecting
+        // tool: the converted A380 crashes seconds after every load with the
+        // plugin loaded and never without it, while gear, struts and
+        // clearances all measure healthy when X-Plane flags it.
+        if !crate::xp_effects_disabled() {
+            self.xp_effects.update(&mut self.vars, Some(xplm));
+        }
         physics::damage::publish(self.damage.engines);
         self.persistence.state.engines = self.damage.engines;
         // Damageable components: progress wear-like settings and recombine
@@ -1596,7 +1652,14 @@ impl Plugin {
         // areas' own published values are read back by the ECAM bridge's
         // triggers and the Study pages next frame (deep/live.rs's
         // "Ordering" note).
-        self.deep.tick(&mut self.vars, Some(xplm), delta);
+        // `FBW_DEEP=off` runs the frame without the deep-systems areas.
+        // A bisecting tool for the crash the converted A380 takes 35-60 s
+        // after every load: it happens only with this plugin loaded, while
+        // the gear, struts, clearances and both gear write paths all measure
+        // healthy at the moment X-Plane flags it.
+        if !crate::deep_disabled() {
+            self.deep.tick(&mut self.vars, Some(xplm), delta);
+        }
         crate::perf::lap("tick-after-systems: lights");
         // [slot tick-after-systems: lights] After the systems, so the buses'
         // ELEC_*_BUS_IS_POWERED are this tick's.
@@ -1608,15 +1671,28 @@ impl Plugin {
         crate::perf::lap("tick-after-systems: flight_controls");
         // [slot tick-after-systems: flight_controls] The actuators have moved
         // this tick; X-Plane's surfaces follow.
-        self.flight_controls.update(&mut self.vars, xplm);
-        self.handling.after_systems(&mut self.vars, xplm);
+        // `FBW_XP_WRITES=off` keeps the systems running but stops the three
+        // modules that drive X-Plane's own physics -- control surfaces,
+        // gear/brakes/flaps/trim/steering, and weight and balance. A
+        // bisecting tool for the crash the converted A380 takes 35-60 s
+        // after every load: it needs this plugin loaded, it is not the deep
+        // areas, not the failure mirroring, not either gear write, and the
+        // airframe measures healthy at the moment X-Plane flags it.
+        if !crate::xp_writes_skip("surfaces") {
+            self.flight_controls.update(&mut self.vars, xplm);
+        }
+        if !crate::xp_writes_skip("handling") {
+            self.handling.after_systems(&mut self.vars, xplm);
+        }
         crate::perf::lap("tick-after-systems: correctness");
         // [slot tick-after-systems: correctness] FlyByWire's post-tick aspects.
         self.correctness.after_previous_tick(&mut self.vars);
         crate::perf::lap("tick-after-systems: weight_balance");
         // [slot tick-after-systems: weight_balance] After the payload aspect and
         // the fuel have written this tick's weights.
-        self.weight_balance.update(&mut self.vars, xplm);
+        if !crate::xp_writes_skip("weight") {
+            self.weight_balance.update(&mut self.vars, xplm);
+        }
         crate::perf::lap("tick-after-systems: doors");
         // [slot tick-after-systems: doors] The hydraulic cargo doors' clips.
         self.doors.update_model(&mut self.vars, xplm);
