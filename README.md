@@ -131,7 +131,7 @@ the feature level.
 | Area | CL650 | This project today |
 |---|---|---|
 | Single failures | ~1,375 (≈ 700 electrical) | **5,555** (967 electrical, 1,008 fuel) |
-| Electrical | Per-load network, every load can fail or short | Per-load network with fault currents and wiring zones, 399 breakers, 91 wiring failures |
+| Electrical | Per-load network, every load can fail or short | Per-load network: **376 loads**, each able to short to ground or open, fault current set by its own feeder resistance; buses solved by Millman/Thevenin; 399 breakers tripping on the real current; 91 wiring failures |
 | Engine gas path | Stage-level compressors, maps, surge | Thermodynamic spools + oil + hot section, TCDS-calibrated; fuel system, ignition, starting, VSVs, bleed valves, vibration, reversers, dual-channel EEC |
 | Hydraulics | Line/volume network | Line network with pumps, reservoirs and leaks (176 failures) |
 | Pneumatic / air conditioning | Simpler | FlyByWire packs + air cycle machine, real engine bleed ports, duct network (115 + 465 failures) |
@@ -140,10 +140,11 @@ the feature level.
 | Avionics network | Not modelled at this depth | ARINC 653 partitions, module and bay faults (153 failures) |
 | Wear, MEL, persistence | Not modelled | Wear, damage creep, MEL, persistent airframe |
 
-Where it is still behind: the CL650's electrical model fails and shorts individual
-loads with real fault currents, and its systems have had years of tuning against the
-real aircraft. Failure *count* is not depth, and this table is a feature comparison,
-not a claim to have overtaken it.
+Where it is still behind: the CL650 has had years of tuning against the real
+aircraft, and its documentation, checklists and failure behaviour have been exercised
+by a large user base. Almost nothing here has been flown in anger by anyone. A failure
+count is not depth, and this table is a feature comparison, not a claim to have
+overtaken it.
 
 ## Roadmap
 
