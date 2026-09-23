@@ -27,7 +27,7 @@ mod xphfbw;
 use std::collections::{HashSet, VecDeque};
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -694,6 +694,39 @@ impl Displays {
         true
     }
 
+    /// One keystroke from [`key_sniffer`], for a screen still drawn in the
+    /// 3D cockpit. Declined if that screen has been popped out and given
+    /// real keyboard focus since the click that aimed us at it, because
+    /// then [`keyboard_callback`] is already delivering the same keystroke
+    /// and the scratchpad would take every character twice.
+    fn sniff_key(&mut self, screen: usize, ch: u32, vkey: u32, flags: u32) -> bool {
+        let popped = match (self.api, self.screens.get(screen)) {
+            (Some(api), Some(s)) => !s.handle.is_null() && unsafe { (api.has_keyboard_focus)(s.handle) } != 0,
+            _ => false,
+        };
+        if popped {
+            return false;
+        }
+        self.dispatch_key(screen, ch, vkey, flags)
+    }
+
+    /// Clicking a screen aims the keyboard: a click on one that can be
+    /// typed into ([`HAS_KEYBOARD`]) sends typing there from then on, a
+    /// click on any other screen gives the keyboard back to X-Plane. This
+    /// is the whole focus gesture -- there is no callback for a click
+    /// anywhere else in the cockpit, so the only other way back is Escape
+    /// ([`key_sniffer`]).
+    fn aim_keyboard(&self, screen: usize) {
+        let id = self.screens[screen].def.id;
+        if !HAS_KEYBOARD.contains(&id) {
+            release_keyboard("a screen with no keyboard was clicked");
+            return;
+        }
+        if COCKPIT_KEYBOARD.swap(screen as isize, Ordering::Relaxed) != screen as isize {
+            log(&format!("{id}: typing goes here now (Escape, or a click on another screen, hands the keyboard back to X-Plane)"));
+        }
+    }
+
     /// The KCCU gesture: right-click a keyboard screen (the MFD, or either
     /// OIT) to pop it out and give it keyboard focus (so typing reaches it,
     /// [`keyboard_callback`]'s doc comment), right-click again to give the
@@ -715,6 +748,8 @@ impl Displays {
             } else {
                 (api.set_popup_visible)(handle, 1);
                 (api.take_keyboard_focus)(handle);
+                // The popup now gets the keystrokes directly (sniff_key).
+                release_keyboard("the screen was popped out instead");
                 log(&format!("{id}: popped up and given keyboard focus"));
             }
         }
@@ -747,6 +782,7 @@ impl Displays {
         let (kind, input_kind) = match status {
             xp::MOUSE_DOWN => {
                 self.screens[screen].pressed = true;
+                self.aim_keyboard(screen);
                 ("down", InputKind::Down)
             }
             xp::MOUSE_DRAG => ("move", InputKind::Move),
@@ -992,10 +1028,17 @@ pub fn start(xplm: &'static Xplm) {
         }
         log(&format!("{} cockpit devices made", d.screens.iter().filter(|s| !s.handle.is_null()).count()));
     });
+    if xplm.register_key_sniffer(key_sniffer, false, std::ptr::null_mut()) {
+        log("key sniffer registered: click the MCDU or an OIT and type into it where it sits in the cockpit");
+    } else {
+        log("X-Plane refused the key sniffer: the MCDU can only be typed into popped out (right-click it)");
+    }
 }
 
 /// Destroy the devices and free what was made on the GPU.
 pub fn stop(xplm: &'static Xplm) {
+    xplm.unregister_key_sniffer(key_sniffer, false, std::ptr::null_mut());
+    release_keyboard("the displays are shutting down");
     let taken = DISPLAYS.lock().ok().and_then(|mut g| g.take());
     let Some(mut d) = taken else { return };
     if let Some(api) = xplm.avionics() {
@@ -1011,6 +1054,72 @@ pub fn stop(xplm: &'static Xplm) {
             d.bridge.iter_mut().flat_map(|b| b.screens.iter_mut()).filter_map(|s| s.as_mut()).map(|bs| &mut bs.gpu).collect();
         renderer.release(&mut gpus, &mut bridges);
     }
+}
+
+/// Which screen typing currently goes to, or -1 for X-Plane's own. Read
+/// by [`key_sniffer`] on every keystroke the sim sees, so it is a plain
+/// atomic rather than something behind the `DISPLAYS` lock: the overwhelming
+/// case is nothing focused, and that has to cost nothing.
+static COCKPIT_KEYBOARD: AtomicIsize = AtomicIsize::new(-1);
+
+/// Typing goes back to X-Plane. `why` is logged, so the user can always
+/// find out where their keystrokes went.
+fn release_keyboard(why: &str) {
+    let was = COCKPIT_KEYBOARD.swap(-1, Ordering::Relaxed);
+    if was >= 0 {
+        let id = SCREENS.get(was as usize).map_or("a screen", |d| d.id);
+        log(&format!("{id}: typing goes back to X-Plane ({why})"));
+    }
+}
+
+/// Whether a keystroke belongs to the focused screen rather than to the
+/// sim. An MCDU scratchpad takes printable characters, and Backspace for
+/// CLR; Tab, Return and Delete are the OITs' terminal keys. Everything
+/// else -- the function keys, the arrows, anything with Ctrl or Alt held --
+/// is left to X-Plane, so the views, the pause key and the developer
+/// shortcuts keep working with a scratchpad focused.
+fn typed_into_cockpit(ch: u32, vkey: u32, flags: c_int) -> bool {
+    if flags & (xp::CONTROL_FLAG | xp::ALT_FLAG) != 0 {
+        return false;
+    }
+    matches!(vkey, xp::VK_BACK | xp::VK_TAB | xp::VK_RETURN | xp::VK_DELETE) || (0x20..0x7f).contains(&ch)
+}
+
+/// Every keystroke the sim sees, registered after windows so nothing is
+/// taken from a text field that already wanted it
+/// ([`Xplm::register_key_sniffer`]). With a screen focused
+/// ([`Displays::aim_keyboard`]) the keys an MCDU can use are swallowed and
+/// forwarded to it; everything else, and every keystroke with nothing
+/// focused, travels on untouched.
+unsafe extern "C" fn key_sniffer(key: c_char, flags: c_int, vkey: c_char, _refcon: *mut c_void) -> c_int {
+    const PASS_ON: c_int = 1;
+    const SWALLOW: c_int = 0;
+    let screen = COCKPIT_KEYBOARD.load(Ordering::Relaxed);
+    if screen < 0 {
+        return PASS_ON;
+    }
+    let (ch, vkey) = (key as u8 as u32, vkey as u8 as u32);
+    if vkey == xp::VK_ESCAPE {
+        // Passed on as well: Escape is how X-Plane leaves its own screens.
+        if flags & xp::KEY_DOWN_FLAG != 0 {
+            release_keyboard("Escape was pressed");
+        }
+        return PASS_ON;
+    }
+    if !typed_into_cockpit(ch, vkey, flags) {
+        return PASS_ON;
+    }
+    if flags & xp::KEY_DOWN_FLAG == 0 {
+        // The release of a key whose press we took. Swallowed as well, so
+        // the sim never sees half a keystroke, but there is nothing to
+        // deliver: the screens hear about presses and auto-repeats only.
+        return SWALLOW;
+    }
+    let sent = std::panic::catch_unwind(|| with_from_callback(|d| d.sniff_key(screen as usize, ch, vkey, flags as u32)))
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    if sent { SWALLOW } else { PASS_ON }
 }
 
 fn screen_of(refcon: *mut c_void) -> usize {
@@ -1098,7 +1207,9 @@ const HAS_KEYBOARD: &[&str] = &["SCREEN_DU_MFD", "SCREEN_OIT_LEFT", "SCREEN_OIT_
 /// screen that popup and focus (right-click it; right-click again, or click
 /// away, gives the focus back — [`Displays::toggle_keyboard`]).
 ///
-/// Only registered on the devices in [`HAS_KEYBOARD`] ([`start`]).
+/// Only registered on the devices in [`HAS_KEYBOARD`] ([`start`]), and
+/// only reached once that device has been popped out. Typing into a screen
+/// still in the 3D cockpit goes through [`key_sniffer`] instead.
 unsafe extern "C" fn keyboard_callback(key: c_char, flags: c_int, vkey: c_char, refcon: *mut c_void, losing_focus: c_int) -> c_int {
     if losing_focus != 0 {
         // hide_popup's doc comment: close the popup along with the

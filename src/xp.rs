@@ -678,7 +678,56 @@ impl Xplm {
             unsafe { f(command, handler, 1, refcon) }
         }
     }
+
+    /// XPLMRegisterKeySniffer: every keystroke X-Plane sees, whether or not
+    /// anything of ours has focus. The only way to type into a device drawn
+    /// in the 3D cockpit -- `XPLMAvionicsKeyboard_f` fires for a popped-out,
+    /// focused device alone (XPLMDisplay.h), so without this the MCDU can
+    /// only be typed into in a window floating over the cockpit.
+    ///
+    /// `before_windows` should be false in almost every case: a sniffer
+    /// registered after windows never sees a keystroke a window already
+    /// took, so X-Plane's own text fields, the map search, the ATC box and
+    /// every plugin window keep working normally. It still runs ahead of
+    /// the sim's key bindings, which is the part worth intercepting.
+    /// `false` while the callback wants the keystroke, `true` to pass it on.
+    pub fn register_key_sniffer(&self, sniffer: KeySniffer, before_windows: bool, refcon: *mut c_void) -> bool {
+        let Some(f) = Self::xplm_symbol("XPLMRegisterKeySniffer") else { return false };
+        let f = unsafe { std::mem::transmute::<*mut c_void, KeySnifferFn>(f) };
+        unsafe { f(sniffer, before_windows as c_int, refcon) != 0 }
+    }
+
+    /// Opposite of [`Self::register_key_sniffer`]; the arguments must match
+    /// the ones it was registered with.
+    pub fn unregister_key_sniffer(&self, sniffer: KeySniffer, before_windows: bool, refcon: *mut c_void) -> bool {
+        let Some(f) = Self::xplm_symbol("XPLMUnregisterKeySniffer") else { return false };
+        let f = unsafe { std::mem::transmute::<*mut c_void, KeySnifferFn>(f) };
+        unsafe { f(sniffer, before_windows as c_int, refcon) != 0 }
+    }
 }
+
+/// An `XPLMKeySniffer_f`: the typed character (0 if the key has none), the
+/// modifier and transition flags, the virtual key code, the refcon.
+/// Returns 1 to let the keystroke travel on, 0 to swallow it.
+pub type KeySniffer = unsafe extern "C" fn(c_char, c_int, c_char, *mut c_void) -> c_int;
+type KeySnifferFn = unsafe extern "C" fn(KeySniffer, c_int, *mut c_void) -> c_int;
+
+/// `XPLMKeyFlags` (XPLMDefs.h). Press, release and auto-repeat each arrive
+/// as their own message, told apart by the down and up flags.
+pub const SHIFT_FLAG: c_int = 1;
+pub const ALT_FLAG: c_int = 2;
+pub const CONTROL_FLAG: c_int = 4;
+pub const KEY_DOWN_FLAG: c_int = 8;
+pub const KEY_UP_FLAG: c_int = 16;
+
+/// The `XPLM_VK_*` codes this plugin looks at (XPLMDefs.h). They follow
+/// Windows' virtual key numbering, and are not character codes: `VK_DELETE`
+/// is the Del key, while the *character* 0x7F is something else entirely.
+pub const VK_BACK: u32 = 0x08;
+pub const VK_TAB: u32 = 0x09;
+pub const VK_RETURN: u32 = 0x0D;
+pub const VK_ESCAPE: u32 = 0x1B;
+pub const VK_DELETE: u32 = 0x2E;
 
 /// An X-Plane command handle.
 pub type CommandRef = *mut c_void;
