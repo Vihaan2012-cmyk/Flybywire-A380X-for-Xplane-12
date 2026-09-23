@@ -22,11 +22,13 @@ physics, not out of a scripted symptom.
 | Fly-by-wire | FlyByWire's C++ PRIM/SEC flight control laws and autothrust, ported (`src/fbw_cpp`, `src/fbw_controllers.rs`, `src/prim.rs`) |
 | Displays | FlyByWire's instruments (PFD, ND, EWD/ECAM, MFD, EFB…) run in a bundled browser runtime and are drawn into the cockpit (`src/display`, `app/`) |
 | Our physics | Gas-turbine engine model, fuel network, bleed ports, oil system, hot-section thermal model, ADIRS, tyres and brakes, bays, damage and wear |
-| Failures | **360** causal single failures across 20 ATA chapters (growing — see the roadmap) |
-| Components | **352** components with continuous health parameters, persisted between flights |
-| Circuit breakers | **265**, each de-powering its real consumer in FlyByWire's electrical simulation |
+| Deep systems | **17 live areas** (`src/deep/`): APU, avionics network, breakers, cabin, electrical, engine accessories, environment, fire/ice, flight controls, fuel, gear structure, hydraulics, oxygen, pneumatic ducts, sensors, thermal zones, wiring |
+| Failures | **5,555** causal single failures, 5,195 of them from the deep-systems areas |
+| Components | **2,013** components with continuous health parameters, persisted between flights |
+| Circuit breakers | **399**, each de-powering its real consumer in FlyByWire's electrical simulation |
 | MEL | 64 items / 89 sub-items mapped to 120 failures, with per-unit placarding |
-| Tests | **831** unit and integration tests, plus a multi-tier failure battery |
+| ECAM | **304** alerts raised from the deep areas' own state, alongside FlyByWire's own catalogue |
+| Tests | **2,455** unit and integration tests, plus a multi-tier failure battery |
 
 Full reference data, sources and architecture: [docs/SPECIFICATIONS.md](docs/SPECIFICATIONS.md).
 
@@ -37,20 +39,26 @@ sources.
 
 | Part | Lines |
 |---|---|
-| Plugin (Rust, `src/`) | 85,059 |
-| … of which physics models (`src/physics/`) | 10,544 |
-| Test emulator and battery (Rust, `emulator/`) | 4,978 |
-| Desktop app (Rust, `app/`) | 3,425 |
-| JavaScript / TypeScript (instrument runtime, bridges, worker) | 33,897 |
-| HTML (app and panel UIs) | 2,769 |
+| Plugin (Rust, `src/`) | 144,252 |
+| … of which the deep-systems areas (`src/deep/`) | 91,612 |
+| … of which physics models (`src/physics/`) | 5,820 |
+| Test emulator and battery (Rust, `emulator/`) | 8,541 |
+| Desktop app (Rust, `app/`) | 3,373 |
+| JavaScript / TypeScript (instrument runtime, bridges, worker) | 37,062 |
 | C++ (fly-by-wire shims) | 1,164 |
 | Patches to FlyByWire's Rust systems (`patches/fbw-rust`, 37 patches) | 11,559 |
-| Documentation (`docs/`, Markdown) | 11,363 |
+| Documentation (`docs/`, Markdown) | 24,219 |
 
 FlyByWire's systems code this builds on adds about 128,700 lines of Rust
 (47,032 in `a380_systems`, 81,666 in the shared `systems` crate).
 
 ## Failures by ATA chapter
+
+The table below is the original catalogue, carried over from FlyByWire's own failures
+and this project's first physics layer. The deep-systems areas add a further 5,195 on
+top of it, registered per component rather than per chapter — see `src/deep/*/registry.rs`
+and the Study pages for those.
+
 
 | ATA | Chapter | Failures |
 |---|---|---|
@@ -67,7 +75,9 @@ FlyByWire's systems code this builds on adds about 128,700 lines of Rust
 | 36 | Pneumatic | 19 |
 | 49 | APU | 5 |
 | 72–80 | Engine (per engine, × 4) | 72 |
-| | **Total** | **360** |
+| | **Subtotal** | **360** |
+| | Deep-systems areas | **5,195** |
+| | **Total** | **5,555** |
 
 Every failure is also a component with a continuous `loss` level (0–100 %), so partial
 and combined failures interact physically (a restriction that only becomes critical
@@ -126,7 +136,9 @@ path, hydraulic plumbing.
 
 ## Roadmap
 
-A deep-systems push is under way (`src/deep/`, `docs/deep/`):
+The deep-systems push (`src/deep/`, `docs/deep/`) is largely delivered: 17 areas are
+wired in and ticking, and the catalogue stands at 5,555 failures against an original
+target of about 2,500. What it added:
 
 - **New systems:**
   - per-load electrical network;
@@ -140,7 +152,30 @@ A deep-systems push is under way (`src/deep/`, `docs/deep/`):
   - avionics network faults;
   - cabin water/waste/IFE.
 - **Coupling models:** airframe thermal zones, wiring bundles and zones, a pneumatic duct network, bird strikes and environment events (lightning, hail, volcanic ash, ice crystals, runway contamination), and a 6-DOF flight model for the test emulator.
-- **Target:** about 2,500 causal single failures, each backed by an emulator test.
+- **Target:** about 2,500 causal single failures, each backed by an emulator test —
+  passed, at 5,555.
+
+Still ahead: the aircraft's own converted assets (cockpit interaction for the MCDU and
+EFB, ND range and mode), the loadsheet reaching the EFB rather than only the cfg's
+defaults, and the engine model's behaviour at high thrust.
+
+## Diagnostics
+
+The plugin reads a few environment variables that switch parts of it off. They exist
+for bisecting a fault to the code that causes it — the aircraft keeps flying with any
+of them set, so a run with and a run without is a measurement rather than an argument.
+
+| Variable | Effect |
+|---|---|
+| `FBW_SCREENS=off` | Draws no cockpit display: no upload, no quad, no underlay. The browser views keep running, so the difference in frame time is what the twenty screens cost — which no timer inside the plugin can see. |
+| `FBW_XP_EFFECTS=off` | Stops mirroring the plugin's own failure state onto X-Plane's (`sim/operation/failures/rel_*`: fires, seizures, flameouts, hydraulic leaks, tyres, brakes). |
+| `FBW_DEEP=off` | Skips the deep-systems areas for the frame. |
+| `FBW_XP_WRITES=…` | Stops the plugin driving X-Plane's own physics. `off` for all of it, or a comma list of `surfaces`, `handling`, `weight`, `weight-stations`, `weight-cg`. |
+
+Each one logs that it is active on its first tick, so a run can be checked rather than
+assumed. Two cautions learned the hard way: confirm from `Log.txt` that the switch
+actually took effect before trusting a result, and do not judge "it did not crash" by
+sim uptime — that clock runs while the sim sits in a menu.
 
 ## Testing
 
@@ -158,7 +193,18 @@ A deep-systems push is under way (`src/deep/`, `docs/deep/`):
 
 The plugin builds with the GNU toolchain (no Visual Studio needed):
 
-    cargo +stable-x86_64-pc-windows-gnu build --release
+    cargo +stable-x86_64-pc-windows-gnu build --release --features js
+
+`--features js` is not optional for a flyable build: it brings in QuickJS and the
+Oxc TypeScript loader that run FlyByWire's instruments. Without it the plugin still
+compiles and loads, but every cockpit display is dead — and the only outward sign is
+that `win.xpl` comes out around 15 MB instead of about 31 MB.
+
+The built `fbw_a380_systems.dll` is installed as
+`Aircraft/<aircraft>/plugins/fbw_a380_systems/64/win.xpl`. X-Plane scans every
+sub-folder of `plugins/` for `64/win.xpl`, so renaming the *folder* does not disable
+the plugin; rename the `.xpl` itself. Windows will not let you replace it while
+X-Plane is running.
 
 FlyByWire's sources are expected at `D:\fbw-aircraft` with the patches in
 `patches/fbw-rust` applied. The desktop app (`app/`) builds with the MSVC toolchain
