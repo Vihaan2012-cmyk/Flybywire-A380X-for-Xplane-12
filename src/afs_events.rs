@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use crate::fbw_types::{BaseFcuAfsPanelInputs, BaseFcuEfisPanelInputs};
-use crate::xp::{CommandRef, Xplm};
+use crate::xp::{CommandRef, DataRef, Xplm};
 
 /// One event, named as in SimConnectInterface's `Events` enum.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,6 +62,13 @@ pub enum Event {
     FcuLocPush,
     FcuApprPush,
     FcuAltButtonPush,
+    /// A detent of one of the EFIS control panel's two knobs: which side
+    /// (0 left, 1 right) and which way (+1 clockwise, -1 anticlockwise).
+    /// The A380's ND mode and range knobs are infinite rotaries -- the FCU
+    /// counts detents (`efis_mode_knob_turns`/`efis_range_knob_turns`) and
+    /// holds the position itself, so there is no absolute value to send.
+    FcuEfisModeTurn(usize, i8),
+    FcuEfisRangeTurn(usize, i8),
     AutoThrottleArm,
     AutoThrottleDisconnect,
     AthrResetDisable,
@@ -117,6 +124,20 @@ const COMMANDS: &[(&str, &str, Event)] = &[
     ("A32NX_FCU_LOC_PUSH", "A32NX.FCU_LOC_PUSH", Event::FcuLocPush),
     ("A32NX_FCU_APPR_PUSH", "A32NX.FCU_APPR_PUSH", Event::FcuApprPush),
     ("A32NX_FCU_ALT_BUTTON_PUSH", "A32NX.FCU_ALT_BUTTON_PUSH", Event::FcuAltButtonPush),
+    // The EFIS control panel's ND mode and range knobs. efis-cp.xml's
+    // `FBW_AIRLINER_Knob_ND_Template` fires these as key events
+    // (`'A32NX.FCU_EFIS_#SIDE#_#TYPE#_INC' (>F:KeyEvent)`), the only
+    // controls on that panel that do -- every button beside them writes its
+    // L:var through RPN instead, which is why this family was once read as
+    // entirely RPN-driven and left unserved.
+    ("A32NX_FCU_EFIS_L_MODE_INC", "A32NX.FCU_EFIS_L_MODE_INC", Event::FcuEfisModeTurn(0, 1)),
+    ("A32NX_FCU_EFIS_L_MODE_DEC", "A32NX.FCU_EFIS_L_MODE_DEC", Event::FcuEfisModeTurn(0, -1)),
+    ("A32NX_FCU_EFIS_L_RANGE_INC", "A32NX.FCU_EFIS_L_RANGE_INC", Event::FcuEfisRangeTurn(0, 1)),
+    ("A32NX_FCU_EFIS_L_RANGE_DEC", "A32NX.FCU_EFIS_L_RANGE_DEC", Event::FcuEfisRangeTurn(0, -1)),
+    ("A32NX_FCU_EFIS_R_MODE_INC", "A32NX.FCU_EFIS_R_MODE_INC", Event::FcuEfisModeTurn(1, 1)),
+    ("A32NX_FCU_EFIS_R_MODE_DEC", "A32NX.FCU_EFIS_R_MODE_DEC", Event::FcuEfisModeTurn(1, -1)),
+    ("A32NX_FCU_EFIS_R_RANGE_INC", "A32NX.FCU_EFIS_R_RANGE_INC", Event::FcuEfisRangeTurn(1, 1)),
+    ("A32NX_FCU_EFIS_R_RANGE_DEC", "A32NX.FCU_EFIS_R_RANGE_DEC", Event::FcuEfisRangeTurn(1, -1)),
     ("AUTO_THROTTLE_ARM", "AUTO_THROTTLE_ARM", Event::AutoThrottleArm),
     ("AUTO_THROTTLE_DISCONNECT", "AUTO_THROTTLE_DISCONNECT", Event::AutoThrottleDisconnect),
     ("A32NX_ATHR_RESET_DISABLE", "A32NX.ATHR_RESET_DISABLE", Event::AthrResetDisable),
@@ -236,6 +257,11 @@ impl EventInputs {
             Event::FcuLocPush => afs.loc_button_pressed = 1, // cpp:2475
             Event::FcuApprPush => afs.appr_button_pressed = 1, // cpp:2482
             Event::FcuAltButtonPush => afs.alt_button_pressed = 1, // cpp:2489
+            // Set, not accumulated, exactly as every other knob above: one
+            // tick carries one detent, and `EventInputs` is rebuilt each
+            // tick so the turn does not linger into the next one.
+            Event::FcuEfisModeTurn(side, turns) => self.efis[side].efis_mode_knob_turns = turns,
+            Event::FcuEfisRangeTurn(side, turns) => self.efis[side].efis_range_knob_turns = turns,
             Event::AutoThrottleArm => self.throttles.athr_push = true, // cpp:3036
             Event::AutoThrottleDisconnect => self.throttles.athr_disconnect = true, // cpp:3042
             Event::AthrResetDisable => self.throttles.athr_reset_disable = true, // cpp:3051
@@ -265,6 +291,99 @@ pub fn take() -> EventInputs {
         inputs.apply(event);
     }
     inputs
+}
+
+// ---------------------------------------------------------------------------
+// The EFIS control panel's two infinite knobs.
+//
+// In MSFS these are the one part of that panel that speaks in key events:
+// efis-cp.xml's `FBW_AIRLINER_Knob_ND_Template` rigs each as an
+// `ASOBO_GT_Knob_Infinite` whose turn code is
+// `'A32NX.FCU_EFIS_#SIDE#_#TYPE#_INC' (>F:KeyEvent)`. The converted cockpit
+// does not reproduce that. It exports every knob the same way -- a
+// `fbw/cockpit/<NODE_ID>` dataref that the aircraft's own SASL script steps
+// with a `_up`/`_down` command pair behind an `ATTR_manip_command_knob` --
+// so the events never fire here and nothing moved
+// `BaseFcuEfisPanelInputs`' knob-turn counts. The knobs turned, and the ND
+// did not follow.
+//
+// Reading the dataref's *change* per tick turns the converted control back
+// into the detents the FCU expects. It is deliberately a delta and not a
+// position: the FCU holds the mode and range itself, and the SASL dataref is
+// a free-running counter with no agreed zero, so only its movement means
+// anything.
+// ---------------------------------------------------------------------------
+
+/// One infinite knob: the SASL dataref it is exported as, and the event a
+/// detent of it sends. Looked up lazily -- the aircraft's SASL script
+/// publishes these after the plugin has loaded.
+struct Detent {
+    path: &'static str,
+    event: fn(i8) -> Event,
+    dataref: Option<DataRef>,
+    last: Option<f64>,
+}
+
+/// A knob cannot plausibly be turned more than this in one frame. Anything
+/// larger is the dataref being *set* rather than turned -- SASL publishing
+/// its initial value, or a saved-state restore -- which must not be replayed
+/// into the FCU as a burst of detents.
+const MAX_DETENTS_PER_TICK: f64 = 8.;
+
+impl Detent {
+    const fn new(path: &'static str, event: fn(i8) -> Event) -> Self {
+        Self { path, event, dataref: None, last: None }
+    }
+
+    /// Send one event for this tick's movement, if it moved. The first read
+    /// only records where the knob is: there is no movement to report yet,
+    /// and whatever the dataref happens to start at is not a turn.
+    fn poll(&mut self, xplm: &Xplm) {
+        if self.dataref.is_none() {
+            self.dataref = xplm.find(self.path);
+        }
+        let Some(d) = self.dataref else { return };
+        let now = xplm.get_f(d) as f64;
+        let Some(last) = self.last.replace(now) else { return };
+        let moved = now - last;
+        if moved != 0. && moved.abs() <= MAX_DETENTS_PER_TICK {
+            send((self.event)(moved as i8));
+        }
+    }
+}
+
+/// The four EFIS knobs, captain and first officer.
+pub struct EfisKnobs {
+    detents: [Detent; 4],
+}
+
+impl EfisKnobs {
+    pub const fn new() -> Self {
+        Self {
+            detents: [
+                // CS is the captain's side (L), FO the first officer's (R);
+                // ROSE is the mode knob and RANGE the range knob, as
+                // efis-cp.xml's own NODE_IDs name them.
+                Detent::new("fbw/cockpit/KNOB_EFIS_CS_ROSE", |t| Event::FcuEfisModeTurn(0, t)),
+                Detent::new("fbw/cockpit/KNOB_EFIS_CS_RANGE", |t| Event::FcuEfisRangeTurn(0, t)),
+                Detent::new("fbw/cockpit/KNOB_EFIS_FO_ROSE", |t| Event::FcuEfisModeTurn(1, t)),
+                Detent::new("fbw/cockpit/KNOB_EFIS_FO_RANGE", |t| Event::FcuEfisRangeTurn(1, t)),
+            ],
+        }
+    }
+
+    /// Call once a tick, before [`take`] collects the tick's events.
+    pub fn update(&mut self, xplm: &Xplm) {
+        for d in &mut self.detents {
+            d.poll(xplm);
+        }
+    }
+}
+
+impl Default for EfisKnobs {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 unsafe extern "C" fn on_command(_command: CommandRef, phase: std::ffi::c_int, refcon: *mut std::ffi::c_void) -> std::ffi::c_int {
@@ -402,5 +521,57 @@ mod priority_takeover_tests {
             on_priority_command(std::ptr::null_mut(), 2, 1 as *mut std::ffi::c_void);
         }
         assert_eq!(priority_takeover_held(), (false, false));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The gap that left the ND frozen: every other FCU knob had an event
+    /// wired to it, and the two EFIS ones did not, so
+    /// `efis_mode_knob_turns`/`efis_range_knob_turns` stayed 0 for the whole
+    /// flight and the FCU never moved the EFIS discrete word `prim.rs`
+    /// publishes the ND mode and range from.
+    #[test]
+    fn turning_an_efis_knob_reaches_the_fcu_as_a_detent() {
+        for (side, name) in [(0, "captain"), (1, "first officer")] {
+            let mut inputs = EventInputs::default();
+            assert_eq!(inputs.efis[side].efis_mode_knob_turns, 0, "{name}: starts still");
+            assert_eq!(inputs.efis[side].efis_range_knob_turns, 0, "{name}: starts still");
+
+            inputs.apply(Event::FcuEfisModeTurn(side, 1));
+            inputs.apply(Event::FcuEfisRangeTurn(side, -1));
+            assert_eq!(inputs.efis[side].efis_mode_knob_turns, 1, "{name}: mode knob turned clockwise");
+            assert_eq!(inputs.efis[side].efis_range_knob_turns, -1, "{name}: range knob turned anticlockwise");
+
+            // One side's knob must never move the other side's ND.
+            let other = 1 - side;
+            assert_eq!(inputs.efis[other].efis_mode_knob_turns, 0, "{name}: the other side stayed put");
+            assert_eq!(inputs.efis[other].efis_range_knob_turns, 0, "{name}: the other side stayed put");
+        }
+    }
+
+    /// Every knob event must be reachable both ways it can arrive: as an
+    /// X-Plane command the converted cockpit binds, and by the MSFS event
+    /// name a script sends.
+    #[test]
+    fn both_efis_knobs_are_bound_on_both_sides() {
+        for side in ["L", "R"] {
+            for kind in ["MODE", "RANGE"] {
+                for way in ["INC", "DEC"] {
+                    let msfs = format!("A32NX.FCU_EFIS_{side}_{kind}_{way}");
+                    let suffix = format!("A32NX_FCU_EFIS_{side}_{kind}_{way}");
+                    assert!(
+                        COMMANDS.iter().any(|(s, m, _)| *s == suffix && *m == msfs),
+                        "{msfs} has no fbw/event/ command"
+                    );
+                    assert!(
+                        crate::key_events::afs_event_for_test(&msfs).is_some(),
+                        "{msfs} cannot be sent by name from a script"
+                    );
+                }
+            }
+        }
     }
 }

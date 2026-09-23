@@ -52,12 +52,24 @@
 //! - A32NX.THROTTLE_MAPPING_*: the flyPad's throttle calibration; throttle.rs
 //!   uses FlyByWire's default detents and keeps no calibration file.
 //!
-//! Checked against the A380X behaviour XML and found not to apply here: the
-//! A32NX_FCU_EFIS_{L,R}_* family and A32NX_EFIS_{L,R}_CHRONO_PUSHED are in
+//! Checked against the A380X behaviour XML: most of the
+//! A32NX_FCU_EFIS_{L,R}_* family, and A32NX_EFIS_{L,R}_CHRONO_PUSHED, are in
 //! SimConnectInterface's Events enum (inherited from the A320) but the A380's
 //! own EFIS control panel (efis-cp.xml) writes `L:A32NX_FCU_EFIS_*` local vars
-//! directly through RPN, never the `K:` event - nothing in fbw-a380x sends
-//! them as key events, so there is nothing for this module to serve.
+//! directly through RPN rather than sending the event, so there is nothing
+//! for this module to serve for those.
+//!
+//! **Four of them are not like that**, and reading the panel as uniformly
+//! RPN-driven is what left the ND dead: efis-cp.xml's own
+//! `FBW_AIRLINER_Knob_ND_Template` rigs the ND mode and range knobs as
+//! `ASOBO_GT_Knob_Infinite` whose turn code is
+//! `'A32NX.FCU_EFIS_#SIDE#_#TYPE#_INC' (>F:KeyEvent)` -- real key events, the
+//! only ones that panel sends. Without them `BaseFcuEfisPanelInputs`'
+//! `efis_mode_knob_turns`/`efis_range_knob_turns` stayed 0 for the whole
+//! flight, so the FCU never moved the EFIS discrete word and `prim.rs` kept
+//! publishing one unchanging `A32NX_EFIS_{side}_ND_{MODE,RANGE}`: the knobs
+//! turned in the cockpit and the picture never followed. They are served in
+//! `afs_events.rs` as `fbw/event/A32NX_FCU_EFIS_{L,R}_{MODE,RANGE}_{INC,DEC}`.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -176,6 +188,14 @@ fn afs_event(name: &str, value: f64) -> Option<Event> {
         "A32NX.FCU_LOC_PUSH" => Event::FcuLocPush,
         "A32NX.FCU_APPR_PUSH" => Event::FcuApprPush,
         "A32NX.FCU_ALT_BUTTON_PUSH" => Event::FcuAltButtonPush,
+        "A32NX.FCU_EFIS_L_MODE_INC" => Event::FcuEfisModeTurn(0, 1),
+        "A32NX.FCU_EFIS_L_MODE_DEC" => Event::FcuEfisModeTurn(0, -1),
+        "A32NX.FCU_EFIS_L_RANGE_INC" => Event::FcuEfisRangeTurn(0, 1),
+        "A32NX.FCU_EFIS_L_RANGE_DEC" => Event::FcuEfisRangeTurn(0, -1),
+        "A32NX.FCU_EFIS_R_MODE_INC" => Event::FcuEfisModeTurn(1, 1),
+        "A32NX.FCU_EFIS_R_MODE_DEC" => Event::FcuEfisModeTurn(1, -1),
+        "A32NX.FCU_EFIS_R_RANGE_INC" => Event::FcuEfisRangeTurn(1, 1),
+        "A32NX.FCU_EFIS_R_RANGE_DEC" => Event::FcuEfisRangeTurn(1, -1),
         "AUTO_THROTTLE_ARM" => Event::AutoThrottleArm,
         "AUTO_THROTTLE_DISCONNECT" => Event::AutoThrottleDisconnect,
         "A32NX.ATHR_RESET_DISABLE" => Event::AthrResetDisable,
@@ -404,4 +424,12 @@ mod tests {
         assert!(apply(&mut vars, &mut xp, "A32NX.FMS_PRESET_SPD_ACTIVATE", &[0.]));
         assert!(afs_events::take().autopilot.preset_spd_activate);
     }
+}
+
+/// [`afs_event`] for `afs_events`' own tests, which check that every knob
+/// event is reachable by the MSFS name a script sends as well as by the
+/// X-Plane command the cockpit binds.
+#[cfg(test)]
+pub(crate) fn afs_event_for_test(name: &str) -> Option<Event> {
+    afs_event(name, 0.)
 }

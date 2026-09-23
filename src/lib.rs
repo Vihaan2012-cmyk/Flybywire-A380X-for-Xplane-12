@@ -162,6 +162,9 @@ mod navdata;
 // [slot modules: oans] Local AMDB airport map data for the OANS (ND/MFD).
 #[cfg(feature = "js")]
 mod oans;
+// The one place this plugin talks to the internet, for the scripts' fetch.
+#[cfg(feature = "js")]
+mod net;
 // [slot modules: wxr] Weather radar on the ND, from X-Plane's real weather.
 #[allow(dead_code)]
 mod wxr;
@@ -931,6 +934,10 @@ struct Plugin {
     fbw_extras_xplane: extra_backend::Xplane,
     // [slot fields: key_events] The general key event dispatcher.
     key_events: key_events::KeyEvents,
+    /// The EFIS control panel's ND mode and range knobs, which the converted
+    /// cockpit exports as SASL datarefs rather than the key events MSFS
+    /// sends (afs_events::EfisKnobs).
+    efis_knobs: afs_events::EfisKnobs,
     /// The script engine, when the plugin has scripts.
     #[cfg(feature = "js")]
     js: Option<js_bridge::JsHost>,
@@ -1271,6 +1278,7 @@ impl Plugin {
         let fbw_extras_xplane = extra_backend::Xplane::new(xplm);
         // [slot new: key_events]
         let key_events = key_events::KeyEvents::new(xplm);
+        let efis_knobs = afs_events::EfisKnobs::new();
         // [slot new: js] FlyByWire's instruments (js_bridge.rs), and their
         // fbw/hevent/ commands.
         #[cfg(feature = "js")]
@@ -1396,6 +1404,7 @@ impl Plugin {
             fbw_extras_xplane,
             // [slot init: key_events]
             key_events,
+            efis_knobs,
             #[cfg(feature = "js")]
             js,
             #[cfg(feature = "js")]
@@ -1488,6 +1497,9 @@ impl Plugin {
         for event in self.prims.fcu_initialization(&readings, self.time) {
             afs_events::send(event);
         }
+        // Strictly before `take`: a detent turned this tick has to be in the
+        // batch this tick's FCU update reads, or the knob lags a frame.
+        self.efis_knobs.update(xplm);
         let events = afs_events::take();
         // Sidestick priority takeover pushbuttons: a held state (see
         // afs_events::PriorityTakeoverCommands), written straight into the
