@@ -680,8 +680,23 @@ fn mapping(name: &str) -> Option<(&'static str, Kind, fn(f64) -> f64)> {
     use Kind::{Double, Float, Int};
     Some(match name {
         "AMBIENT TEMPERATURE" => ("sim/weather/aircraft/temperature_ambient_deg_c", Float, identity),
-        "AIRSPEED INDICATED" => ("sim/flightmodel/position/indicated_airspeed", Float, identity),
-        "AIRSPEED TRUE" => ("sim/flightmodel/position/true_airspeed", Float, |v| v * MS_TO_KNOT),
+        // Airspeeds never go below zero. X-Plane's do: both of these read
+        // negative when the aeroplane moves backwards, and one run had
+        // indicated airspeed at -69 kt while it slid tail-first down a
+        // runway. No air data computer can produce that number -- a pitot
+        // tube cannot measure reversed flow, it reads zero -- and handing
+        // one to the avionics is not a small lie.
+        //
+        // The inertial reference builds wind as `gs_vector - tas_vector`
+        // (`adirs.rs::update_wind_velocity`), laying the airspeed vector
+        // along the heading. A negative true airspeed turns that vector
+        // around, which turns the subtraction into an addition: ground
+        // speed 84 kt and true airspeed 115 kt reported 199 kt of wind on a
+        // runway -- the sum, where the difference, 31 kt, was the answer.
+        // Everything else fed by airspeed has the same exposure: the speed
+        // scale's own protections, the flap and gear limits, alpha floor.
+        "AIRSPEED INDICATED" => ("sim/flightmodel/position/indicated_airspeed", Float, |v| v.max(0.)),
+        "AIRSPEED TRUE" => ("sim/flightmodel/position/true_airspeed", Float, |v| (v * MS_TO_KNOT).max(0.)),
         "GPS GROUND SPEED" => ("sim/flightmodel/position/groundspeed", Float, |v| v * MS_TO_KNOT),
         "AIRSPEED MACH" => ("sim/flightmodel/misc/machno", Float, identity),
         "PRESSURE ALTITUDE" => (
@@ -2712,5 +2727,32 @@ mod tests {
             rotated[0] > 0.,
             "a north wind heading east should be a left crosswind (positive body X), got {rotated:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod airspeed_sign_tests {
+    use super::*;
+
+    /// An air data computer cannot report a negative airspeed.
+    ///
+    /// X-Plane's `indicated_airspeed` and `true_airspeed` both go negative
+    /// when the aeroplane moves backwards. A pitot tube cannot measure
+    /// reversed flow -- it reads zero -- so nothing downstream is built to
+    /// cope, and the inertial reference in particular turns a negative true
+    /// airspeed into wind of the wrong sign *and* the wrong magnitude:
+    /// `gs_vector - tas_vector` becomes an addition when the airspeed vector
+    /// points backwards along the heading.
+    #[test]
+    fn a_backwards_aeroplane_reports_zero_airspeed_not_a_negative_one() {
+        let (_, _, ias) = mapping("AIRSPEED INDICATED").unwrap();
+        let (_, _, tas) = mapping("AIRSPEED TRUE").unwrap();
+        // The run that prompted this: -69 kt indicated, sliding tail-first.
+        assert_eq!(ias(-69.4), 0.0);
+        assert_eq!(tas(-35.0), 0.0);
+        // Forwards is untouched, in the units each carries (knots for
+        // indicated, metres per second for true).
+        assert_eq!(ias(250.0), 250.0);
+        assert!((tas(100.0) - 194.384).abs() < 0.01);
     }
 }
