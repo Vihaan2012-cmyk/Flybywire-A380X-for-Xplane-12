@@ -488,6 +488,8 @@ pub struct Engine {
     /// ground-start limit below 50 % HP speed. Holds fuel shut until the
     /// crew cycles the master switch, as a real hot-start abort does.
     start_aborted: bool,
+    /// Last frame's gas-path stations, for diagnostics.
+    pub(crate) last_gas: gas_path::Outputs,
     hot: hot_section::HotSection,
     oil: oil::OilSystem,
     /// Temperatures start at the first frame's ambient (a cold-soaked
@@ -665,6 +667,7 @@ impl Engine {
             design,
             egt_lag_c: 15.0,
             start_aborted: false,
+            last_gas: gas_path::Outputs::default(),
             hot: hot_section::HotSection::new(T_REF_K),
             oil: oil::OilSystem::new(T_REF_K),
             soaked: false,
@@ -846,6 +849,7 @@ impl Engine {
         // hot section's metal (`hot_section`): cooler while the metal warms,
         // hotter over metal still hot from the last run; with little or no
         // flow the probe settles to the metal around it.
+        self.last_gas = gp;
         let exchange = self.hot.step(gp.tt4_k, gp.tt45_k, gp.mdot_gas_kg_s, self.gas.design.mdot_core_kg_s, ambient_t, dt);
         let egt_raw_c = exchange.probe_target_k - 273.15;
         let egt_tau_s = 1.5; // typical thermocouple first-order response, generic
@@ -969,7 +973,7 @@ impl Default for Engine {
 mod tests {
     use super::*;
 
-    fn isa_sea_level() -> EngineInputs {
+    pub(super) fn isa_sea_level() -> EngineInputs {
         EngineInputs {
             ambient_pressure_pa: P_REF_PA,
             ambient_temp_k: T_REF_K,
@@ -998,7 +1002,7 @@ mod tests {
     /// starting from rest (with the starter engaged until self-sustaining)
     /// so tests exercise the real starting/spool-up path rather than
     /// teleporting to a speed.
-    fn run_to_steady_state(engine: &mut Engine, mut inputs: EngineInputs, seconds: f64) -> EngineOutputs {
+    pub(super) fn run_to_steady_state(engine: &mut Engine, mut inputs: EngineInputs, seconds: f64) -> EngineOutputs {
         // The start itself (FlyByWire's start schedule, ~65 s to idle) comes
         // before the steady-state period the caller asked for.
         let steps = ((seconds + 90.0) / inputs.dt_s).round() as u32;
@@ -1322,7 +1326,7 @@ mod tests {
         let mut reached_idle_at_s: Option<f64> = None;
         let mut out = EngineOutputs::default();
         let max_t = 90.0;
-        let mut t = 0.0;
+        let mut t: f64 = 0.0;
         while t < max_t {
             inputs.starter_engaged = out.n3_pct < 50.0;
             out = engine.step(&inputs);
@@ -1934,4 +1938,71 @@ mod total_compressor_loss {
         assert!(out.n3_pct < 65.0, "a destroyed HP compressor should run down from idle: N3 {}", out.n3_pct);
     }
 
+}
+
+#[cfg(test)]
+mod accel_diagnostic {
+    use super::tests::*;
+    use super::*;
+
+    /// Where the power goes during the certificated acceleration.
+    ///
+    /// `cargo test -p fbw_a380_systems_xp --lib where_the_power_goes --     ///  --ignored --nocapture`
+    ///
+    /// Ignored because it prints rather than asserts. It is kept because it
+    /// is what finally located the engine's part-speed problem, after five
+    /// constants had been swept against the test suite without finding it:
+    /// the answer is in the `margin` column, and no pass/fail test was
+    /// looking at that column.
+    ///
+    /// What it shows, run against the calibration as it stands:
+    ///
+    /// ```text
+    ///   t   N1   N3    wf    TET   TGT  core  HPTkW  HPCkW  surplus  margin  thrust
+    /// 0.0   15   59 0.297   1324   369  21.1   2679   2022      657    1.10       8
+    /// 4.0   18   62 0.364   1488   782  23.3   4176   2991     1184    0.98      12
+    /// 8.0   23   67 0.490   1682   910  26.9   5903   4211     1692    0.93      19
+    /// 12.0  29   73 0.637   1686   929  32.4   8731   6457     2274    0.97      30
+    /// ```
+    ///
+    /// The HP compressor's stall margin is 1.10 at idle and **below 1.0 --
+    /// stalled -- for most of the acceleration**. That is the whole story.
+    /// A stalled compressor passes little flow (27 kg/s at 67 % N3 against
+    /// a 136.6 kg/s design) and builds pressure badly, so the engine needs
+    /// a near-design fuel-air ratio to do idle work: TET is 1324 K at idle
+    /// against 1633 K at the design point, where a real engine idles at
+    /// little more than half its take-off turbine temperature. By 24 % N1
+    /// -- taxi thrust -- TGT has reached the take-off limit and the EEC's
+    /// running limiter is holding it there (visible as TGT pinned at 929
+    /// and fuel flow stepping back at t = 9).
+    ///
+    /// The 73 % handling bleed was the crutch holding the compressor off
+    /// its stall line. That is exactly what a handling bleed is for; it was
+    /// sized four times too large because the map underneath has no
+    /// part-speed surge margin of its own to start from.
+    #[test]
+    #[ignore]
+    fn where_the_power_goes() {
+        let mut engine = Engine::new();
+        run_to_steady_state(&mut engine, EngineInputs { target_n1_corrected_pct: IDLE_N1_PCT, ..isa_sea_level() }, 60.0);
+        let dt = 0.02;
+        let inputs = EngineInputs { target_n1_corrected_pct: 100.0, dt_s: dt, ..isa_sea_level() };
+        println!("  t   N1   N3    wf    TET   TGT  core  bleed  HPTkW  HPCkW  surplus  margin  thrust");
+        let mut t = 0.0;
+        while t < 12.0 {
+            let out = engine.step(&inputs);
+            let g = &engine.last_gas;
+            if ((t * 50.0_f64).round() as i64) % 25 == 0 {
+                println!(
+                    "{t:5.1} {:4.0} {:4.0} {:5.3} {:6.0} {:5.0} {:5.1} {:6.2} {:6.0} {:6.0} {:8.0} {:7.2} {:7.0}",
+                    out.n1_pct, out.n3_pct, out.fuel_flow_kg_s, g.tt4_k, out.egt_c, g.m_core,
+                    engine.gas.state.m_hpc - g.m_core,
+                    g.hpt_power_w / 1000.0, g.hpc_power_w / 1000.0,
+                    (g.hpt_power_w - g.hpc_power_w) / 1000.0,
+                    g.hpc_stall_margin, out.net_thrust_n / 1000.0
+                );
+            }
+            t += dt;
+        }
+    }
 }
