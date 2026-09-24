@@ -54,6 +54,34 @@ struct Stats {
     fire_released: [VariableIdentifier; 4],
     green_psi: VariableIdentifier,
     yellow_psi: VariableIdentifier,
+    /// Per pump, in `AirbusEngineDrivenPumpId` order (1A, 1B, 2A, ... 4B):
+    /// whether the controller has it pressurising, the flow it is moving,
+    /// and whether it is cavitating.
+    pump: [PumpStats; 8],
+    /// Per circuit, green then yellow.
+    reservoir: [ReservoirStats; 2],
+}
+
+struct PumpStats {
+    name: &'static str,
+    active: VariableIdentifier,
+    flow: VariableIdentifier,
+    /// `HYD_<id>_EDPUMP_CAVITATION` is an *efficiency ratio*, not a flag:
+    /// 1.0 is a pump with a full, pressurised, cool reservoir behind it,
+    /// and `EngineDrivenPump::is_heating_this_tick` treats anything below
+    /// `CAVITATION_OVERHEAT_EFFICIENCY_RATIO` (0.3) as severe enough to
+    /// start heating the pump toward damage.
+    cavitation: VariableIdentifier,
+    overheat: VariableIdentifier,
+    damaged: VariableIdentifier,
+}
+
+struct ReservoirStats {
+    name: &'static str,
+    level: VariableIdentifier,
+    low_level: VariableIdentifier,
+    low_air_pressure: VariableIdentifier,
+    overheating: VariableIdentifier,
 }
 
 impl Stats {
@@ -70,9 +98,29 @@ impl Stats {
             fire_released: std::array::from_fn(|i| vars.get(format!("FIRE_BUTTON_ENG{}", i + 1))),
             green_psi: vars.get("HYD_GREEN_SYSTEM_1_SECTION_PRESSURE".to_owned()),
             yellow_psi: vars.get("HYD_YELLOW_SYSTEM_1_SECTION_PRESSURE".to_owned()),
+            pump: PUMP_NAMES.map(|name| PumpStats {
+                name,
+                active: vars.get(format!("HYD_{name}_EDPUMP_ACTIVE")),
+                flow: vars.get(format!("HYD_{name}_EDPUMP_FLOW")),
+                cavitation: vars.get(format!("HYD_{name}_EDPUMP_CAVITATION")),
+                overheat: vars.get(format!("HYD_{name}_EDPUMP_OVERHEAT")),
+                damaged: vars.get(format!("HYD_{name}_EDPUMP_DAMAGED")),
+            }),
+            reservoir: ["GREEN", "YELLOW"].map(|name| ReservoirStats {
+                name,
+                level: vars.get(format!("HYD_{name}_RESERVOIR_LEVEL")),
+                low_level: vars.get(format!("HYD_{name}_RESERVOIR_LEVEL_IS_LOW")),
+                low_air_pressure: vars.get(format!("HYD_{name}_RESERVOIR_AIR_PRESSURE_IS_LOW")),
+                overheating: vars.get(format!("HYD_{name}_RESERVOIR_OVHT")),
+            }),
         }
     }
 }
+
+/// `AirbusEngineDrivenPumpId`'s own `Display` spellings: engines 1 and 2
+/// drive the green circuit, 3 and 4 the yellow, two pumps each.
+const PUMP_NAMES: [&str; 8] =
+    ["GREEN_1A", "GREEN_1B", "GREEN_2A", "GREEN_2B", "YELLOW_3A", "YELLOW_3B", "YELLOW_4A", "YELLOW_4B"];
 
 impl Hydraulics {
     pub fn new(vars: &mut Vars) -> Self {
@@ -99,9 +147,8 @@ impl Hydraulics {
         self.log_stats(vars);
     }
 
-    /// `FBW_HYD_STATS=1`: every 5 s, one line giving each engine's N3, its
-    /// pump pushbutton and fire pushbutton, the shaft power its two pumps
-    /// are drawing, and both circuits' pressure.
+    /// `FBW_HYD_STATS=1`: every 5 s, three lines covering the whole chain
+    /// from the engine to the circuit.
     ///
     /// A circuit that will not pressurise has a short list of causes and
     /// they are strictly ordered -- the Trent drives its pumps from N3
@@ -111,6 +158,30 @@ impl Hydraulics {
     /// stowed, and the pump then makes shaft power. Printing all four
     /// together says which link is the broken one instead of leaving it to
     /// inference.
+    ///
+    /// The first line is that chain. It is not enough on its own, because
+    /// the case actually seen -- pumps making 5311 W at 50 % N3 and 0 W at
+    /// 76 %, with the circuit down to 16 psi -- is the wrong way round for
+    /// every link in it: pump speed is a *monotone* function of N3, so more
+    /// N3 cannot mean less pump. Something downstream is taking the pump
+    /// out, and there are exactly three candidates in `hydraulic/mod.rs`,
+    /// all of them published:
+    ///
+    /// * the controller stops commanding it (`..._EDPUMP_ACTIVE` false),
+    /// * the reservoir cannot feed it -- low level, low air pressure, or
+    ///   overheating (`HYD_<circuit>_RESERVOIR_*`), which is what makes a
+    ///   pump cavitate, and
+    /// * the pump has overheated into damage, after which
+    ///   `EngineDrivenPump::update` stops applying `pump_speed` at all
+    ///   (`!self.is_damaged()`) -- so it reads as a pump spinning at zero
+    ///   while the engine it is bolted to is at take-off power.
+    ///
+    /// Each of those is printed, so the three are distinguishable rather
+    /// than all presenting the same way -- zero flow at zero pressure --
+    /// from outside. Note that shaft power is *derived* from pressure
+    /// (`EngineDrivenPump::shaft_power` is `last_pressure * flow / 0.90`),
+    /// so "shaft 0 W" is a restatement of "the circuit is at 16 psi", not
+    /// independent evidence about the pump.
     fn log_stats(&mut self, vars: &mut Vars) {
         use std::sync::OnceLock;
         static ON: OnceLock<bool> = OnceLock::new();
@@ -136,5 +207,32 @@ impl Hydraulics {
             vars.read(&self.stats.yellow_psi)
         ));
         crate::log(&line);
+
+        let mut pumps = String::from("hyd pumps:");
+        for p in &self.stats.pump {
+            pumps.push_str(&format!(
+                " {} {} {:.2} gal/s cav {:.2}{}{};",
+                p.name,
+                if vars.read(&p.active) != 0. { "active" } else { "off" },
+                vars.read(&p.flow),
+                vars.read(&p.cavitation),
+                if vars.read(&p.overheat) != 0. { " OVERHEAT" } else { "" },
+                if vars.read(&p.damaged) != 0. { " DAMAGED" } else { "" },
+            ));
+        }
+        crate::log(&pumps);
+
+        let mut res = String::from("hyd reservoirs:");
+        for r in &self.stats.reservoir {
+            res.push_str(&format!(
+                " {} {:.1} gal{}{}{};",
+                r.name,
+                vars.read(&r.level),
+                if vars.read(&r.low_level) != 0. { " LOW LEVEL" } else { "" },
+                if vars.read(&r.low_air_pressure) != 0. { " LOW AIR PRESS" } else { "" },
+                if vars.read(&r.overheating) != 0. { " OVHT" } else { "" },
+            ));
+        }
+        crate::log(&res);
     }
 }
