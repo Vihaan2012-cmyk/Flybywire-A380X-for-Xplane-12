@@ -1945,6 +1945,12 @@ pub(crate) mod tests {
         pub ias: f64,
         pub buses: [BasePrimOutBus; 3],
         pub fadec_out: [AthrOut; 4],
+        /// What the plugin hands the computers each frame outside the
+        /// variable registry: the sidestick, the load factor and the body
+        /// rates. Zero by default, as `SimReadings::default()` is -- which
+        /// includes a load factor of zero, so a test that wants the pitch
+        /// law to do anything has to set at least that.
+        pub readings: SimReadings,
     }
 
     pub const DT: f64 = 0.05;
@@ -1964,6 +1970,7 @@ pub(crate) mod tests {
                 ias: ias as f64,
                 buses: Default::default(),
                 fadec_out: Default::default(),
+                readings: SimReadings { nz_g: 1.0, ..Default::default() },
             }
         }
 
@@ -1979,7 +1986,7 @@ pub(crate) mod tests {
                 inputs.apply(*e);
             }
             self.buses =
-                self.prims.update_with(&mut self.vars, &SimReadings::default(), &inputs, DT, self.time, active_failures);
+                self.prims.update_with(&mut self.vars, &self.readings, &inputs, DT, self.time, active_failures);
             let (eec, outs) =
                 step_fadecs(&mut self.fadecs, &self.buses, self.on_ground, self.ias, DT, self.time, &mut self.n1);
             self.fadec_out = outs;

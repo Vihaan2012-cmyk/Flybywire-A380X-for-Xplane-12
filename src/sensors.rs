@@ -761,11 +761,27 @@ pub fn g_force(g_nrml: f64) -> f64 {
 /// body axes for this struct: x pitch, y yaw, z roll (matching the mapping()
 /// table's "ROTATION VELOCITY BODY X/Y/Z", lib.rs:496-501, which serve the
 /// same three rates from the same X-Plane datarefs as separate named
-/// variables) — so the struct's members are read the same way, straight from
-/// X-Plane's Qrad/Rrad/Prad (already radians per second, X-Plane's own
-/// pitch/yaw/roll rates).
+/// variables) — so the struct's members are read the same way, and carry
+/// the same signs.
+///
+/// **Which means pitch and roll are negated, and that is the whole point.**
+/// MSFS counts both the opposite way to X-Plane's Q and P, and
+/// FlyByWireInterface.cpp undoes it on the way in
+/// (`q_deg_s = -1 * simData.bodyRotationVelocity.x`,
+/// `p_deg_s = -1 * simData.bodyRotationVelocity.z`; yaw is not negated,
+/// `r_deg_s = 1 * simData.bodyRotationVelocity.y`). So what this hands over
+/// must already be in MSFS's sign, exactly as `mapping()` does for the
+/// named variables.
+///
+/// It did not, and only these rates were affected: attitude reaches the
+/// flight control computers through the ADIRS and the named variables,
+/// which were negated correctly, so every attitude signal checked out while
+/// the *rates* arrived inverted. An inverted rate is an inverted damping
+/// term, which is positive feedback, and the aeroplane pitched onto its
+/// nose with the sidestick centred while the PRIM commanded saturated
+/// nose-down -- the shape of a divergence rather than of a wrong command.
 pub fn body_rotation_velocity_rad_s(p_rad_s: f64, q_rad_s: f64, r_rad_s: f64) -> (f64, f64, f64) {
-    (q_rad_s, r_rad_s, p_rad_s)
+    (-q_rad_s, r_rad_s, -p_rad_s)
 }
 
 /// STRUCT BODY ROTATION ACCELERATION (SimConnectData.h:12), the same x
@@ -776,9 +792,10 @@ pub fn body_rotation_velocity_rad_s(p_rad_s: f64, q_rad_s: f64, r_rad_s: f64) ->
 /// for "ROTATION ACCELERATION BODY X/Y/Z", lib.rs:502-504), so this converts
 /// them rather than differencing successive rates across the frame delta
 /// (equivalent, but X-Plane's own derivative avoids a frame of lag and
-/// division-by-small-dt noise).
+/// division-by-small-dt noise). Pitch and roll are negated for the same
+/// reason as the rates above, and `mapping()` negates the same two.
 pub fn body_rotation_acceleration_rad_s2(p_dot_deg_s2: f64, q_dot_deg_s2: f64, r_dot_deg_s2: f64) -> (f64, f64, f64) {
-    (q_dot_deg_s2 * DEG_TO_RAD, r_dot_deg_s2 * DEG_TO_RAD, p_dot_deg_s2 * DEG_TO_RAD)
+    (-q_dot_deg_s2 * DEG_TO_RAD, r_dot_deg_s2 * DEG_TO_RAD, -p_dot_deg_s2 * DEG_TO_RAD)
 }
 
 /// ACCELERATION BODY Z (SimConnectData.h:15 `bz_m_s2`), read at
@@ -1018,18 +1035,43 @@ mod tests {
     }
 
     #[test]
-    fn body_rotation_velocity_reorders_prq_into_msfs_xyz() {
-        // x = pitch (q), y = yaw (r), z = roll (p).
+    fn body_rotation_velocity_reorders_prq_into_msfs_xyz_and_flips_pitch_and_roll() {
+        // x = pitch (q), y = yaw (r), z = roll (p), with pitch and roll in
+        // MSFS's sign rather than X-Plane's -- see the doc comment.
         let (x, y, z) = body_rotation_velocity_rad_s(0.1, 0.2, 0.3);
-        assert_eq!((x, y, z), (0.2, 0.3, 0.1));
+        assert_eq!((x, y, z), (-0.2, 0.3, -0.1));
+    }
+
+    /// The two paths the same three rates travel must agree, or the flight
+    /// control computers get attitude one way round and rate the other.
+    ///
+    /// `mapping()` serves them as named variables to the ADIRS;
+    /// `body_rotation_velocity_rad_s` serves them as a struct straight to
+    /// the PRIM. They were opposite on pitch and roll, which inverted the
+    /// damping term in the pitch law.
+    #[test]
+    fn the_struct_and_the_named_variables_agree_on_every_axis() {
+        let (p, q, r) = (0.3_f64, 0.1_f64, 0.2_f64);
+        let (x, y, z) = body_rotation_velocity_rad_s(p, q, r);
+        // Compared loosely: `mapping()` goes through a rounded
+        // degrees-per-radian constant, so the two paths agree to about a
+        // part in a billion rather than exactly. The sign is the subject
+        // here, not the ninth decimal.
+        let named = |name: &str, raw: f64| {
+            let (_, _, convert) = crate::mapping(name).unwrap();
+            convert(raw).to_radians()
+        };
+        assert!((x - named("ROTATION VELOCITY BODY X", q)).abs() < 1e-6, "pitch rate");
+        assert!((y - named("ROTATION VELOCITY BODY Y", r)).abs() < 1e-6, "yaw rate");
+        assert!((z - named("ROTATION VELOCITY BODY Z", p)).abs() < 1e-6, "roll rate");
     }
 
     #[test]
     fn body_rotation_acceleration_converts_degrees_to_radians_and_reorders() {
         let (x, y, z) = body_rotation_acceleration_rad_s2(180., 90., 360.);
-        assert!((x - std::f64::consts::FRAC_PI_2).abs() < 1e-9); // q_dot 90 deg/s2
+        assert!((x + std::f64::consts::FRAC_PI_2).abs() < 1e-9); // q_dot 90 deg/s2, flipped
         assert!((y - std::f64::consts::TAU).abs() < 1e-9); // r_dot 360 deg/s2
-        assert!((z - std::f64::consts::PI).abs() < 1e-9); // p_dot 180 deg/s2
+        assert!((z + std::f64::consts::PI).abs() < 1e-9); // p_dot 180 deg/s2, flipped
     }
 
     #[test]
