@@ -940,6 +940,18 @@ pub struct AvionicsApi {
     /// popup window. The only way (XPLM410) to give a device keyboard focus
     /// is through this popup — see `take_keyboard_focus`'s doc comment.
     pub set_popup_visible: unsafe extern "C" fn(AvionicsId, c_int),
+    /// XPLMPopOutAvionics: takes the device out of X-Plane's own window
+    /// into an operating-system window of its own, which is the one that
+    /// can be dragged to a second monitor. `set_popup_visible` only floats
+    /// it inside the simulator's window, where it covers the cockpit it is
+    /// meant to be read beside.
+    pub pop_out: unsafe extern "C" fn(AvionicsId),
+    /// XPLMIsAvionicsPopupVisible / XPLMIsAvionicsPoppedOut: which state a
+    /// device is in, asked of X-Plane rather than remembered here, so a
+    /// window the user closed with its own chrome does not leave this
+    /// module believing it is still open.
+    pub is_popup_visible: unsafe extern "C" fn(AvionicsId) -> c_int,
+    pub is_popped_out: unsafe extern "C" fn(AvionicsId) -> c_int,
     /// XPLMTakeAvionicsKeyboardFocus: gives the device's popup window
     /// keyboard focus, so its `CreateAvionics::keyboard` callback starts
     /// receiving keystrokes. XPLMDisplay.h is explicit that
@@ -985,6 +997,15 @@ impl Xplm {
                 ),
                 set_popup_visible: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(AvionicsId, c_int)>(
                     Self::xplm_symbol("XPLMSetAvionicsPopupVisible")?,
+                ),
+                pop_out: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(AvionicsId)>(
+                    Self::xplm_symbol("XPLMPopOutAvionics")?,
+                ),
+                is_popup_visible: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(AvionicsId) -> c_int>(
+                    Self::xplm_symbol("XPLMIsAvionicsPopupVisible")?,
+                ),
+                is_popped_out: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(AvionicsId) -> c_int>(
+                    Self::xplm_symbol("XPLMIsAvionicsPoppedOut")?,
                 ),
                 take_keyboard_focus: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(AvionicsId)>(
                     Self::xplm_symbol("XPLMTakeAvionicsKeyboardFocus")?,

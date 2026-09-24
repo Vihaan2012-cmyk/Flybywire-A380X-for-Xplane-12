@@ -12,6 +12,7 @@
 
 pub mod image;
 pub mod path;
+pub mod popout;
 pub mod plan;
 pub mod screens;
 pub mod stream;
@@ -156,8 +157,8 @@ struct Bridge {
 /// instruments' thread holds it only briefly, to hand over a new mesh.
 pub struct Displays {
     xplm: Option<&'static Xplm>,
-    api: Option<xp::AvionicsApi>,
-    screens: Vec<Screen>,
+    pub(crate) api: Option<xp::AvionicsApi>,
+    pub(crate) screens: Vec<Screen>,
     /// The atlas and images as the meshes need them; no fonts.
     res: Resources,
     renderer: Option<Result<gl::Renderer, String>>,
@@ -1106,6 +1107,38 @@ pub fn start(xplm: &'static Xplm) {
     } else {
         log("X-Plane refused the key sniffer: the MCDU can only be typed into popped out (right-click it)");
     }
+    // Pop-out: a command per screen, and a menu so the commands can be
+    // found without binding anything first.
+    let commands = popout::Commands::register(xplm, popout_command);
+    log(&format!("{} display pop-out commands registered (fbw/display/popout/<screen>)", commands.refs.len()));
+    let menu = xplm.menu("A380X Displays", popout_menu);
+    if !menu.is_null() {
+        for (i, def) in SCREENS.iter().enumerate() {
+            let sub = xplm.submenu(menu, &popout::pretty(def.id), popout_menu);
+            if sub.is_null() {
+                continue;
+            }
+            xplm.menu_item(sub, "Own window (second monitor)", popout::refcon_for(i, popout::Act::PopOut));
+            xplm.menu_item(sub, "Float in X-Plane", popout::refcon_for(i, popout::Act::PopUp));
+            xplm.menu_item(sub, "Put away", popout::refcon_for(i, popout::Act::Close));
+        }
+    }
+}
+
+/// X-Plane pressed one of the pop-out commands. Only the press matters; a
+/// release would toggle it straight back.
+unsafe extern "C" fn popout_command(_: xp::CommandRef, phase: c_int, refcon: *mut c_void) -> c_int {
+    if phase == 0 {
+        let (screen, act) = popout::unpack(refcon);
+        let _ = with_from_callback(|d| popout::apply(d, screen, act));
+    }
+    popout::HANDLED
+}
+
+/// A pop-out menu entry was chosen.
+unsafe extern "C" fn popout_menu(_: *mut c_void, item: *mut c_void) {
+    let (screen, act) = popout::unpack(item);
+    let _ = with_from_callback(|d| popout::apply(d, screen, act));
 }
 
 /// Destroy the devices and free what was made on the GPU.
