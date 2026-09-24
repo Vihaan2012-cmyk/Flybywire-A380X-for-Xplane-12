@@ -384,7 +384,16 @@ fn find_all(xplm: &Xplm, names: &[&str]) -> Vec<Option<DataRef>> {
 }
 
 /// The sensors: what they read from X-Plane and the variables they feed.
+/// Whether `FBW_NAV_STATS` is set to something other than "0"/empty.
+fn nav_stats_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FBW_NAV_STATS").is_ok_and(|v| v.trim() != "0" && !v.trim().is_empty()))
+}
+
 pub struct Sensors {
+    /// `FBW_NAV_STATS` only.
+    nav_stats_at: Option<std::time::Instant>,
     // X-Plane.
     deflection: Option<DataRef>,
     deploy: Option<DataRef>,
@@ -508,6 +517,7 @@ impl Sensors {
                     "sim/aircraft/overflow/pushback_attached",
                 ],
             ),
+            nav_stats_at: None,
             compression,
             gear_animation,
             wheel_rpm,
@@ -595,6 +605,29 @@ impl Sensors {
             vars.write_from_xplane(&self.true_track, normalise_360(hpath));
             if let (Some(psi), Some(mag)) = (psi, mag_psi) {
                 vars.write_from_xplane(&self.magnetic_track, magnetic_track(hpath, psi, mag));
+            }
+        }
+        // `FBW_NAV_STATS=1`: the two angles and two speeds the IR builds the
+        // wind from, every 2 s.
+        //
+        // The ND reported a 196-knot wind at GS 76 / TAS 120, and 196 is
+        // exactly 76 + 120. `adirs.rs`'s `update_wind_velocity` computes the
+        // wind as `gs_vector - tas_vector`, one laid along the true track and
+        // the other along the true heading, so their difference can only
+        // reach the *sum* of their lengths when the two vectors are exactly
+        // antiparallel -- the angle between track and heading is 180 degrees,
+        // not the fraction of a degree a take-off roll has. Printing both
+        // angles as this module writes them says which of the two is the one
+        // pointing the wrong way, and whether it is X-Plane's own dataref or
+        // this module's handling of it.
+        if nav_stats_on() {
+            let now = std::time::Instant::now();
+            if !self.nav_stats_at.is_some_and(|t| now - t < std::time::Duration::from_secs(2)) {
+                self.nav_stats_at = Some(now);
+                crate::log(&format!(
+                    "nav: psi (true heading) {:?}, hpath (true track) {:?}, mag_psi {:?}, alpha {:?}",
+                    psi, hpath, mag_psi, alpha
+                ));
             }
         }
         if let Some(alpha) = alpha {

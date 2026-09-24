@@ -192,6 +192,8 @@ pub struct EngineCommands {
     thrust_integral: [f64; 4],
     /// Each engine's damageable components (`components.rs`).
     damage: [DamageHandles; 4],
+    /// `FBW_ENG_STATS` only.
+    stats_at: Option<std::time::Instant>,
 
     airspeed: VariableIdentifier,
     true_airspeed: VariableIdentifier,
@@ -216,6 +218,13 @@ pub struct EngineCommands {
     athr_disabled: VariableIdentifier,
     flap_handle: VariableIdentifier,
     pack_1: VariableIdentifier,
+}
+
+/// Whether `FBW_ENG_STATS` is set to something other than "0"/empty.
+fn stats_on() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FBW_ENG_STATS").is_ok_and(|v| v.trim() != "0" && !v.trim().is_empty()))
 }
 
 impl EngineCommands {
@@ -297,6 +306,7 @@ impl EngineCommands {
             },
             thrust_integral: [0.; 4],
             damage: std::array::from_fn(|i| DamageHandles::register(i + 1)),
+            stats_at: None,
             airspeed: vars.get("AIRSPEED INDICATED".into()),
             true_airspeed: vars.get("AIRSPEED TRUE".into()),
             mach: vars.get("AIRSPEED MACH".into()),
@@ -403,6 +413,20 @@ impl EngineCommands {
         let true_airspeed_m_s = vars.read(&self.true_airspeed) * 0.514_444;
 
         let mut disabled = false;
+        // `FBW_ENG_STATS=1`: the gas path's own station values, gathered
+        // inside the per-engine loop and logged once below.
+        //
+        // The damage model reports take-off TGT around 1127 C against an
+        // untrimmed over-temperature limit of 957 (EASA.E.012 Note 14), so
+        // either the limit is being compared against the wrong quantity or
+        // the engine is genuinely running 170 C hot -- and nothing short of
+        // the stations between fuel flow and the turbine tells those apart.
+        // Fuel flow says whether the FADEC is over-fuelling; TET against
+        // TGT says whether the turbines are extracting the work they
+        // should; core mass flow and the bleed extraction beside its own
+        // scheduled limit say whether the core is being starved of the air
+        // that would otherwise carry that heat away.
+        let mut stats_line = String::new();
         for i in 0..4 {
             // LGCIU 1 for engines 1 and 2, LGCIU 2 for 3 and 4. FlyByWire
             // indexes a two-element array by engine, reading past it for
@@ -546,6 +570,23 @@ impl EngineCommands {
                 let (limit, scheduled) = customer_bleed_limit_kg_s(port, configuration, phys.tet_k, flow);
                 vars.write(&e.bleed_limit, limit);
                 vars.write(&e.bleed_port_scheduled, scheduled as i32 as f64);
+                if stats_on() {
+                    stats_line.push_str(&format!(
+                        " eng{}: N1 {:.0} N2 {:.0} N3 {:.0}%, wf {:.3} kg/s, TET {:.0} K, TGT {:.0} C, core {:.1} kg/s, thrust {:.0} kN, bleed {:.3} of {:.3} kg/s ({:?});",
+                        i + 1,
+                        phys.n1_pct,
+                        phys.n2_pct,
+                        phys.n3_pct,
+                        phys.fuel_flow_kg_s,
+                        phys.tet_k,
+                        phys.egt_c,
+                        phys.core_mdot_kg_s,
+                        phys.net_thrust_n / 1000.,
+                        vars.read(&e.bleed_extraction_kg_s),
+                        limit,
+                        port,
+                    ));
+                }
             }
             vars.write(&e.ff, phys.fuel_flow_kg_s * 3600.); // ENGINE_FF:n is kg/h
             vars.write(&e.oil_temp, phys.oil_temp_c);
@@ -610,6 +651,13 @@ impl EngineCommands {
                     (base + trim).clamp(0., 1.)
                 };
                 xplm.set_vf_at(d, i, ratio as f32);
+            }
+        }
+        if stats_on() && !stats_line.is_empty() {
+            let now = std::time::Instant::now();
+            if !self.stats_at.is_some_and(|t| now - t < std::time::Duration::from_secs(2)) {
+                self.stats_at = Some(now);
+                crate::log(&format!("eng:{stats_line}"));
             }
         }
         vars.write(&self.athr_disabled, disabled as i32 as f64);

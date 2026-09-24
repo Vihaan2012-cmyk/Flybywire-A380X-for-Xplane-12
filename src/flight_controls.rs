@@ -361,7 +361,7 @@ impl FlightControls {
     /// when the aeroplane pitches somewhere nobody asked it to, is a
     /// surface actually there, or is something else moving the aircraft?
     /// The sidestick and the 3D model both look right either way.
-    fn log_stats<V: SimulatorReaderWriter>(&mut self, vars: &mut V, s: &Surfaces, trim_ratio: f64) {
+    fn log_stats<V: SimulatorReaderWriter>(&mut self, vars: &mut V, xplm: &Xplm, s: &Surfaces, trim_ratio: f64) {
         use std::sync::OnceLock;
         static ON: OnceLock<bool> = OnceLock::new();
         if !*ON.get_or_init(|| std::env::var("FBW_FCTL_STATS").is_ok_and(|v| v.trim() != "0" && !v.trim().is_empty())) {
@@ -373,7 +373,7 @@ impl FlightControls {
         }
         self.stats_at = Some(now);
         crate::log(&format!(
-            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2}; spoilers L{:?}; hyd {:.0}/{:.0} psi",
+            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2} (X-Plane trim travel up {:.3} dn {:.3}, as read); spoilers L{:?}; hyd {:.0}/{:.0} psi",
             s.elevators_deg[LEFT],
             s.elevators_deg[RIGHT],
             s.ailerons_deg[LEFT][0],
@@ -381,6 +381,8 @@ impl FlightControls {
             s.rudder_deg,
             s.ths_deg,
             trim_ratio,
+            self.refs.trim_travel_up.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
+            self.refs.trim_travel_down.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
             s.spoilers_deg[LEFT].iter().map(|v| v.round() as i32).collect::<Vec<_>>(),
             vars.read(&self.hyd_green),
             vars.read(&self.hyd_yellow),
@@ -436,7 +438,7 @@ impl FlightControls {
             xplm.set_f(d, ratio as f32);
         }
         // After the  borrow above has ended.
-        self.log_stats(vars, &s, ratio);
+        self.log_stats(vars, xplm, &s, ratio);
     }
 
     /// Hand the surfaces back to X-Plane.
