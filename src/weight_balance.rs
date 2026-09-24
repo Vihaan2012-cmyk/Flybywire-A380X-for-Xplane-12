@@ -329,6 +329,30 @@ impl WeightBalance {
             crate::log(&format!("weight/balance: FlyByWire's payload is live ({payload_lb:.0} lb); driving X-Plane's from here"));
         }
         let skip_stations = skip_stations || !self.payload_reported;
+        // ... and the centre of gravity waits on the same latch, for the
+        // same reason, which the payload fix above missed.
+        //
+        // Withholding the payload leaves X-Plane holding whatever the .acf
+        // and the user's loadsheet put there -- 55 tonnes of it, measured:
+        // this module computed a total of 694 038 lb from an empty airframe,
+        // no stations and the tanks, while X-Plane's own `TOTAL WEIGHT` read
+        // 815 226 lb at the same moment. The centre of gravity below is
+        // computed from *this* module's masses, so while the payload is
+        // being withheld it is the centre of gravity of an aeroplane
+        // carrying nobody, and it was being stamped onto an aeroplane
+        // carrying fifty-five tonnes at the .acf's own arms.
+        //
+        // A balance point that does not describe the mass it is applied to
+        // puts the weight in the wrong place: the aircraft rode its nose
+        // gear down the whole take-off roll at two to three degrees nose
+        // down, hammering the strut hard enough to throw +/-127 deg/s^2 of
+        // pitch acceleration through the airframe, and would not rotate.
+        //
+        // So it is withheld together with the payload it belongs to. Until
+        // FlyByWire publishes a loadsheet, X-Plane's own balance is the
+        // consistent one -- its payload and its centre of gravity describe
+        // the same aeroplane -- and a half-applied one is worse than none.
+        let skip_cg = skip_cg || !self.payload_reported;
         // X-Plane takes the payload either as one total (`m_fixed`) or per
         // station (`m_stations`). The per-station array is what crashed the
         // converted A380 -- rewriting all nine every tick puts the aircraft
@@ -423,5 +447,38 @@ mod tests {
         assert_eq!(xplane_cg_offset_z(16., 0., -16.), 0.);
         // One foot forward in MSFS is 0.3048 m forward (negative) in X-Plane.
         assert!((xplane_cg_offset_z(17., 0., -16.) + 0.3048).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod latch_tests {
+    /// The payload and the centre of gravity are one decision, not two.
+    ///
+    /// This module withholds the payload until FlyByWire publishes a real
+    /// loadsheet, because its payload variables read zero before that and
+    /// zero means "nobody has said yet", not "an empty aircraft". Stamping
+    /// that zero onto X-Plane put the converted A380 on its belly within a
+    /// minute.
+    ///
+    /// The centre of gravity is computed from the same masses. Withholding
+    /// one and writing the other leaves X-Plane holding a payload this
+    /// module does not know about -- 55 tonnes of it, measured -- under a
+    /// balance point computed as though it were not there. Both are
+    /// withheld together, and this asserts the two conditions are the same
+    /// expression rather than two that happen to agree today.
+    #[test]
+    fn the_centre_of_gravity_is_withheld_whenever_the_payload_is() {
+        let src = include_str!("weight_balance.rs");
+        let payload = src
+            .lines()
+            .find(|l| l.contains("let skip_stations = skip_stations ||"))
+            .expect("the payload latch");
+        let cg = src.lines().find(|l| l.contains("let skip_cg = skip_cg ||")).expect("the centre-of-gravity latch");
+        let condition = |line: &str| line.split("||").nth(1).map(|c| c.trim().trim_end_matches(';').to_owned());
+        assert_eq!(
+            condition(payload),
+            condition(cg),
+            "the payload and the centre of gravity must wait on the same condition:\n  {payload}\n  {cg}"
+        );
     }
 }
