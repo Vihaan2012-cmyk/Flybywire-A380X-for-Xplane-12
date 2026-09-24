@@ -1,5 +1,20 @@
 //! X-Plane's control surfaces, moved by FlyByWire's actuators.
 //!
+//! **Two dataref families, and both are needed.** `sim/flightmodel2/wing/
+//! *_deg` are the *drawn* surfaces -- X-Plane's "flightmodel2" namespace is
+//! its graphics model -- while `sim/flightmodel/controls/*_def` are the
+//! aerodynamic deflections the flight model integrates. X-Plane's own
+//! DataRefs.txt says so where it documents the override this module sets:
+//! "override_control_surfaces: Overrides individual control surfaces, e.g.
+//! sim/flightmodel/controls/lail1def".
+//!
+//! Writing only the first is a trap worth naming, because it fails in the
+//! most convincing way possible: the override switches X-Plane's own
+//! joystick-to-surface path off, nothing then writes the aerodynamic
+//! deflections, and they sit at zero -- while the cockpit's sidestick moves,
+//! the 3D surfaces track it exactly, and the aircraft does not respond at
+//! all. Everything looks right except the flying.
+//!
 //! FlyByWire's PRIMs and SECs (prim.rs) turn the sidestick and pedals into
 //! commanded positions; FlyByWire's hydraulic actuators (a380_systems) move
 //! each surface and write its position, normalised 0..1. In MSFS their glue
@@ -241,6 +256,12 @@ struct Refs {
     spoiler1: Option<DataRef>,
     spoiler2: Option<DataRef>,
     speedbrake1: Option<DataRef>,
+    aero_aileron1: Option<DataRef>,
+    aero_aileron2: Option<DataRef>,
+    aero_elevator1: Option<DataRef>,
+    aero_rudder1: Option<DataRef>,
+    aero_spoiler1: Option<DataRef>,
+    aero_spoiler2: Option<DataRef>,
     trim_actual: Option<DataRef>,
     trim_requested: Option<DataRef>,
     trim_travel_up: Option<DataRef>,
@@ -280,6 +301,15 @@ impl FlightControls {
             spoiler1: xplm.find("sim/flightmodel2/wing/spoiler1_deg"),
             spoiler2: xplm.find("sim/flightmodel2/wing/spoiler2_deg"),
             speedbrake1: xplm.find("sim/flightmodel2/wing/speedbrake1_deg"),
+            // The aerodynamic half. See `Refs`'s own doc comment: the
+            // `flightmodel2` names above are the *drawn* surfaces, and on
+            // their own they move the model and nothing else.
+            aero_aileron1: xplm.find("sim/flightmodel/controls/ail1_def"),
+            aero_aileron2: xplm.find("sim/flightmodel/controls/ail2_def"),
+            aero_elevator1: xplm.find("sim/flightmodel/controls/elv1_def"),
+            aero_rudder1: xplm.find("sim/flightmodel/controls/rudd_def"),
+            aero_spoiler1: xplm.find("sim/flightmodel/controls/splr_def"),
+            aero_spoiler2: xplm.find("sim/flightmodel/controls/splr2_def"),
             trim_actual: xplm.find("sim/flightmodel/controls/elv_trim"),
             trim_requested: xplm.find("sim/cockpit2/controls/elevator_trim"),
             trim_travel_up: xplm.find("sim/aircraft/controls/acf_hstb_trim_up"),
@@ -332,20 +362,26 @@ impl FlightControls {
                 xplm.set_vf_at(d, wing, v as f32);
             }
         };
+        // Every surface goes to both families: the drawn one so the model
+        // moves, and the aerodynamic one so the aircraft does.
+        let set_both = |drawn: Option<DataRef>, aero: Option<DataRef>, wing: usize, v: f64| {
+            set(drawn, wing, v);
+            set(aero, wing, v);
+        };
         for side in [LEFT, RIGHT] {
-            set(r.aileron1, WING3[side], s.ailerons_deg[side][0]);
-            set(r.aileron2, WING4[side], s.ailerons_deg[side][1]);
-            set(r.elevator1, HSTAB[side], s.elevators_deg[side]);
+            set_both(r.aileron1, r.aero_aileron1, WING3[side], s.ailerons_deg[side][0]);
+            set_both(r.aileron2, r.aero_aileron2, WING4[side], s.ailerons_deg[side][1]);
+            set_both(r.elevator1, r.aero_elevator1, HSTAB[side], s.elevators_deg[side]);
             for (k, (set_kind, wings)) in XP_SPOILER_GROUPS.iter().enumerate() {
-                let d = match set_kind {
-                    SpoilerSet::Speedbrake1 => r.speedbrake1,
-                    SpoilerSet::Spoiler1 => r.spoiler1,
-                    SpoilerSet::Spoiler2 => r.spoiler2,
+                let (drawn, aero) = match set_kind {
+                    SpoilerSet::Speedbrake1 => (r.speedbrake1, r.aero_spoiler1),
+                    SpoilerSet::Spoiler1 => (r.spoiler1, r.aero_spoiler1),
+                    SpoilerSet::Spoiler2 => (r.spoiler2, r.aero_spoiler2),
                 };
-                set(d, wings[side], s.spoilers_deg[side][k]);
+                set_both(drawn, aero, wings[side], s.spoilers_deg[side][k]);
             }
         }
-        set(r.rudder1, VSTAB, s.rudder_deg);
+        set_both(r.rudder1, r.aero_rudder1, VSTAB, s.rudder_deg);
 
         let travel = |d: Option<DataRef>| match d.map(|d| xplm.get_f(d) as f64) {
             Some(t) if t > 0. => t,
