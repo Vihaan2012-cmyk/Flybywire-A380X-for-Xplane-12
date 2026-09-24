@@ -1546,6 +1546,11 @@ impl Plugin {
         self.ticks += 1;
         self.simulation
             .tick(Duration::from_secs_f64(delta), self.time, &mut self.vars);
+        // `prim.rs` has just republished the EFIS variables from the FCU's
+        // discrete word. Record them, so next tick's read is measured
+        // against the FCU's own output and only a *crew* write looks like a
+        // turn (afs_events::EfisKnobs).
+        self.efis_knobs.latch(xplm);
         if let remote::Systems::Remote(r) = &mut self.simulation {
             if self.time - self.systems_report_at >= 60. {
                 self.systems_report_at = self.time;

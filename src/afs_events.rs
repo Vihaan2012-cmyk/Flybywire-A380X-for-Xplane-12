@@ -69,11 +69,7 @@ pub enum Event {
     /// as well as take a position. This is what an MSFS key event carries.
     FcuEfisModeTurn(usize, i8),
     FcuEfisRangeTurn(usize, i8),
-    /// The ND mode/range as an absolute value, which is what the converted
-    /// cockpit produces ([`EfisKnobs`]): side, then the value itself, in the
-    /// same encoding `prim.rs` publishes (mode 0..4, range 0..7).
-    FcuEfisModeSet(usize, f64),
-    FcuEfisRangeSet(usize, f64),
+
     AutoThrottleArm,
     AutoThrottleDisconnect,
     AthrResetDisable,
@@ -267,24 +263,7 @@ impl EventInputs {
             // tick so the turn does not linger into the next one.
             Event::FcuEfisModeTurn(side, turns) => self.efis[side].efis_mode_knob_turns = turns,
             Event::FcuEfisRangeTurn(side, turns) => self.efis[side].efis_range_knob_turns = turns,
-            // `prim.rs` reads these straight into `FcuInputs::sim_input`'s
-            // own `efis_mode`/`efis_range`, whose -1 default means "no
-            // change" -- so setting them is the only way the FCU ever hears
-            // about a mode or range the crew selected.
-            Event::FcuEfisModeSet(side, v) => {
-                if side == 0 {
-                    ap.efis_mode_left_set = v;
-                } else {
-                    ap.efis_mode_right_set = v;
-                }
-            }
-            Event::FcuEfisRangeSet(side, v) => {
-                if side == 0 {
-                    ap.efis_range_left_set = v;
-                } else {
-                    ap.efis_range_right_set = v;
-                }
-            }
+
             Event::AutoThrottleArm => self.throttles.athr_push = true, // cpp:3036
             Event::AutoThrottleDisconnect => self.throttles.athr_disconnect = true, // cpp:3042
             Event::AthrResetDisable => self.throttles.athr_reset_disable = true, // cpp:3051
@@ -349,31 +328,71 @@ pub fn take() -> EventInputs {
 // the crew's command on the tick they turn the knob.
 // ---------------------------------------------------------------------------
 
-/// One knob's published variable and the event that sets it.
+/// One knob's published variable and the detent event a turn of it sends.
 struct KnobVar {
     path: &'static str,
-    event: fn(usize, f64) -> Event,
+    event: fn(usize, i8) -> Event,
     side: usize,
     dataref: Option<DataRef>,
+    /// The value `prim.rs` last published, taken after the systems tick
+    /// ([`EfisKnobs::latch`]). A read that differs from this is the crew's,
+    /// because nothing else writes between the two points.
+    baseline: Option<f64>,
 }
 
+/// A knob cannot be turned more than this in one tick. Anything larger is
+/// the variable being *set* rather than turned -- a state load, a preset --
+/// and must not be replayed into the FCU as a burst of detents.
+const MAX_DETENTS_PER_TICK: f64 = 8.0;
+
 impl KnobVar {
-    const fn new(path: &'static str, side: usize, event: fn(usize, f64) -> Event) -> Self {
-        Self { path, event, side, dataref: None }
+    const fn new(path: &'static str, side: usize, event: fn(usize, i8) -> Event) -> Self {
+        Self { path, event, side, dataref: None, baseline: None }
     }
 
-    /// Hand the FCU whatever the dataref currently says. Looked up lazily:
-    /// a variable is only published once the systems have registered it.
-    fn poll(&mut self, xplm: &Xplm) {
+    fn read(&mut self, xplm: &Xplm) -> Option<f64> {
         if self.dataref.is_none() {
             self.dataref = xplm.find(self.path);
         }
-        let Some(d) = self.dataref else { return };
-        let value = xplm.get_f(d) as f64;
-        // Never feed the FCU a negative value: -1 is its own "no change"
-        // sentinel, and a variable that has not been published yet reads 0.
-        if value >= 0.0 {
-            send((self.event)(self.side, value));
+        Some(xplm.get_f(self.dataref?) as f64)
+    }
+
+    /// Turn the crew's write into detents.
+    ///
+    /// **Detents, not the value itself.** The published variable and the
+    /// FCU's own input are on different scales: `prim.rs` publishes the ND's
+    /// scale (0 = ZOOM, 1 = 10 NM, 2 = 20, ...) decoded from the EFIS
+    /// discrete word, while `sim_input.efis_range` is the FCU's
+    /// `a380_efis_range_selection` (0 = ZOOM 0.2, ... 5 = RANGE_10, ...).
+    /// Feeding one into the other lands five steps low -- deep in the ZOOM
+    /// band -- which is precisely when the ND draws the OANS airport map
+    /// over ARC, NAV and PLAN, and shows NOT AVAIL there with no airport
+    /// database loaded.
+    ///
+    /// A *difference* needs no shared origin. Both scales increase with
+    /// range and with mode, so one step up on the published scale is one
+    /// detent clockwise, whatever either scale's zero happens to mean.
+    fn poll(&mut self, xplm: &Xplm) {
+        let Some(value) = self.read(xplm) else { return };
+        let Some(baseline) = self.baseline else {
+            // First sight of it: record where the knob is, and send nothing.
+            self.baseline = Some(value);
+            return;
+        };
+        let moved = value - baseline;
+        if moved != 0.0 && moved.abs() <= MAX_DETENTS_PER_TICK {
+            send((self.event)(self.side, moved as i8));
+        }
+        // Either way this read is now the reference, so one turn is not
+        // sent twice while the FCU catches up.
+        self.baseline = Some(value);
+    }
+
+    /// Record what `prim.rs` has just published, so the next tick's read is
+    /// compared against the FCU's own output rather than the crew's.
+    fn latch(&mut self, xplm: &Xplm) {
+        if let Some(value) = self.read(xplm) {
+            self.baseline = Some(value);
         }
     }
 }
@@ -387,10 +406,10 @@ impl EfisKnobs {
     pub const fn new() -> Self {
         Self {
             vars: [
-                KnobVar::new("fbw/A32NX_EFIS_L_ND_MODE", 0, Event::FcuEfisModeSet),
-                KnobVar::new("fbw/A32NX_EFIS_L_ND_RANGE", 0, Event::FcuEfisRangeSet),
-                KnobVar::new("fbw/A32NX_EFIS_R_ND_MODE", 1, Event::FcuEfisModeSet),
-                KnobVar::new("fbw/A32NX_EFIS_R_ND_RANGE", 1, Event::FcuEfisRangeSet),
+                KnobVar::new("fbw/A32NX_EFIS_L_ND_MODE", 0, Event::FcuEfisModeTurn),
+                KnobVar::new("fbw/A32NX_EFIS_L_ND_RANGE", 0, Event::FcuEfisRangeTurn),
+                KnobVar::new("fbw/A32NX_EFIS_R_ND_MODE", 1, Event::FcuEfisModeTurn),
+                KnobVar::new("fbw/A32NX_EFIS_R_ND_RANGE", 1, Event::FcuEfisRangeTurn),
             ],
         }
     }
@@ -400,6 +419,16 @@ impl EfisKnobs {
     pub fn update(&mut self, xplm: &Xplm) {
         for v in &mut self.vars {
             v.poll(xplm);
+        }
+    }
+
+    /// Call once a tick *after* the systems tick, when `prim.rs` has
+    /// republished the EFIS variables. Without this the FCU's own output
+    /// would read back next tick as though the crew had turned the knob,
+    /// and every detent would repeat forever.
+    pub fn latch(&mut self, xplm: &Xplm) {
+        for v in &mut self.vars {
+            v.latch(xplm);
         }
     }
 }
@@ -576,30 +605,28 @@ mod tests {
         }
     }
 
-    /// An absolute mode/range reaches the FCU's own `sim_input`, which is
-    /// what the converted cockpit needs: it writes the value straight into
-    /// `fbw/A32NX_EFIS_*_ND_*` rather than sending any event, and nothing
-    /// ever assigned these fields before.
+    /// The knobs must send *detents*, never the published value itself.
+    ///
+    /// `prim.rs` publishes the ND's scale (0 = ZOOM, 1 = 10 NM, 2 = 20) and
+    /// the FCU's own input is `a380_efis_range_selection` (0 = ZOOM 0.2, ...
+    /// 5 = RANGE_10). Feeding one into the other lands five steps low, deep
+    /// in the ZOOM band -- which is exactly where the ND draws the OANS
+    /// airport map over ARC, NAV and PLAN and shows NOT AVAIL with no
+    /// airport database loaded. A difference needs no shared origin, so
+    /// that is what is sent.
     #[test]
-    fn an_absolute_mode_or_range_reaches_the_fcus_sim_input() {
+    fn a_turn_becomes_a_detent_in_the_direction_it_moved() {
         let mut inputs = EventInputs::default();
-        // -1 is the FCU's own "no change" default.
-        assert_eq!(inputs.autopilot.efis_mode_left_set, -1.);
-        assert_eq!(inputs.autopilot.efis_range_right_set, -1.);
+        assert_eq!(inputs.efis[0].efis_range_knob_turns, 0);
 
-        inputs.apply(Event::FcuEfisModeSet(0, 3.));
-        inputs.apply(Event::FcuEfisRangeSet(0, 5.));
-        assert_eq!(inputs.autopilot.efis_mode_left_set, 3.);
-        assert_eq!(inputs.autopilot.efis_range_left_set, 5.);
-        // ... and the first officer's side is untouched by the captain's.
-        assert_eq!(inputs.autopilot.efis_mode_right_set, -1.);
-        assert_eq!(inputs.autopilot.efis_range_right_set, -1.);
+        inputs.apply(Event::FcuEfisRangeTurn(0, 1));
+        assert_eq!(inputs.efis[0].efis_range_knob_turns, 1, "one step up is one detent clockwise");
+        inputs.apply(Event::FcuEfisRangeTurn(0, -1));
+        assert_eq!(inputs.efis[0].efis_range_knob_turns, -1);
 
-        inputs.apply(Event::FcuEfisModeSet(1, 4.));
-        inputs.apply(Event::FcuEfisRangeSet(1, 2.));
-        assert_eq!(inputs.autopilot.efis_mode_right_set, 4.);
-        assert_eq!(inputs.autopilot.efis_range_right_set, 2.);
-        assert_eq!(inputs.autopilot.efis_mode_left_set, 3., "the captain's selection must survive");
+        inputs.apply(Event::FcuEfisModeTurn(1, 2));
+        assert_eq!(inputs.efis[1].efis_mode_knob_turns, 2, "two steps is two detents");
+        assert_eq!(inputs.efis[0].efis_mode_knob_turns, 0, "and the other side is untouched");
     }
 
     /// Every knob event must be reachable both ways it can arrive: as an
