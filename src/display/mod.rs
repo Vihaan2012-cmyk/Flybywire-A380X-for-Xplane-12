@@ -100,6 +100,8 @@ struct BridgeScreen {
     underlay_generation: u64,
     /// When this screen's texture was last brought up to date.
     last_upload_at: Option<std::time::Instant>,
+    /// How many uploads this screen has had, for `log_screen_stats`.
+    uploads: u64,
 }
 
 /// Screen pixels copied into X-Plane's textures in one X-Plane frame, at
@@ -167,6 +169,10 @@ pub struct Displays {
     bridge: Option<Bridge>,
     /// What is left of this X-Plane frame's [`UPLOAD_BUDGET_BYTES`].
     upload_budget: usize,
+    /// `log_screen_stats`: when it last printed, and each screen's
+    /// (published frame, upload count) at that moment.
+    stats_at: Option<std::time::Instant>,
+    stats_baseline: [(u64, u64); SCREENS.len()],
 }
 
 // X-Plane's handles are only touched on its main thread.
@@ -439,6 +445,8 @@ impl Displays {
             events: VecDeque::new(),
             bridge: None,
             upload_budget: UPLOAD_BUDGET_BYTES,
+            stats_at: None,
+            stats_baseline: [(0, 0); SCREENS.len()],
         }
     }
 
@@ -599,6 +607,7 @@ impl Displays {
             // fall through to draw what is already on the GPU.
             if area <= self.upload_budget || waited >= UPLOAD_MAX_WAIT {
                 bs.last_upload_at = Some(now);
+                bs.uploads += 1;
                 if !rects.is_empty() {
                     self.upload_budget = self.upload_budget.saturating_sub(area);
                     let pixels = bs.block.pixels();
@@ -819,8 +828,57 @@ impl Displays {
         }
     }
 
+    /// `FBW_SCREEN_STATS=1`: every 10 s, one line per bridged screen giving
+    /// how fast XPHFBW is *publishing* it against how fast this plugin is
+    /// *uploading* it.
+    ///
+    /// The two answer different questions, which is the point. A screen that
+    /// looks like it is stepping can be starved on either side: the app may
+    /// not be drawing it any faster, or the app may be drawing it fine and
+    /// the upload path may be dropping frames. Guessing between those is how
+    /// an afternoon disappears; this prints which.
+    fn log_screen_stats(&mut self) {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::OnceLock;
+        static ON: OnceLock<bool> = OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("FBW_SCREEN_STATS").is_ok_and(|v| v.trim() != "0" && !v.trim().is_empty())) {
+            return;
+        }
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        let _ = &WARNED;
+        let now = std::time::Instant::now();
+        let since = self.stats_at.map_or(std::time::Duration::from_secs(0), |t| now - t);
+        if self.stats_at.is_some() && since < std::time::Duration::from_secs(10) {
+            return;
+        }
+        let seconds = since.as_secs_f64();
+        self.stats_at = Some(now);
+        let Some(bridge) = self.bridge.as_ref() else { return };
+        if seconds <= 0.0 {
+            // First call: just take the baseline.
+            for (i, bs) in bridge.screens.iter().enumerate() {
+                if let Some(bs) = bs {
+                    self.stats_baseline[i] = (bs.block.header().frame.load(Ordering::Relaxed), bs.uploads);
+                }
+            }
+            return;
+        }
+        let mut line = String::from("screens (published/s -> uploaded/s):");
+        for (i, bs) in bridge.screens.iter().enumerate() {
+            let Some(bs) = bs else { continue };
+            let frame = bs.block.header().frame.load(Ordering::Relaxed);
+            let (last_frame, last_uploads) = self.stats_baseline[i];
+            let published = frame.saturating_sub(last_frame) as f64 / seconds;
+            let uploaded = bs.uploads.saturating_sub(last_uploads) as f64 / seconds;
+            self.stats_baseline[i] = (frame, bs.uploads);
+            line.push_str(&format!(" {}={published:.0}->{uploaded:.0}", SCREENS[i].id.trim_start_matches("SCREEN_")));
+        }
+        log(&line);
+    }
+
     /// Set each dimming region's brightness from the variables `read` gives.
     pub fn update_brightness(&mut self, mut read: impl FnMut(&str) -> Option<f64>) {
+        self.log_screen_stats();
         // Once per X-Plane frame, from the plugin's tick: a fresh upload budget.
         self.upload_budget = UPLOAD_BUDGET_BYTES;
         for s in &mut self.screens {
@@ -846,7 +904,7 @@ impl Displays {
                 if block.is_none() {
                     log(&format!("could not create the XPHFBW ScreenBlock for {}", def.id));
                 }
-                block.map(|block| BridgeScreen { block, gpu: gl::BridgeGpu::default(), last_uploaded: 0, force_full: true, underlay: gl::BridgeGpu::default(), underlay_generation: 0, last_upload_at: None })
+                block.map(|block| BridgeScreen { block, gpu: gl::BridgeGpu::default(), last_uploaded: 0, force_full: true, underlay: gl::BridgeGpu::default(), underlay_generation: 0, last_upload_at: None, uploads: 0 })
             })
             .collect();
         log(&format!("XPHFBW bridge attached ({tag}), {}/{} screens", screens.iter().filter(|s| s.is_some()).count(), SCREENS.len()));
