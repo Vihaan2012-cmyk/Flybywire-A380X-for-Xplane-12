@@ -28,30 +28,64 @@ use std::ffi::c_int;
 use super::canvas::{palette as p, Action, Canvas};
 use crate::xp::FONT_BASIC;
 
-/// The passenger zones FlyByWire publishes, in the order they sit in the
-/// aeroplane: main deck front to back, then the upper deck.
-pub(super) const PAX_ZONES: &[(&str, &str)] = &[
-    ("MAIN FWD A", "A32NX_PAX_MAIN_FWD_A"),
-    ("MAIN FWD B", "A32NX_PAX_MAIN_FWD_B"),
-    ("MAIN MID 1A", "A32NX_PAX_MAIN_MID_1A"),
-    ("MAIN MID 1B", "A32NX_PAX_MAIN_MID_1B"),
-    ("MAIN MID 1C", "A32NX_PAX_MAIN_MID_1C"),
-    ("MAIN MID 2A", "A32NX_PAX_MAIN_MID_2A"),
-    ("MAIN MID 2B", "A32NX_PAX_MAIN_MID_2B"),
-    ("MAIN MID 2C", "A32NX_PAX_MAIN_MID_2C"),
-    ("MAIN AFT A", "A32NX_PAX_MAIN_AFT_A"),
-    ("MAIN AFT B", "A32NX_PAX_MAIN_AFT_B"),
-    ("UPPER FWD", "A32NX_PAX_UPPER_FWD"),
-    ("UPPER MID A", "A32NX_PAX_UPPER_MID_A"),
-    ("UPPER MID B", "A32NX_PAX_UPPER_MID_B"),
-    ("UPPER AFT", "A32NX_PAX_UPPER_AFT"),
+/// One cabin zone: its label, the variable FlyByWire publishes it as, how
+/// many seats it holds, and which deck it is on (0 main, 1 upper).
+///
+/// The seat counts are FlyByWire's own (`a380_systems/payload/mod.rs`'s
+/// `max_pax` per station), not a guess: the drawing fills each block by
+/// occupancy, so a wrong capacity draws a full zone as half empty.
+pub(super) struct Zone {
+    pub label: &'static str,
+    pub var: &'static str,
+    pub seats: u32,
+    pub deck: u8,
+}
+
+const fn zone(label: &'static str, var: &'static str, seats: u32, deck: u8) -> Zone {
+    Zone { label, var, seats, deck }
+}
+
+/// Main deck front to back, then the upper deck front to back.
+pub(super) const PAX_ZONES: &[Zone] = &[
+    zone("MAIN FWD A", "A32NX_PAX_MAIN_FWD_A", 28, 0),
+    zone("MAIN FWD B", "A32NX_PAX_MAIN_FWD_B", 28, 0),
+    zone("MAIN MID 1A", "A32NX_PAX_MAIN_MID_1A", 39, 0),
+    zone("MAIN MID 1B", "A32NX_PAX_MAIN_MID_1B", 50, 0),
+    zone("MAIN MID 1C", "A32NX_PAX_MAIN_MID_1C", 43, 0),
+    zone("MAIN MID 2A", "A32NX_PAX_MAIN_MID_2A", 48, 0),
+    zone("MAIN MID 2B", "A32NX_PAX_MAIN_MID_2B", 40, 0),
+    zone("MAIN MID 2C", "A32NX_PAX_MAIN_MID_2C", 36, 0),
+    zone("MAIN AFT A", "A32NX_PAX_MAIN_AFT_A", 42, 0),
+    zone("MAIN AFT B", "A32NX_PAX_MAIN_AFT_B", 40, 0),
+    zone("UPPER FWD", "A32NX_PAX_UPPER_FWD", 14, 1),
+    zone("UPPER MID A", "A32NX_PAX_UPPER_MID_A", 30, 1),
+    zone("UPPER MID B", "A32NX_PAX_UPPER_MID_B", 28, 1),
+    zone("UPPER AFT", "A32NX_PAX_UPPER_AFT", 18, 1),
 ];
 
-pub(super) const CARGO_HOLDS: &[(&str, &str)] = &[
-    ("FWD HOLD", "A32NX_CARGO_FWD"),
-    ("AFT HOLD", "A32NX_CARGO_AFT"),
-    ("BULK", "A32NX_CARGO_BULK"),
+/// The three holds, with FlyByWire's own `max_cargo_kg`.
+pub(super) struct Hold {
+    pub label: &'static str,
+    pub var: &'static str,
+    pub max_kg: f64,
+}
+
+pub(super) const CARGO_HOLDS: &[Hold] = &[
+    Hold { label: "FWD HOLD", var: "A32NX_CARGO_FWD", max_kg: 28_577. },
+    Hold { label: "AFT HOLD", var: "A32NX_CARGO_AFT", max_kg: 20_310. },
+    Hold { label: "BULK", var: "A32NX_CARGO_BULK", max_kg: 2_513. },
 ];
+
+/// Every seat the aeroplane has, so the page can say "412 of 484".
+pub(super) fn total_seats() -> u32 {
+    let mut n = 0;
+    let mut i = 0;
+    while i < PAX_ZONES.len() {
+        n += PAX_ZONES[i].seats;
+        i += 1;
+    }
+    n
+}
 
 /// The variables this page's own buttons may write, and the only ones the
 /// panel's `writeVariable` action will accept. Without the list that action
@@ -84,8 +118,8 @@ pub fn draw(cv: &mut Canvas, scroll: c_int) -> c_int {
     let lh = cv.line_h;
     let row_h = lh + 10;
 
-    let pax: f64 = PAX_ZONES.iter().map(|(_, v)| kg(cv, v)).sum();
-    let cargo_kg: f64 = CARGO_HOLDS.iter().map(|(_, v)| kg(cv, v)).sum();
+    let pax: f64 = PAX_ZONES.iter().map(|z| kg(cv, z.var)).sum();
+    let cargo_kg: f64 = CARGO_HOLDS.iter().map(|h| kg(cv, h.var)).sum();
     let payload_kg = pax * KG_PER_PAX + cargo_kg;
     // The same latch `weight_balance.rs` waits on, read the same way: a
     // payload FlyByWire has actually stated.
@@ -183,14 +217,14 @@ pub fn draw(cv: &mut Canvas, scroll: c_int) -> c_int {
     );
 
     heading(cv, &mut y, &mut height, "PASSENGERS");
-    for (label, var) in PAX_ZONES {
-        line(cv, &mut y, &mut height, label, &against_desired(cv, var, "pax", 0));
+    for z in PAX_ZONES {
+        line(cv, &mut y, &mut height, z.label, &against_desired(cv, z.var, "pax", 0));
     }
     line(cv, &mut y, &mut height, "Total", &format!("{pax:.0} pax, {:.0} kg", pax * KG_PER_PAX));
 
     heading(cv, &mut y, &mut height, "CARGO");
-    for (label, var) in CARGO_HOLDS {
-        line(cv, &mut y, &mut height, label, &against_desired(cv, var, "kg", 0));
+    for h in CARGO_HOLDS {
+        line(cv, &mut y, &mut height, h.label, &against_desired(cv, h.var, "kg", 0));
     }
     line(cv, &mut y, &mut height, "Total", &format!("{cargo_kg:.0} kg"));
 
@@ -207,10 +241,13 @@ mod tests {
         // guessed: a misspelt name here reads zero, and zero payload is
         // exactly the state this page exists to make visible, so it would
         // hide the very thing it reports.
-        for (_, v) in PAX_ZONES.iter().chain(CARGO_HOLDS) {
+        for v in PAX_ZONES.iter().map(|z| z.var).chain(CARGO_HOLDS.iter().map(|h| h.var)) {
             assert!(v.starts_with("A32NX_"), "{v} is not a FlyByWire variable");
             assert!(!v.ends_with("_DESIRED"), "{v} is the target, not the load");
         }
         assert_eq!(PAX_ZONES.len(), 14, "the A380 has fourteen cabin zones");
+        // FlyByWire's own per-station `max_pax` summed: a seat count that
+        // drifts from theirs draws every zone at the wrong fill.
+        assert_eq!(total_seats(), 484, "the A380X's seat map");
     }
 }

@@ -313,6 +313,30 @@ fn page_json(index: usize, title: &str, kind: PageKind) -> Value {
             // the in-sim window has.
             map.insert("kind".into(), json!("loadsheet"));
             map.insert("groups".into(), groups_json(&pages::groups(kind)));
+            // The drawing's own data: where each cabin zone, hold and tank
+            // sits and how much it holds, so the panel can fill each one by
+            // occupancy rather than just list numbers. The seat and hold
+            // capacities are FlyByWire's own (`payload/mod.rs`); the tank
+            // layout is the one the Study tab's fuel page already draws
+            // from, so the two diagrams cannot drift apart.
+            let zones: Vec<Value> = crate::study::loadsheet::PAX_ZONES
+                .iter()
+                .map(|z| json!({ "label": z.label, "name": z.var, "seats": z.seats, "deck": z.deck }))
+                .collect();
+            let holds: Vec<Value> = crate::study::loadsheet::CARGO_HOLDS
+                .iter()
+                .map(|h| json!({ "label": h.label, "name": h.var, "maxKg": h.max_kg }))
+                .collect();
+            let tanks: Vec<Value> = pages::tanks()
+                .iter()
+                .map(|(n, label, x, w, cap)| {
+                    json!({ "label": label, "name": format!("FUELSYSTEM TANK QUANTITY:{n}"), "x": x, "w": w, "capacityGal": cap })
+                })
+                .collect();
+            map.insert("zones".into(), json!(zones));
+            map.insert("holds".into(), json!(holds));
+            map.insert("tanks".into(), json!(tanks));
+            map.insert("seats".into(), json!(crate::study::loadsheet::total_seats()));
         }
         PageKind::All => {
             map.insert("kind".into(), json!("all"));

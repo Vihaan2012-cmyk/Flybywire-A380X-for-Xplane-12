@@ -2307,9 +2307,103 @@ const AIRCRAFT_PRESETS = [
   [5, 'Ready for Takeoff', 'FlyByWire preset 5'],
 ];
 const loadsheet = { page: null, timer: null };
-// The loadsheet tab: the weights and both centres of gravity as FlyByWire
-// holds them, X-Plane's own total beside them, the payload by zone and
-// hold, and the SimBrief and boarding buttons.
+
+// The aeroplane drawn from above, with what is loaded into it.
+//
+// Every block is filled by occupancy, which is why the seat counts and hold
+// capacities come from FlyByWire's own payload module rather than being
+// guessed here: a wrong capacity draws a full zone as half empty, which is
+// worse than not drawing it at all. The tank layout is the same one the
+// Study tab's fuel page uses, so the two pictures cannot disagree about
+// where a tank is.
+// `svgEl` is already defined above, without children; this adds them.
+function svgKids(tag, attrs, ...kids) {
+  const n = svgEl(tag, attrs || {});
+  for (const k of kids) if (k) n.append(k);
+  return n;
+}
+function svgText(x, y, anchor, fill, size, text) {
+  const t = svgEl('text', { x, y, 'text-anchor': anchor, fill, 'font-size': size });
+  t.textContent = text;
+  return t;
+}
+// Empty to full. Amber past nine tenths, so a hold at its limit reads as one.
+function fillColour(frac) {
+  if (frac >= 0.9) return '#d8a23a';
+  if (frac > 0) return '#4f8fd0';
+  return '#2a2f38';
+}
+function loadBlock(x, y, w, h, frac, label, value, title) {
+  const g = svgKids('g', {});
+  g.append(svgEl('rect', { x, y, width: w, height: h, rx: 2, fill: '#20242c', stroke: '#3a4150' }));
+  const fw = Math.max(0, Math.min(1, frac)) * (w - 2);
+  if (fw > 0) g.append(svgEl('rect', { x: x + 1, y: y + 1, width: fw, height: h - 2, rx: 1, fill: fillColour(frac) }));
+  g.append(svgText(x + w / 2, y + h / 2 + 3, 'middle', '#dfe4ee', 9, value));
+  if (label) g.append(svgText(x + w / 2, y - 3, 'middle', '#8b94a6', 8, label));
+  const tt = svgKids('title', {});
+  tt.textContent = title;
+  g.append(tt);
+  return g;
+}
+function drawAircraft(page, vars) {
+  const root = svgKids('svg', { viewBox: '0 0 960 400', width: '100%', style: 'max-height:420px' });
+  const val = (n) => (Object.prototype.hasOwnProperty.call(vars, n) ? vars[n] : null);
+
+  // Wings and tailplane behind the fuselage, so the tanks sit on the wing.
+  root.append(svgEl('path', { d: 'M 150 190 L 470 108 L 900 48 L 915 70 L 500 140 L 470 190 Z', fill: '#1b1f27', stroke: '#39404e' }));
+  root.append(svgEl('path', { d: 'M 150 210 L 470 292 L 900 352 L 915 330 L 500 260 L 470 210 Z', fill: '#1b1f27', stroke: '#39404e' }));
+  root.append(svgEl('path', { d: 'M 62 190 L 150 156 L 208 164 L 150 190 Z', fill: '#1b1f27', stroke: '#39404e' }));
+  root.append(svgEl('path', { d: 'M 62 210 L 150 244 L 208 236 L 150 210 Z', fill: '#1b1f27', stroke: '#39404e' }));
+  root.append(svgEl('path', {
+    d: 'M 40 200 Q 48 172 110 170 L 900 176 Q 938 186 938 200 Q 938 214 900 224 L 110 230 Q 48 228 40 200 Z',
+    fill: '#252a33', stroke: '#454d5e',
+  }));
+
+  // Fuel across the wing, on the fuel page's own x/width scale.
+  for (const t of page.tanks || []) {
+    const q = val(t.name);
+    const frac = q === null ? 0 : q / t.capacityGal;
+    const x = 150 + (t.x / 960) * 780;
+    const w = Math.max(15, (t.w / 960) * 780);
+    const kg = q === null ? '--' : Math.round(q * 3.03907) + ' kg';
+    const tip = t.label + ': ' + (q === null ? 'not modelled' : Math.round(q) + ' of ' + Math.round(t.capacityGal) + ' US gal');
+    if (t.label === 'TRIM') {
+      root.append(loadBlock(x, 182, w, 24, frac, t.label, kg, tip));
+    } else {
+      root.append(loadBlock(x, 84, w, 24, frac, t.label, kg, tip));
+      root.append(loadBlock(x, 300, w, 24, frac, null, kg, tip + ' (right)'));
+    }
+  }
+
+  // Cabin: upper deck above the fuselage centreline, main deck on it. Each
+  // zone's width is its share of the seats, so the picture is a seat map.
+  const zones = page.zones || [];
+  for (const [i, deck] of [zones.filter((z) => z.deck === 1), zones.filter((z) => z.deck === 0)].entries()) {
+    const seats = deck.reduce((a, z) => a + z.seats, 0) || 1;
+    let x = 124;
+    for (const z of deck) {
+      const w = (z.seats / seats) * 756 - 3;
+      const pax = val(z.name);
+      root.append(loadBlock(x, i === 0 ? 140 : 194, w, 22, pax === null ? 0 : pax / z.seats, z.label,
+        pax === null ? '--' : Math.round(pax) + '/' + z.seats,
+        z.label + ': ' + (pax === null ? 'not modelled' : Math.round(pax) + ' of ' + z.seats + ' seats')));
+      x += w + 3;
+    }
+    root.append(svgText(118, (i === 0 ? 140 : 194) + 15, 'end', '#8b94a6', 9, i === 0 ? 'UPPER' : 'MAIN'));
+  }
+
+  // Holds, under the fuselage.
+  let hx = 200;
+  for (const h of page.holds || []) {
+    const q = val(h.name);
+    root.append(loadBlock(hx, 240, 150, 24, q === null ? 0 : q / h.maxKg, h.label,
+      q === null ? '--' : Math.round(q) + ' kg',
+      h.label + ': ' + (q === null ? 'not modelled' : Math.round(q) + ' of ' + Math.round(h.maxKg) + ' kg')));
+    hx += 160;
+  }
+  return root;
+}
+
 async function loadsheetOnShow() {
   const content = document.getElementById('loadsheet-content');
   if (!loadsheet.page) {
@@ -2338,10 +2432,16 @@ async function loadsheetOnShow() {
     act('Board', 'BOARDING_STARTED_BY_USR', 1, 'Boarding'),
     act('Stop', 'BOARDING_STARTED_BY_USR', 0, 'Boarding stopped'),
     act('Instant', 'BOARDING_RATE', 0, 'Boarding set to instant'),
+    act('Real time', 'BOARDING_RATE', 2, 'Boarding set to real time'),
   );
+  const summary = el('div', { class: 'box' });
+  const plan = el('div', { class: 'box' });
   const body = el('div');
-  content.replaceChildren(buttons, body);
-  const names = collectNames(page);
+  content.replaceChildren(buttons, summary, plan, body);
+  const names = collectNames(page)
+    .concat((page.zones || []).map((z) => z.name))
+    .concat((page.holds || []).map((h) => h.name))
+    .concat((page.tanks || []).map((t) => t.name));
   if (loadsheet.timer) clearInterval(loadsheet.timer);
   let busy = false;
   const poll = async () => {
@@ -2350,8 +2450,19 @@ async function loadsheetOnShow() {
     try {
       const q = names.length ? '?names=' + names.map(encodeURIComponent).join(',') : '';
       const data = await studyGet('/vars' + q);
+      const vars = data.vars || {};
+      const pax = (page.zones || []).reduce((a, z) => a + (vars[z.name] || 0), 0);
+      const cargo = (page.holds || []).reduce((a, h) => a + (vars[h.name] || 0), 0);
+      const fuel = (page.tanks || []).reduce((a, t) => a + (vars[t.name] || 0), 0);
+      const live = pax > 0 || cargo > 0;
+      let text;
+      if (!data.ticks) text = 'The aircraft is not loaded yet. Figures appear once the A380X is running.';
+      else if (live) text = Math.round(pax) + ' of ' + page.seats + ' passengers, ' + Math.round(cargo) + ' kg of cargo, ' + Math.round(fuel * 3.03907) + ' kg of fuel. The balance is live: X-Plane is flying this loadsheet.';
+      else text = 'No loadsheet. Nobody is aboard, so the plugin leaves X-Plane\u2019s own balance alone rather than write one for an aeroplane carrying nobody.';
+      summary.replaceChildren(el('span', { class: 'label' + (live ? '' : ' dim'), text }));
+      plan.replaceChildren(drawAircraft(page, vars));
       body.innerHTML = '';
-      renderGroups(body, page.groups, data.vars || {});
+      renderGroups(body, page.groups, vars);
     } catch {
       // Left as it was: a dropped poll should not blank the page.
     } finally {

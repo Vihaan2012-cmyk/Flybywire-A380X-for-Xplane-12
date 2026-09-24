@@ -423,12 +423,12 @@ fn loadsheet() -> Vec<Group> {
     let pax = group(
         "Passengers",
         tint(2),
-        super::loadsheet::PAX_ZONES.iter().map(|(label, var)| num(label, *var, "pax", 0)).collect(),
+        super::loadsheet::PAX_ZONES.iter().map(|z| num(z.label, z.var, "pax", 0)).collect(),
     );
     let cargo = group(
         "Cargo",
         tint(3),
-        super::loadsheet::CARGO_HOLDS.iter().map(|(label, var)| num(label, *var, "kg", 0)).collect(),
+        super::loadsheet::CARGO_HOLDS.iter().map(|h| num(h.label, h.var, "kg", 0)).collect(),
     );
     vec![weights, desired, pax, cargo]
 }
