@@ -278,6 +278,10 @@ pub struct EngineWear {
     /// Seconds the thrust lever has continuously been in the TOGA detent.
     #[serde(skip)]
     toga_lever_seconds: f64,
+    /// Which quarter of creep life has already been reported, so the log
+    /// gets one line per step rather than one per tick.
+    #[serde(skip)]
+    logged_creep_quarter: f64,
 }
 
 impl EngineWear {
@@ -373,6 +377,7 @@ impl Default for EngineWear {
             seconds_above_mct: 0.0,
             seconds_above_overtemp: 0.0,
             toga_lever_seconds: 0.0,
+            logged_creep_quarter: 0.0,
             exceedances: NO_EXCEEDANCES,
             in_exceedance: [false; 10],
             seconds_ip_overspeed: 0.0,
@@ -689,6 +694,7 @@ impl Damage {
             // (via `self.arm`, which needs its own `&mut self`) only after
             // that borrow ends, since the two can't be live at once.
             let mut overtemp_exceeded = false;
+            let mut creep_report: Option<String> = None;
             let (creep_life_fraction, compressor_efficiency_loss) = {
                 let e = &mut self.engines[n];
 
@@ -757,9 +763,32 @@ impl Damage {
                 // Saturating efficiency loss: up to 15% (an order-of-magnitude
                 // ceiling, not a cited figure) as creep life is consumed.
                 e.compressor_efficiency_loss = (e.creep_life_fraction * 0.05).min(0.15);
+                // Creep life is what arms bearing wear, and an engine that
+                // reaches 1.0 seizes -- so every quarter of it consumed is
+                // worth a line saying which term did it and what the turbine
+                // was actually doing at the time. Four numbers, because
+                // there are exactly four ways in: measured TGT against the
+                // two untrimmed limits it is compared with, and the two
+                // dwell timers.
+                let quarter = (e.creep_life_fraction * 4.0).floor();
+                if quarter > e.logged_creep_quarter {
+                    e.logged_creep_quarter = quarter;
+                    creep_report = Some(format!(
+                        "engine {} creep life {:.2} (TGT {t:.0} C measured, limits: max-continuous {:.0}, over-temperature {:.0}; {:.0} s above MCT, {:.0} s above over-temperature)",
+                        n + 1,
+                        e.creep_life_fraction,
+                        trent900::TGT_MAX_CONTINUOUS_UNTRIMMED_C,
+                        trent900::TGT_OVERTEMP_UNTRIMMED_C,
+                        e.seconds_above_mct,
+                        e.seconds_above_overtemp,
+                    ));
+                }
                 (e.creep_life_fraction, e.compressor_efficiency_loss)
             };
 
+            if let Some(line) = creep_report {
+                self.events.push(line);
+            }
             if overtemp_exceeded {
                 self.arm(72_008 + n as u64, &format!("engine {} turbine overtemperature", n + 1));
             }
@@ -993,6 +1022,7 @@ static LATEST_WEAR: std::sync::Mutex<[EngineWear; 4]> = std::sync::Mutex::new([E
     seconds_above_mct: 0.0,
     seconds_above_overtemp: 0.0,
     toga_lever_seconds: 0.0,
+    logged_creep_quarter: 0.0,
     exceedances: NO_EXCEEDANCES,
     in_exceedance: [false; 10],
     seconds_ip_overspeed: 0.0,
