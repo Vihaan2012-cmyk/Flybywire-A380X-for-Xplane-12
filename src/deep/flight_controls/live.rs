@@ -1507,10 +1507,19 @@ mod tests {
 
         let deployed = run(&mut ids(), &truth, &Faults::default(), 4.0);
         assert_eq!(deployed["FCTL_GND_SPLR_DEPLOYED"], 1.0);
+        // Both travel groups come out, each to its own stop: panels 1 and 2
+        // reach 35 deg and panels 3 to 8 reach 50 (`spoiler_max_deg`, from
+        // the FCOM's per-panel deflections). Asserting one figure for every
+        // panel would have hidden that difference.
         assert!(
-            deployed["FCTL_SPLR_L1_DEFLECTION_DEG"] > 45.0,
-            "armed and on the ground, the panels come out: {} deg",
-            deployed["FCTL_SPLR_L1_DEFLECTION_DEG"]
+            deployed["FCTL_SPLR_L4_DEFLECTION_DEG"] > 45.0,
+            "armed and on the ground, an inboard panel comes right out: {} deg",
+            deployed["FCTL_SPLR_L4_DEFLECTION_DEG"]
+        );
+        let outboard = deployed["FCTL_SPLR_L1_DEFLECTION_DEG"];
+        assert!(
+            outboard > SPOILER_1_2_MAX_DEG - 2.0 && outboard <= SPOILER_1_2_MAX_DEG + 1e-6,
+            "panel 1 deploys, but stops at its own {SPOILER_1_2_MAX_DEG} deg travel: {outboard} deg"
         );
 
         let stowed = run(&mut ids(), &truth, &faults, 4.0);
