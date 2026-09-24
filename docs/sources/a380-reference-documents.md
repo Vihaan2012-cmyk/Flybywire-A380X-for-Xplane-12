@@ -42,12 +42,52 @@ quoted here and must not be shipped in this repository in any form. It is
 also the wrong variant: an A380-861 with GP7200 engines, where this port is
 an -842 with Trent 900s.
 
-The **FCOM** is a KAL fleet issue, so its *weights* are that operator's
-certified figures and not universal: MTOW 1 234 588 lb = **560 t**, MLW
-386 t, MZFW 361 t, max taxi 562 t, minimum weight 270 t. The third-party
-crib sheet gives 569/391/366/571 t for the same rows. Both are plausible
-A380-800 weight variants; neither is "the" answer, and this port should not
-hard-code either.
+The **FCOM** is a KAL fleet issue, so its weights are that operator's
+certified figures. They turn out to be the baseline ones — see the weight
+variants below.
+
+## Weight variants: the port mixes two of them
+
+The Aircraft Characteristics document carries the whole weight-variant table
+(AC p.25), which settles a question this code has been guessing at:
+
+| | **WV000** | WV001 | WV002 | WV003 | WV004 |
+|---|---|---|---|---|---|
+| MRW / MTW | 562 t | 512 t | 571 t | 512 t | 562 t |
+| MTOW | **560 t** | 510 t | 569 t | 510 t | 560 t |
+| MLW | **386 t** | 394 t | 391 t | 395 t | 391 t |
+| MZFW | **361 t** | 372 t | 366 t | 373 t | 366 t |
+
+WV000 — 560/386/361 — is corroborated twice over: Airbus's own Technical
+Training Manual states MTOW 560 t, MLW 386 t, MZFW 361 t, and the KAL FCOM's
+limitations chapter gives the same four figures including MTW 562 t. The
+third-party crib sheet's 569/391/366/571 is WV002.
+
+**This port uses two variants at once.** `deep::gear_structure::MTOW_KG` is
+510 000 kg, which is WV001/WV003; `MLW_KG` (and `physics::damage`'s own copy)
+is 386 000 kg, which is WV000. Both cite *"WV000"* — and the citation in
+`damage.rs` states the variant's MTOW as 510 000 kg, which the table above
+shows is not WV000's figure at all.
+
+FlyByWire's own `flight_model.cfg` is a third combination: `max_gross_weight`
+1 124 355 lb = 510 t with MLW 395 t and MZFW 373 t (all WV003), under a
+comment giving MRW 562 t (WV000/WV004).
+
+So there are three coherent choices and the code currently makes none of them:
+
+* **WV000**, the Airbus baseline all three documents agree on — then
+  `MTOW_KG` should be 560 000 and `MLW_KG` stays;
+* **WV003**, the aircraft FlyByWire actually models and the one the converted
+  `.acf` inherits its mass from — then `MTOW_KG` stays and `MLW_KG` becomes
+  395 000;
+* keep the present numbers deliberately, and say which variant each belongs
+  to instead of citing one that matches neither.
+
+It is not cosmetic. `MLW_KG` arms the overweight-landing failure (32_123) and
+sets `overweight_landing_check`'s inspection tier, so against the aircraft
+FlyByWire models, a legal 390 t landing is currently treated as overweight;
+`MTOW_KG` sets the MTOW drop case in `strut.rs`'s certification limit load,
+where the WV000 figure would size the struts about ten per cent stronger.
 
 ## Confirmed: figures this code guessed, now sourced
 
@@ -86,6 +126,24 @@ OVER LIMIT procedure to this port's `DEEP_ENG_n_TGT_SENSED_C` on the grounds
 that they are different gas-path stations. TCDS Note 6 settles it: TGT is
 measured by thermocouples at the LP turbine's 1st-stage nozzle guide vane.
 The refusal was right.
+
+**Landing gear and brakes, in full.** The course (GenFam p.442) describes
+two wing landing gears on four-wheel bogies, two body landing gears on
+six-wheel bogies retracting rearwards, a two-wheel nose gear retracting
+forward with twin steering actuators, all single-stage oleo-pneumatic; and,
+of the main group's **20 wheels, 16 anti-skid brakes**, because each body
+bogie's rear axle is steerable and unbraked. `deep::gear_structure` already
+models precisely this — `BRAKED_WHEEL_COUNT = 16.0`, "16 braked of the 22
+total", the body-bogie rear axle steered rather than braked, three steerable
+positions. Tyres are one specification for both wing and body gear (1400 mm)
+and a different one for the nose (1270 mm).
+
+**Hydraulic system pressure.** 5000 psi nominal (GenFam p.348), which this
+code uses throughout (`HYDRAULIC_NOMINAL_PA`, the accumulator model). The
+course adds the context: the 5000 psi choice saves over 1000 kg, and the
+A380's installed hydraulic power is 800 kW against 300 kW for the
+A340-500/600, which is why two fuel/hydraulic heat exchangers per circuit
+are fitted.
 
 **Main and standby feed pumps.** The course describes each collector cell as
 holding a main pump and a standby pump, the standby being redundancy for the
@@ -177,6 +235,19 @@ Totals: 323 546 L modelled against the course's 315 354 L usable without a
 centre tank, **+2.6 %**. The outer tanks are the outlier. This is FlyByWire's
 data, not this port's, and the course's figures may be usable rather than
 total volume — but the gap is real and now measured.
+
+### Two documents with less in them than their size suggests
+
+The **Technical Training Manual** (124 pages) is Level I **ATA 00 only** —
+aircraft general introduction, stations and zoning, cockpit philosophy,
+documentation, tools, safety precautions and handling. No system chapters at
+all. Its one contribution is the weight table above. It also carries an
+explicit no-reproduction notice.
+
+The **performance analysis** (58 pages) is an academic study: wing span, wing
+area, aspect ratio, sweep angle and published weights, then analysis built on
+them. Useful only as a cross-check on figures that are better sourced
+elsewhere.
 
 ## Not in these documents — stop looking
 
