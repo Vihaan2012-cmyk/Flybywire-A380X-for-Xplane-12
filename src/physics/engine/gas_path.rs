@@ -588,6 +588,50 @@ const HP3_BLEED_AFTER_STAGE: usize = 3;
 /// to 49 %, and every existing validation still passes. The measurement
 /// below asserts that bound rather than the physical one, so the debt is
 /// recorded by a test that passes rather than hidden in one that does not.
+///
+/// # What a proper fix is not
+///
+/// Five independent levers were swept against the full engine suite, and
+/// every one of them fails, which is worth writing down so the next attempt
+/// starts further along:
+///
+/// * **The valve's area alone.** 0.006 (15 %) leaves four validations
+///   failing: idle settles at N3 60.5 against FlyByWire's 63 gate, the
+///   certificated 15-to-95 % acceleration stretches to 6.70 s against
+///   5.6 s, idle-to-TOGA to 28.7 s, and a hot restart stops running hotter
+///   than a cold one.
+/// * **The valve's schedule.** Shutting it by 72 % corrected HP speed
+///   instead of 85 % keeps it closed through the whole take-off, which is
+///   the right shape, but the certificated acceleration then takes 7.04 s:
+///   the valve's surge-margin help is gone from exactly the speeds the
+///   certificated segment runs at.
+/// * **Vane authority.** The vanes do the same job and are the physically
+///   right substitute, but `VSV_MIN` cannot go below 0.75. At 0.74 the HP
+///   compressor's realised efficiency at half speed and half flow reads
+///   153, and at 0.72, 22.7: the stage's net work passes through zero and
+///   changes sign there, so the current 0.75 is not an optimum but the last
+///   value before a pole.
+/// * **Rotor inertia.** Not the limit. Taking `LP_MASS_FRACTION` from 0.18
+///   to 0.10 -- a 45 % lighter fan rotor -- buys 0.14 s of the 1.44 s the
+///   certificated acceleration is short by.
+/// * **The acceleration fuel schedule.** `ACCEL_FAR_MARGIN` is binding, but
+///   it has no usable range: 2.30 gives 7.04 s, 2.40 gives 6.96 s, and 2.50
+///   and 2.70 give 30.02 s and 1.96 s. It is no longer a monotone knob,
+///   because it and the EEC's new running temperature limiter
+///   (`Engine::running_tgt_cutback`) are two loops on the same fuel.
+///
+/// What that adds up to is one finding: **the engine's acceleration
+/// performance is currently produced by the starvation.** Dumping most of
+/// the core leaves the combustor a small mass flow and a large fuel flow,
+/// and a hot, light gas path spins a spool up quickly. Take the starvation
+/// away by any route and the cycle no longer has the turbine power to make
+/// its certificated acceleration legally -- which is the same thing the
+/// over-temperature was already telling us, seen from the other side.
+///
+/// So the fix is not a constant. It is re-deriving the turbine work split
+/// so the cycle makes its certificated acceleration on a legal temperature,
+/// and only then sizing this valve at what a handling bleed is actually
+/// for.
 const HP3_BLEED_AREA_M2: f64 = 0.020;
 /// Fully open below the first corrected HP speed, shut above the second.
 const HP3_BLEED_SCHEDULE_PCT: (f64, f64) = (70.0, 85.0);
