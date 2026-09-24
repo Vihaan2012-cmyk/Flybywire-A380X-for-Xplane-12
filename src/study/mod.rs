@@ -27,7 +27,7 @@ mod elec;
 mod engine;
 mod failures;
 mod hyd;
-mod loadsheet;
+pub(crate) mod loadsheet;
 mod pages;
 mod services;
 /// JSON for the XPHFBW app's Study tab: the same page/group/topology data

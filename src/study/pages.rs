@@ -44,6 +44,7 @@ fn base_groups(kind: PageKind) -> Vec<Group> {
         PageKind::GearBrakes => gear_brakes(),
         PageKind::AirData => air_data(),
         PageKind::Fire => fire(),
+        PageKind::Loadsheet => loadsheet(),
         _ => Vec::new(),
     }
 }
@@ -380,6 +381,56 @@ fn air_data() -> Vec<Group> {
         ],
     ));
     groups
+}
+
+/// The loadsheet as the browser panel shows it.
+///
+/// The in-sim window draws its own richer version (`study::loadsheet`),
+/// with the boarding and SimBrief buttons; this is the same figures as
+/// plain variable groups, because that is what the panel renders. Without
+/// it the page appeared in the menu and came up blank -- `base_groups`
+/// falls through to an empty list for any kind it does not name.
+fn loadsheet() -> Vec<Group> {
+    let weights = group(
+        "Weights and Balance",
+        tint(0),
+        vec![
+            num("Zero fuel weight", "A32NX_AIRFRAME_ZFW", "kg", 0),
+            num("Zero fuel CG", "A32NX_AIRFRAME_ZFW_CG_PERCENT_MAC", "% MAC", 1),
+            num("Gross weight", "A32NX_AIRFRAME_GW", "kg", 0),
+            num("Gross weight CG", "A32NX_AIRFRAME_GW_CG_PERCENT_MAC", "% MAC", 1),
+            num("Take-off weight", "A32NX_AIRFRAME_TOW", "kg", 0),
+            num("Take-off CG", "A32NX_AIRFRAME_TO_CG_PERCENT_MAC", "% MAC", 1),
+            // X-Plane's own, which is what actually flies. It differs from
+            // the above whenever no loadsheet has been published and the
+            // plugin is therefore leaving X-Plane's balance alone
+            // (`weight_balance.rs`), and that difference is the thing worth
+            // seeing.
+            num("X-Plane total weight", "TOTAL WEIGHT", "lb", 0),
+        ],
+    );
+    let desired = group(
+        "Boarding Toward",
+        tint(1),
+        vec![
+            num("Zero fuel weight", "A32NX_AIRFRAME_ZFW_DESIRED", "kg", 0),
+            num("Zero fuel CG", "A32NX_AIRFRAME_ZFW_CG_PERCENT_MAC_DESIRED", "% MAC", 1),
+            num("Gross weight", "A32NX_AIRFRAME_GW_DESIRED", "kg", 0),
+            num("Boarding in progress", "A32NX_BOARDING_STARTED_BY_USR", "", 0),
+            num("Boarding rate", "A32NX_BOARDING_RATE", "", 0),
+        ],
+    );
+    let pax = group(
+        "Passengers",
+        tint(2),
+        super::loadsheet::PAX_ZONES.iter().map(|(label, var)| num(label, *var, "pax", 0)).collect(),
+    );
+    let cargo = group(
+        "Cargo",
+        tint(3),
+        super::loadsheet::CARGO_HOLDS.iter().map(|(label, var)| num(label, *var, "kg", 0)).collect(),
+    );
+    vec![weights, desired, pax, cargo]
 }
 
 fn fire() -> Vec<Group> {

@@ -273,6 +273,7 @@
   <button type="button" class="tab-btn" data-tab="components">Components</button>
   <button type="button" class="tab-btn" data-tab="flightplan">Flight Plan</button>
   <button type="button" class="tab-btn" data-tab="ground">Ground Services</button>
+  <button type="button" class="tab-btn" data-tab="loadsheet">Loadsheet</button>
   <button type="button" class="tab-btn" data-tab="settings">Settings</button>
   <button type="button" class="tab-btn" data-tab="status">Status</button>
   <button type="button" class="tab-btn" data-tab="support">Support</button>
@@ -364,6 +365,11 @@
 <div class="tab-panel" id="tab-ground">
   <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
   <div class="page-main" id="ground-content"></div>
+</div>
+
+<div class="tab-panel" id="tab-loadsheet">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="page-main" id="loadsheet-content"></div>
 </div>
 
 <div class="tab-panel" id="tab-settings">
@@ -704,6 +710,7 @@ for (const btn of $all('.tab-btn')) {
     if (btn.dataset.tab === 'components') componentsOnShow();
     if (btn.dataset.tab === 'flightplan') flightPlanOnShow();
     if (btn.dataset.tab === 'ground') groundOnShow();
+    if (btn.dataset.tab === 'loadsheet') loadsheetOnShow();
   });
 }
 
@@ -1590,7 +1597,7 @@ function renderStudyNav() {
   const nav = document.getElementById('study-nav');
   nav.innerHTML = '';
   const groups = {};
-  for (const p of study.pages.filter((p) => p.kind !== 'failures' && p.kind !== 'breakers' && p.kind !== 'groundServices')) (groups[p.menuGroup || ''] = groups[p.menuGroup || ''] || []).push(p);
+  for (const p of study.pages.filter((p) => p.kind !== 'failures' && p.kind !== 'breakers' && p.kind !== 'groundServices' && p.kind !== 'loadsheet')) (groups[p.menuGroup || ''] = groups[p.menuGroup || ''] || []).push(p);
   const order = ['', 'Engines', 'Environmental', 'Hydraulics', 'Landing Gear', 'Fire', 'Deep Systems'];
   for (const key of order) {
     if (!groups[key]) continue;
@@ -2299,6 +2306,62 @@ const AIRCRAFT_PRESETS = [
   [4, 'Ready for Taxi', 'FlyByWire preset 4'],
   [5, 'Ready for Takeoff', 'FlyByWire preset 5'],
 ];
+const loadsheet = { page: null, timer: null };
+// The loadsheet tab: the weights and both centres of gravity as FlyByWire
+// holds them, X-Plane's own total beside them, the payload by zone and
+// hold, and the SimBrief and boarding buttons.
+async function loadsheetOnShow() {
+  const content = document.getElementById('loadsheet-content');
+  if (!loadsheet.page) {
+    try {
+      loadsheet.page = (await studyGet('/study/pages')).pages.find((p) => p.kind === 'loadsheet');
+    } catch {
+      content.replaceChildren(el('div', { class: 'box', text: 'Could not load the loadsheet.' }));
+      return;
+    }
+  }
+  const page = loadsheet.page;
+  if (!page) {
+    content.replaceChildren(el('div', { class: 'box', text: 'The plugin did not offer a loadsheet page.' }));
+    return;
+  }
+  const act = (label, name, value, said) => {
+    const b = el('button', { type: 'button', class: 'small', text: label });
+    b.addEventListener('click', async () => {
+      const r = await studyPost('/study/action', { kind: 'writeVariable', name, value });
+      if (r.ok !== false) show(said);
+    });
+    return b;
+  };
+  const buttons = el('div', { class: 'row' },
+    act('Fetch SimBrief OFP', 'EFB_SIMBRIEF_REQUEST', 1, 'Requested the SimBrief OFP'),
+    act('Board', 'BOARDING_STARTED_BY_USR', 1, 'Boarding'),
+    act('Stop', 'BOARDING_STARTED_BY_USR', 0, 'Boarding stopped'),
+    act('Instant', 'BOARDING_RATE', 0, 'Boarding set to instant'),
+  );
+  const body = el('div');
+  content.replaceChildren(buttons, body);
+  const names = collectNames(page);
+  if (loadsheet.timer) clearInterval(loadsheet.timer);
+  let busy = false;
+  const poll = async () => {
+    if (busy || !document.getElementById('tab-loadsheet').classList.contains('active')) return;
+    busy = true;
+    try {
+      const q = names.length ? '?names=' + names.map(encodeURIComponent).join(',') : '';
+      const data = await studyGet('/vars' + q);
+      body.innerHTML = '';
+      renderGroups(body, page.groups, data.vars || {});
+    } catch {
+      // Left as it was: a dropped poll should not blank the page.
+    } finally {
+      busy = false;
+    }
+  };
+  await poll();
+  loadsheet.timer = setInterval(poll, 500);
+}
+
 async function groundOnShow() {
   const content = document.getElementById('ground-content');
   if (!ground.page) {

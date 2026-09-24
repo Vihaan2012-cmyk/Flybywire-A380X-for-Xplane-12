@@ -30,7 +30,7 @@ use crate::xp::FONT_BASIC;
 
 /// The passenger zones FlyByWire publishes, in the order they sit in the
 /// aeroplane: main deck front to back, then the upper deck.
-const PAX_ZONES: &[(&str, &str)] = &[
+pub(super) const PAX_ZONES: &[(&str, &str)] = &[
     ("MAIN FWD A", "A32NX_PAX_MAIN_FWD_A"),
     ("MAIN FWD B", "A32NX_PAX_MAIN_FWD_B"),
     ("MAIN MID 1A", "A32NX_PAX_MAIN_MID_1A"),
@@ -47,11 +47,17 @@ const PAX_ZONES: &[(&str, &str)] = &[
     ("UPPER AFT", "A32NX_PAX_UPPER_AFT"),
 ];
 
-const CARGO_HOLDS: &[(&str, &str)] = &[
+pub(super) const CARGO_HOLDS: &[(&str, &str)] = &[
     ("FWD HOLD", "A32NX_CARGO_FWD"),
     ("AFT HOLD", "A32NX_CARGO_AFT"),
     ("BULK", "A32NX_CARGO_BULK"),
 ];
+
+/// The variables this page's own buttons may write, and the only ones the
+/// panel's `writeVariable` action will accept. Without the list that action
+/// is a door onto every aircraft variable in the simulation, openable by
+/// anything that can reach the panel's HTTP endpoint.
+pub(super) const WRITABLE: &[&str] = &["BOARDING_STARTED_BY_USR", "BOARDING_RATE", "EFB_SIMBRIEF_REQUEST"];
 
 /// Kilograms per passenger, FlyByWire's own figure for the A380
 /// (`Payload.tsx`'s `PAX_WEIGHT`): 84 kg, a passenger plus their cabin bag.

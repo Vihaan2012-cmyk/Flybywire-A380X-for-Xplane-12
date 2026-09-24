@@ -308,9 +308,10 @@ fn page_json(index: usize, title: &str, kind: PageKind) -> Value {
             map.insert("groups".into(), groups_json(&services::ground_groups()));
         }
         PageKind::Loadsheet => {
-            // The browser panel shows it as a plain variable page; the
-            // buttons are the in-sim window's (`study::loadsheet`).
-            map.insert("kind".into(), json!("groups"));
+            // Its own kind rather than a plain group page: the panel gives
+            // it a tab of its own, with the boarding and SimBrief buttons
+            // the in-sim window has.
+            map.insert("kind".into(), json!("loadsheet"));
             map.insert("groups".into(), groups_json(&pages::groups(kind)));
         }
         PageKind::All => {
@@ -908,6 +909,19 @@ pub(crate) fn apply_action(body: &str) -> Result<(), String> {
                 return Err(format!("no aircraft preset {id}"));
             }
             queue_write("AIRCRAFT_PRESET_LOAD", id as f64);
+        }
+        // The loadsheet tab's boarding and SimBrief buttons. Restricted to
+        // the names that tab actually owns: this is a general "write any
+        // aircraft variable" door otherwise, reachable by anything that can
+        // talk to the panel's HTTP endpoint.
+        "writeVariable" => {
+            let name = v.get("name").and_then(Value::as_str).ok_or("missing \"name\"")?;
+            let value = v.get("value").and_then(Value::as_f64).ok_or("missing \"value\"")?;
+            let allowed = crate::study::loadsheet::WRITABLE;
+            let Some(name) = allowed.iter().find(|n| **n == name) else {
+                return Err(format!("{name} is not one of the loadsheet's own variables"));
+            };
+            queue_write(name, value);
         }
         "setPresetExpedite" => {
             let on = v.get("on").and_then(Value::as_bool).ok_or("missing \"on\"")?;
