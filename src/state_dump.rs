@@ -9,6 +9,16 @@
 //! changing the interval or the keep count, takes effect on the very next
 //! tick/dump without an aircraft reload.
 //!
+//! `FBW_DUMP` turns the same dumps on from the environment, for a session
+//! started from a script or a shell rather than through the settings panel
+//! -- including one already in the air, since nothing here is read once at
+//! start-up. `FBW_DUMP=1` uses the shipped interval; `FBW_DUMP=<frames>`
+//! sets it. It overrides the `xphfbw.stateDumps` switch rather than
+//! consulting it, because the point of it is to dump on a run where nobody
+//! got to the panel first. The other two settings still apply, so the
+//! interval can be adjusted mid-session from the panel even on an
+//! environment-started dump.
+//!
 //! The flight loop only copies the values; a thread of its own formats and
 //! writes them, so a dump never costs a frame. Each X-Plane session gets a
 //! folder; a session keeps its latest `xphfbw.stateDumpKeep` dumps
@@ -83,7 +93,7 @@ impl StateDump {
     /// whenever dumps are off — the common case once `stateDumps` defaults
     /// to off (see `docs/deep/debug_start_fps.md`).
     pub fn enabled(&self) -> bool {
-        self.sender.is_some() && crate::app_settings::current().state_dumps
+        self.sender.is_some() && (env_frames().is_some() || crate::app_settings::current().state_dumps)
     }
 
     /// Called once a tick with the tick's state; dumps every
@@ -92,8 +102,16 @@ impl StateDump {
     pub fn tick(&mut self, time: f64, ticks: u64, names: &[String], datarefs: &[String], values: &[f64], sources: &[u8]) {
         let Some(sender) = &self.sender else { return };
         let settings = crate::app_settings::current();
-        let every = settings.state_dump_frames.max(1);
-        if !settings.state_dumps || ticks == 0 || ticks % every != 0 {
+        let forced = env_frames();
+        // `FBW_DUMP=<frames>` sets the interval; `FBW_DUMP=1` means "on",
+        // which is one frame -- an interval nobody wants and a disk nobody
+        // has, so it reads as "the shipped interval" instead. Anything
+        // larger is taken literally.
+        let every = match forced {
+            Some(1) | None => settings.state_dump_frames.max(1),
+            Some(frames) => frames,
+        };
+        if (forced.is_none() && !settings.state_dumps) || ticks == 0 || ticks % every != 0 {
             return;
         }
         // Names change only when a variable is registered.
@@ -144,6 +162,23 @@ fn prune(dir: &Path, prefix: &str, keep: usize) {
     for (_, path) in found.into_iter().skip(keep) {
         let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
     }
+}
+
+/// `FBW_DUMP`'s frame interval, or `None` when it is unset or off.
+///
+/// Read once: an environment variable cannot change inside a running
+/// process, and this is called on every tick that could dump.
+fn env_frames() -> Option<u64> {
+    use std::sync::OnceLock;
+    static FRAMES: OnceLock<Option<u64>> = OnceLock::new();
+    *FRAMES.get_or_init(|| {
+        let raw = std::env::var("FBW_DUMP").ok()?;
+        let raw = raw.trim();
+        if raw.is_empty() || raw == "0" || raw.eq_ignore_ascii_case("off") {
+            return None;
+        }
+        Some(raw.parse::<u64>().ok().filter(|f| *f > 0).unwrap_or(1))
+    })
 }
 
 fn write(session: &Path, dump: &Dump) -> std::io::Result<()> {
