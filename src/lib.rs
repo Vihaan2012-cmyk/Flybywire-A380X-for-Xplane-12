@@ -38,6 +38,7 @@ pub mod app_settings;
 mod big_stack;
 mod state_dump;
 mod engine_commands;
+mod live_log;
 // hyperrealism.md physics workstream 5 (fluids): hydraulics/fuel/oxygen
 // physics not already covered by FlyByWire's own ported systems. Shared
 // across workstreams; each adds its own `physics::<area>` submodule.
@@ -232,8 +233,8 @@ impl Snapshot {
 
 /// Where a variable's value comes from, as the snapshot records it.
 const NO_SOURCE: u8 = 0;
-const FROM_XPLANE: u8 = 1;
-const FROM_SYSTEMS: u8 = 2;
+pub(crate) const FROM_XPLANE: u8 = 1;
+pub(crate) const FROM_SYSTEMS: u8 = 2;
 
 /// The X-Plane dataref feeding a variable, if one is mapped to it.
 pub(crate) fn source_dataref(name: &str) -> Option<&'static str> {
@@ -807,6 +808,8 @@ struct Plugin {
     ticks: u64,
     /// Every variable written to disk every few hundred frames.
     state_dump: state_dump::StateDump,
+    /// `FBW_LOG_ALL` only (`live_log.rs`).
+    live_log: Option<live_log::LiveLog>,
     computed: Computed,
     /// FlyByWire's engine control, ported from their C++.
     fadec: fadec::Fadec,
@@ -1341,6 +1344,7 @@ impl Plugin {
             time: 0.,
             ticks: 0,
             state_dump: state_dump::StateDump::start(),
+            live_log: live_log::LiveLog::from_env(),
             computed,
             fadec,
             throttles,
@@ -1851,6 +1855,9 @@ impl Plugin {
         // single tick even with dumps off. `enabled()` is checked first
         // instead: cheap, and false in the common (dumps off) case, so the
         // snapshot lock is only taken on a tick that could actually dump.
+        if let Some(live) = self.live_log.as_mut() {
+            live.tick();
+        }
         if self.ticks % state_dump::EVERY_TICKS == 0 && self.state_dump.enabled() {
             if let Ok(s) = snapshot().lock() {
                 self.state_dump.tick(s.time, s.ticks, &s.names, &s.datarefs, &s.values, &s.sources);
