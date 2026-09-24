@@ -271,6 +271,10 @@ struct Refs {
 pub struct FlightControls {
     ids: Ids,
     refs: Refs,
+    /// `FBW_FCTL_STATS` only.
+    stats_at: Option<std::time::Instant>,
+    hyd_green: VariableIdentifier,
+    hyd_yellow: VariableIdentifier,
 }
 
 impl FlightControls {
@@ -321,6 +325,9 @@ impl FlightControls {
         Self {
             ids: Ids { ailerons, elevators, rudders, spoilers, ths, tracking_mode },
             refs,
+            stats_at: None,
+            hyd_green: get("HYD_GREEN_SYSTEM_1_SECTION_PRESSURE".to_owned()),
+            hyd_yellow: get("HYD_YELLOW_SYSTEM_1_SECTION_PRESSURE".to_owned()),
         }
     }
 
@@ -345,6 +352,41 @@ impl FlightControls {
     }
 
     /// After FlyByWire's systems have moved the actuators this tick.
+    /// `FBW_FCTL_STATS=1`: every 2 s, the deflections this module is handing
+    /// X-Plane, in the sign X-Plane reads them (positive trailing edge
+    /// down, so a positive elevator is nose *down*), beside the hydraulic
+    /// pressure the actuators are running on.
+    ///
+    /// It answers the question that is otherwise guesswork from the seat:
+    /// when the aeroplane pitches somewhere nobody asked it to, is a
+    /// surface actually there, or is something else moving the aircraft?
+    /// The sidestick and the 3D model both look right either way.
+    fn log_stats<V: SimulatorReaderWriter>(&mut self, vars: &mut V, s: &Surfaces, trim_ratio: f64) {
+        use std::sync::OnceLock;
+        static ON: OnceLock<bool> = OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("FBW_FCTL_STATS").is_ok_and(|v| v.trim() != "0" && !v.trim().is_empty())) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self.stats_at.is_some_and(|t| now - t < std::time::Duration::from_secs(2)) {
+            return;
+        }
+        self.stats_at = Some(now);
+        crate::log(&format!(
+            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2}; spoilers L{:?}; hyd {:.0}/{:.0} psi",
+            s.elevators_deg[LEFT],
+            s.elevators_deg[RIGHT],
+            s.ailerons_deg[LEFT][0],
+            s.ailerons_deg[RIGHT][0],
+            s.rudder_deg,
+            s.ths_deg,
+            trim_ratio,
+            s.spoilers_deg[LEFT].iter().map(|v| v.round() as i32).collect::<Vec<_>>(),
+            vars.read(&self.hyd_green),
+            vars.read(&self.hyd_yellow),
+        ));
+    }
+
     pub fn update<V: SimulatorReaderWriter>(&mut self, vars: &mut V, xplm: &Xplm) {
         if vars.read(&self.ids.tracking_mode) != 0. {
             return;
@@ -393,6 +435,8 @@ impl FlightControls {
         for d in [r.trim_requested, r.trim_actual].into_iter().flatten() {
             xplm.set_f(d, ratio as f32);
         }
+        // After the  borrow above has ended.
+        self.log_stats(vars, &s, ratio);
     }
 
     /// Hand the surfaces back to X-Plane.
