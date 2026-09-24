@@ -5,8 +5,9 @@
 //! (`high_lift.rs`), the trimmable horizontal stabiliser and rudder trim
 //! (`ths.rs`), PRIM/SEC-to-actuator allocation (`allocation.rs`), LVDT/RVDT
 //! position transducers (`sensors.rs`), spoiler blowdown/load-alleviation/
-//! ground-spoiler logic (`spoiler.rs`), and the aggregate output a flight
-//! model consumes (`output.rs`). See `docs/deep/BRIEF.md`, and this
+//! ground-spoiler logic (`spoiler.rs`), the backup control module and its
+//! two hydraulically-driven power supplies (`backup.rs`), and the aggregate
+//! output a flight model consumes (`output.rs`). See `docs/deep/BRIEF.md`, and this
 //! directory's own `PROGRESS.md` and `FAILURES.md`.
 //!
 //! Self-contained: nothing outside this directory references it yet, and it
@@ -23,6 +24,7 @@ pub mod surface;
 pub mod high_lift;
 pub mod ths;
 pub mod allocation;
+pub mod backup;
 pub mod sensors;
 pub mod spoiler;
 pub mod output;

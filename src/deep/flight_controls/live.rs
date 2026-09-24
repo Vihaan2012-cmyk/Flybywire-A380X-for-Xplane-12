@@ -490,6 +490,10 @@ pub struct FlightControlsLive {
     /// `[flap, slat, droop nose]`.
     high_lift: [HighLiftPair; 3],
     ground_spoiler: GroundSpoilerLogic,
+    /// The backup control path (`backup.rs`): two hydraulically-driven
+    /// power supplies and the module they feed, which is what flies the
+    /// aircraft once every PRIM and SEC is gone.
+    backup: super::backup::BackupControl,
 
     // The computers' own position monitoring, one dual channel per surface.
     aileron_monitors: [[DualTransducer; 3]; 2],
@@ -571,6 +575,7 @@ impl FlightControlsLive {
                 HighLiftPair::new(HighLiftSystem::new_droop_nose(), HighLiftSystem::new_droop_nose(), HIGH_LIFT_ASYMMETRY_TIMER_S),
             ],
             ground_spoiler: GroundSpoilerLogic::new(),
+            backup: super::backup::BackupControl::new(),
 
             aileron_monitors: std::array::from_fn(|_| std::array::from_fn(|_| DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S))),
             elevator_monitors: std::array::from_fn(|_| std::array::from_fn(|_| DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S))),
@@ -799,6 +804,26 @@ impl LiveArea for FlightControlsLive {
         // each computer's own per-index power feed. Real per-computer
         // availability, not an AC-bus-wide approximation.
         let health = ComputerHealth { prim: truth.prim_healthy, sec: truth.sec_healthy };
+
+        // Backup control (`backup.rs`). Stepped from the same per-computer
+        // health and the two hydraulic systems, so the supplies spin up on
+        // the FCOM's own condition (PRIM 2 and SEC 2 lost) and the module
+        // engages on its own (every computer lost).
+        //
+        // Its *surface commands* are not consumed yet, and deliberately so:
+        // this area is handed `truth.commanded_surfaces`, which are angles
+        // the computers have already computed, not the raw sidestick, pedal
+        // and pitch-trim positions the BCM would fly from. Wiring those
+        // through `Truth` is the remaining step; until then the module's
+        // availability is modelled and published, which is what the ECAM and
+        // the failure model need, and nothing pretends the surfaces are
+        // being driven.
+        let _backup_commands = self.backup.step(
+            &health,
+            truth.hydraulic_pressure_pa,
+            &super::backup::BackupInceptors::default(),
+            dt,
+        );
 
         let aileron_span = (AILERON_MAX_DEG - AILERON_MIN_DEG).to_radians();
         let rudder_span = (2.0 * RUDDER_LIMIT_DEG).to_radians();
@@ -1051,6 +1076,9 @@ impl LiveArea for FlightControlsLive {
         out("FCTL_THS_DEFLECTION_DEG", self.angles.ths_deg);
         out("FCTL_THS_NO_BACK_ENGAGED", f64::from(u8::from(self.ths_out.no_back_engaged)));
         out("FCTL_RUDDER_TRIM_DEFLECTION_DEG", self.angles.rudder_trim_deg);
+        out("FCTL_BPS_1_AVAILABLE", f64::from(u8::from(self.backup.supplies[0].available())));
+        out("FCTL_BPS_2_AVAILABLE", f64::from(u8::from(self.backup.supplies[1].available())));
+        out("FCTL_BCM_ENGAGED", f64::from(u8::from(self.backup.module.engaged())));
 
         const HIGH_LIFT_NAMES: [&str; 3] = ["FLAP", "SLAT", "DROOP"];
         let high_lift_angles = [self.angles.flap_deg, self.angles.slat_deg, self.angles.droop_deg];
@@ -1120,6 +1148,45 @@ mod tests {
             hydraulic_pressure_pa: [HYDRAULIC_SUPPLY_PA; 2],
             ..Truth::default()
         }
+    }
+
+    /// Backup control is live in this area, not just in `backup.rs`: with
+    /// every PRIM and SEC gone the supplies come up on their own condition
+    /// and the module engages, and a healthy aircraft never sees either.
+    #[test]
+    fn the_backup_control_path_engages_only_with_every_computer_lost() {
+        let mut area = FlightControlsLive::default();
+        let healthy = run(&mut area, &flying_truth(), &Faults::default(), 5.0);
+        assert_eq!(healthy["FCTL_BCM_ENGAGED"], 0.0, "a healthy aircraft must never engage backup control");
+        assert_eq!(healthy["FCTL_BPS_1_AVAILABLE"], 0.0);
+        assert_eq!(healthy["FCTL_BPS_2_AVAILABLE"], 0.0);
+
+        // PRIM 2 and SEC 2 alone: the FCOM's condition for the supplies to
+        // run, but not for the module to take over.
+        let mut partial = flying_truth();
+        partial.prim_healthy[1] = false;
+        partial.sec_healthy[1] = false;
+        let mut area = FlightControlsLive::default();
+        let out = run(&mut area, &partial, &Faults::default(), 5.0);
+        assert_eq!(out["FCTL_BPS_1_AVAILABLE"], 1.0, "PRIM 2 + SEC 2 lost should spin the supplies up");
+        assert_eq!(out["FCTL_BPS_2_AVAILABLE"], 1.0);
+        assert_eq!(out["FCTL_BCM_ENGAGED"], 0.0, "four computers still fly the aircraft");
+
+        // Everything gone.
+        let mut dead = flying_truth();
+        dead.prim_healthy = [false; 3];
+        dead.sec_healthy = [false; 3];
+        let mut area = FlightControlsLive::default();
+        let out = run(&mut area, &dead, &Faults::default(), 5.0);
+        assert_eq!(out["FCTL_BCM_ENGAGED"], 1.0, "with no computer left the BCM must take over");
+
+        // ... but not with both hydraulic systems dead, since each supply is
+        // driven by one of them.
+        let mut no_hyd = dead.clone();
+        no_hyd.hydraulic_pressure_pa = [0.0; 2];
+        let mut area = FlightControlsLive::default();
+        let out = run(&mut area, &no_hyd, &Faults::default(), 5.0);
+        assert_eq!(out["FCTL_BCM_ENGAGED"], 0.0, "no hydraulics means no backup power supply");
     }
 
     fn run(area: &mut FlightControlsLive, truth: &Truth, faults: &Faults, seconds: f64) -> BTreeMap<String, f64> {
