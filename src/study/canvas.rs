@@ -44,6 +44,10 @@ pub enum Action {
     ServiceOxygen,
     /// Switch a schematic page between its schematic and its physics.
     TogglePhysics,
+    /// Write one of FlyByWire's own variables, for the loadsheet page's
+    /// boarding and SimBrief buttons. The name carries no aircraft prefix,
+    /// the same as `study::web`'s queued writes.
+    WriteVariable(&'static str, i32),
 }
 
 /// A clickable area the last frame drew.

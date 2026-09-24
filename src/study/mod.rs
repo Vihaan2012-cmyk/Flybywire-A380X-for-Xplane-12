@@ -27,6 +27,7 @@ mod elec;
 mod engine;
 mod failures;
 mod hyd;
+mod loadsheet;
 mod pages;
 mod services;
 /// JSON for the XPHFBW app's Study tab: the same page/group/topology data
@@ -65,6 +66,7 @@ pub(crate) enum PageKind {
     Failures,
     Breakers,
     GroundServices,
+    Loadsheet,
     All,
     /// One `deep` area's own page: its registered components, failures and
     /// ECAM alerts (`deep::registry()`), and its own published variables
@@ -93,6 +95,7 @@ pub(crate) const ITEMS: &[(&str, PageKind)] = &[
     ("Failures", PageKind::Failures),
     ("Circuit Breakers", PageKind::Breakers),
     ("Ground Services", PageKind::GroundServices),
+    ("Loadsheet", PageKind::Loadsheet),
     ("All Variables", PageKind::All),
     // One page per `deep` area (src/deep/*), in `deep_page::AREA_LIST`'s own
     // order -- kept in sync with it by `deep_pages_match_area_list` below.
@@ -206,6 +209,7 @@ pub fn build_menu(xplm: &Xplm) {
         add(study, PageKind::Failures);
         add(study, PageKind::Breakers);
         add(study, PageKind::GroundServices);
+        add(study, PageKind::Loadsheet);
 
         let deep_systems = xplm.submenu(study, "Deep Systems", menu_handler);
         for &(area, _) in deep_page::AREA_LIST {
@@ -297,6 +301,10 @@ unsafe extern "C" fn click(_window: WindowId, x: c_int, y: c_int, status: c_int,
         }
         Action::Press(command) => {
             crate::published::press(command);
+            return 1;
+        }
+        Action::WriteVariable(name, value) => {
+            web::queue_write(name, f64::from(value));
             return 1;
         }
         Action::ToggleFailure(id) => {
@@ -411,6 +419,7 @@ unsafe extern "C" fn draw(window: WindowId, refcon: *mut c_void) {
                 PageKind::Failures => overflow = failures::draw(&mut cv, win.scroll),
                 PageKind::Breakers => overflow = services::breakers(&mut cv, win.scroll),
                 PageKind::GroundServices => services::ground(&mut cv),
+                PageKind::Loadsheet => overflow = loadsheet::draw(&mut cv, win.scroll),
                 PageKind::Area(area) => overflow = pages::flow(&mut cv, &deep_page::var_groups(area), win.scroll),
                 other => overflow = pages::flow(&mut cv, &pages::groups(other), win.scroll),
             },

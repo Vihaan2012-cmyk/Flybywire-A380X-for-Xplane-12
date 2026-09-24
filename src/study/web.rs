@@ -307,6 +307,12 @@ fn page_json(index: usize, title: &str, kind: PageKind) -> Value {
             map.insert("tug".into(), buttons_json(&services::tug_buttons()));
             map.insert("groups".into(), groups_json(&services::ground_groups()));
         }
+        PageKind::Loadsheet => {
+            // The browser panel shows it as a plain variable page; the
+            // buttons are the in-sim window's (`study::loadsheet`).
+            map.insert("kind".into(), json!("groups"));
+            map.insert("groups".into(), groups_json(&pages::groups(kind)));
+        }
         PageKind::All => {
             map.insert("kind".into(), json!("all"));
         }
