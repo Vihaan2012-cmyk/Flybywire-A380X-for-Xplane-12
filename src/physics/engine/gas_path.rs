@@ -556,7 +556,39 @@ const FAN_HUB_FRACTION: f64 = 0.6;
 /// areas and schedules are GENERIC, sized so a start and ground idle keep
 /// both compressors unstalled.
 const HP3_BLEED_AFTER_STAGE: usize = 3;
-const HP3_BLEED_AREA_M2: f64 = 0.03;
+/// HP3 handling-bleed effective area, m^2.
+///
+/// Sized by measurement, not by guess: at 0.03 this valve dumped **73 % of
+/// the core flow** when open (`a_handling_bleed_dumps_a_fraction_of_the_core
+/// _flow_not_most_of_it`), leaving the combustor a quarter of its air
+/// through the whole 70-85 % HP band the valve is open in. A FADEC
+/// scheduling fuel to hold an N1 target against a starved combustor raises
+/// turbine temperature until something stops it, and in the simulator
+/// nothing did: TET reached 2082 K and TGT 1071-1104 C against a 957 C
+/// untrimmed over-temperature limit, which armed creep-life bearing wear on
+/// all four engines within ten seconds of TOGA.
+///
+/// A compressor handling bleed exists to raise surge margin while the engine
+/// accelerates through its part-speed band, by throwing away *some* of the
+/// core flow -- published three-spool practice puts an interstage handling
+/// bleed at roughly a tenth to a fifth. 0.006 m^2 measures at 15 % at the
+/// mid-band condition, inside that range.
+///
+/// **This is 0.020, not 0.006, and that is a known debt.** At 0.006 the
+/// engine no longer meets its own validations: ground idle settles at
+/// N3 60.5 % against FlyByWire's 63 % start-complete gate, the certificated
+/// 15-to-95 % acceleration stretches to 6.62 s against the data sheet's
+/// 5.6 s, and idle-to-TOGA does not converge at all. The engine has been
+/// calibrated *around* an oversized handling bleed, so the valve's area and
+/// the rest of the cycle cannot be corrected independently -- fixing it
+/// properly means recalibrating the turbine work split and the acceleration
+/// schedule together, not editing one constant.
+///
+/// 0.020 is what can be defended today: it halves the dumped flow from 73 %
+/// to 49 %, and every existing validation still passes. The measurement
+/// below asserts that bound rather than the physical one, so the debt is
+/// recorded by a test that passes rather than hidden in one that does not.
+const HP3_BLEED_AREA_M2: f64 = 0.020;
 /// Fully open below the first corrected HP speed, shut above the second.
 const HP3_BLEED_SCHEDULE_PCT: (f64, f64) = (70.0, 85.0);
 const IP_BLEED_AFTER_STAGE: usize = 8;
@@ -1122,3 +1154,48 @@ mod tests {
 }
 
 
+
+#[cfg(test)]
+mod handling_bleed_tests {
+    use super::*;
+
+    /// What fraction of the core flow each handling bleed dumps when it is
+    /// fully open, at the speeds it is open at.
+    ///
+    /// A compressor handling bleed exists to raise surge margin while the
+    /// engine accelerates through its part-speed band, by throwing away
+    /// some of the core flow. "Some" is the operative word: published
+    /// three-spool practice puts an interstage handling bleed at roughly a
+    /// tenth to a fifth of core flow. A valve that dumps most of the core
+    /// starves the combustor, and a FADEC scheduling fuel to hold an N1
+    /// target against a starved combustor raises turbine temperature until
+    /// something stops it -- which is what was observed: TET 2082 K and TGT
+    /// above 1070 C through the whole 70-85 % band this valve is open in.
+    /// What fraction of the core flow the HP3 handling bleed dumps when it
+    /// is fully open, at a speed it is open at.
+    ///
+    /// A valve that dumps most of the core starves the combustor, and the
+    /// FADEC's answer to a starved combustor is more fuel, because it is
+    /// holding an N1 target. See [`HP3_BLEED_AREA_M2`] for what that cost.
+    #[test]
+    fn a_handling_bleed_dumps_a_fraction_of_the_core_flow_not_most_of_it() {
+        let d = design();
+        let m = d.mdot_core_kg_s * 0.55;
+        let w_hp = omega(N3_DESIGN_RPM * 0.70);
+        // The HPC inlet temperature at part speed, from the IPC at the same
+        // sort of fraction of its own design speed.
+        let ipc = d.ipc.compress(m, omega(N2_DESIGN_RPM * 0.75), T_REF_K, d.state.p13, 1.0, 1.0);
+        let open = Some(HandlingBleed { after_stage: HP3_BLEED_AFTER_STAGE, area_m2: HP3_BLEED_AREA_M2, sink_pa: d.state.p13 });
+        let hp = d.hpc.compress_bled(m, w_hp, ipc.tt_out_k, d.state.p25, 1.0, 1.0, open);
+        let fraction = hp.bleed_kg_s / m;
+        // The physical target is a tenth to a fifth. The bound asserted is
+        // the one the rest of the calibration currently allows; see
+        // `HP3_BLEED_AREA_M2` for why the two differ and what closing the
+        // gap requires.
+        assert!(
+            fraction < 0.5,
+            "the HP3 handling bleed dumps {:.0}% of the core flow when open; a handling bleed is a tenth to a fifth,              and most of the core is a starved combustor the FADEC answers with more fuel",
+            fraction * 100.0
+        );
+    }
+}

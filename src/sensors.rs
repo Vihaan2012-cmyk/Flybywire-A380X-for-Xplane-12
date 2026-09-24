@@ -100,6 +100,39 @@ pub fn magnetic_minus_true(psi_true: f64, psi_magnetic: f64) -> f64 {
     normalise_180(psi_magnetic - psi_true)
 }
 
+/// Below this ground speed the velocity vector has no meaningful direction,
+/// so neither does ground track.
+///
+/// X-Plane derives `hpath` from the velocity vector (`DataRefs.txt`:
+/// "the heading the aircraft actually flies", `hpath + beta = psi`). Parked,
+/// that vector is numerical noise, and `hpath` swings across the whole
+/// compass while `psi` sits still -- measured at one stand: psi 90.6 fixed,
+/// hpath 219, 263, 264, 299, 326, 357 on consecutive samples.
+///
+/// That is not a display nuisance. The IR computes wind as
+/// `gs_vector - tas_vector` (`adirs.rs::update_wind_velocity`), one vector
+/// laid along the track and the other along the heading, so a track pointing
+/// the opposite way to the heading makes the two antiparallel and their
+/// difference the *sum* of their lengths. With a ground speed of 76 kt and a
+/// true airspeed of 120, that is 196 kt of wind on a runway -- exactly the
+/// figure the ND showed, and 76 + 120 exactly.
+///
+/// Real inertial and satellite navigators do this too: track is undefined at
+/// rest and is held at heading until there is enough motion to define it.
+/// 5 knots is the shipped default of several such sets and is far below any
+/// speed at which the two genuinely differ.
+const MIN_GROUND_SPEED_FOR_TRACK_KT: f64 = 5.0;
+
+/// The ground track to publish: X-Plane's own, once the aircraft is moving
+/// fast enough for it to mean anything, and the true heading before that.
+pub fn true_track(hpath_true: f64, psi_true: f64, ground_speed_kt: f64) -> f64 {
+    if ground_speed_kt < MIN_GROUND_SPEED_FOR_TRACK_KT {
+        normalise_360(psi_true)
+    } else {
+        normalise_360(hpath_true)
+    }
+}
+
 pub fn magnetic_track(hpath_true: f64, psi_true: f64, psi_magnetic: f64) -> f64 {
     normalise_360(hpath_true + magnetic_minus_true(psi_true, psi_magnetic))
 }
@@ -394,6 +427,8 @@ fn nav_stats_on() -> bool {
 pub struct Sensors {
     /// `FBW_NAV_STATS` only.
     nav_stats_at: Option<std::time::Instant>,
+    /// For [`true_track`]'s gate.
+    ground_speed: Option<DataRef>,
     // X-Plane.
     deflection: Option<DataRef>,
     deploy: Option<DataRef>,
@@ -518,6 +553,7 @@ impl Sensors {
                 ],
             ),
             nav_stats_at: None,
+            ground_speed: xplm.find("sim/flightmodel/position/groundspeed"),
             compression,
             gear_animation,
             wheel_rpm,
@@ -601,10 +637,13 @@ impl Sensors {
         let f = |i: usize| s[i].map(|d| xplm.get_f(d) as f64);
         let (hpath, psi, mag_psi, alpha) = (f(0), f(1), f(2), f(3));
         let longitude = s[4].map(|d| xplm.get_d(d));
-        if let Some(hpath) = hpath {
-            vars.write_from_xplane(&self.true_track, normalise_360(hpath));
-            if let (Some(psi), Some(mag)) = (psi, mag_psi) {
-                vars.write_from_xplane(&self.magnetic_track, magnetic_track(hpath, psi, mag));
+        let ground_speed_kt = self.ground_speed.map_or(0.0, |d| xplm.get_f(d) as f64 * 1.943_844);
+        if let (Some(hpath), Some(psi)) = (hpath, psi) {
+            // Held at heading while stopped: see `true_track`.
+            let track = true_track(hpath, psi, ground_speed_kt);
+            vars.write_from_xplane(&self.true_track, track);
+            if let Some(mag) = mag_psi {
+                vars.write_from_xplane(&self.magnetic_track, magnetic_track(track, psi, mag));
             }
         }
         // `FBW_NAV_STATS=1`: the two angles and two speeds the IR builds the
@@ -625,8 +664,12 @@ impl Sensors {
             if !self.nav_stats_at.is_some_and(|t| now - t < std::time::Duration::from_secs(2)) {
                 self.nav_stats_at = Some(now);
                 crate::log(&format!(
-                    "nav: psi (true heading) {:?}, hpath (true track) {:?}, mag_psi {:?}, alpha {:?}",
-                    psi, hpath, mag_psi, alpha
+                    "nav: psi (true heading) {:?}, hpath (raw) {:?}, ground speed {ground_speed_kt:.1} kt, track published {:?}, mag_psi {:?}, alpha {:?}",
+                    psi,
+                    hpath,
+                    hpath.zip(psi).map(|(h, p)| true_track(h, p, ground_speed_kt)),
+                    mag_psi,
+                    alpha
                 ));
             }
         }
@@ -1009,5 +1052,39 @@ mod tests {
         assert!(!autopilot_master_on(false));
         assert!(kohlsman_setting_std_4(true));
         assert!(!kohlsman_setting_std_4(false));
+    }
+}
+
+#[cfg(test)]
+mod track_tests {
+    use super::*;
+
+    /// The 196-knot runway wind, in one assertion.
+    ///
+    /// The IR makes wind out of `gs_vector - tas_vector`, so a track
+    /// pointing opposite to the heading turns a difference into a sum. Held
+    /// at heading while stopped, the two vectors are parallel and the wind
+    /// is their difference, which is what a wind is.
+    #[test]
+    fn a_parked_aircrafts_track_is_its_heading_not_its_velocity_noise() {
+        // Measured at one stand: heading still, hpath all over the compass.
+        for noise in [219.1, 263.1, 264.1, 299.2, 326.2, 357.2] {
+            assert_eq!(true_track(noise, 90.6, 0.0), 90.6, "parked, track must hold at heading");
+        }
+    }
+
+    #[test]
+    fn once_moving_the_track_is_x_planes_own_and_may_differ_from_heading() {
+        // In a crab the two genuinely differ, and the difference is the
+        // whole point of publishing a track at all.
+        assert_eq!(true_track(85.0, 90.6, 140.0), 85.0);
+        // Normalised, so a track that has wrapped stays in [0, 360).
+        assert_eq!(true_track(-5.0, 90.6, 140.0), 355.0);
+    }
+
+    #[test]
+    fn the_gate_is_at_the_threshold_not_either_side_of_it() {
+        assert_eq!(true_track(200.0, 90.0, MIN_GROUND_SPEED_FOR_TRACK_KT), 200.0);
+        assert_eq!(true_track(200.0, 90.0, MIN_GROUND_SPEED_FOR_TRACK_KT - 0.1), 90.0);
     }
 }

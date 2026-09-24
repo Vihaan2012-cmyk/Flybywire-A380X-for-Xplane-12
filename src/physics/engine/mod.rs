@@ -566,6 +566,31 @@ pub fn idle_engine() -> Engine {
 /// the certificated figure this crate already carries.
 const TGT_START_CUTBACK_BAND_C: f64 = 50.0;
 
+/// The same idea for the *running* engine: how far below the take-off TGT
+/// limit the EEC begins holding fuel back, and how far it will hold it back.
+///
+/// The start limiter above covers sub-idle. Above it, nothing did. The
+/// governor's only fuel ceiling is `MAX_COMBUSTOR_FUEL_AIR_RATIO`, and that
+/// constant (0.08) sits above stoichiometric (1/14.7 = 0.068), so it can
+/// never bind before the chemistry does -- the same gap this file already
+/// documents for starts, left open for every other regime. A TOGA slam
+/// therefore commanded whatever fuel the N1 loop asked for, and the N1 loop
+/// holds a *speed*, not a temperature: measured TGT peaked around 1200 C
+/// against a 956 C take-off limit on an ordinary take-off, `physics::damage`
+/// correctly recorded the certificated exceedance, and creep-life bearing
+/// wear armed on all four engines every flight.
+///
+/// A real EEC has exactly this loop -- an over-temperature limiter that
+/// trims fuel to hold TGT at the rating, which is why a real engine sits
+/// *at* its take-off limit on a hot day instead of climbing past it. The
+/// band and the floor are GENERIC (no Trent 900 limiter schedule is
+/// public); what is not generic is the limit they close on, which is
+/// EASA.E.012's own take-off figure. The floor is well above zero because
+/// this is a limiter, not a shutdown: it must never be able to put the
+/// flame out.
+const TGT_RUNNING_CUTBACK_BAND_C: f64 = 30.0;
+const TGT_RUNNING_CUTBACK_FLOOR: f64 = 0.5;
+
 impl Engine {
 
     /// See [`TGT_START_CUTBACK_BAND_C`]. Uses the lagged TGT the engine
@@ -598,6 +623,20 @@ impl Engine {
         {
             self.start_aborted = true;
         }
+    }
+
+    /// The running over-temperature limiter (see
+    /// [`TGT_RUNNING_CUTBACK_BAND_C`]): 1.0 with the take-off TGT limit a
+    /// full band away, falling to [`TGT_RUNNING_CUTBACK_FLOOR`] at it.
+    ///
+    /// Scoped to the running engine, above the speed the start limiter
+    /// covers, so the two never both bite.
+    fn running_tgt_cutback(&self, n3_pct: f64) -> f64 {
+        if n3_pct < crate::physics::damage::trent900::GROUND_START_HP_PCT {
+            return 1.0;
+        }
+        let headroom_c = crate::physics::damage::trent900::TGT_TAKEOFF_UNTRIMMED_C - self.egt_lag_c;
+        (headroom_c / TGT_RUNNING_CUTBACK_BAND_C).clamp(TGT_RUNNING_CUTBACK_FLOOR, 1.0)
     }
 
     fn start_tgt_cutback(&self, n3_pct: f64) -> f64 {
@@ -716,7 +755,7 @@ impl Engine {
             mdot_to_combustor,
             self.gas.design.wf_kg_s,
             dt.max(1e-4),
-        );
+        ) * self.running_tgt_cutback(n3_pct);
         // The start and its handover, one piece. A real FADEC fuels the
         // sub-idle start open-loop from a start schedule keyed to core speed
         // and closes the N1 loop only once the core reaches idle. The schedule
@@ -1140,11 +1179,21 @@ mod tests {
         // *certificated* segment already meets the one figure that is
         // actually published (EASA.E.012 Note 12, 4.98 s against 5.6 s); the
         // remaining, uncertificated ground-idle segment is bounded here at
-        // 20 s -- comfortably above the 18.0-18.9 s the fully-investigated
-        // model now takes (a small margin for platform/float variance), but
-        // still well under the previous, worse-performing states (22.8 s,
-        // 26.6 s) this suite has already climbed down from, so a real
-        // regression still fails it.
+        // 25 s -- above the 22.3 s the model now takes, with a small margin
+        // for platform/float variance.
+        //
+        // That bound was 20 s, against 18.0-18.9 s, until the EEC gained the
+        // running over-temperature limiter (`TGT_RUNNING_CUTBACK_BAND_C`).
+        // The faster figure is not a standard to hold on to: it was reached
+        // by letting measured TGT peak around 1200 C against a 956 C
+        // take-off limit, which is to say the model was buying its
+        // acceleration with a certificated exceedance, and `physics::damage`
+        // was correctly writing the engines off for it on every take-off. An
+        // engine cannot accelerate faster than its own temperature limit
+        // allows, so 22.3 s is the honest figure for this model and 18 s was
+        // never a legal one. The *certificated* segment is unaffected and is
+        // still checked against the published figure by
+        // `acceleration_from_15_to_95_percent_takeoff_thrust_matches_the_data_sheet`.
         let mut engine = Engine::new();
         let idle_inputs = EngineInputs { target_n1_corrected_pct: IDLE_N1_PCT, ..isa_sea_level() };
         run_to_steady_state(&mut engine, idle_inputs, 60.0);
@@ -1157,7 +1206,7 @@ mod tests {
         let mut inputs = EngineInputs { target_n1_corrected_pct: 100.0, dt_s: dt, ..isa_sea_level() };
         let mut elapsed = 0.0;
         let mut reached = None;
-        while elapsed < 20.0 {
+        while elapsed < 30.0 {
             inputs.starter_engaged = false;
             let out = engine.step(&inputs);
             elapsed += dt;
@@ -1166,8 +1215,48 @@ mod tests {
                 break;
             }
         }
-        let reached = reached.expect("spool-up did not reach 95% of TOGA thrust within 20 s");
-        assert!(reached <= 20.0, "took {reached:.2} s from ground idle to 95% take-off thrust");
+        let reached = reached.expect("spool-up did not reach 95% of TOGA thrust within 30 s");
+        assert!(reached <= 25.0, "took {reached:.2} s from ground idle to 95% take-off thrust");
+    }
+
+    /// Take-off does not cook the engine.
+    ///
+    /// The whole-aeroplane bug this pins: at TOGA the measured (untrimmed)
+    /// TGT ran to 1071-1104 C against EASA.E.012's 957 C untrimmed
+    /// over-temperature limit, which `physics::damage` correctly read as a
+    /// certificated exceedance and, ten seconds later, armed creep-life
+    /// bearing wear (72_000+n) on all four engines with -- before the
+    /// companion fix in `engine_commands.rs` -- a drag torque that stopped
+    /// the spools dead. Every take-off ended with four seized engines.
+    ///
+    /// The cause was upstream of all of that: the HP3 handling bleed
+    /// (`gas_path::HP3_BLEED_AREA_M2`) threw most of the core flow overboard
+    /// through the very speed band a take-off accelerates through, and the
+    /// FADEC's answer to a starved combustor is more fuel, because it is
+    /// holding an N1 target, not a temperature.
+    ///
+    /// Asserted against the certificated limit rather than a tuned number,
+    /// so it stays meaningful if the calibration moves again.
+    #[test]
+    fn take_off_power_stays_inside_the_certificated_turbine_temperature() {
+        use crate::physics::damage::trent900;
+        let mut engine = Engine::new();
+        run_to_steady_state(&mut engine, EngineInputs { target_n1_corrected_pct: IDLE_N1_PCT, ..isa_sea_level() }, 60.0);
+
+        let dt = 0.02;
+        let inputs = EngineInputs { target_n1_corrected_pct: 100.0, dt_s: dt, ..isa_sea_level() };
+        let mut peak = f64::MIN;
+        let mut elapsed = 0.0;
+        while elapsed < 60.0 {
+            let out = engine.step(&inputs);
+            peak = peak.max(out.egt_c);
+            elapsed += dt;
+        }
+        assert!(
+            peak < trent900::TGT_OVERTEMP_UNTRIMMED_C,
+            "take-off peaked at {peak:.0} C measured TGT, past the {:.0} C untrimmed over-temperature limit --              a normal take-off must not be a certificated exceedance",
+            trent900::TGT_OVERTEMP_UNTRIMMED_C
+        );
     }
 
     /// The field bug this workstream fixes: commanded to a real ground-idle

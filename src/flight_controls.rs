@@ -156,8 +156,20 @@ pub fn spoiler_up_deg(n: f64) -> f64 {
 
 /// X-Plane's trim ratio (+1 full nose up) for a stabiliser angle, positive
 /// nose up, given the aircraft's trim travel each way.
+///
+/// **The two travels are crossed on purpose.** `acf_hstb_trim_up` and
+/// `acf_hstb_trim_dn` name the *stabiliser's* deflection, not the trim's
+/// sense, and they come back the other way round from the aircraft file's
+/// own fields: this airframe's `.acf` says `_stab_trim_up 10.0` and
+/// `_stab_trim_dn 2.0`, while the datarefs read up 2.000 and dn 10.000.
+/// Taking them at face value divided a +5.8 degree nose-up stabiliser by a
+/// travel of 2, saturating X-Plane's trim at +1.00 and leaving the aircraft
+/// permanently at full nose-up trim whatever FlyByWire commanded. Crossed,
+/// the same 5.8 degrees is 0.58 of a 10 degree travel, and the pair line up
+/// with FlyByWire's own THS range (-2 to +12 degrees,
+/// `a380_systems/hydraulic/mod.rs`) at both ends.
 pub fn trim_ratio(ths_deg: f64, travel_up_deg: f64, travel_down_deg: f64) -> f64 {
-    let travel = if ths_deg >= 0. { travel_up_deg } else { travel_down_deg };
+    let travel = if ths_deg >= 0. { travel_down_deg } else { travel_up_deg };
     if travel <= 0. {
         return 0.;
     }
@@ -583,13 +595,28 @@ mod tests {
 
     #[test]
     fn stabiliser_maps_onto_x_planes_trim_travel() {
-        // The .acf's 8 degrees each way.
+        // Symmetric travel: nothing to cross, so either reading agrees.
         assert!(close(trim_ratio(4., 8., 8.), 0.5));
         assert!(close(trim_ratio(-2., 8., 8.), -0.25));
-        // FlyByWire's 10 degrees nose up is beyond the .acf's travel.
         assert!(close(trim_ratio(10., 8., 8.), 1.));
-        assert!(close(trim_ratio(10., 10., 2.), 1.));
-        assert!(close(trim_ratio(-2., 10., 2.), -1.));
+
+        // This airframe, as the datarefs actually read: up 2.000, dn 10.000
+        // (the aircraft file's own fields are the other way round -- see
+        // `trim_ratio`). The stabiliser angle seen in the cockpit, +5.8
+        // degrees nose up, used to saturate at +1.00 here; against the 10
+        // degree travel it is a little over half.
+        assert!(close(trim_ratio(5.8, 2., 10.), 0.58));
+        // Both ends of FlyByWire's own THS range (-2 to +12 degrees) land
+        // where they should against this pairing, which is the check that
+        // the crossing is the right way round rather than merely different:
+        // its full nose-down travel is exactly the 2.000 the "up" dataref
+        // reports, so it reaches -1.00 and no further.
+        assert!(close(trim_ratio(-2., 2., 10.), -1.));
+        assert!(close(trim_ratio(12., 2., 10.), 1.));
+        // ... and taken uncrossed, that same nose-down limit would read a
+        // fifth of its travel, and the nose-up side would saturate at a
+        // third of the angle the aircraft actually trims to.
+        assert!(close(trim_ratio(4., 2., 10.), 0.4));
     }
 
     #[test]

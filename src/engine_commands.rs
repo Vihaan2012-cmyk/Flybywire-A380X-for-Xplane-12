@@ -849,7 +849,22 @@ struct EngineDamage {
 /// Each engine failure (by its base id; engine n is base + n - 1) and the
 /// physical quantities it moves at full magnitude.
 const EXOTIC: [(u64, EngineDamage); 6] = [
-    (72_000, EngineDamage { bearing_friction: 1.0, compressor_efficiency_loss: 0.0, compressor_flow_capacity_loss: 0.0, turbine_efficiency_loss: 0.0 }),
+    // Bearing *wear* (`failures.rs`: "a main shaft bearing wears, raising
+    // vibration and running clearances"), not a seizure. This was 1.0 --
+    // a parasitic drag equal to the HP turbine's entire design torque,
+    // which is more than the whole turbine makes anywhere below its design
+    // speed. Armed in flight it did not degrade the engine, it stopped it:
+    // N3 fell from 68 % to 9 % in two seconds, the flame went out, and the
+    // EEC's start-abort latched the fuel off for good. Four engines, every
+    // take-off, from a failure whose own description is a wear item.
+    //
+    // The table contradicted itself, which is the cheapest way to see it:
+    // 72_012 below is HP compressor *destruction* -- blades gone, the rotor
+    // out of balance -- and it asks for 0.3. Wear cannot drag harder than
+    // that. Main-shaft bearings absorb well under a percent of shaft power
+    // when healthy, so a worn one is a few percent: enough to cost fuel,
+    // spool time and oil temperature, which is what a wear failure is for.
+    (72_000, EngineDamage { bearing_friction: 0.03, compressor_efficiency_loss: 0.0, compressor_flow_capacity_loss: 0.0, turbine_efficiency_loss: 0.0 }),
     (72_004, EngineDamage { compressor_efficiency_loss: 1.0, compressor_flow_capacity_loss: 1.0, turbine_efficiency_loss: 0.0, bearing_friction: 0.0 }),
     (72_008, EngineDamage { turbine_efficiency_loss: 1.0, compressor_efficiency_loss: 0.0, compressor_flow_capacity_loss: 0.0, bearing_friction: 0.0 }),
     // HP compressor destruction: compression and flow gone, imbalance on
