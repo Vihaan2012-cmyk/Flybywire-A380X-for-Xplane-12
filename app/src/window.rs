@@ -35,10 +35,25 @@ thread_local! {
 /// budget. It is much less pressing now that the texture work has brought
 /// that down, so this is a setting worth being able to change.
 ///
-/// Defaults to **on**, which is what the settings UI says and what this
-/// behaved as before, so nothing changes for anyone who does not go and
-/// turn it off. Read from the process arguments rather than any shared
-/// state because CEF asks this before anything else has been built.
+/// Defaults to **off**, i.e. the GPU draws the instruments.
+///
+/// It defaulted to on, and was unconditional before that. The measurement
+/// is what changed the default: with CPU rasterisation every screen
+/// published at 1-5 Hz, the simplest page reached 17 and the busiest sat
+/// near zero, and the rate did not rise when the aircraft was accelerating
+/// -- so it was not waiting on content, it was waiting on the rasteriser.
+/// Eighteen views, several 1646x1024 or larger, is simply more than
+/// software rendering can carry, and the instruments are unusable that way.
+///
+/// The reason it was forced -- "no video memory taken from X-Plane" -- was
+/// sound when the converted aircraft was over its VRAM budget. The texture
+/// work has since taken that from 2797 MB to 1085 MB, leaving room.
+///
+/// A machine that cannot spare the video memory turns it back on in the
+/// settings, which now works. Read from the process arguments rather than
+/// any shared state because CEF asks this before anything else is built,
+/// and defaults to *on* if the aircraft path is not known, since that is
+/// the safe direction when nothing can be read.
 fn force_cpu_rendering() -> bool {
     let aircraft = std::env::args().find_map(|a| a.strip_prefix("--aircraft=").map(std::path::PathBuf::from));
     let Some(aircraft) = aircraft else { return true };
@@ -46,9 +61,9 @@ fn force_cpu_rendering() -> bool {
     match settings.get("xphfbw.forceCpuRendering") {
         Some(v) => {
             let text = v.as_str().map(str::trim).unwrap_or("");
-            !(text.eq_ignore_ascii_case("false") || text == "0" || v.as_bool() == Some(false))
+            text.eq_ignore_ascii_case("true") || text == "1" || v.as_bool() == Some(true)
         }
-        None => true,
+        None => false,
     }
 }
 

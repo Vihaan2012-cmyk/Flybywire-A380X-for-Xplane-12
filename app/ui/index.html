@@ -406,7 +406,7 @@
     <h2>Flight Deck Displays</h2>
     <form class="box" data-group="displays">
       <label class="row"><input type="checkbox" data-key="xphfbw.displaySafeMode"><span class="label">Use display safe mode</span><span class="help" title="Draws the instruments with the most compatible settings (lower frame rate, no hardware paths). Use if screens stay black or flicker.">?</span></label>
-      <label class="row"><input type="checkbox" data-key="xphfbw.forceCpuRendering"><span class="label">Force safe mode CPU rendering</span><span class="help" title="Renders every instrument on the CPU: no extra video memory. On by default.">?</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.forceCpuRendering"><span class="label">Force safe mode CPU rendering</span><span class="help" title="Renders every instrument on the CPU instead of the GPU: no extra video memory, but the instruments run at a few frames a second. Off by default; turn it on only if video memory is short.">?</span></label>
       <div class="grid2">
         <div class="field"><span class="label">Display frame rate</span>
           <select data-key="xphfbw.displayFps"><option value="60">60</option><option value="30">30</option><option value="20">20</option></select></div>
@@ -589,7 +589,7 @@ const DEFAULTS = {
   ACARS_PROVIDER: 'NONE', CONFIG_HOPPIE_USERID: '', CONFIG_SAI_LOGON_KEY: '',
   CONFIG_ONLINE_FEATURES_STATUS: 'DISABLED', CONFIG_SIMBRIDGE_ENABLED: 'AUTO ON', CONFIG_SIMBRIDGE_REMOTE: 'local',
   CONFIG_SIMBRIDGE_PORT: '8380', CONFIG_SIMBRIDGE_IP: 'localhost', CONFIG_OVERRIDE_SIMBRIEF_USERID: '', CONFIG_AUTO_SIMBRIEF_IMPORT: 'DISABLED',
-  'xphfbw.displaySafeMode': false, 'xphfbw.forceCpuRendering': true, 'xphfbw.displayFps': '60', 'xphfbw.efbBrightness': '100',
+  'xphfbw.displaySafeMode': false, 'xphfbw.forceCpuRendering': false, 'xphfbw.displayFps': '60', 'xphfbw.efbBrightness': '100',
   CONFIG_SELF_TEST_TIME: '12', CONFIG_INIT_BARO_UNIT: 'AUTO', CONFIG_MCDU_KB_TIMEOUT: '60',
   ISIS_BARO_UNIT_INHG: '0', ISIS_METRIC_ALTITUDE: '0', LATLON_EXT_FMT: '0', CONFIG_A380X_SHOW_ECL_SOFTKEYS: '0', FO_SYNC_EFIS_ENABLED: '0',
   EFB_PREFERRED_WEIGHT_UNIT: 'kg', CONFIG_ALIGN_TIME: 'REAL', CONFIG_BOARDING_RATE: 'REAL', REFUEL_RATE_SETTING: 'REAL',
