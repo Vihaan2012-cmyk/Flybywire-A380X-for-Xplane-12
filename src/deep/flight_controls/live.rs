@@ -121,8 +121,31 @@ const AILERON_MIN_DEG: f64 = -20.0;
 const AILERON_MAX_DEG: f64 = 30.0;
 /// Rudder travel, same table: +-30 deg, spanning `n = (30 - deg) / 60`.
 const RUDDER_LIMIT_DEG: f64 = 30.0;
-/// Spoiler travel, same table: 0..50 deg up, spanning `n = deg / 50`.
+/// Spoiler travel, same table: 0..50 deg up, spanning `n = deg / 50`. This
+/// is the travel of panels 3 to 8; panels 1 and 2 stop earlier, see
+/// [`spoiler_max_deg`].
 const SPOILER_MAX_DEG: f64 = 50.0;
+/// The outboard pair's travel, degrees. **Sourced**: the FCOM gives the
+/// spoilers' deflection per panel and per function, and the largest either
+/// of panels 1 and 2 ever reaches is 35 deg, at full ground extension
+/// (DSC-27-10-40 p.1847) -- against 50 deg for panels 3 to 8 in the same
+/// case. In flight nothing exceeds 45 deg: the speed brake takes panels 1
+/// to 5 to 20 deg and panels 6 to 8 to 45 deg (DSC-27-10-10 p.1846), and
+/// partial ground extension is 10 deg on panels 1 and 2 against 15 deg on
+/// 3 to 8.
+///
+/// Only the *mechanical* stop belongs here. This area is handed
+/// `commanded_surfaces` -- the angles the computers have already computed --
+/// so the per-function schedule above is the computers' business, not this
+/// model's; what this owns is how far the panel can physically travel
+/// before it hits its stop.
+const SPOILER_1_2_MAX_DEG: f64 = 35.0;
+
+/// The travel stop of spoiler panel `index` (0-based, so 0 and 1 are panels
+/// 1 and 2).
+fn spoiler_max_deg(index: usize) -> f64 {
+    if index < 2 { SPOILER_1_2_MAX_DEG } else { SPOILER_MAX_DEG }
+}
 
 /// GENERIC: the position disagreement between an actuator's two transducer
 /// channels that a flight control computer treats as a monitoring fault,
@@ -412,13 +435,14 @@ fn rudder_surface(panel: usize) -> ControlSurface<2> {
     )
 }
 
-/// Mass/chord `mod.rs:624-632` (42 kg, 0.685 m).
-fn spoiler_surface() -> ControlSurface<1> {
+/// Mass/chord `mod.rs:624-632` (42 kg, 0.685 m). `index` is the panel's
+/// 0-based number, which sets its travel ([`spoiler_max_deg`]).
+fn spoiler_surface(index: usize) -> ControlSurface<1> {
     ControlSurface::new(
         [PowerControlUnit::new(ActuatorGeometry::spoiler())],
         HingeMomentCoefficients::spoiler(),
         inertia_uniform_plate_kg_m2(42.0, 0.685),
-        limits(0.0, SPOILER_MAX_DEG),
+        limits(0.0, spoiler_max_deg(index)),
         SurfaceDamping::spoiler(),
         0.0,
     )
@@ -566,7 +590,7 @@ impl FlightControlsLive {
             ailerons: std::array::from_fn(|_| std::array::from_fn(aileron_surface)),
             elevators: std::array::from_fn(|_| std::array::from_fn(elevator_surface)),
             rudders: std::array::from_fn(rudder_surface),
-            spoilers: std::array::from_fn(|_| std::array::from_fn(|_| spoiler_surface())),
+            spoilers: std::array::from_fn(|_| std::array::from_fn(spoiler_surface)),
             ths: TrimmableHorizontalStabilizer::new_generic(),
             rudder_trim: RudderTrimActuator::new_generic(),
             high_lift: [

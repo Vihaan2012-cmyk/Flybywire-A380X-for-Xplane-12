@@ -29,11 +29,29 @@ pub mod live;
 
 /// Standard gravity, m/s^2 (exact SI definition).
 pub const G_MS2: f64 = 9.806_65;
-/// A380 MLW, kg. Airbus "A380 Aircraft Characteristics - Airport and
-/// Maintenance Planning" (WV000 variant), matching
-/// `physics::damage.rs`'s own `MLW_KG` citation.
-pub const MLW_KG: f64 = 386_000.0;
-/// A380 MTOW, kg, same source (WV000 variant).
+/// A380 MLW and MTOW, kg, for the **weight variant this port actually
+/// flies**.
+///
+/// Airbus's "A380 Aircraft Characteristics - Airport and Maintenance
+/// Planning" tabulates ten weight variants, and these two constants used to
+/// take one figure from each of two different ones: 386 t is WV000's MLW,
+/// while 510 t is WV001/WV003's MTOW. Both were cited as "WV000", and
+/// WV000's MTOW is in fact 560 t, so the citation described neither.
+///
+/// The aircraft being simulated settles it. FlyByWire's `flight_model.cfg`
+/// gives `max_gross_weight` 1 124 355 lb = 510 t with MLW 395 t and MZFW
+/// 373 t -- WV003 -- and the converted `.acf` inherits its mass and limits
+/// from that file. So the MTOW was already right and the MLW belonged to a
+/// different aircraft; MLW now matches the one being flown.
+///
+/// This is not cosmetic: `MLW_KG` arms the overweight-landing failure
+/// (32_123) and sets `structure::overweight_landing_check`'s inspection
+/// tier, so at 386 t a legal 390 t landing was treated as overweight.
+/// `MTOW_KG` sizes the MTOW drop case in `strut.rs`'s certification limit
+/// load. For the Airbus baseline instead (WV000: 560/386/361), both would
+/// have to move together -- see `docs/sources/a380-reference-documents.md`.
+pub const MLW_KG: f64 = 395_000.0;
+/// A380 MTOW, kg, same variant (WV003).
 pub const MTOW_KG: f64 = 510_000.0;
 
 /// The three structurally distinct leg types (geometry/servicing constants

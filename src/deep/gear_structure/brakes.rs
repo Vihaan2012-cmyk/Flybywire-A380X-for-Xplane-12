@@ -450,10 +450,10 @@ mod tests {
     /// moves this catches it.
     #[test]
     fn the_per_wheel_brake_force_is_the_btv_dry_deceleration_shared_out() {
-        // 386_000 kg x 2.8 m/s^2 / 16 wheels = 67_550 N per wheel.
+        // 395_000 kg x 2.8 m/s^2 / 16 wheels = 69_125 N per wheel.
         let expected = MLW_KG * MAX_BRAKING_DECEL_MS2 / BRAKED_WHEEL_COUNT;
         assert!((max_brake_force_n() - expected).abs() < 1e-6);
-        assert!((max_brake_force_n() - 67_550.0).abs() < 50.0, "{}", max_brake_force_n());
+        assert!((max_brake_force_n() - 69_125.0).abs() < 50.0, "{}", max_brake_force_n());
         // All 16 braked wheels together must be able to produce exactly the
         // deceleration the figure came from -- the round trip.
         let total_n = max_brake_force_n() * BRAKED_WHEEL_COUNT;

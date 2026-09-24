@@ -858,6 +858,52 @@ fn ata36(v: &mut Vec<BreakerDef>) {
 // literal number for this exact consumer, not a typical/derived table --
 // and reuses the file's own `Name:` field (spaces for underscores) as its
 // display name, so nothing here is invented.
+/// The real AC bus behind a feed tank pump, by its `systems.cfg` name.
+///
+/// MSFS's `systems.cfg` wires every fuel pump to `bus.1`, which is
+/// FlyByWire's always-powered INFINIBAT (`fuel.rs`'s own doc says so). Taken
+/// at face value that makes the feed pumps unfailable: no electrical fault
+/// of any kind could ever stop one, which is not how the aircraft works.
+///
+/// The FCOM gives the real supply, one AC bus per pump (DSC-28-70
+/// "Electrical Supply", p.2053):
+///
+/// | Feed tank | Main pump | Standby pump |
+/// |---|---|---|
+/// | 1 | AC 4 | AC 2 |
+/// | 2 | AC ESS | AC 3 |
+/// | 3 | AC 3 | AC ESS |
+/// | 4 | AC 2 | AC 4 |
+///
+/// FlyByWire's own config names the two pumps of each tank
+/// `Feed<n>TankPump1`/`2` with no main/standby designation and the same 30
+/// psi, so reading pump 1 as the main is an assumption. It is a
+/// low-consequence one: swapping them preserves each tank's *pair*, so
+/// "losing AC 2 costs one pump in feed 1 and one in feed 4" holds either
+/// way, and only which index dies changes.
+///
+/// Returns `None` for every other circuit, which keeps its `systems.cfg`
+/// bus.
+fn feed_pump_bus(name: Option<&str>) -> Option<Bus> {
+    // MSFS bus numbers, `circuits::MSFS_BUSES`: AC_1 = 2 .. AC_4 = 5, AC_ESS = 6.
+    const AC_2: u32 = 3;
+    const AC_3: u32 = 4;
+    const AC_4: u32 = 5;
+    const AC_ESS: u32 = 6;
+    let bus = match name? {
+        "Fuel_Pump1_Feed1" => AC_4,
+        "Fuel_Pump2_Feed1" => AC_2,
+        "Fuel_Pump1_Feed2" => AC_ESS,
+        "Fuel_Pump2_Feed2" => AC_3,
+        "Fuel_Pump1_Feed3" => AC_3,
+        "Fuel_Pump2_Feed3" => AC_ESS,
+        "Fuel_Pump1_Feed4" => AC_2,
+        "Fuel_Pump2_Feed4" => AC_4,
+        _ => return None,
+    };
+    Some(Bus::Msfs(bus))
+}
+
 fn absorbed_systems_cfg(v: &mut Vec<BreakerDef>) {
     for def in circuits::parse_circuits(circuits::SYSTEMS_CFG) {
         let ata: u16 = if def.type_name == "CIRCUIT_FUEL_PUMP" || def.type_name == "CIRCUIT_FUEL_VALVE" {
@@ -869,12 +915,14 @@ fn absorbed_systems_cfg(v: &mut Vec<BreakerDef>) {
         } else {
             continue;
         };
-        let bus = def.buses.iter().copied().find(|&b| b != 1).map(Bus::Msfs).unwrap_or(Bus::Named("INFINIBAT", 28.));
+        let bus = feed_pump_bus(def.name.as_deref())
+            .or_else(|| def.buses.iter().copied().find(|&b| b != 1).map(Bus::Msfs))
+            .unwrap_or(Bus::Named("INFINIBAT", 28.));
         let rating_a = def.rated_w.unwrap_or(50.) / bus.nominal_voltage();
         let display_name = def.name.clone().unwrap_or_else(|| def.type_name.clone()).replace('_', " ").to_uppercase();
         let (basis, consumers): (&'static str, &'static [&'static str]) = match ata {
             28 if def.type_name == "CIRCUIT_FUEL_PUMP" => (
-                "real, from FBW's own embedded systems.cfg Power field (not typical/derived); gates through fuel.rs's power_circuits -> fuel_network.rs's pump_circuits, which really stops that pump (PumpType::Electric gating)",
+                "real, from FBW's own embedded systems.cfg Power field (not typical/derived); gates through fuel.rs's power_circuits -> fuel_network.rs's pump_circuits, which really stops that pump (PumpType::Electric gating). Bus is the FCOM's own per-pump AC supply (DSC-28-70), not systems.cfg's always-powered bus.1 -- see feed_pump_bus",
                 &["fuel boost/transfer/jettison pump motor"],
             ),
             28 => (
@@ -1811,6 +1859,38 @@ mod tests {
         assert_eq!(bearing_overcurrent_multiplier("hyd-epump-ga"), 1.0);
         // An id this coupling does not own is never affected.
         assert_eq!(bearing_overcurrent_multiplier("sys-2"), 1.0);
+    }
+
+    /// Every feed pump sits on the AC bus the FCOM gives it, not on
+    /// systems.cfg's always-powered bus.1 -- which is what made them
+    /// unfailable, since no electrical fault could reach INFINIBAT.
+    #[test]
+    fn the_feed_pumps_are_on_their_real_ac_buses() {
+        let mut vars = TestVars::default();
+        let b = Breakers::new(&mut vars);
+        // DSC-28-70's table, as bus labels.
+        let expected = [
+            ("FUEL PUMP1 FEED1", "AC_4"), ("FUEL PUMP2 FEED1", "AC_2"),
+            ("FUEL PUMP1 FEED2", "AC_ESS"), ("FUEL PUMP2 FEED2", "AC_3"),
+            ("FUEL PUMP1 FEED3", "AC_3"), ("FUEL PUMP2 FEED3", "AC_ESS"),
+            ("FUEL PUMP1 FEED4", "AC_2"), ("FUEL PUMP2 FEED4", "AC_4"),
+        ];
+        for (name, bus) in expected {
+            let def = b.defs.iter().find(|d| d.name == name).unwrap_or_else(|| panic!("no breaker named {name}"));
+            assert_eq!(def.bus.label(), bus, "{name} should be fed from {bus}");
+        }
+        // Each feed tank's two pumps must be on different buses, or one bus
+        // loss takes a whole tank's supply.
+        for tank in 1..=4 {
+            let of = |p: u32| b.defs.iter().find(|d| d.name == format!("FUEL PUMP{p} FEED{tank}")).unwrap().bus.label();
+            assert_ne!(of(1), of(2), "feed tank {tank}'s two pumps share a bus");
+        }
+        // And the whole set must span all four, so no single bus loss costs
+        // more than two pumps.
+        let mut used: Vec<String> = expected.iter().map(|(n, _)| b.defs.iter().find(|d| d.name == *n).unwrap().bus.label()).collect();
+        used.sort();
+        used.dedup();
+        assert_eq!(used.len(), 4, "the eight feed pumps should spread across four buses, got {used:?}");
     }
 
     /// The regression that grounded both FEED 4 pumps in flight, and the

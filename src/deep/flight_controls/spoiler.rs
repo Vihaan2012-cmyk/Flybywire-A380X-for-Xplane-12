@@ -112,13 +112,21 @@ pub struct GroundSpoilerInputs {
     pub go_around_selected: bool,
 }
 
-/// GENERIC wheel spin-up threshold for the "rolling on the runway" half of
-/// the auto-deploy OR condition (a commonly cited order-of-magnitude
-/// transport wheel-spin-up threshold; not an A380-certified number).
+/// The speed above which a rejected take-off extends the ground spoilers,
+/// and the "rolling on the runway" half of this model's auto-deploy OR
+/// condition. **Sourced, and A380-specific**: the FCOM's rejected-take-off
+/// logic extends the ground spoilers fully "when the thrust levers are at
+/// idle and the speed is greater than 72 kt" (DSC-27-10-40 p.1848), with the
+/// same 72 kt gating the reverser-selected case. This was carried as a
+/// GENERIC order-of-magnitude guess until the FCOM was read, and the guess
+/// turned out to be exactly the aircraft's own figure.
 const WHEEL_SPINUP_KT: f64 = 72.0;
-/// GENERIC low-height gate paired with the wheel-spin-up condition, so a
-/// fast taxi run can never look like a touchdown.
-const SPINUP_RADIO_ALT_FT: f64 = 5.0;
+/// Low-height gate paired with the wheel-spin-up condition, so a fast taxi
+/// run can never look like a touchdown. **Sourced**: the FCOM's own
+/// auto-arm height -- "the ground spoilers are automatically armed if the
+/// speed brakes are extended and the radio height is lower than 6 ft"
+/// (DSC-27-10-40 p.1847).
+const SPINUP_RADIO_ALT_FT: f64 = 6.0;
 
 /// The ground-spoiler deploy/retract state machine: armed -> touchdown (WOW
 /// on both main gear, or wheel spin-up at low height) -> deployed -> a

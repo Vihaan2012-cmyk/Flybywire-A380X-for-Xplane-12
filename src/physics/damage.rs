@@ -98,12 +98,22 @@ const VLE_VLO_KT: f64 = 250.0;
 /// lines 787-788), FlyByWire's own VMO/MMO redlines.
 const VMO_KT: f64 = 390.0;
 const MMO: f64 = 0.97;
-/// Airbus "A380 Aircraft Characteristics - Airport and Maintenance
-/// Planning" (airbus.com/sites/g/files/jlcbta136/files/2021-11/
-/// Airbus-Aircraft-AC-A380.pdf), lightest weight variant (WV000, MTOW
-/// 510,000 kg = 1,124,355 lb), matching FlyByWire's own
-/// `max_gross_weight` (flight_model.cfg:16): MLW 386,000 kg.
-const MLW_KG: f64 = 386_000.0;
+/// A380 MLW, kg, for the weight variant this port flies: **WV003**, the one
+/// FlyByWire's own `flight_model.cfg` describes (MTOW 510 t via
+/// `max_gross_weight` = 1,124,355 lb, MLW 395 t, MZFW 373 t), and therefore
+/// the one the converted `.acf` inherits.
+///
+/// This previously read 386,000 kg, cited as WV000 with "MTOW 510,000 kg" --
+/// but Airbus's own weight variant table ("A380 Aircraft Characteristics -
+/// Airport and Maintenance Planning", airbus.com/sites/g/files/jlcbta136/
+/// files/2021-11/Airbus-Aircraft-AC-A380.pdf) gives WV000 as 560/386/361 and
+/// WV003 as 510/395/373. The old pair mixed the two, and the cited MTOW
+/// belonged to neither variant named. It also called `max_gross_weight` the
+/// MLW, where that field is the *takeoff* weight.
+///
+/// See `deep::gear_structure`'s own copy, and
+/// `docs/sources/a380-reference-documents.md` for the full table.
+const MLW_KG: f64 = 395_000.0;
 
 /// Tailstrike pitch angle, derived from FlyByWire's own contact-point
 /// geometry (flight_model.cfg): the aft body gear (`point.1`/`point.2`,
