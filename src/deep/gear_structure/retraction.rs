@@ -57,10 +57,25 @@ const GEAR_NOMINAL_TRAVEL_S: f64 = 8.0;
 /// Full door travel time (GENERIC: doors are lighter and faster than the
 /// leg itself).
 const DOOR_NOMINAL_TRAVEL_S: f64 = 4.0;
-/// Gravity/free-fall extension travel time (GENERIC: qualitatively slower
-/// and less controlled than powered extension, the well documented general
-/// characteristic of unpowered gear extension).
-const GRAVITY_EXTEND_TRAVEL_S: f64 = 25.0;
+/// Gravity/free-fall extension travel time, s.
+///
+/// **Derived from a sourced figure**: the FCOM states that "landing gear
+/// gravity extension takes approximately 70 s" (repeated throughout its
+/// abnormal procedures, e.g. p.4846). That 70 s is the crew-facing,
+/// end-to-end duration -- lever pulled to gear down and locked -- whereas
+/// this constant is only the leg's own travel, which this model runs *after*
+/// a door phase costing `DOOR_NOMINAL_TRAVEL_S`. So the travel time that
+/// makes the whole sequence match the aircraft is 70 - 4 = 66 s, for a main
+/// leg at `kind_rate_scale` 1.0.
+///
+/// The nose leg finishes sooner, as it does everywhere else in this model
+/// (`kind_rate_scale`); the 70 s is governed by the slowest leg, which is
+/// what the crew is waiting on.
+const GRAVITY_EXTEND_TRAVEL_S: f64 = 66.0;
+/// The end-to-end gravity extension duration the FCOM gives, s -- what
+/// `GRAVITY_EXTEND_TRAVEL_S` is derived from, kept so the test can assert
+/// the sequence against the sourced figure rather than the derived one.
+const GRAVITY_EXTEND_TOTAL_S: f64 = 70.0;
 
 /// Doors are considered clear of the gear's path above this position.
 const DOOR_OPEN_THRESHOLD: f64 = 0.98;
@@ -315,6 +330,38 @@ mod tests {
         assert_eq!(out.phase, Phase::Locked);
         assert!(out.downlocked);
         assert!((out.gear_position - 1.0).abs() < 1e-9);
+    }
+
+    /// The FCOM's own figure: gravity extension takes approximately 70 s,
+    /// lever to down-and-locked. That is the whole sequence, doors included,
+    /// which is why `GRAVITY_EXTEND_TRAVEL_S` is not itself 70.
+    #[test]
+    fn gravity_extension_takes_the_seventy_seconds_the_fcom_gives() {
+        // Start from up and locked.
+        let mut r = Retraction::new(LegKind::Wing);
+        let faults = healthy();
+        let up = RetractionInputs { gear_lever_down: false, gravity_extend_commanded: false, hydraulic_pressure_fraction: 1.0, dt_s: 0.1 };
+        let out = run_to_locked(&mut r, &up, &faults, 4_000);
+        assert!(out.uplocked);
+
+        // Free-fall it down with no hydraulics at all.
+        let dt = 0.1;
+        let drop = RetractionInputs { gear_lever_down: false, gravity_extend_commanded: true, hydraulic_pressure_fraction: 0.0, dt_s: dt };
+        let mut seconds = 0.0;
+        for _ in 0..4_000 {
+            let out = r.step(&drop, &faults);
+            seconds += dt;
+            if out.phase == Phase::Locked && out.gear_position > GEAR_DOWN_THRESHOLD {
+                break;
+            }
+        }
+        assert!(
+            (seconds - GRAVITY_EXTEND_TOTAL_S).abs() < 2.0,
+            "gravity extension should take about {GRAVITY_EXTEND_TOTAL_S} s, took {seconds}"
+        );
+        // And it must be far slower than the powered cycle, which is the
+        // whole point of the manoeuvre.
+        assert!(seconds > 4.0 * (GEAR_NOMINAL_TRAVEL_S + DOOR_NOMINAL_TRAVEL_S));
     }
 
     #[test]

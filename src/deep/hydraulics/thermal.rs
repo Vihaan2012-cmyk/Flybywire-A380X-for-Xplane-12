@@ -128,6 +128,320 @@ pub fn throttling_heat_w(flow_m3_s: f64, dp_pa: f64) -> f64 {
     flow_m3_s.abs() * dp_pa.abs()
 }
 
+// ---------------------------------------------------------------------------
+// The HSMU's cooling control.
+//
+// The model above says how hot the fluid gets and how the fuel-cooled
+// exchanger takes heat out of it. What it did not have is the unit that
+// decides *when* any of that cooling runs -- and on the A380 that decision
+// is neither continuous nor simple.
+//
+// Every threshold below is the FCOM's (DSC-29-10 p.2066, "the HSMU"):
+//
+//   * inner air/hydraulic heat exchanger: fans on above 55 C, off below 35 C;
+//   * outer air/hydraulic heat exchanger: fans on above 20 C, off below 0 C
+//     -- a much colder pair, so the outer exchanger is working almost
+//     whenever the aircraft is;
+//   * the fans are inhibited above M 0.45, *unless* wing anti-ice has been
+//     turned on during the flight. That exception is a latch on the flight,
+//     not a live state, which is why the input is named for what it is;
+//   * the fuel/hydraulic exchanger's valves open above 85 C and close below
+//     40 C. The direction matters: 85 C *engages* extra cooling; it is not
+//     a shutoff, and reading it as one gets the failure case backwards;
+//   * and the FQMS refuses that exchanger outright on low feed tank 1(4)
+//     quantity, feed tank fuel above 53 C, crossfeed valves open, gravity
+//     feed, low feed pump pressure, or electrical emergency configuration.
+//
+// The FCOM also states the causal chain this makes possible: the
+// fuel/hydraulic exchanger "is active when an air/hydraulic heat exchanger
+// fails", that failure being "detected by an abnormal increase of the
+// hydraulic reservoir temperature". Nothing needs to assert that here --
+// losing the air cooling raises the temperature, and the temperature opens
+// the valves.
+// ---------------------------------------------------------------------------
+
+/// Inner air/hydraulic exchanger: fans on above this fluid temperature, C.
+pub const INNER_FAN_ON_C: f64 = 55.0;
+/// Inner exchanger: fans off below this, C.
+pub const INNER_FAN_OFF_C: f64 = 35.0;
+/// Outer air/hydraulic exchanger: fans on above this, C.
+pub const OUTER_FAN_ON_C: f64 = 20.0;
+/// Outer exchanger: fans off below this, C.
+pub const OUTER_FAN_OFF_C: f64 = 0.0;
+/// Fans are inhibited above this Mach number.
+pub const FAN_INHIBIT_MACH: f64 = 0.45;
+/// The fuel/hydraulic exchanger's valves open above this, C.
+pub const FUEL_EXCHANGER_OPEN_C: f64 = 85.0;
+/// ...and close below this, C.
+pub const FUEL_EXCHANGER_CLOSE_C: f64 = 40.0;
+/// The FQMS inhibits the fuel/hydraulic exchanger above this feed tank fuel
+/// temperature, C.
+pub const FEED_TANK_FUEL_INHIBIT_C: f64 = 53.0;
+
+/// GENERIC: how much conductance one air/hydraulic exchanger adds with its
+/// fans running, W/K, and with them stopped but still passing air. No
+/// published A380 figure exists, so these are sized from the one behaviour
+/// the FCOM does pin down: the fuel/hydraulic exchanger is "active when an
+/// air/hydraulic heat exchanger fails", which means the air exchangers alone
+/// must hold a healthy circuit *below* the 85 C that opens the fuel
+/// exchanger's valves. Two of them at this conductance carry a circuit's
+/// heat rejection with the fluid comfortably under that, and losing both
+/// takes it well over -- which is the whole point of the fuel exchanger
+/// existing.
+const AIR_EXCHANGER_FAN_W_PER_K: f64 = 800.0;
+const AIR_EXCHANGER_STILL_W_PER_K: f64 = 150.0;
+
+/// The FQMS's reasons for refusing the fuel/hydraulic exchanger. Fuel
+/// temperature is not here: [`Hsmu::step`] checks it itself, so the sourced
+/// 53 C sits with the other thresholds rather than in a caller.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FqmsInhibit {
+    pub low_feed_tank_quantity: bool,
+    pub crossfeed_open: bool,
+    pub gravity_feed: bool,
+    pub low_feed_pump_pressure: bool,
+    pub electrical_emergency: bool,
+}
+
+impl FqmsInhibit {
+    pub fn any(&self) -> bool {
+        self.low_feed_tank_quantity || self.crossfeed_open || self.gravity_feed || self.low_feed_pump_pressure || self.electrical_emergency
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HsmuInputs {
+    pub mach: f64,
+    /// Latched for the flight, not a live state -- see the section comment.
+    pub wing_anti_ice_used_this_flight: bool,
+    /// Fuel temperature in the feed tank this circuit's exchanger draws
+    /// from: tank 1 for green, tank 4 for yellow.
+    pub feed_tank_fuel_c: f64,
+    pub fqms_inhibit: FqmsInhibit,
+    /// `[inner, outer]`: whether each air/hydraulic exchanger still works.
+    pub air_exchanger_ok: [bool; 2],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HsmuOutputs {
+    /// `[inner, outer]`.
+    pub fans_running: [bool; 2],
+    /// Temperature wanted the fans, but the Mach inhibit held them off.
+    pub fans_inhibited: bool,
+    pub fuel_exchanger_valves_open: bool,
+    /// Temperature wanted the exchanger, but the FQMS refused it.
+    pub fuel_exchanger_inhibited: bool,
+}
+
+/// One circuit's Hydraulic System Monitoring Unit, as far as cooling goes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Hsmu {
+    fans_on: [bool; 2],
+    fuel_valves_open: bool,
+}
+
+impl Hsmu {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// On above `on_c`, off below `off_c`, unchanged in between.
+    fn hysteresis(state: bool, value_c: f64, on_c: f64, off_c: f64) -> bool {
+        if value_c > on_c {
+            true
+        } else if value_c < off_c {
+            false
+        } else {
+            state
+        }
+    }
+
+    /// Decide this tick's cooling from the fluid temperature. Pure control:
+    /// the heat balance itself stays in [`ThermalState::step`], which the
+    /// caller feeds using [`Self::cooled_sizing`] and by gating its
+    /// `fuel_kg_s` on [`HsmuOutputs::fuel_exchanger_valves_open`].
+    pub fn step(&mut self, fluid_c: f64, inputs: &HsmuInputs) -> HsmuOutputs {
+        let wanted = [
+            Self::hysteresis(self.fans_on[0], fluid_c, INNER_FAN_ON_C, INNER_FAN_OFF_C),
+            Self::hysteresis(self.fans_on[1], fluid_c, OUTER_FAN_ON_C, OUTER_FAN_OFF_C),
+        ];
+        let inhibited = inputs.mach > FAN_INHIBIT_MACH && !inputs.wing_anti_ice_used_this_flight;
+        self.fans_on = if inhibited { [false; 2] } else { wanted };
+
+        let fuel_too_hot = inputs.feed_tank_fuel_c > FEED_TANK_FUEL_INHIBIT_C;
+        let refused = inputs.fqms_inhibit.any() || fuel_too_hot;
+        let wanted_by_temp = Self::hysteresis(self.fuel_valves_open, fluid_c, FUEL_EXCHANGER_OPEN_C, FUEL_EXCHANGER_CLOSE_C);
+        self.fuel_valves_open = wanted_by_temp && !refused;
+
+        HsmuOutputs {
+            fans_running: self.fans_on,
+            fans_inhibited: inhibited && (wanted[0] || wanted[1]),
+            fuel_exchanger_valves_open: self.fuel_valves_open,
+            fuel_exchanger_inhibited: wanted_by_temp && refused,
+        }
+    }
+
+    /// `sizing` with the air/hydraulic exchangers' conductance folded into
+    /// its ambient loss, which is how the fans reach the heat balance. An
+    /// exchanger that has failed contributes nothing at all.
+    pub fn cooled_sizing(&self, sizing: &ThermalSizing, air_exchanger_ok: [bool; 2]) -> ThermalSizing {
+        let mut extra = 0.0;
+        for i in 0..2 {
+            if air_exchanger_ok[i] {
+                extra += if self.fans_on[i] { AIR_EXCHANGER_FAN_W_PER_K } else { AIR_EXCHANGER_STILL_W_PER_K };
+            }
+        }
+        ThermalSizing { fluid_mass_kg: sizing.fluid_mass_kg, ambient_loss_w_per_k: sizing.ambient_loss_w_per_k + extra }
+    }
+
+    pub fn fans_running(&self) -> [bool; 2] {
+        self.fans_on
+    }
+
+    pub fn fuel_exchanger_valves_open(&self) -> bool {
+        self.fuel_valves_open
+    }
+}
+
+#[cfg(test)]
+mod hsmu_tests {
+    use super::*;
+
+    fn inputs() -> HsmuInputs {
+        HsmuInputs { mach: 0.0, wing_anti_ice_used_this_flight: false, feed_tank_fuel_c: 10.0, fqms_inhibit: FqmsInhibit::default(), air_exchanger_ok: [true; 2] }
+    }
+
+    /// The two exchangers have different, sourced thresholds, and each holds
+    /// its state inside its own band.
+    #[test]
+    fn each_exchangers_fans_follow_their_own_sourced_hysteresis() {
+        let mut h = Hsmu::new();
+        assert!(!h.step(50.0, &inputs()).fans_running[0], "50 C sits inside the inner band, so off stays off");
+        assert!(h.step(56.0, &inputs()).fans_running[0], "above 55 C the inner fans run");
+        assert!(h.step(40.0, &inputs()).fans_running[0], "40 C is inside the band, so on stays on");
+        assert!(!h.step(34.0, &inputs()).fans_running[0], "below 35 C they stop");
+
+        // The outer pair is far colder, so it runs almost always.
+        let mut h = Hsmu::new();
+        let out = h.step(25.0, &inputs());
+        assert!(out.fans_running[1], "above 20 C the outer fans run");
+        assert!(!out.fans_running[0], "...while the inner ones are nowhere near theirs");
+    }
+
+    /// Inhibited above M 0.45 -- unless wing anti-ice has been used.
+    #[test]
+    fn the_mach_inhibit_applies_unless_wing_anti_ice_has_been_used() {
+        let mut h = Hsmu::new();
+        let mut i = inputs();
+        i.mach = 0.8;
+        let out = h.step(70.0, &i);
+        assert!(!out.fans_running[0] && !out.fans_running[1], "fast and clean, the fans are held off");
+        assert!(out.fans_inhibited, "and it is reported, because temperature did want them");
+
+        i.wing_anti_ice_used_this_flight = true;
+        let out = h.step(70.0, &i);
+        assert!(out.fans_running[0], "wing anti-ice used this flight lifts the inhibit");
+        assert!(!out.fans_inhibited);
+
+        i.wing_anti_ice_used_this_flight = false;
+        i.mach = 0.3;
+        assert!(h.step(70.0, &i).fans_running[0], "slow again, no inhibit");
+    }
+
+    /// 85 C *opens* the fuel exchanger. Reading it as a shutoff gets the
+    /// failure case exactly backwards.
+    #[test]
+    fn the_fuel_exchanger_opens_hot_and_closes_cold() {
+        let mut h = Hsmu::new();
+        assert!(!h.step(80.0, &inputs()).fuel_exchanger_valves_open, "80 C is below the opening threshold");
+        assert!(h.step(86.0, &inputs()).fuel_exchanger_valves_open, "above 85 C the valves open");
+        assert!(h.step(50.0, &inputs()).fuel_exchanger_valves_open, "50 C is inside the band, they stay open");
+        assert!(!h.step(39.0, &inputs()).fuel_exchanger_valves_open, "below 40 C they close");
+    }
+
+    /// Every FQMS condition refuses it on its own, the 53 C fuel temperature
+    /// included, and each reports the refusal.
+    #[test]
+    fn every_fqms_condition_refuses_the_fuel_exchanger() {
+        let cases: [(&str, fn(&mut HsmuInputs)); 6] = [
+            ("low feed tank quantity", |i| i.fqms_inhibit.low_feed_tank_quantity = true),
+            ("crossfeed open", |i| i.fqms_inhibit.crossfeed_open = true),
+            ("gravity feed", |i| i.fqms_inhibit.gravity_feed = true),
+            ("low feed pump pressure", |i| i.fqms_inhibit.low_feed_pump_pressure = true),
+            ("electrical emergency", |i| i.fqms_inhibit.electrical_emergency = true),
+            ("feed tank fuel above 53 C", |i| i.feed_tank_fuel_c = 54.0),
+        ];
+        for (name, arm) in cases {
+            let mut h = Hsmu::new();
+            let mut i = inputs();
+            arm(&mut i);
+            let out = h.step(90.0, &i);
+            assert!(!out.fuel_exchanger_valves_open, "{name} must refuse the exchanger");
+            assert!(out.fuel_exchanger_inhibited, "{name} should say it refused");
+        }
+        // Exactly 53 C is not "above" 53 C.
+        let mut h = Hsmu::new();
+        let mut i = inputs();
+        i.feed_tank_fuel_c = FEED_TANK_FUEL_INHIBIT_C;
+        assert!(h.step(90.0, &i).fuel_exchanger_valves_open);
+    }
+
+    /// Running fans must actually cool: the conductance they add has to
+    /// dominate the passive loss, and a failed exchanger must add nothing.
+    #[test]
+    fn the_fans_conductance_reaches_the_heat_balance() {
+        let base = ThermalSizing::a380_circuit();
+        let mut h = Hsmu::new();
+        h.step(10.0, &inputs());
+        let cold = h.cooled_sizing(&base, [true; 2]);
+        h.step(90.0, &inputs());
+        let hot = h.cooled_sizing(&base, [true; 2]);
+        assert!(hot.ambient_loss_w_per_k > cold.ambient_loss_w_per_k, "running fans must add conductance");
+        assert!(hot.ambient_loss_w_per_k > 2.0 * base.ambient_loss_w_per_k, "and dominate the passive loss");
+        assert_eq!(hot.fluid_mass_kg, base.fluid_mass_kg, "cooling must not change the thermal mass");
+
+        let failed = h.cooled_sizing(&base, [false; 2]);
+        assert_eq!(failed.ambient_loss_w_per_k, base.ambient_loss_w_per_k, "failed exchangers add nothing");
+    }
+
+    /// The FCOM's own causal chain, falling out of the heat balance rather
+    /// than being asserted: losing the air cooling drives the fluid up to
+    /// the temperature that brings the fuel exchanger in.
+    #[test]
+    fn losing_the_air_exchangers_heats_the_fluid_until_the_fuel_exchanger_takes_over() {
+        let sizing = ThermalSizing::a380_circuit();
+        let run = |air_ok: [bool; 2]| {
+            let mut h = Hsmu::new();
+            let mut state = ThermalState::new(298.15);
+            let mut i = inputs();
+            i.air_exchanger_ok = air_ok;
+            i.feed_tank_fuel_c = 20.0;
+            let mut out = HsmuOutputs::default();
+            for _ in 0..7_200 {
+                out = h.step(state.temp_c(), &i);
+                let cooled = h.cooled_sizing(&sizing, air_ok);
+                // The valves gate the fuel flow: that is how the HSMU's
+                // decision reaches the heat balance.
+                let fuel_kg_s = if out.fuel_exchanger_valves_open { 0.5 } else { 0.0 };
+                state.step(&cooled, 60_000.0, 0.0, 2.0, fuel_kg_s, 293.15, 313.15, 0.5);
+            }
+            (state.temp_c(), out)
+        };
+
+        let (healthy_c, healthy) = run([true; 2]);
+        assert!(healthy_c < FUEL_EXCHANGER_OPEN_C, "healthy air cooling should stay below 85 C, got {healthy_c}");
+        assert!(!healthy.fuel_exchanger_valves_open, "so the fuel exchanger is never called on");
+        assert!(healthy.fans_running[0] || healthy.fans_running[1], "something should be cooling");
+
+        let (failed_c, failed) = run([false; 2]);
+        assert!(failed_c > healthy_c, "losing the air exchangers must run hotter");
+        assert!(failed.fuel_exchanger_valves_open, "and must bring the fuel exchanger in");
+        // The fuel sink arrests the rise rather than letting it run away,
+        // but not below the band that keeps the valves open.
+        assert!(failed_c.is_finite() && failed_c > FUEL_EXCHANGER_CLOSE_C);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
