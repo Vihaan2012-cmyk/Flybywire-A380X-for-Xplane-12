@@ -154,6 +154,36 @@ pub fn spoiler_up_deg(n: f64) -> f64 {
     50. * n
 }
 
+/// The vertical load on each leg, as a share of the aeroplane's weight.
+///
+/// The one measurement that says outright whether the nose gear is carrying
+/// what it should. An A380 puts six to eight per cent on the nose; a nose
+/// share well past that is an aeroplane riding its nose wheel, which is what
+/// a nose-down ground attitude, a hammered nose strut and a refusal to
+/// rotate all look like from the seat, and what no amount of reasoning about
+/// where the centre of gravity *ought* to be can settle.
+///
+/// X-Plane's own order: 0 nose, then the mains.
+fn gear_load(xplm: &Xplm, tire_force: Option<DataRef>) -> String {
+    let Some(d) = tire_force else { return "-".to_owned() };
+    let mut n = [0f32; 10];
+    xplm.get_vf(d, &mut n);
+    let total: f32 = n.iter().sum();
+    if total <= 1.0 {
+        return "airborne".to_owned();
+    }
+    let share = |i: usize| 100.0 * f64::from(n[i]) / f64::from(total);
+    format!(
+        "nose {:.0}% mains {:.0}/{:.0}/{:.0}/{:.0}% of {:.0} t",
+        share(0),
+        share(1),
+        share(2),
+        share(3),
+        share(4),
+        f64::from(total) / 9.81 / 1000.0
+    )
+}
+
 /// Whether the aeroplane pitched the way the elevator asked it to.
 ///
 /// The one sign this port cannot read off anything: X-Plane documents
@@ -318,6 +348,10 @@ struct Refs {
     pitch_rate: Option<DataRef>,
     pitch_accel: Option<DataRef>,
     theta: Option<DataRef>,
+    /// Vertical load on each leg, and the total pitching moment: where the
+    /// aeroplane's weight actually sits, and what is moving it.
+    tire_force: Option<DataRef>,
+    pitch_moment: Option<DataRef>,
 }
 
 pub struct FlightControls {
@@ -370,6 +404,8 @@ impl FlightControls {
             trim_requested: xplm.find("sim/cockpit2/controls/elevator_trim"),
             trim_travel_up: xplm.find("sim/aircraft/controls/acf_hstb_trim_up"),
             trim_travel_down: xplm.find("sim/aircraft/controls/acf_hstb_trim_dn"),
+            tire_force: xplm.find("sim/flightmodel2/gear/tire_vertical_force_n_mtr"),
+            pitch_moment: xplm.find("sim/flightmodel/forces/M_total"),
             pitch_rate: xplm.find("sim/flightmodel/position/Q"),
             pitch_accel: xplm.find("sim/flightmodel/position/Q_dot"),
             theta: xplm.find("sim/flightmodel/position/theta"),
@@ -428,7 +464,7 @@ impl FlightControls {
         }
         self.stats_at = Some(now);
         crate::log(&format!(
-            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2} (X-Plane trim travel up {:.3} dn {:.3}, as read); spoilers L{:?}; hyd {:.0}/{:.0} psi; pitch {:+.1} deg, rate {:+.2}, accel {:+.3} deg/s2 [{}]",
+            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2} (X-Plane trim travel up {:.3} dn {:.3}, as read); spoilers L{:?}; hyd {:.0}/{:.0} psi; pitch {:+.1} deg, rate {:+.2}, accel {:+.3} deg/s2 [{}]; gear {}; pitch moment {:+.0} kN.m",
             s.elevators_deg[LEFT],
             s.elevators_deg[RIGHT],
             s.ailerons_deg[LEFT][0],
@@ -445,6 +481,8 @@ impl FlightControls {
             self.refs.pitch_rate.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
             self.refs.pitch_accel.map_or(f64::NAN, |d| xplm.get_f(d) as f64 * 57.295_78),
             pitch_verdict(s.elevators_deg[LEFT], self.refs.pitch_accel.map_or(f64::NAN, |d| xplm.get_f(d) as f64)),
+            gear_load(xplm, self.refs.tire_force),
+            self.refs.pitch_moment.map_or(f64::NAN, |d| xplm.get_f(d) as f64 / 1000.),
         ));
     }
 
