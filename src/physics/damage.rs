@@ -282,6 +282,17 @@ pub struct EngineWear {
     /// gets one line per step rather than one per tick.
     #[serde(skip)]
     logged_creep_quarter: f64,
+    /// `creep_life_fraction` split by the term that charged it, so the log
+    /// names the route instead of leaving it to be inferred from the three
+    /// dwell timers -- two of which reset the moment the condition lifts,
+    /// and so read zero at exactly the tick worth reporting. Persisted with
+    /// the fraction they sum to.
+    #[serde(default)]
+    pub creep_from_overtemp: f64,
+    #[serde(default)]
+    pub creep_from_mct: f64,
+    #[serde(default)]
+    pub creep_from_toga: f64,
 }
 
 impl EngineWear {
@@ -378,6 +389,9 @@ impl Default for EngineWear {
             seconds_above_overtemp: 0.0,
             toga_lever_seconds: 0.0,
             logged_creep_quarter: 0.0,
+            creep_from_overtemp: 0.0,
+            creep_from_mct: 0.0,
+            creep_from_toga: 0.0,
             exceedances: NO_EXCEEDANCES,
             in_exceedance: [false; 10],
             seconds_ip_overspeed: 0.0,
@@ -712,6 +726,7 @@ impl Damage {
                     // Miner's-rule linear damage: the 20-second overtemperature
                     // budget consumed at 1x while above it.
                     e.creep_life_fraction += delta / trent900::OVERTEMP_LIMIT_S;
+                    e.creep_from_overtemp += delta / trent900::OVERTEMP_LIMIT_S;
                     if e.seconds_above_overtemp > trent900::OVERTEMP_LIMIT_S {
                         overtemp_exceeded = true;
                     }
@@ -742,6 +757,7 @@ impl Damage {
                     e.seconds_above_mct += delta;
                     if e.seconds_above_mct > takeoff_limit_s {
                         e.creep_life_fraction += delta / (takeoff_limit_s * 10.0);
+                        e.creep_from_mct += delta / (takeoff_limit_s * 10.0);
                     }
                 } else {
                     e.seconds_above_mct = 0.0;
@@ -755,6 +771,7 @@ impl Damage {
                         // held at TOGA past the logbook-exceedance time even if
                         // EGT itself stayed under the redline on a cold day.
                         e.creep_life_fraction += delta / (takeoff_limit_s * 10.0);
+                        e.creep_from_toga += delta / (takeoff_limit_s * 10.0);
                     }
                 } else {
                     e.toga_lever_seconds = 0.0;
@@ -766,21 +783,24 @@ impl Damage {
                 // Creep life is what arms bearing wear, and an engine that
                 // reaches 1.0 seizes -- so every quarter of it consumed is
                 // worth a line saying which term did it and what the turbine
-                // was actually doing at the time. Four numbers, because
-                // there are exactly four ways in: measured TGT against the
-                // two untrimmed limits it is compared with, and the two
-                // dwell timers.
+                // was actually doing at the time: the three accrual terms,
+                // each with its own running total, beside the measured TGT
+                // and the two limits it is compared with.
                 let quarter = (e.creep_life_fraction * 4.0).floor();
                 if quarter > e.logged_creep_quarter {
                     e.logged_creep_quarter = quarter;
                     creep_report = Some(format!(
-                        "engine {} creep life {:.2} (TGT {t:.0} C measured, limits: max-continuous {:.0}, over-temperature {:.0}; {:.0} s above MCT, {:.0} s above over-temperature)",
+                        "engine {} creep life {:.2} = over-temperature {:.2} + above-MCT {:.2} + TOGA-lever {:.2} (TGT {t:.0} C measured against max-continuous {:.0}, over-temperature {:.0}; dwells now {:.0}/{:.0}/{:.0} s)",
                         n + 1,
                         e.creep_life_fraction,
+                        e.creep_from_overtemp,
+                        e.creep_from_mct,
+                        e.creep_from_toga,
                         trent900::TGT_MAX_CONTINUOUS_UNTRIMMED_C,
                         trent900::TGT_OVERTEMP_UNTRIMMED_C,
                         e.seconds_above_mct,
                         e.seconds_above_overtemp,
+                        e.toga_lever_seconds,
                     ));
                 }
                 (e.creep_life_fraction, e.compressor_efficiency_loss)
@@ -1023,6 +1043,9 @@ static LATEST_WEAR: std::sync::Mutex<[EngineWear; 4]> = std::sync::Mutex::new([E
     seconds_above_overtemp: 0.0,
     toga_lever_seconds: 0.0,
     logged_creep_quarter: 0.0,
+    creep_from_overtemp: 0.0,
+    creep_from_mct: 0.0,
+    creep_from_toga: 0.0,
     exceedances: NO_EXCEEDANCES,
     in_exceedance: [false; 10],
     seconds_ip_overspeed: 0.0,
