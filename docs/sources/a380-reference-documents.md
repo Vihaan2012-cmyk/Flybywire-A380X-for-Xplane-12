@@ -249,6 +249,71 @@ area, aspect ratio, sweep angle and published weights, then analysis built on
 them. Useful only as a cross-check on figures that are better sourced
 elsewhere.
 
+### 6. The ground spoiler and speed brake schedule is fully specified
+
+`deep::flight_controls::live` gives every spoiler one limit,
+`SPOILER_MAX_DEG = 50.0`, from this project's own integration table. The FCOM
+(DSC-27-10-10, p.1846-1848) specifies them per panel and per function:
+
+*Speed brake, in flight* — spoilers 1 to 5 reach **20 °**, spoilers 6 to 8
+reach **45 °**; the lever's 1/2 position gives 3/4 extension; deflection is
+reduced in CONF 1+F, 2, 3 and FULL.
+
+*Ground spoilers, partial extension* (after retard, at least one gear on
+ground) — spoilers 1 and 2 to **10 °**, spoilers 3 to 8 to **15 °**, ailerons
+not deflected, at **5 °/s**.
+
+*Ground spoilers, full extension* (three main gears on ground) — spoilers 1
+and 2 to **35 °**, spoilers 3 to 8 to **50 °**, ailerons **25 ° up**, at
+**17 °/s**. The spoilers' roll function is inhibited below 110 kt while they
+are serving as ground spoilers, leaving roll to the ailerons.
+
+So the port's flat 50 ° is right only for spoilers 3-8 at full ground
+extension: panels 1 and 2 stop at 35 ° there, and in flight nothing goes
+beyond 45 °. None of the rates, nor the aileron-up-with-ground-spoilers
+coupling, is modelled.
+
+Two thresholds in `spoiler.rs` are worth singling out, because the file is
+candid about both being guesses:
+
+* `WHEEL_SPINUP_KT = 72.0`, commented *"a commonly cited order-of-magnitude
+  transport wheel-spin-up threshold; not an A380-certified number"* — it is
+  in fact exactly the A380's own figure. The FCOM's rejected-takeoff logic
+  extends the ground spoilers fully "when the thrust levers are at idle and
+  the speed is greater than **72 kt**" (p.1848). The guess was right and can
+  now be cited.
+* `SPINUP_RADIO_ALT_FT = 5.0`, its paired low-height gate, against the FCOM's
+  auto-arm gate of **6 ft** radio height.
+
+### 7. Timings and hydraulic figures the port does not carry
+
+**Landing gear gravity extension takes approximately 70 s** (FCOM p.4846,
+repeated across the abnormal procedures). `gear_structure::live` has a
+`gravity_extend_commanded` input and no duration behind it.
+
+**Rudder trim reset** drives the trim to zero at **3 °/s**, and the reset
+pushbutton is inactive with the autopilot engaged (p.1858). The port's
+`RudderTrimActuator::new_generic` is explicitly generic at ±20 ° authority;
+the FCOM was searched for a trim authority figure and does not state one, so
+that part stays generic.
+
+**Hydraulic reservoirs** (DSC-29-10, p.2061): total volume **31.70 US gal**
+each, located in the outer engine pylon — close to the pumps, which is what
+prevents cavitation — pressurised by outer-engine HP air with aircraft bleed
+as the fallback. This is not directly comparable with the 12 and 12.7 US gal
+this port takes from FlyByWire, which are usable-fluid maxima rather than
+total volume, but it is the Airbus figure and the two should be reconciled
+deliberately rather than by accident. Also stated: reservoir fans run above
+55 °C and stop below 35 °C, an overheat closes valves above **85 °C**, and
+low reservoir air pressure annunciates below **21.8 psi**.
+
+**Hydraulic architecture confirmed, no change needed**: each system is
+pressurised by four engine-driven pumps, two per engine, with engines 1 and 2
+on GREEN and 3 and 4 on YELLOW, two pumps being sufficient for the users, and
+one fire shutoff valve per engine between the reservoir and its pumps.
+`deep::hydraulics::live` already models exactly this, down to the
+`green_edp_1a`/`1b`/`2a`/`2b` naming.
+
 ## Not in these documents — stop looking
 
 **Per-consumer electrical ratings, including the fuel pump's full-load
