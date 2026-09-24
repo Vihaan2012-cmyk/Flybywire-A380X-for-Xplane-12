@@ -16,17 +16,54 @@ thread_local! {
     static WINDOW: RefCell<Option<Window>> = const { RefCell::new(None) };
 }
 
+/// Whether to rasterise every instrument on the CPU (`disable-gpu`), from
+/// the app's own **"Force safe mode CPU rendering"** setting.
+///
+/// This used to be unconditional, and the settings checkbox that claims to
+/// control it did nothing: there was no way to turn it off. That matters
+/// more than it sounds. Chromium then software-rasterises eighteen browser
+/// views, several of them 1646x1024 or larger, which is what holds the
+/// instruments down to a handful of frames a second no matter how fast the
+/// aircraft's own state is changing -- measured with `FBW_SCREEN_STATS=1`,
+/// which showed every screen publishing at 1-5 Hz, the simplest page (the
+/// SD) reaching 17 and the busiest (the MFD) near zero, with the plugin
+/// uploading every frame it was handed. The upload path was never the
+/// limit; the rasteriser was.
+///
+/// The original reason for forcing it -- "no video memory taken from
+/// X-Plane" -- was sound when the converted aircraft was over its VRAM
+/// budget. It is much less pressing now that the texture work has brought
+/// that down, so this is a setting worth being able to change.
+///
+/// Defaults to **on**, which is what the settings UI says and what this
+/// behaved as before, so nothing changes for anyone who does not go and
+/// turn it off. Read from the process arguments rather than any shared
+/// state because CEF asks this before anything else has been built.
+fn force_cpu_rendering() -> bool {
+    let aircraft = std::env::args().find_map(|a| a.strip_prefix("--aircraft=").map(std::path::PathBuf::from));
+    let Some(aircraft) = aircraft else { return true };
+    let settings = crate::settings::load(&aircraft);
+    match settings.get("xphfbw.forceCpuRendering") {
+        Some(v) => {
+            let text = v.as_str().map(str::trim).unwrap_or("");
+            !(text.eq_ignore_ascii_case("false") || text == "0" || v.as_bool() == Some(false))
+        }
+        None => true,
+    }
+}
+
 wrap_app! {
     pub struct XphfbwApp;
 
     impl App {
         fn on_before_command_line_processing(&self, process_type: Option<&CefString>, command_line: Option<&mut CommandLine>) {
-            // The browser process decides for all: instruments and the page
-            // are drawn on the CPU (no video memory taken from X-Plane).
+            // The browser process decides for all.
             let is_browser = process_type.map_or(true, |t| t.to_string().is_empty());
             if let (true, Some(cl)) = (is_browser, command_line) {
-                cl.append_switch(Some(&CefString::from("disable-gpu")));
-                cl.append_switch(Some(&CefString::from("disable-gpu-compositing")));
+                if force_cpu_rendering() {
+                    cl.append_switch(Some(&CefString::from("disable-gpu")));
+                    cl.append_switch(Some(&CefString::from("disable-gpu-compositing")));
+                }
                 // Diagnostics only, never set by the plugin: Chromium's
                 // DevTools protocol on this local port, to inspect a view.
                 if let Ok(port) = std::env::var("XPHFBW_DEVTOOLS_PORT") {
