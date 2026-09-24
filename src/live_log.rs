@@ -22,6 +22,12 @@
 //! `crate::log` is a call into X-Plane's own logging, and a thousand of them
 //! in one frame is the cost this is meant to avoid.
 //!
+//! Entries are separated by [`SEPARATOR`], not by a space: MSFS's own
+//! variable names have spaces in them (`FUELSYSTEM TANK QUANTITY:3`,
+//! `PLANE HEADING DEGREES TRUE`), so a space-separated line cannot be split
+//! back into name/value pairs by anything reading it afterwards -- which
+//! was found the first time one of these lines had to be picked apart.
+//!
 //! ```text
 //! FBW_LOG_ALL=1                       every second, whatever changed
 //! FBW_LOG_ALL=0.2                     five times a second
@@ -33,6 +39,11 @@
 /// sample is a few lines rather than hundreds, short enough to stay
 /// greppable.
 const LINE_CHARS: usize = 1600;
+
+/// Between entries. Not a space: MSFS's variable names contain spaces, and
+/// a space-separated line cannot be split back into pairs. No registered
+/// name contains a semicolon.
+const SEPARATOR: &str = "; ";
 
 /// Values this close together are the same number for logging purposes.
 ///
@@ -166,11 +177,11 @@ impl LiveLog {
         let mut line = String::new();
         let mut count = 0usize;
         for change in &changes {
-            if line.len() + change.len() + 1 > LINE_CHARS && !line.is_empty() {
+            if line.len() + change.len() + SEPARATOR.len() > LINE_CHARS && !line.is_empty() {
                 crate::log(&format!("state {time:.1}s ({what} {count}/{}):{line}", changes.len()));
                 line.clear();
             }
-            line.push(' ');
+            line.push_str(SEPARATOR);
             line.push_str(change);
             count += 1;
         }
@@ -214,6 +225,21 @@ mod tests {
             at: None,
             last: Vec::new(),
             generation: u64::MAX,
+        }
+    }
+
+    #[test]
+    fn no_registered_name_could_collide_with_the_separator() {
+        // The separator has to be something a name cannot contain, or a
+        // line cannot be split back into pairs -- which is exactly what a
+        // space turned out not to be, since MSFS's own names have spaces.
+        for name in [
+            "FUELSYSTEM TANK QUANTITY:3",
+            "PLANE HEADING DEGREES TRUE",
+            "A32NX_HYD_GREEN_SYSTEM_1_SECTION_PRESSURE",
+            "ENGINE_N3:1",
+        ] {
+            assert!(!name.contains(SEPARATOR.trim()), "{name} contains the separator");
         }
     }
 
