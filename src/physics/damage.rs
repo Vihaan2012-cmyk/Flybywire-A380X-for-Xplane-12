@@ -714,8 +714,29 @@ impl Damage {
                 }
 
                 if t > trent900::TGT_MAX_CONTINUOUS_UNTRIMMED_C {
+                    // Above maximum continuous, but that is not damage by
+                    // itself: the TCDS *permits* the take-off rating, up to
+                    // TGT_TAKEOFF_UNTRIMMED_C, for `takeoff_limit_s` (Note
+                    // 5 -- five minutes, ten with an engine out). A normal
+                    // take-off spends its whole roll and initial climb here
+                    // by design.
+                    //
+                    // This used to charge `delta / takeoff_limit_s` for
+                    // every second above MCT, so five minutes at take-off
+                    // thrust consumed a full creep-life budget and armed
+                    // "bearing wear" on all four engines -- on the take-off
+                    // the engine is certified for. Every flight ended with
+                    // four seized engines, and the spent fraction persisted,
+                    // so it happened again on the next load.
+                    //
+                    // Only the time *beyond* the certified allowance is
+                    // damage, and it is charged at the same tenth-rate the
+                    // lever-position check below uses for overrunning the
+                    // same limit.
                     e.seconds_above_mct += delta;
-                    e.creep_life_fraction += delta / takeoff_limit_s;
+                    if e.seconds_above_mct > takeoff_limit_s {
+                        e.creep_life_fraction += delta / (takeoff_limit_s * 10.0);
+                    }
                 } else {
                     e.seconds_above_mct = 0.0;
                 }
@@ -1054,17 +1075,34 @@ mod tests {
             vars.write(&d.egt[n], 945.0); // above the 939 C (untrimmed) max continuous, all engines "running"
         }
 
-        // Just under the 5-minute limit: no failure yet.
+        // Inside the certified take-off allowance the engine is doing
+        // exactly what the TCDS permits, so it must cost *nothing*. This is
+        // the assertion that matters: charging creep here consumed a full
+        // engine life every normal take-off and seized all four engines.
         for _ in 0..299 {
             d.update(&mut vars, None, 1.0);
         }
-        assert!(!crate::failures::active_ids().contains(&72_000), "not armed yet at {}", d.engines[0].creep_life_fraction);
+        assert_eq!(
+            d.engines[0].creep_life_fraction, 0.0,
+            "the certified 5-minute take-off rating must not consume creep life"
+        );
+        assert!(!crate::failures::active_ids().contains(&72_000));
 
-        // Past the limit.
-        for _ in 0..5 {
+        // Past the limit it starts to count, but slowly -- a few seconds
+        // over is a logbook entry, not a written-off engine.
+        for _ in 0..60 {
             d.update(&mut vars, None, 1.0);
         }
-        assert!(crate::failures::active_ids().contains(&72_000), "72000 should be armed past the 5-minute limit");
+        let after_a_minute_over = d.engines[0].creep_life_fraction;
+        assert!(after_a_minute_over > 0.0, "past the limit it must start to accrue");
+        assert!(after_a_minute_over < 0.05, "a minute over must not be a fifth of the engine: {after_a_minute_over}");
+        assert!(!crate::failures::active_ids().contains(&72_000), "still nowhere near a failure");
+
+        // Held far past it, it does eventually arm.
+        for _ in 0..3_000 {
+            d.update(&mut vars, None, 1.0);
+        }
+        assert!(crate::failures::active_ids().contains(&72_000), "sustained far past the limit must arm 72000");
         assert!(d.engines[0].creep_life_fraction >= 1.0);
         assert!(d.engines[0].compressor_efficiency_loss > 0.0);
         crate::failures::replace([]);
