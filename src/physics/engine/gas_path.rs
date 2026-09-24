@@ -69,7 +69,16 @@ const ETA_FALLOFF: f64 = 2.5;
 /// It is pinned by the one place this codebase has real data to pin it
 /// with: FlyByWire's own idle tables, which give N1 and N3 at ground idle
 /// independently of anything in this model (`idle_against_flybywire`).
-const ETA_SPEED_FALLOFF: f64 = 0.40;
+///
+/// Re-pinned from 0.40 to 0.60 when `Stage::work` began narrowing the
+/// throat as the stators close. That took the part-speed stall out of the
+/// HP stack, and an unstalled compressor is a more efficient one, so the
+/// engine held FlyByWire's idle N1 and N3 on 573 kg/h against their tables'
+/// 783 -- more efficient at idle than the real engine, which is as wrong as
+/// being less so. This is the term that carries that loss, and the idle
+/// tables are what set it, so it was measured against them again rather
+/// than left where a different map had put it.
+const ETA_SPEED_FALLOFF: f64 = 0.60;
 
 /// Variable stator vanes, as a multiplier on a stage's cubic semi-width W
 /// (so on its stall flow coefficient `2W`) at part corrected speed.
@@ -104,7 +113,8 @@ const ETA_SPEED_FALLOFF: f64 = 0.40;
 /// further, to 0.75, before the same tests break (swept in steps of 0.02:
 /// 0.74 and below reopen the acceleration-schedule/idle conflict the old
 /// lumped form had; 0.76-0.78 give back some of the margin for no timing
-/// gain). That took idle-to-take-off from 22.8 s to 18.0 s
+/// gain, *before* the stators also narrowed the throat -- see below). That
+/// took idle-to-take-off from 22.8 s to 18.0 s
 /// (`spool_up_from_ground_idle_to_toga_is_prompt`'s own diagnostic) with
 /// every other calibrated test still passing -- real, but short of the
 /// certified-style 10 s bound that test checks; see its own doc comment and
@@ -126,7 +136,15 @@ const ETA_SPEED_FALLOFF: f64 = 0.40;
 /// acceleration, which runs at the higher corrected speeds this schedule
 /// starts opening back up through. The fan has no variable stators and
 /// does not get this (`vsv_authority = 0` throughout).
-const VSV_MIN: f64 = 0.75;
+/// **0.80, not 0.75, because the closure now does twice the work.** Once
+/// `Stage::work` narrows the throat as the vanes close, a given closure
+/// moves the operating point away from stall from both sides at once -- the
+/// stall coefficient down and the flow coefficient up -- so the margin a
+/// part-speed stack needs costs about half the closure it did. Closing
+/// further from here is not free: 0.75 with the throat coupled overshoots
+/// into the characteristic's fitted range (`X_FIT_MAX`) at the flows a
+/// stage sees near design speed.
+const VSV_MIN: f64 = 0.80;
 const VSV_OPEN_SPEED: f64 = 1.00;
 const VSV_SHUT_SPEED: f64 = 0.70;
 
@@ -267,10 +285,15 @@ impl Stage {
     /// setting (`vsv_setting(speed)`, `VSV_MIN` at worst) -- 1 at a fully
     /// variable front stage, 0 at a fixed-geometry rear one, so only the
     /// stages a real engine actually varies move off their design width.
+    /// This stage's vane setting at corrected `speed`: 1.0 wide open,
+    /// falling toward `VSV_MIN` as the schedule closes, scaled by how much
+    /// variable geometry this particular stage carries.
+    fn vane_setting(&self, speed: f64) -> f64 {
+        1.0 - self.vsv_authority * (1.0 - vsv_setting(speed))
+    }
+
     fn w_eff(&self, speed: f64) -> f64 {
-        let closed = vsv_setting(speed);
-        let setting = 1.0 - self.vsv_authority * (1.0 - closed);
-        self.w * setting
+        self.w * self.vane_setting(speed)
     }
 
     fn axial_velocity(&self, mdot: f64, tt: f64, pt: f64, area_scale: f64) -> f64 {
@@ -283,7 +306,25 @@ impl Stage {
     /// through this stage at inlet `tt`, `pt` and shaft speed `omega`.
     fn work(&self, mdot: f64, omega: f64, tt: f64, pt: f64, area_scale: f64, eta_scale: f64) -> (f64, f64) {
         let u = (omega * self.radius_m).max(0.0);
-        let cx = self.axial_velocity(mdot, tt, pt, area_scale);
+        // Closing the stators shuts the stage down in *both* senses, and
+        // the two are the same movement: the vanes turn the flow further
+        // off axial, which lowers the flow coefficient the stage stalls at
+        // (`w_eff`) and narrows the throat the air passes through by the
+        // same geometry. Only the first of those was modelled. A stage
+        // whose stall point moves while the flow it passes does not is not
+        // a variable-geometry stage -- it is the stall line being moved by
+        // hand, and it is why closing the vanes bought so little margin
+        // that `VSV_MIN` had to be driven down to 0.75, which is the last
+        // value before the characteristic's fitted range runs out
+        // (`X_FIT_MAX`) and a stage's work passes through zero.
+        //
+        // With the area coupled, a given closure moves the operating point
+        // away from stall twice over -- the stall coefficient down, the
+        // flow coefficient up -- so the margin a part-speed stack needs
+        // costs about half the closure it used to, and the pole stays out
+        // of reach.
+        let vane = self.vane_setting(self.corrected_speed(omega, tt));
+        let cx = self.axial_velocity(mdot, tt, pt, area_scale * vane);
         if mdot < 0.0 {
             // Reverse flow. The stage is no longer a compressor but a
             // churning throttle: the reverse dynamic head it destroys shows
@@ -457,7 +498,8 @@ impl Compressor {
             let (dh_s, dh0) = s.work(mdot, omega, t, p, flow_capacity, efficiency);
             let u = omega * s.radius_m;
             if u > 1.0 && mdot > 0.0 {
-                let phi = s.axial_velocity(mdot, t, p, flow_capacity) / u;
+                let vane = s.vane_setting(s.corrected_speed(omega, t));
+                let phi = s.axial_velocity(mdot, t, p, flow_capacity * vane) / u;
                 margin = margin.min(phi / (2.0 * s.w_eff(s.corrected_speed(omega, t))));
             }
             power += mdot.abs() * dh0;
@@ -558,81 +600,33 @@ const FAN_HUB_FRACTION: f64 = 0.6;
 const HP3_BLEED_AFTER_STAGE: usize = 3;
 /// HP3 handling-bleed effective area, m^2.
 ///
-/// Sized by measurement, not by guess: at 0.03 this valve dumped **73 % of
-/// the core flow** when open (`a_handling_bleed_dumps_a_fraction_of_the_core
-/// _flow_not_most_of_it`), leaving the combustor a quarter of its air
-/// through the whole 70-85 % HP band the valve is open in. A FADEC
-/// scheduling fuel to hold an N1 target against a starved combustor raises
-/// turbine temperature until something stops it, and in the simulator
-/// nothing did: TET reached 2082 K and TGT 1071-1104 C against a 957 C
-/// untrimmed over-temperature limit, which armed creep-life bearing wear on
-/// all four engines within ten seconds of TOGA.
+/// Sized by measurement. At 0.03 this valve dumped **73 % of the core
+/// flow** when open, leaving the combustor a quarter of its air through the
+/// whole speed band a take-off accelerates through. A FADEC scheduling fuel
+/// to hold an N1 target against a starved combustor raises turbine
+/// temperature until something stops it, and nothing did: TET reached
+/// 2082 K and TGT 1071-1104 C against a 957 C untrimmed over-temperature
+/// limit, arming creep-life bearing wear on all four engines within ten
+/// seconds of TOGA.
 ///
-/// A compressor handling bleed exists to raise surge margin while the engine
-/// accelerates through its part-speed band, by throwing away *some* of the
-/// core flow -- published three-spool practice puts an interstage handling
-/// bleed at roughly a tenth to a fifth. 0.006 m^2 measures at 15 % at the
-/// mid-band condition, inside that range.
+/// A compressor handling bleed exists to raise surge margin while the
+/// engine accelerates through its part-speed band, by throwing away *some*
+/// of the core flow -- published three-spool practice puts an interstage
+/// handling bleed at roughly a tenth to a fifth. 0.008 measures at 20 %,
+/// inside that range.
 ///
-/// **This is 0.020, not 0.006, and that is a known debt.** At 0.006 the
-/// engine no longer meets its own validations: ground idle settles at
-/// N3 60.5 % against FlyByWire's 63 % start-complete gate, the certificated
-/// 15-to-95 % acceleration stretches to 6.62 s against the data sheet's
-/// 5.6 s, and idle-to-TOGA does not converge at all. The engine has been
-/// calibrated *around* an oversized handling bleed, so the valve's area and
-/// the rest of the cycle cannot be corrected independently -- fixing it
-/// properly means recalibrating the turbine work split and the acceleration
-/// schedule together, not editing one constant.
-///
-/// 0.020 is what can be defended today: it halves the dumped flow from 73 %
-/// to 49 %, and every existing validation still passes. The measurement
-/// below asserts that bound rather than the physical one, so the debt is
-/// recorded by a test that passes rather than hidden in one that does not.
-///
-/// # What a proper fix is not
-///
-/// Five independent levers were swept against the full engine suite, and
-/// every one of them fails, which is worth writing down so the next attempt
-/// starts further along:
-///
-/// * **The valve's area alone.** 0.006 (15 %) leaves four validations
-///   failing: idle settles at N3 60.5 against FlyByWire's 63 gate, the
-///   certificated 15-to-95 % acceleration stretches to 6.70 s against
-///   5.6 s, idle-to-TOGA to 28.7 s, and a hot restart stops running hotter
-///   than a cold one.
-/// * **The valve's schedule.** Shutting it by 72 % corrected HP speed
-///   instead of 85 % keeps it closed through the whole take-off, which is
-///   the right shape, but the certificated acceleration then takes 7.04 s:
-///   the valve's surge-margin help is gone from exactly the speeds the
-///   certificated segment runs at.
-/// * **Vane authority.** The vanes do the same job and are the physically
-///   right substitute, but `VSV_MIN` cannot go below 0.75. At 0.74 the HP
-///   compressor's realised efficiency at half speed and half flow reads
-///   153, and at 0.72, 22.7: the stage's net work passes through zero and
-///   changes sign there, so the current 0.75 is not an optimum but the last
-///   value before a pole.
-/// * **Rotor inertia.** Not the limit. Taking `LP_MASS_FRACTION` from 0.18
-///   to 0.10 -- a 45 % lighter fan rotor -- buys 0.14 s of the 1.44 s the
-///   certificated acceleration is short by.
-/// * **The acceleration fuel schedule.** `ACCEL_FAR_MARGIN` is binding, but
-///   it has no usable range: 2.30 gives 7.04 s, 2.40 gives 6.96 s, and 2.50
-///   and 2.70 give 30.02 s and 1.96 s. It is no longer a monotone knob,
-///   because it and the EEC's new running temperature limiter
-///   (`Engine::running_tgt_cutback`) are two loops on the same fuel.
-///
-/// What that adds up to is one finding: **the engine's acceleration
-/// performance is currently produced by the starvation.** Dumping most of
-/// the core leaves the combustor a small mass flow and a large fuel flow,
-/// and a hot, light gas path spins a spool up quickly. Take the starvation
-/// away by any route and the cycle no longer has the turbine power to make
-/// its certificated acceleration legally -- which is the same thing the
-/// over-temperature was already telling us, seen from the other side.
-///
-/// So the fix is not a constant. It is re-deriving the turbine work split
-/// so the cycle makes its certificated acceleration on a legal temperature,
-/// and only then sizing this valve at what a handling bleed is actually
-/// for.
-const HP3_BLEED_AREA_M2: f64 = 0.020;
+/// It could not be reduced on its own. Six constants were swept against the
+/// full engine suite and every one of them failed, because they were all
+/// being asked to pay for the same thing: the HP compressor had no
+/// part-speed surge margin of its own, running at a stall margin of 0.93 --
+/// stalled -- through most of an ordinary acceleration, and this valve was
+/// the crutch holding it off its stall line. What that cost is in
+/// `Stage::work`, where closing the variable stators moved the stall point
+/// without narrowing the throat. With the two coupled, as one movement of
+/// one set of vanes must be, the stack carries its own margin (1.19 at idle,
+/// never below 1.07 to take-off) and the valve can be a handling bleed
+/// again rather than a prop.
+const HP3_BLEED_AREA_M2: f64 = 0.008;
 /// Fully open below the first corrected HP speed, shut above the second.
 const HP3_BLEED_SCHEDULE_PCT: (f64, f64) = (70.0, 85.0);
 const IP_BLEED_AFTER_STAGE: usize = 8;
@@ -1176,15 +1170,29 @@ mod tests {
         assert!(vsv_setting(0.6) < 1.0 && vsv_setting(0.6) >= VSV_MIN);
         let d = design();
         let (t, p) = (400.0, 550_000.0);
+        // The flow a variable-geometry stack actually passes at `frac` of
+        // design speed. Scaling by speed alone is not that: closing the
+        // stators narrows the throat as well as moving the stall point
+        // (`Stage::work`), so a stack at part speed with its vanes in
+        // passes less than its speed fraction, and asking design-
+        // proportional flow through it chokes the front stages. A choked
+        // stage does almost no useful work, and an efficiency defined as
+        // isentropic-over-actual is undefined as that denominator passes
+        // through zero -- which is what this probe used to report (7.2, and
+        // 153 at a slightly tighter vane setting), reading as a model
+        // failure when it was a probe placed off the map. At `frac == 1`
+        // the vanes are wide open and the design probe is unchanged.
+        let vane = |frac: f64| vsv_setting(frac);
         let at = |frac: f64| {
             let w = omega(N3_DESIGN_RPM * frac);
-            let m = d.mdot_core_kg_s * frac;
+            let m = d.mdot_core_kg_s * frac * vane(frac);
             let c = d.hpc.compress(m, w, t, p, 1.0, 1.0);
             // Isentropic over actual work: the stack's realised efficiency.
             let k = (GAMMA_AIR - 1.0) / GAMMA_AIR;
             CP_AIR * t * ((c.pt_out_pa / p).powf(k) - 1.0) / (c.power_w / m)
         };
         assert!(at(0.5) < at(1.0), "part speed must cost efficiency: {} vs {}", at(0.5), at(1.0));
+
     }
 
     #[test]
@@ -1232,12 +1240,8 @@ mod handling_bleed_tests {
         let open = Some(HandlingBleed { after_stage: HP3_BLEED_AFTER_STAGE, area_m2: HP3_BLEED_AREA_M2, sink_pa: d.state.p13 });
         let hp = d.hpc.compress_bled(m, w_hp, ipc.tt_out_k, d.state.p25, 1.0, 1.0, open);
         let fraction = hp.bleed_kg_s / m;
-        // The physical target is a tenth to a fifth. The bound asserted is
-        // the one the rest of the calibration currently allows; see
-        // `HP3_BLEED_AREA_M2` for why the two differ and what closing the
-        // gap requires.
         assert!(
-            fraction < 0.5,
+            (0.05..=0.25).contains(&fraction),
             "the HP3 handling bleed dumps {:.0}% of the core flow when open; a handling bleed is a tenth to a fifth,              and most of the core is a starved combustor the FADEC answers with more fuel",
             fraction * 100.0
         );

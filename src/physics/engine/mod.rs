@@ -675,6 +675,34 @@ impl Engine {
         }
     }
 
+    /// Put the spools straight at idle, skipping the start.
+    ///
+    /// For `AIRCRAFT_PRESET_QUICK_MODE` only -- FlyByWire's own presets set
+    /// it, and its APU already honours it (`apu/aps3200.rs`,
+    /// `air_intake_flap.rs`), as does the ADIRS for its alignment. The
+    /// engines did not, so a "ready for takeoff" preset still sat through
+    /// four real starts: everything else in the aeroplane arrived at once
+    /// and then the procedure waited half a minute on *Await ENG 3 Avail*.
+    /// Setting up a session is not the same activity as simulating a start,
+    /// and the preset is the former by definition.
+    ///
+    /// Only the rotor speeds are set. The gas path is left to converge on
+    /// them over the next frames from wherever it was, rather than having a
+    /// second, hand-written idea of what an idling engine's stations are:
+    /// it is the same solver that settles ground idle after a real start,
+    /// and it reaches the same place in about a second.
+    pub fn snap_to_idle(&mut self, n1_pct: f64, n2_pct: f64, n3_pct: f64) {
+        self.lp.rpm = params::N1_DESIGN_RPM * n1_pct / 100.0;
+        self.ip.rpm = params::N2_DESIGN_RPM * n2_pct / 100.0;
+        self.hp.rpm = params::N3_DESIGN_RPM * n3_pct / 100.0;
+        // The start law hands over to the N1 loop at idle and latches; a
+        // spool put there directly has to latch too, or the next frame
+        // re-enters the start schedule and fuels it as though it were
+        // lighting off.
+        self.start_complete = true;
+        self.start_aborted = false;
+    }
+
     /// The calibrated design-point fuel flow, kg/s. Exposed for tests and
     /// for `docs/physics/engine.md`'s validation table.
     pub fn design_wf_kg_s(&self) -> f64 {
@@ -1221,6 +1249,45 @@ mod tests {
         }
         let reached = reached.expect("spool-up did not reach 95% of TOGA thrust within 30 s");
         assert!(reached <= 25.0, "took {reached:.2} s from ground idle to 95% take-off thrust");
+    }
+
+    /// The HP compressor is not stalled anywhere on an ordinary
+    /// acceleration.
+    ///
+    /// This is the property the whole part-speed calibration hangs on, and
+    /// nothing asserted it until the acceleration diagnostic
+    /// (`where_the_power_goes`) was written to go looking: the HP stack ran
+    /// at a stall margin of 0.93 -- below 1.0, stalled -- through most of an
+    /// ordinary take-off, which is why it passed 27 kg/s at 67 % N3 against
+    /// a 136.6 kg/s design, needed a near-design fuel-air ratio to do idle
+    /// work, and reached its take-off turbine temperature at taxi thrust.
+    /// The oversized handling bleed was the crutch holding it off that line.
+    ///
+    /// Asserted on the engine's own working line rather than on a probe of
+    /// the map, because the working line is much steeper than flow
+    /// proportional to speed: at 67 % N3 the engine passes 18 % of design
+    /// core flow, not 67 %. A map probe placed by hand lands somewhere the
+    /// engine never goes, in either direction.
+    #[test]
+    fn the_compressor_never_stalls_accelerating_from_idle_to_take_off() {
+        let mut engine = Engine::new();
+        run_to_steady_state(&mut engine, EngineInputs { target_n1_corrected_pct: IDLE_N1_PCT, ..isa_sea_level() }, 60.0);
+        let dt = 0.02;
+        let inputs = EngineInputs { target_n1_corrected_pct: 100.0, dt_s: dt, ..isa_sea_level() };
+        let (mut worst, mut worst_at) = (f64::MAX, 0.0);
+        let mut elapsed = 0.0;
+        while elapsed < 40.0 {
+            let out = engine.step(&inputs);
+            if engine.last_gas.hpc_stall_margin < worst {
+                worst = engine.last_gas.hpc_stall_margin;
+                worst_at = out.n3_pct;
+            }
+            elapsed += dt;
+        }
+        assert!(
+            worst > 1.0,
+            "the HP compressor stalls on the way to take-off: margin fell to {worst:.2} at {worst_at:.0}% N3"
+        );
     }
 
     /// Take-off does not cook the engine.
@@ -1955,7 +2022,8 @@ mod accel_diagnostic {
     /// the answer is in the `margin` column, and no pass/fail test was
     /// looking at that column.
     ///
-    /// What it shows, run against the calibration as it stands:
+    /// What it showed, run against the calibration it was written to
+    /// investigate:
     ///
     /// ```text
     ///   t   N1   N3    wf    TET   TGT  core  HPTkW  HPCkW  surplus  margin  thrust
@@ -1978,8 +2046,26 @@ mod accel_diagnostic {
     ///
     /// The 73 % handling bleed was the crutch holding the compressor off
     /// its stall line. That is exactly what a handling bleed is for; it was
-    /// sized four times too large because the map underneath has no
+    /// sized four times too large because the map underneath had no
     /// part-speed surge margin of its own to start from.
+    ///
+    /// With the stators narrowing the throat as they close (`Stage::work`),
+    /// the same run reads:
+    ///
+    /// ```text
+    ///   t   N1   N3    wf    TET   TGT  core  HPTkW  HPCkW  surplus  margin  thrust
+    /// 0.0   15   60 0.295   1184   317  20.1   3122   2370      752    1.19       8
+    /// 4.0   20   64 0.385   1332   653  23.0   5225   3712     1513    1.09      14
+    /// 6.0   22   67 0.463   1426   715  25.3   6416   4561     1854    1.07      18
+    /// ```
+    ///
+    /// The stack carries its own margin now -- 1.19 at idle, never below
+    /// 1.07 -- and turbine entry at idle is 1184 K against a 1633 K design
+    /// point instead of 1324 K, which is an engine idling rather than one
+    /// running a take-off cycle at taxi thrust. The margin is asserted on
+    /// the working line by
+    /// `the_compressor_never_stalls_accelerating_from_idle_to_take_off`, so
+    /// this diagnostic is for looking, not for guarding.
     #[test]
     #[ignore]
     fn where_the_power_goes() {

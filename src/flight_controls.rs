@@ -154,6 +154,42 @@ pub fn spoiler_up_deg(n: f64) -> f64 {
     50. * n
 }
 
+/// Whether the aeroplane pitched the way the elevator asked it to.
+///
+/// The one sign this port cannot read off anything: X-Plane documents
+/// `elv_trim` as "-1 = max nose down, 1 = max nose up" and
+/// `flightmodel2/wing/elevator1_deg` as "positive is trailing-edge down",
+/// but `sim/flightmodel/controls/elv1_def` -- the aerodynamic elevator this
+/// module writes -- carries no sign in `DataRefs.txt` at all, and the
+/// override's own entry names the scalar `lail1def` group rather than the
+/// `[WING]` arrays. Guessing it wrong inverts the pitch axis, which looks
+/// exactly like what was flown: a rotation that turns into a nose-down
+/// divergence, pulling back making it worse rather than better, and the
+/// elevators *visually* in the right place the whole time, because the
+/// drawn surfaces come off a dataref whose sign X-Plane does document.
+///
+/// So it is measured instead. A trailing-edge-up elevator (negative here)
+/// pitches a conventional aeroplane nose up, which is a positive pitch
+/// acceleration in X-Plane's `Q_dot`. Agreement is `ok`; a clear
+/// disagreement at a deflection big enough to dominate thrust and trim is
+/// `INVERTED?`. Small deflections say nothing and are reported as `-`.
+fn pitch_verdict(elevator_te_down_deg: f64, q_dot_rad_s2: f64) -> &'static str {
+    // Below these the aeroplane's own trim, thrust line and gravity are as
+    // large as the elevator's contribution, so the comparison means nothing.
+    const DEFLECTION_DEG: f64 = 5.0;
+    const ACCEL_RAD_S2: f64 = 0.01;
+    if !q_dot_rad_s2.is_finite() || elevator_te_down_deg.abs() < DEFLECTION_DEG || q_dot_rad_s2.abs() < ACCEL_RAD_S2 {
+        return "-";
+    }
+    // Trailing edge down pitches nose down: the two should have opposite
+    // signs.
+    if elevator_te_down_deg * q_dot_rad_s2 < 0.0 {
+        "ok"
+    } else {
+        "INVERTED?"
+    }
+}
+
 /// X-Plane's trim ratio (+1 full nose up) for a stabiliser angle, positive
 /// nose up, given the aircraft's trim travel each way.
 ///
@@ -278,6 +314,10 @@ struct Refs {
     trim_requested: Option<DataRef>,
     trim_travel_up: Option<DataRef>,
     trim_travel_down: Option<DataRef>,
+    /// `FBW_FCTL_STATS` only: what the aeroplane did about it.
+    pitch_rate: Option<DataRef>,
+    pitch_accel: Option<DataRef>,
+    theta: Option<DataRef>,
 }
 
 pub struct FlightControls {
@@ -330,6 +370,9 @@ impl FlightControls {
             trim_requested: xplm.find("sim/cockpit2/controls/elevator_trim"),
             trim_travel_up: xplm.find("sim/aircraft/controls/acf_hstb_trim_up"),
             trim_travel_down: xplm.find("sim/aircraft/controls/acf_hstb_trim_dn"),
+            pitch_rate: xplm.find("sim/flightmodel/position/Q"),
+            pitch_accel: xplm.find("sim/flightmodel/position/Q_dot"),
+            theta: xplm.find("sim/flightmodel/position/theta"),
         };
         if let Some(d) = refs.override_surfaces {
             xplm.set_i(d, 1);
@@ -385,7 +428,7 @@ impl FlightControls {
         }
         self.stats_at = Some(now);
         crate::log(&format!(
-            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2} (X-Plane trim travel up {:.3} dn {:.3}, as read); spoilers L{:?}; hyd {:.0}/{:.0} psi",
+            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2} (X-Plane trim travel up {:.3} dn {:.3}, as read); spoilers L{:?}; hyd {:.0}/{:.0} psi; pitch {:+.1} deg, rate {:+.2}, accel {:+.3} deg/s2 [{}]",
             s.elevators_deg[LEFT],
             s.elevators_deg[RIGHT],
             s.ailerons_deg[LEFT][0],
@@ -398,6 +441,10 @@ impl FlightControls {
             s.spoilers_deg[LEFT].iter().map(|v| v.round() as i32).collect::<Vec<_>>(),
             vars.read(&self.hyd_green),
             vars.read(&self.hyd_yellow),
+            self.refs.theta.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
+            self.refs.pitch_rate.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
+            self.refs.pitch_accel.map_or(f64::NAN, |d| xplm.get_f(d) as f64 * 57.295_78),
+            pitch_verdict(s.elevators_deg[LEFT], self.refs.pitch_accel.map_or(f64::NAN, |d| xplm.get_f(d) as f64)),
         ));
     }
 
@@ -420,14 +467,45 @@ impl FlightControls {
         };
         // Every surface goes to both families: the drawn one so the model
         // moves, and the aerodynamic one so the aircraft does.
+        // The drawn surface and the aerodynamic one do *not* take the same
+        // sign, and X-Plane says so if you read the two groups together.
+        // `sim/flightmodel2/wing/elevator1_deg` is documented "positive is
+        // trailing-edge down" -- geometry. Everything documented in
+        // `sim/flightmodel/controls/` is the opposite idea: `elv_trim` is
+        // "-1 = max nose down, 1 = max nose up", `ail_trim` "max left ..
+        // max right", `rud_trim` "max left .. max right" -- the *effect* the
+        // control has, not where the metal is. The `[WING]` deflection
+        // arrays in that same group carry no sign in `DataRefs.txt` at all,
+        // and were being written with the geometric sign the drawn surfaces
+        // take.
+        //
+        // For the elevator those two are exactly opposed: trailing edge up
+        // is nose up. So a rotation command reached the aeroplane as a
+        // nose-down command, which is what was flown -- the aircraft
+        // pitching over onto its nose as the tail came up, pulling back
+        // making it worse rather than better, and the elevators looking
+        // correct throughout, because the drawn surfaces come off the one
+        // dataref whose sign X-Plane does document. It also explains the
+        // refusal to rotate at 200 kt earlier: the harder the rotation was
+        // commanded, the harder the aeroplane was held down.
+        //
+        // Only pitch is inverted here. Roll and yaw are left alone: for
+        // those the sign depends on which wing an element belongs to, so
+        // "positive = roll right" and "positive = trailing edge down" are
+        // not simply opposite the way they are on a symmetric tail, and
+        // nothing observed says they are wrong.
         let set_both = |drawn: Option<DataRef>, aero: Option<DataRef>, wing: usize, v: f64| {
             set(drawn, wing, v);
             set(aero, wing, v);
         };
+        let set_both_pitch = |drawn: Option<DataRef>, aero: Option<DataRef>, wing: usize, v: f64| {
+            set(drawn, wing, v);
+            set(aero, wing, -v);
+        };
         for side in [LEFT, RIGHT] {
             set_both(r.aileron1, r.aero_aileron1, WING3[side], s.ailerons_deg[side][0]);
             set_both(r.aileron2, r.aero_aileron2, WING4[side], s.ailerons_deg[side][1]);
-            set_both(r.elevator1, r.aero_elevator1, HSTAB[side], s.elevators_deg[side]);
+            set_both_pitch(r.elevator1, r.aero_elevator1, HSTAB[side], s.elevators_deg[side]);
             for (k, (set_kind, wings)) in XP_SPOILER_GROUPS.iter().enumerate() {
                 let (drawn, aero) = match set_kind {
                     SpoilerSet::Speedbrake1 => (r.speedbrake1, r.aero_spoiler1),

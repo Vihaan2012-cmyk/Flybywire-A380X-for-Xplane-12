@@ -82,11 +82,25 @@ impl AircraftPresets {
         vars.write(&load_request, 0.);
         let quick_mode = named(vars, "AIRCRAFT_PRESET_QUICK_MODE");
         vars.write(&quick_mode, 0.);
+        // Expedited by default: a preset runs every one of its steps within
+        // the tick it is asked for, so "ready for takeoff" *is* ready for
+        // takeoff by the time the button comes back up.
+        //
+        // FlyByWire paces the unexpedited path one step per frame with a
+        // delay between them because in MSFS a preset is something you watch
+        // happen. Here it is how a session is set up before flying, and
+        // watching a few hundred switches move one frame at a time is not
+        // the point of it. The `AIRCRAFT_PRESET_LOAD_EXPEDITE` variable
+        // still turns the paced behaviour back on for anyone who does want
+        // to watch, and the Study panel still has its own toggle for it --
+        // this only changes which way round the default sits.
+        let expedite = named(vars, "AIRCRAFT_PRESET_LOAD_EXPEDITE");
+        vars.write(&expedite, 1.);
         Self {
             load_request,
             progress,
             verbose: named(vars, "AIRCRAFT_PRESET_VERBOSE"),
-            expedite: named(vars, "AIRCRAFT_PRESET_LOAD_EXPEDITE"),
+            expedite,
             expedite_delay: named(vars, "AIRCRAFT_PRESET_LOAD_EXPEDITE_DELAY"),
             quick_mode,
             is_ready: named(vars, "IS_READY"),
@@ -409,6 +423,10 @@ mod tests {
         let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
         vars.set("A32NX_IS_READY", 1.);
         vars.set("SIM ON GROUND", 1.);
+        // This is the *paced* path, which is no longer the default: presets
+        // now expedite unless asked not to (`AircraftPresets::new`). Said
+        // explicitly here because pacing is the whole subject of this test.
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 0.);
         vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
         run(&mut p, &mut vars, &mut xp, 0.5);
         // Step 1 ran on the second frame; its 1 s delay holds step 2.

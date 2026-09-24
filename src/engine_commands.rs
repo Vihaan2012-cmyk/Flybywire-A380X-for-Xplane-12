@@ -194,6 +194,9 @@ pub struct EngineCommands {
     damage: [DamageHandles; 4],
     /// `FBW_ENG_STATS` only.
     stats_at: Option<std::time::Instant>,
+    /// `AIRCRAFT_PRESET_QUICK_MODE`: set while a preset is being applied in
+    /// expedited mode, which is the default (`aircraft_presets.rs`).
+    preset_quick_mode: VariableIdentifier,
 
     airspeed: VariableIdentifier,
     true_airspeed: VariableIdentifier,
@@ -218,6 +221,27 @@ pub struct EngineCommands {
     athr_disabled: VariableIdentifier,
     flap_handle: VariableIdentifier,
     pack_1: VariableIdentifier,
+}
+
+/// FlyByWire's own idle N3 at this altitude and Mach: the speed its FADEC
+/// declares a start complete at, and so the speed a quick-mode engine has
+/// to be at for the rest of the aeroplane to agree it is running.
+fn fbw_idle_n3(inputs: &EngineInputs) -> f64 {
+    let alt_ft = (1.0 - (inputs.ambient_pressure_pa / crate::physics::engine::params::P_REF_PA).powf(0.190_284)) * 145_366.45;
+    crate::fadec::table1502::icn3(alt_ft, inputs.mach)
+}
+
+/// The three spool speeds a settled ground idle sits at, from FlyByWire's
+/// own idle tables rather than from a figure of this model's own, so a
+/// quick-started engine lands where a real start would have left it.
+fn idle_speeds(inputs: &EngineInputs) -> (f64, f64, f64) {
+    let alt_ft = (1.0 - (inputs.ambient_pressure_pa / crate::physics::engine::params::P_REF_PA).powf(0.190_284)) * 145_366.45;
+    let n1 = crate::fadec::table1502::icn1(alt_ft, inputs.mach, inputs.ambient_temp_k - 273.15);
+    let n3 = crate::fadec::table1502::icn3(alt_ft, inputs.mach);
+    // The IP spool has no published idle table; it sits between the other
+    // two, and the gas path pulls it to its own equilibrium within a second
+    // either way.
+    (n1, 0.5 * (n1 + n3), n3)
 }
 
 /// Whether `FBW_ENG_STATS` is set to something other than "0"/empty.
@@ -307,6 +331,7 @@ impl EngineCommands {
             thrust_integral: [0.; 4],
             damage: std::array::from_fn(|i| DamageHandles::register(i + 1)),
             stats_at: None,
+            preset_quick_mode: vars.get("AIRCRAFT_PRESET_QUICK_MODE".to_owned()),
             airspeed: vars.get("AIRSPEED INDICATED".into()),
             true_airspeed: vars.get("AIRSPEED TRUE".into()),
             mach: vars.get("AIRSPEED MACH".into()),
@@ -412,6 +437,12 @@ impl EngineCommands {
         let ambient_temp_k = oat + 273.15;
         let true_airspeed_m_s = vars.read(&self.true_airspeed) * 0.514_444;
 
+        // A preset asking for an aeroplane that is ready to fly gets one
+        // now rather than after four real engine starts. See
+        // `Engine::snap_to_idle`: the APU and the ADIRS already treat quick
+        // mode this way, and the engines were the only thing left that a
+        // "ready for takeoff" preset still had to sit and wait for.
+        let quick = vars.read(&self.preset_quick_mode) != 0.;
         let mut disabled = false;
         // `FBW_ENG_STATS=1`: the gas path's own station values, gathered
         // inside the per-engine loop and logged once below.
@@ -525,6 +556,10 @@ impl EngineCommands {
                 },
                 dt_s: delta,
             };
+            if quick && phys_inputs.fuel_valve_open && self.last_out[i].n3_pct < fbw_idle_n3(&phys_inputs) {
+                let (n1, n2, n3) = idle_speeds(&phys_inputs);
+                self.physics[i].snap_to_idle(n1, n2, n3);
+            }
             let phys = self.physics[i].step(&phys_inputs);
             self.last_out[i] = phys;
 
