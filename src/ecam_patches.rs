@@ -24,6 +24,7 @@ mod ecl;
 const SYSTEMS_HOST: &str = "/Pages/VCockpit/Instruments/A380X/SystemsHost/SystemsHost.js";
 const MFD: &str = "/Pages/VCockpit/Instruments/A380X/MFD/mfd.js";
 const PFD: &str = "/Pages/VCockpit/Instruments/A380X/PFD/pfd.js";
+const EWD: &str = "/Pages/VCockpit/Instruments/A380X/EWD/ewd.js";
 
 pub fn source_patches() -> Vec<SourcePatch> {
     let mut patches = vec![
@@ -37,6 +38,8 @@ pub fn source_patches() -> Vec<SourcePatch> {
         ecam_015_rudder_fault(),
         ecam_014_engines_off_and_on_ground_uses_core_speed(),
         inst_009_pfd_spoiler_indication_max_of_all_panels(),
+        inst_010_ewd_egt_not_clamped_to_850(),
+        inst_010_ewd_egt_digits_not_clamped_to_850(),
     ];
     patches.extend(ecl::source_patches());
     patches
@@ -348,6 +351,61 @@ fn inst_009_pfd_spoiler_indication_max_of_all_panels() -> SourcePatch {
         reason: "the PFD spoiler tape showed only panel 1's commanded position; show \
                   the greatest deflection across all 8 real spoiler panels per side \
                   instead"
+            .to_string(),
+    }
+}
+
+/// The EWD's EGT never reads above 850 C, whatever the engine is doing.
+///
+/// `EGT.tsx` caps the displayed value:
+///
+/// ```js
+/// Math.min([3, 4].includes(throttleMode) ? 900 : 850, egt)
+/// ```
+///
+/// `throttleMode` there is `throttle_position`, which `EwdSimvarPublisher`
+/// binds to `L:A32NX_AUTOTHRUST_TLA:n` -- the thrust lever *angle in
+/// degrees* (idle 0, CLB 25, FLX/MCT 35, TOGA 45, `throttle.rs`).
+/// `[3, 4].includes(...)` is asking whether that angle is exactly 3 or 4
+/// degrees: a thrust-limit-mode test applied to a number of degrees. It is
+/// never true in normal operation, so the 850 branch always wins and the
+/// gauge pins there at every power setting. The same file reads the same
+/// variable as a percentage two lines earlier (`tm < 33`), which is the
+/// other half of the same mix-up.
+///
+/// The cap is dropped rather than corrected, for two reasons. This port
+/// already applies the EEC's own TGT trim upstream (`engine_commands.rs`:
+/// `egt_displayed = phys.egt_c - tgt_trim_c(...)`, EASA.E.012 Note 16), so
+/// capping here trims a trimmed value twice. And a cap at 900 would still
+/// be wrong: the certified over-temperature limit is **920 C trimmed** for
+/// 20 s (Note 14), so the cockpit has to be able to show a number above
+/// 900 -- a gauge that cannot is hiding the exceedance the crew is meant to
+/// act on.
+///
+/// Colour is untouched: `warningEGTColor` still turns the reading red at
+/// 900 and amber above 850 below the take-off detent.
+fn inst_010_ewd_egt_not_clamped_to_850() -> SourcePatch {
+    SourcePatch {
+        path: EWD.to_string(),
+        find: "Math.min([3, 4].includes(throttleMode) ? 900 : 850, egt),".to_string(),
+        replace: "egt,".to_string(),
+        reason: "EWD EGT is capped at 850 C because [3,4].includes() tests a thrust-limit mode \
+                 against A32NX_AUTOTHRUST_TLA, which is the lever angle in degrees; the cap is \
+                 removed rather than fixed because engine_commands.rs already applies the EEC's \
+                 TGT trim, and the 920 C over-temperature limit has to be displayable"
+            .to_string(),
+    }
+}
+
+/// The same cap on the digital readout beside the gauge -- the same
+/// expression, applied to a rounded value.
+fn inst_010_ewd_egt_digits_not_clamped_to_850() -> SourcePatch {
+    SourcePatch {
+        path: EWD.to_string(),
+        find: "Math.min([3, 4].includes(this.throttlePosition.get()) ? 900 : 850, Math.round(egt))".to_string(),
+        replace: "Math.round(egt)".to_string(),
+        reason: "the EGT digits carry the same 850 C cap as the gauge (inst_010), from the same \
+                 thrust-limit-mode test applied to a lever angle in degrees"
             .to_string(),
     }
 }
