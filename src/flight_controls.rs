@@ -352,6 +352,12 @@ struct Refs {
     /// aeroplane's weight actually sits, and what is moving it.
     tire_force: Option<DataRef>,
     pitch_moment: Option<DataRef>,
+    /// The same pitching moment split by what is producing it. X-Plane
+    /// keeps the three apart, which is the difference between knowing the
+    /// nose is being pushed down and knowing what is pushing it.
+    pitch_moment_aero: Option<DataRef>,
+    pitch_moment_prop: Option<DataRef>,
+    pitch_moment_gear: Option<DataRef>,
 }
 
 pub struct FlightControls {
@@ -406,6 +412,9 @@ impl FlightControls {
             trim_travel_down: xplm.find("sim/aircraft/controls/acf_hstb_trim_dn"),
             tire_force: xplm.find("sim/flightmodel2/gear/tire_vertical_force_n_mtr"),
             pitch_moment: xplm.find("sim/flightmodel/forces/M_total"),
+            pitch_moment_aero: xplm.find("sim/flightmodel/forces/M_aero"),
+            pitch_moment_prop: xplm.find("sim/flightmodel/forces/M_prop"),
+            pitch_moment_gear: xplm.find("sim/flightmodel/forces/M_gear"),
             pitch_rate: xplm.find("sim/flightmodel/position/Q"),
             pitch_accel: xplm.find("sim/flightmodel/position/Q_dot"),
             theta: xplm.find("sim/flightmodel/position/theta"),
@@ -464,7 +473,7 @@ impl FlightControls {
         }
         self.stats_at = Some(now);
         crate::log(&format!(
-            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2} (X-Plane trim travel up {:.3} dn {:.3}, as read); spoilers L{:?}; hyd {:.0}/{:.0} psi; pitch {:+.1} deg, rate {:+.2}, accel {:+.3} deg/s2 [{}]; gear {}; pitch moment {:+.0} kN.m",
+            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2} (X-Plane trim travel up {:.3} dn {:.3}, as read); spoilers L{:?}; hyd {:.0}/{:.0} psi; pitch {:+.1} deg, rate {:+.2}, accel {:+.3} deg/s2 [{}]; gear {}; pitch moment {:+.0} = aero {:+.0} + thrust {:+.0} + gear {:+.0} kN.m (+ is nose up)",
             s.elevators_deg[LEFT],
             s.elevators_deg[RIGHT],
             s.ailerons_deg[LEFT][0],
@@ -483,6 +492,9 @@ impl FlightControls {
             pitch_verdict(s.elevators_deg[LEFT], self.refs.pitch_accel.map_or(f64::NAN, |d| xplm.get_f(d) as f64)),
             gear_load(xplm, self.refs.tire_force),
             self.refs.pitch_moment.map_or(f64::NAN, |d| xplm.get_f(d) as f64 / 1000.),
+            self.refs.pitch_moment_aero.map_or(f64::NAN, |d| xplm.get_f(d) as f64 / 1000.),
+            self.refs.pitch_moment_prop.map_or(f64::NAN, |d| xplm.get_f(d) as f64 / 1000.),
+            self.refs.pitch_moment_gear.map_or(f64::NAN, |d| xplm.get_f(d) as f64 / 1000.),
         ));
     }
 
