@@ -31,6 +31,10 @@ const OPEN_RETRY_MS: i64 = 250;
 /// its screens.
 const OPEN_MAX_TRIES: u32 = 300;
 const INPUT_POLL_MS: i64 = 8;
+/// How long a screen's browser is given to paint its first frame before it
+/// is taken as stillborn and made again, and how many times that is tried.
+const FIRST_PAINT_MS: i64 = 4000;
+const FIRST_PAINT_TRIES: u32 = 3;
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -38,6 +42,14 @@ thread_local! {
 
 struct State {
     aircraft_root: PathBuf,
+    /// The bridge tag, kept so a screen's `ScreenBlock` can be reopened to
+    /// read its frame counter (`has_painted`) and so a browser can be made
+    /// again (`remake`).
+    tag: String,
+    /// The frame rate and view list these browsers were made with, for the
+    /// same reason.
+    fps: i32,
+    defs: Vec<ViewDef>,
     session: Session,
     /// Every view's browser (restart_displays, shutdown).
     browsers: Vec<Browser>,
@@ -132,9 +144,113 @@ fn create_views(tag: &str, session: Session, aircraft_root: PathBuf) {
     }
 
     let count = browsers.len();
-    STATE.with(|s| *s.borrow_mut() = Some(State { aircraft_root, session, browsers, screen_browsers }));
+    STATE.with(|s| {
+        *s.borrow_mut() = Some(State { aircraft_root, tag: tag.to_owned(), fps, defs, session, browsers, screen_browsers })
+    });
     crate::logging::log(&format!("views: {count} browsers created"));
     start_input_timer();
+    watch_first_paint(FIRST_PAINT_TRIES);
+}
+
+// ---------------------------------------------------------------------------
+// Screens that never paint.
+// ---------------------------------------------------------------------------
+
+/// A screen's browser can be created and then never start. CEF's GPU process
+/// crashed three times while these browsers were being made, and two frames
+/// never answered the browser-info handshake ("Timeout of new browser info
+/// response", cef-debug.log); the browsers waiting on them stayed blank
+/// forever. Nothing reports it -- `browser_host_create_browser_sync` has
+/// already returned a browser by then -- so the screen simply stays black,
+/// which is what the EFB did on every run.
+///
+/// Every painting browser bumps its `ScreenBlock`'s frame counter once per
+/// `on_paint` (see `paint`), so a screen that is still on frame 0 well after
+/// its browser was made has never painted. Make it again.
+fn watch_first_paint(tries_left: u32) {
+    let mut task = FirstPaintTask::new(tries_left);
+    post_delayed_task(ThreadId::UI, Some(&mut task), FIRST_PAINT_MS);
+}
+
+wrap_task! {
+    struct FirstPaintTask {
+        tries_left: u32,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            check_first_paint(self.tries_left);
+        }
+    }
+}
+
+fn check_first_paint(tries_left: u32) {
+    let silent: Vec<usize> = STATE.with(|s| {
+        let borrow = s.borrow();
+        let Some(state) = borrow.as_ref() else { return Vec::new() };
+        (0..SCREEN_ORDER.len()).filter(|&i| state.screen_browsers[i].is_some() && !has_painted(state, i)).collect()
+    });
+    if silent.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = silent.iter().map(|&i| SCREEN_ORDER[i]).collect();
+    if tries_left == 0 {
+        crate::logging::log(&format!("views: {} never painted and will stay black: {}", silent.len(), names.join(", ")));
+        return;
+    }
+    crate::logging::log(&format!("views: {} never painted, making their browsers again: {}", silent.len(), names.join(", ")));
+    for i in silent {
+        remake(i);
+    }
+    watch_first_paint(tries_left - 1);
+}
+
+/// Whether this screen's block has ever been painted into.
+fn has_painted(state: &State, screen: usize) -> bool {
+    let Some((w, h)) = screen_size(state, screen) else { return true };
+    let Some(block) = ScreenBlock::open(&state.tag, SCREEN_ORDER[screen], w, h) else { return true };
+    block.header().frame.load(Ordering::Relaxed) != 0
+}
+
+/// The pixel size this screen's browser paints at: panel.cfg's for a gauge
+/// view, [`EFB_WIDTH`]/[`EFB_HEIGHT`] for the EFB, which has no panel.cfg
+/// entry of its own (`spawn_efb_view`).
+fn screen_size(state: &State, screen: usize) -> Option<(u32, u32)> {
+    let id = SCREEN_ORDER[screen];
+    if id.eq_ignore_ascii_case(EFB_SCREEN) {
+        return Some((EFB_WIDTH, EFB_HEIGHT));
+    }
+    state.defs.iter().find(|d| d.screen.eq_ignore_ascii_case(id)).map(|d| (d.width, d.height))
+}
+
+/// Close this screen's browser and make another in its place.
+fn remake(screen: usize) {
+    STATE.with(|s| {
+        let mut borrow = s.borrow_mut();
+        let Some(state) = borrow.as_mut() else { return };
+        let id = SCREEN_ORDER[screen];
+        if let Some(old) = state.screen_browsers[screen].take() {
+            let gone = old.identifier();
+            state.browsers.retain(|b| b.identifier() != gone);
+            if let Some(host) = old.host() {
+                // Force: a browser that never started has no page to ask.
+                host.close_browser(1);
+            }
+        }
+        let made = if id.eq_ignore_ascii_case(EFB_SCREEN) {
+            spawn_efb_view(&state.tag, state.fps)
+        } else {
+            let def = state.defs.iter().find(|d| d.screen.eq_ignore_ascii_case(id)).cloned();
+            def.and_then(|d| spawn_view(&state.tag, &d, state.fps))
+        };
+        match made {
+            Some(browser) => {
+                state.screen_browsers[screen] = Some(browser.clone());
+                state.browsers.push(browser);
+            }
+            None => crate::logging::log(&format!("views: could not make {id}'s browser again")),
+        }
+    });
 }
 
 /// The EFB screen's browser: not one of panel.cfg's views (it is filtered
