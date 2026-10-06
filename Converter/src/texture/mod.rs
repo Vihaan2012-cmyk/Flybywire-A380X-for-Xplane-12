@@ -832,6 +832,25 @@ pub fn metal(metalness: u8, gloss: u8) -> u8 {
 /// 2x2 block it belongs to. That block mean is exactly what the half-size
 /// image would hold, so this is the error of reconstructing the original
 /// from it.
+///
+/// (2026-09-27: this replaces an in-progress `worst_tile_error` rewrite --
+/// tile-wise, measured against the true original every step rather than
+/// the previous level -- that was still uncommitted here and never
+/// reached the sizes it was meant to reproduce: against the installed,
+/// user-approved cockpit it made every NML/MAT map this function's own
+/// caller can shrink 2-8x too big, e.g. `A380_COCKPIT_AFT_MISC01_4K_NORMAL`
+/// 256 -> 2048, because comparing to the true original lets error that
+/// used to look fine one halving at a time accumulate into "too much"
+/// several steps earlier than before. Its actual purpose -- finding the
+/// maps whose real, load-bearing detail (FCU's embossed digits, a metal
+/// bezel's edge) a whole-canvas average could hide behind a large flat
+/// surround -- is done, not lost: that is exactly how
+/// `msfs2xp-aircraft`'s `LETTERED_NORMAL_MAPS`/`LETTERED_MATERIAL_MAPS`
+/// were found (their own doc comments cite the same worst-tile/RG-std
+/// sweep), and those lists already force the maps it would have caught
+/// to a 1024 floor regardless of what this function decides. Wiring it
+/// into every other map's live shrink decision was the redundant, too-
+/// conservative part.)
 fn detail_lost_by_halving(px: &[u8], w: u32, h: u32) -> f32 {
     let (nw, nh) = (w / 2, h / 2);
     if nw == 0 || nh == 0 {
@@ -868,6 +887,12 @@ fn detail_lost_by_halving(px: &[u8], w: u32, h: u32) -> f32 {
 /// pushbutton gloss -- cost 9 to 14 and keep their size. Halving only what
 /// measures flat took the aircraft's referenced textures down by 624 MB
 /// without touching anything the eye is on.
+///
+/// `floor` is not always [`FLAT_FLOOR`]: a caller that already knows a
+/// particular map's detail cannot be told apart from an ordinary flat
+/// map's own noise by any statistic run over it (see
+/// `msfs2xp-aircraft`'s `LETTERED_NORMAL_MAPS`) can raise it to guarantee a
+/// minimum size outright, without asking this function to make that call.
 fn shrink_while_flat(mut px: Vec<u8>, mut w: u32, mut h: u32, limit: f32, floor: u32) -> (Vec<u8>, u32, u32) {
     while w > floor && h > floor && detail_lost_by_halving(&px, w, h) <= limit {
         let (nw, nh) = (w / 2, h / 2);
@@ -896,8 +921,9 @@ const NORMAL_FLAT_LIMIT: f32 = 5.0;
 /// rather than what shape it is.
 const MATERIAL_FLAT_LIMIT: f32 = 8.0;
 /// Never shrink either below this: past it a map stops being able to tell
-/// two adjacent controls apart at all.
-const FLAT_FLOOR: u32 = 256;
+/// two adjacent controls apart at all. Some callers ask for a higher floor
+/// than this default (see [`shrink_while_flat`]'s doc).
+pub const FLAT_FLOOR: u32 = 256;
 
 /// An uncompressed RGB PNG, as X-Plane wants its normal and material maps.
 fn rgb_png(px: &[u8], w: u32, h: u32) -> Result<Converted, TextureError> {
@@ -917,10 +943,22 @@ fn rgb_png(px: &[u8], w: u32, h: u32) -> Result<Converted, TextureError> {
 /// red and green the normal, blue empty. Green is inverted, because MSFS
 /// packs DirectX-style normals (its glTF says so: `ASOBO_normal_map_convention`
 /// is `DirectX`, green pointing down the image) and X-Plane reads green as up.
-pub fn normal_png(normal: &[u8], max_side: u32) -> Result<Converted, TextureError> {
+///
+/// `used`: the UV-space triangles (`[[u, v]; 3]`, 0..1) at least one mesh
+/// actually draws with into this normal map; empty when unknown. The same
+/// remedy `material_png` applies to a COMP atlas's unused padding applies
+/// here: an atlas normal map (FlyByWire's FCU and glareshield among them)
+/// can leave most of its canvas unused, and without dilating the real
+/// content out into it first, that padding's own arbitrary values would
+/// dilute how much detail the used part is measured to lose by shrinking.
+///
+/// `floor`: never shrink below this side length (usually [`FLAT_FLOOR`],
+/// see its doc and [`shrink_while_flat`]'s).
+pub fn normal_png(normal: &[u8], max_side: u32, used: &[[[f32; 2]; 3]], floor: u32) -> Result<Converted, TextureError> {
     let (w, h, n) = decode_within(normal, max_side)?;
-    let px: Vec<u8> = n.chunks_exact(4).flat_map(|p| [p[0], 255 - p[1], 0]).collect();
-    let (px, w, h) = shrink_while_flat(px, w, h, NORMAL_FLAT_LIMIT, FLAT_FLOOR);
+    let mut px: Vec<u8> = n.chunks_exact(4).flat_map(|p| [p[0], 255 - p[1], 0]).collect();
+    dilate_outside_uv(&mut px, w, h, used);
+    let (px, w, h) = shrink_while_flat(px, w, h, NORMAL_FLAT_LIMIT, floor);
     rgb_png(&px, w, h)
 }
 
@@ -951,7 +989,17 @@ pub fn normal_png(normal: &[u8], max_side: u32) -> Result<Converted, TextureErro
 /// [`dilate_transparent`] applies to a decal's transparent background, and
 /// just as honest: it makes the padding say what its nearest real neighbour
 /// says, not something no surface ever meant.
-pub fn material_png(comp: Option<&[u8]>, max_side: u32, used: &[[[f32; 2]; 3]]) -> Result<Converted, TextureError> {
+///
+/// `floor`: never shrink below this side length (usually [`FLAT_FLOOR`]; see
+/// its doc and [`shrink_while_flat`]'s). A handful of COMP maps carry a
+/// gloss channel whose real, load-bearing contrast -- a switch's metal
+/// bezel against its matte face, a keycap's edge -- no statistic run over
+/// the map can reliably tell apart from an ordinary flat map's own noise,
+/// the same problem T01 found for a normal map's relief (see
+/// `msfs2xp-aircraft`'s `LETTERED_MATERIAL_MAPS`); a caller that already
+/// knows which ones can raise `floor` to keep a guaranteed minimum size,
+/// bypassing the flatness heuristic outright.
+pub fn material_png(comp: Option<&[u8]>, max_side: u32, used: &[[[f32; 2]; 3]], floor: u32) -> Result<Converted, TextureError> {
     let Some(comp) = comp else {
         return rgb_png(&[0, gloss(128), 0].repeat(16), 4, 4);
     };
@@ -967,7 +1015,7 @@ pub fn material_png(comp: Option<&[u8]>, max_side: u32, used: &[[[f32; 2]; 3]]) 
     // After the dilation, not before: the flatness measure has to see the
     // padding already carrying its neighbours' values, or a canvas that is
     // mostly unused padding reads as flat when its real content is not.
-    let (px, w, h) = shrink_while_flat(px, w, h, MATERIAL_FLAT_LIMIT, FLAT_FLOOR);
+    let (px, w, h) = shrink_while_flat(px, w, h, MATERIAL_FLAT_LIMIT, floor);
     rgb_png(&px, w, h)
 }
 
@@ -1480,13 +1528,115 @@ fn half_in_linear_light(rgba: &[u8], w: u32, h: u32) -> (u32, u32, Vec<u8>) {
     (nw, nh, out)
 }
 
+/// How much unsharp [`sharpen_mip_rgba`] should apply to a mip built by
+/// [`half_in_linear_light`], keyed to how many times that box filter has
+/// run so far (1 the first time, counting up): 0 at level 1, where the box
+/// output is already close to (sometimes past) a direct Lanczos downsample
+/// of the source and a flat correction overshoots it; ramping to 0.18 by
+/// level 3, where repeated box filtering compounds into a real softness gap
+/// against Lanczos. This is the same schedule `msfs2xp-aircraft`'s `main.rs`
+/// uses for its own, separate copy of this same box filter (`half`,
+/// `fixes/T03.md`) -- kept identical on purpose: [`half_in_linear_light`]'s
+/// own doc says it mirrors `half()` "so a baked albedo's own mip chain is
+/// built the same way", and a baked albedo compressed here should not
+/// suddenly get a different sharpness profile than one that took the other
+/// crate's `encode_dds` path. Capped at 0.18 for anything deeper, since
+/// that is as far as either chain was measured and validated
+/// (`E:/fbw-debug/fixes/W66.md`).
+fn mip_sharpen_amount(level: u32) -> f32 {
+    (0.09 * (level as f32 - 1.0)).clamp(0.0, 0.18)
+}
+
+/// A small unsharp mask in linear light, undoing part of the blur that
+/// compounds through repeated [`half_in_linear_light`] calls: each mip
+/// level is filtered from the previous level, not from the original, so by
+/// level 3 the equivalent blur is much wider than a single box pass. The
+/// box filter itself stays untouched ([`half_in_linear_light`]'s own doc:
+/// a perceptual filter rang around painted lettering and shimmered under
+/// FXAA/TAA) -- this only nudges the already-boxed result back toward a
+/// Lanczos-sharp target, and only where `amount` > 0 (see
+/// [`mip_sharpen_amount`]: zero at level 1, so the level closest to the eye
+/// is untouched). Alpha is left exactly as `half_in_linear_light` produced
+/// it; only RGB is sharpened.
+fn sharpen_mip_rgba(rgba: &[u8], w: u32, h: u32, amount: f32) -> Vec<u8> {
+    if amount <= 0.0 {
+        return rgba.to_vec();
+    }
+    let (w, h) = (w as usize, h as usize);
+    let mut centre = vec![0f32; w * h * 3];
+    for (i, p) in rgba.chunks_exact(4).enumerate() {
+        for k in 0..3 {
+            centre[i * 3 + k] = srgb_to_linear(p[k]);
+        }
+    }
+    // Two passes of a separable 1-2-1 blur (edges replicated, like
+    // `half_in_linear_light`'s own sampling), wide enough to reach past the
+    // compounding box blur without spreading past a glyph stroke onto the
+    // placard around it.
+    let blur_pass = |buf: &[f32]| -> Vec<f32> {
+        let mut tmp = vec![0f32; w * h * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let xm = x.saturating_sub(1);
+                let xp = (x + 1).min(w - 1);
+                for k in 0..3 {
+                    tmp[(y * w + x) * 3 + k] =
+                        (buf[(y * w + xm) * 3 + k] + 2.0 * buf[(y * w + x) * 3 + k] + buf[(y * w + xp) * 3 + k]) / 4.0;
+                }
+            }
+        }
+        let mut out = vec![0f32; w * h * 3];
+        for y in 0..h {
+            let ym = y.saturating_sub(1);
+            let yp = (y + 1).min(h - 1);
+            for x in 0..w {
+                for k in 0..3 {
+                    out[(y * w + x) * 3 + k] =
+                        (tmp[(ym * w + x) * 3 + k] + 2.0 * tmp[(y * w + x) * 3 + k] + tmp[(yp * w + x) * 3 + k]) / 4.0;
+                }
+            }
+        }
+        out
+    };
+    let blurred = blur_pass(&blur_pass(&centre));
+    let mut out = rgba.to_vec();
+    for (i, px) in out.chunks_exact_mut(4).enumerate() {
+        for k in 0..3 {
+            px[k] = linear_to_srgb(centre[i * 3 + k] + amount * (centre[i * 3 + k] - blurred[i * 3 + k]));
+        }
+        // px[3] (alpha) is left exactly as `half_in_linear_light` wrote it.
+    }
+    out
+}
+
+/// The lowest alpha a texel may have and still count as opaque when a
+/// cockpit texture's BC1-or-BC3 format is chosen ([`effectively_opaque`]).
+/// FlyByWire's A380 ships its cockpit textures as BC7, whose encoder leaves
+/// alpha noise of 251-254 on surfaces meant to be solid; demanding exactly
+/// 255 put 51 of them in BC3, twice BC1's video memory (360 MB on the A380,
+/// 2026-09-28) for an alpha channel nothing reads. A real cutout or decal
+/// edge sits far below this.
+pub const OPAQUE_ALPHA_MIN: u8 = 250;
+
+/// Whether RGBA8 pixels are opaque enough to drop the alpha channel (BC1):
+/// every texel at [`OPAQUE_ALPHA_MIN`] or above, bar at most one in 100,000
+/// -- the A380's CEILING01 is solid but carries 7 stray texels at 191 in 16.7
+/// million, far too few for any alpha test or blend to be drawing with.
+pub fn effectively_opaque(rgba: &[u8]) -> bool {
+    let total = rgba.len() / 4;
+    let below = rgba.chunks_exact(4).filter(|p| p[3] < OPAQUE_ALPHA_MIN).count();
+    below <= total / 100_000
+}
+
 /// Compress RGBA8 pixels (top row first) into a DXT DDS with a full mip
-/// chain, each level built by [`half_in_linear_light`]: BC1 (DXT1) when
-/// every texel's alpha is 255, BC3 (DXT5) otherwise, matching the format
-/// choice `encode_dds` in `msfs2xp-aircraft` already makes for its plain and
-/// decal texture paths. `ClusterFit`, the same quality tier that pipeline
-/// uses for its own interior (non-"best") textures: this is only ever
-/// called for cockpit materials.
+/// chain, each level built by [`half_in_linear_light`] and, from the second
+/// level down, nudged back toward Lanczos sharpness by [`sharpen_mip_rgba`]
+/// (see [`mip_sharpen_amount`]): BC1 (DXT1) when [`effectively_opaque`],
+/// BC3 (DXT5) otherwise, matching the format choice `encode_dds` in
+/// `msfs2xp-aircraft` makes for its interior texture paths.
+/// `ClusterFit`, the same quality tier that pipeline uses for its own
+/// interior (non-"best") textures: this is only ever called for cockpit
+/// materials.
 ///
 /// This is what lets [`convert_for_xplane_capped_with_ao`] write a baked
 /// albedo at the aircraft's usual on-disk and video-memory size instead of
@@ -1496,7 +1646,7 @@ pub fn compress_rgba_to_dds(rgba: Vec<u8>, width: u32, height: u32) -> Result<Co
     if width == 0 || height == 0 {
         return Err(TextureError::Unsupported("cannot compress an empty image".into()));
     }
-    let opaque = rgba.chunks_exact(4).all(|p| p[3] == 255);
+    let opaque = effectively_opaque(&rgba);
     let (format, tformat) = if opaque {
         (PixelFormat::Bc1, texpresso::Format::Bc1)
     } else {
@@ -1505,6 +1655,7 @@ pub fn compress_rgba_to_dds(rgba: Vec<u8>, width: u32, height: u32) -> Result<Co
     let params = texpresso::Params::default();
     let mut mips = Vec::new();
     let (mut w, mut h, mut px) = (width, height, rgba);
+    let mut level = 0u32;
     loop {
         let mut out = vec![0u8; tformat.compressed_size(w as usize, h as usize)];
         tformat.compress(&px, w as usize, h as usize, params, &mut out);
@@ -1513,7 +1664,8 @@ pub fn compress_rgba_to_dds(rgba: Vec<u8>, width: u32, height: u32) -> Result<Co
             break;
         }
         let (nw, nh, next) = half_in_linear_light(&px, w, h);
-        (w, h, px) = (nw, nh, next);
+        level += 1;
+        (w, h, px) = (nw, nh, sharpen_mip_rgba(&next, nw, nh, mip_sharpen_amount(level)));
     }
     let img = TextureImage {
         width,
@@ -1725,15 +1877,15 @@ mod tests {
     #[test]
     fn laminar_style_normal_and_material_maps() {
         let normal = ktx2(37, 4, 4, &[[255u8, 128, 0, 255].repeat(16)], 0);
-        let n = image::load_from_memory(&normal_png(&normal, 4096).unwrap().bytes).unwrap().to_rgb8();
+        let n = image::load_from_memory(&normal_png(&normal, 4096, &[], FLAT_FLOOR).unwrap().bytes).unwrap().to_rgb8();
         assert_eq!(n.get_pixel(0, 0).0, [255, 127, 0], "red kept, green inverted, blue empty");
         let comp = ktx2(37, 4, 4, &[[10u8, 200, 100, 255].repeat(16)], 0);
-        let m = image::load_from_memory(&material_png(Some(&comp), 4096, &[]).unwrap().bytes).unwrap().to_rgb8();
+        let m = image::load_from_memory(&material_png(Some(&comp), 4096, &[], FLAT_FLOOR).unwrap().bytes).unwrap().to_rgb8();
         // Roughness 200 of 255 gives gloss 9 (see below); metal 100 of 255
         // scaled by that gloss (100 * 9 / 255, rounded) is 4: a metal
         // reading on a rough surface does not glare as bare chrome.
         assert_eq!(m.get_pixel(0, 0).0, [4, 9, 0], "metal in red scaled by gloss, gloss in green");
-        let plain = image::load_from_memory(&material_png(None, 4096, &[]).unwrap().bytes).unwrap().to_rgb8();
+        let plain = image::load_from_memory(&material_png(None, 4096, &[], FLAT_FLOOR).unwrap().bytes).unwrap().to_rgb8();
         assert_eq!(plain.get_pixel(0, 0).0, [0, 55, 0], "no COMP: not metal, gloss of roughness 0.5");
     }
 
@@ -1750,12 +1902,12 @@ mod tests {
         rows.extend(std::iter::repeat_n([10u8, 0, 0, 255].repeat(4), 3)); // rows 1..4: unused padding
         let comp = ktx2(37, 4, 4, &[rows.concat()], 0);
 
-        let undilated = image::load_from_memory(&material_png(Some(&comp), 4096, &[]).unwrap().bytes).unwrap().to_rgb8();
+        let undilated = image::load_from_memory(&material_png(Some(&comp), 4096, &[], FLAT_FLOOR).unwrap().bytes).unwrap().to_rgb8();
         assert_eq!(undilated.get_pixel(0, 3).0, [0, 255, 0], "without `used`, padding keeps its own gloss (255): the bug");
 
         // Only row 0 (v in [0, 0.25)) is ever sampled: a quad as two triangles.
         let used = [[[0.0, 0.0], [1.0, 0.0], [1.0, 0.2]], [[0.0, 0.0], [1.0, 0.2], [0.0, 0.2]]];
-        let dilated = image::load_from_memory(&material_png(Some(&comp), 4096, &used).unwrap().bytes).unwrap().to_rgb8();
+        let dilated = image::load_from_memory(&material_png(Some(&comp), 4096, &used, FLAT_FLOOR).unwrap().bytes).unwrap().to_rgb8();
         assert_eq!(dilated.get_pixel(0, 0).0, [4, 9, 0], "the used row itself is untouched");
         assert_eq!(dilated.get_pixel(0, 3).0, [4, 9, 0], "the far padding row now reads the real content, not 255 gloss");
         assert_eq!(dilated.get_pixel(2, 2).0, [4, 9, 0], "so does the middle of the unused block");
@@ -1794,7 +1946,7 @@ mod tests {
             vec![[[2.5, -1.0], [3.0, -1.0], [3.0, -0.5]]], // tiled UVs, entirely outside 0..1
             vec![[[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]], // a single point
         ] {
-            material_png(Some(&comp), 4096, &used).unwrap();
+            material_png(Some(&comp), 4096, &used, FLAT_FLOOR).unwrap();
         }
     }
 
@@ -1872,6 +2024,20 @@ mod tests {
     }
 
     #[test]
+    fn bc7_alpha_noise_on_a_solid_texture_still_compresses_as_bc1() {
+        // FlyByWire's BC7 cockpit textures decode with alpha 251-254 on
+        // surfaces meant to be solid; that is not an alpha channel.
+        let noisy = vec![180u8, 90, 40, 252].repeat(64);
+        let out = compress_rgba_to_dds(noisy, 8, 8).unwrap();
+        assert_eq!(load_dds(&out.bytes).unwrap().format, PixelFormat::Bc1);
+        // A real cutout keeps its alpha.
+        let mut cut = vec![180u8, 90, 40, 255].repeat(64);
+        cut[3] = 0;
+        let out = compress_rgba_to_dds(cut, 8, 8).unwrap();
+        assert_eq!(load_dds(&out.bytes).unwrap().format, PixelFormat::Bc3, "one transparent texel in 64 is a cutout, not noise");
+    }
+
+    #[test]
     fn compress_rgba_to_dds_round_trips_within_bc1_tolerance() {
         // A uniform 8x8 block: BC1's single-colour fit should reproduce it
         // almost exactly (still quantized to 5/6/5 bits, so allow a few
@@ -1886,6 +2052,50 @@ mod tests {
         for (before, after) in [180u8, 90, 40].iter().zip(&back[0..3]) {
             assert!((*before as i32 - *after as i32).abs() <= 8, "before {before} after {after}");
         }
+    }
+
+    #[test]
+    fn mip_sharpen_amount_is_zero_at_level_one_and_caps_at_level_three() {
+        assert_eq!(mip_sharpen_amount(1), 0.0);
+        assert!((mip_sharpen_amount(2) - 0.09).abs() < 1e-6);
+        assert!((mip_sharpen_amount(3) - 0.18).abs() < 1e-6);
+        // Deeper levels stay at the same cap, not keep climbing.
+        assert_eq!(mip_sharpen_amount(4), 0.18);
+        assert_eq!(mip_sharpen_amount(7), 0.18);
+    }
+
+    #[test]
+    fn sharpen_mip_rgba_at_zero_amount_is_a_no_op() {
+        let rgba: Vec<u8> = (0..16u32).flat_map(|i| [((i * 17) % 255) as u8, 128, 0, 200]).collect();
+        let out = sharpen_mip_rgba(&rgba, 4, 4, 0.0);
+        assert_eq!(out, rgba);
+    }
+
+    #[test]
+    fn sharpen_mip_rgba_preserves_alpha_and_sharpens_an_edge() {
+        // A flat dark half next to a flat bright half: unsharp should push
+        // the dark side darker and the bright side brighter right at the
+        // step (more local contrast there), without ever touching alpha.
+        let (w, h) = (6u32, 6u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let v = if x < 3 { 40u8 } else { 220u8 };
+                let i = ((y * w + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&[v, v, v, 137]);
+            }
+        }
+        let out = sharpen_mip_rgba(&rgba, w, h, 0.18);
+        for chunk in out.chunks_exact(4) {
+            assert_eq!(chunk[3], 137, "alpha must be untouched");
+        }
+        let at = |x: u32, y: u32| out[((y * w + x) * 4) as usize];
+        // The edge texel (x=2, right next to the step) sees more of the
+        // bright side in its own blurred average than the interior texel
+        // (x=0) does, so unsharp pushes it further from that average, i.e.
+        // darker, not lighter -- x=2 must come out no lighter than x=0.
+        assert!(at(2, 3) <= at(0, 3), "the dark side should not get lighter right at the edge");
+        assert!(at(3, 3) >= at(5, 3), "the light side should not get darker right at the edge");
     }
 
     /// The task this whole path exists for: baking occlusion in, then
@@ -2323,15 +2533,63 @@ mod tests {
     }
 
     #[test]
-    fn halving_a_uniform_image_loses_nothing() {
-        let px = vec![7u8; 64 * 64 * 3];
-        assert_eq!(detail_lost_by_halving(&px, 64, 64), 0.0);
-    }
-
-    #[test]
     fn the_floor_is_never_crossed() {
         let px = vec![3u8; (FLAT_FLOOR as usize) * (FLAT_FLOOR as usize) * 3];
         let (_, w, h) = shrink_while_flat(px, FLAT_FLOOR, FLAT_FLOOR, MATERIAL_FLAT_LIMIT, FLAT_FLOOR);
         assert_eq!((w, h), (FLAT_FLOOR, FLAT_FLOOR));
+    }
+
+    /// `normal_png` gets the same padding-dilution fix `material_png` has
+    /// had: an atlas whose real content is a small used rectangle, the rest
+    /// left at MSFS's own default fill, must be judged by the used part
+    /// alone once `used` is given.
+    #[test]
+    fn normal_png_dilates_padding_outside_the_used_uv_rectangle() {
+        let mut rows = vec![[255u8, 128, 0, 255].repeat(4)]; // row 0: real content (flat normal, straight up)
+        rows.extend(std::iter::repeat_n([0u8, 255, 0, 255].repeat(4), 3)); // rows 1..4: unused padding, a different value
+        let normal = ktx2(37, 4, 4, &[rows.concat()], 0);
+
+        let used = [[[0.0, 0.0], [1.0, 0.0], [1.0, 0.2]], [[0.0, 0.0], [1.0, 0.2], [0.0, 0.2]]];
+        let dilated = image::load_from_memory(&normal_png(&normal, 4096, &used, FLAT_FLOOR).unwrap().bytes).unwrap().to_rgb8();
+        assert_eq!(dilated.get_pixel(0, 0).0, [255, 127, 0], "the used row itself is untouched");
+        assert_eq!(dilated.get_pixel(0, 3).0, [255, 127, 0], "far padding now reads the real content, not its own default fill");
+    }
+
+    /// A caller that already knows a map's real detail cannot be told apart
+    /// from an ordinary flat map's own noise (see `msfs2xp-aircraft`'s
+    /// `LETTERED_NORMAL_MAPS`) can raise `normal_png`'s `floor` to keep a
+    /// guaranteed minimum size, bypassing the flatness heuristic outright.
+    #[test]
+    fn normal_png_floor_overrides_the_flatness_heuristic() {
+        let (w, h) = (1024u32, 1024u32);
+        // Perfectly flat: on its own this shrinks all the way to FLAT_FLOOR.
+        let flat: Vec<u8> = [128u8, 128, 0, 255].repeat((w * h) as usize);
+        let src = ktx2(37, w, h, &[flat], 0);
+        let free = image::load_from_memory(&normal_png(&src, w, &[], FLAT_FLOOR).unwrap().bytes).unwrap();
+        assert_eq!(free.width(), FLAT_FLOOR, "no override: shrinks to the default floor");
+
+        let held = image::load_from_memory(&normal_png(&src, w, &[], 512).unwrap().bytes).unwrap();
+        assert_eq!(held.width(), 512, "a raised floor is never crossed, even for a flat map");
+    }
+
+    /// Same override, for `material_png`: a caller that already knows a
+    /// COMP map's real gloss/metal contrast cannot be told apart from an
+    /// ordinary flat map's own noise by any statistic run over it (see
+    /// `msfs2xp-aircraft`'s `LETTERED_MATERIAL_MAPS`, measured directly
+    /// against FlyByWire's own GLARESHIELD/KEYBOARD/MIP03/MIP_KNOBS_02 COMP
+    /// textures: E:/fbw-debug/fixes/W105.md) can raise `material_png`'s
+    /// `floor` to keep a guaranteed minimum size.
+    #[test]
+    fn material_png_floor_overrides_the_flatness_heuristic() {
+        let (w, h) = (1024u32, 1024u32);
+        // Perfectly flat COMP (roughness/metalness constant everywhere): on
+        // its own this shrinks all the way to FLAT_FLOOR.
+        let flat: Vec<u8> = [10u8, 200, 100, 255].repeat((w * h) as usize);
+        let comp = ktx2(37, w, h, &[flat], 0);
+        let free = image::load_from_memory(&material_png(Some(&comp), w, &[], FLAT_FLOOR).unwrap().bytes).unwrap();
+        assert_eq!(free.width(), FLAT_FLOOR, "no override: shrinks to the default floor");
+
+        let held = image::load_from_memory(&material_png(Some(&comp), w, &[], 512).unwrap().bytes).unwrap();
+        assert_eq!(held.width(), 512, "a raised floor is never crossed, even for a flat COMP map");
     }
 }
