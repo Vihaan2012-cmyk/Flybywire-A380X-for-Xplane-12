@@ -37,6 +37,79 @@ use crate::xp::{self, DataRef, Xplm};
 use crate::Vars;
 
 // ---------------------------------------------------------------------------
+// ECAM Phase 2 (E-FUEL-DESIGN.md D12/D14): CG/weight-disagree and CG-envelope
+// discretes, published here because `efb.rs` is the real owner of every
+// input value (`AIRFRAME_*`/`AIRFRAME_*_DESIRED`), not `deep::fuel`'s own
+// duplicate ledger. See `E-FUEL-DESIGN.md`'s D17 for why an `FbwProc`
+// trigger is allowed to read a plain `efb.rs`-published name at all
+// (`TRIGGER_REAL_OWNER_VARS`, `deep/ecam/fbw_tests.rs`).
+// ---------------------------------------------------------------------------
+
+/// D12, **GENERIC**: how far a crew-entered "desired" ZFW CG figure may sit
+/// from the fully precise computed "actual" one before it counts as a real
+/// disagreement rather than ordinary crew-entry rounding. An
+/// order-of-magnitude "still within rounding" band, the same kind of
+/// reasoned-but-unmeasured figure `deep::fuel::live::WING_IMBALANCE_LIMIT_KG`
+/// already is elsewhere in this crate -- not a cited AMM number.
+const ZFW_CG_DISAGREE_TOLERANCE_PCT: f64 = 0.5;
+/// D12, **GENERIC**: the same reasoning as above, for the weight figure
+/// (typical load-sheet rounding, not a cited AMM number).
+const WEIGHT_DISAGREE_TOLERANCE_KG: f64 = 500.0;
+
+/// D14: the A380-842's real weight/CG performance-envelope polygons,
+/// `[%MAC, weight_kg]` point lists, copied verbatim from
+/// `D:/Microsoft Flight Simulator 2020/.../Community/
+/// flybywire-aircraft-a380-842/config/a380x/a380-842/airframe.json5:65-73`
+/// (read in full for this revision, not taken on trust). This is the
+/// broadest, general in-flight envelope FlyByWire's own flyPad `efb.js` runs
+/// its own "CG Outside Takeoff Envelope"-style point-in-polygon test
+/// against.
+const FLIGHT_ENVELOPE: &[(f64, f64)] = &[(29.0, 270000.0), (28.0, 270000.0), (28.0, 375000.0), (35.0, 510000.0), (44.0, 510000.0), (44.0, 270000.0), (43.0, 270000.0)];
+/// D14: `airframe.json5:58-64`'s `mtow` envelope, used for the predicted
+/// take-off CG/GW check (`281800081`).
+const MTOW_ENVELOPE: &[(f64, f64)] = &[(29.0, 270000.0), (29.0, 375000.0), (35.75, 510000.0), (43.0, 510000.0), (43.0, 270000.0)];
+
+/// D14, **GENERIC**: how close to the `FLIGHT_ENVELOPE`'s forward (low
+/// %MAC) boundary counts as "AT the forward limit" rather than merely
+/// "still in range" -- an early-annunciation band before the real
+/// structural/`CG_OUT_OF_RANGE` limit is actually reached. The underlying
+/// limit itself (the polygon) is real and cited above; only this margin is
+/// a judgement call.
+const FWD_MARGIN_PCT: f64 = 0.5;
+/// D14: the real EXCESS AFT CG trigger, sourced directly rather than a
+/// margin against the envelope's own aft edge: FCOM PRO-ABN-ECAM p.5164,
+/// "The aircraft center of gravity (CG), computed by the Weight and Balance
+/// Backup Computer (WBBC) exceeds 50% while the fuel system is in automatic
+/// mode." This model has no separate WBBC-vs-FQMS CG channel and no
+/// automatic/manual fuel-system-mode discrete, so `AIRFRAME_GW_CG_PERCENT_
+/// MAC` (the one real CG figure this crate publishes) is compared directly
+/// against the FCOM's own number, without the "automatic mode" gate --
+/// simpler and more conservative than a margin against the 43% structural
+/// limit this design used before the FCOM addendum, and a real, cited value
+/// rather than a `FWD_MARGIN_PCT`-style judgement call.
+const AFT_CG_EXCESS_PCT: f64 = 50.0;
+
+/// D14: a standard even-odd ray-casting point-in-polygon test. Not a
+/// fabricated threshold -- a textbook computational-geometry algorithm; the
+/// only real numbers are the polygon points it is fed (`FLIGHT_ENVELOPE`/
+/// `MTOW_ENVELOPE` above, both cited to `airframe.json5`).
+fn point_in_polygon(x: f64, y: f64, poly: &[(f64, f64)]) -> bool {
+    let mut inside = false;
+    let n = poly.len();
+    for i in 0..n {
+        let (x1, y1) = poly[i];
+        let (x2, y2) = poly[(i + 1) % n];
+        if (y1 > y) != (y2 > y) {
+            let x_at_y = x1 + (y - y1) / (y2 - y1) * (x2 - x1);
+            if x < x_at_y {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+// ---------------------------------------------------------------------------
 // Payload, as the flyPad splits it.
 // ---------------------------------------------------------------------------
 
@@ -445,6 +518,14 @@ struct Ids {
     /// zfw, zfw desired, gw, gw desired (kg); zfw, zfw desired, gw, gw desired,
     /// take-off CG (% MAC).
     weights: [VariableIdentifier; 9],
+    // ---- Phase 2 (E-FUEL-DESIGN.md D12/D14) additions: efb.rs-published
+    // discretes an `FbwProc` trigger reads via `TRIGGER_REAL_OWNER_VARS`. ----
+    airframe_zfw_cg_disagree: VariableIdentifier,
+    airframe_weight_disagree: VariableIdentifier,
+    airframe_cg_out_of_range: VariableIdentifier,
+    airframe_cg_at_fwd_limit: VariableIdentifier,
+    airframe_cg_excess_aft: VariableIdentifier,
+    airframe_to_cg_out_of_range: VariableIdentifier,
 }
 
 struct Refs {
@@ -523,6 +604,32 @@ struct Other {
 /// How long X-Plane's GPU flag must hold before a hook or unhook counts.
 const GPU_SETTLE_S: f64 = 2.;
 
+/// How long after a spawn the "aircraft started moving" ground-power
+/// auto-disconnect in `update_ground` may arm. X-Plane settles a freshly
+/// placed aircraft onto its gear over roughly the first one to two
+/// seconds; during that settle `groundspeed` (and so `IS_STATIONARY`)
+/// reads as moving from the settle alone (every kept log:
+/// `A32NX_IS_STATIONARY` stays 0 for up to ~1.7s right after spawn), which
+/// used to satisfy the 1-second "moving" threshold below on its own and
+/// immediately disconnect the ground power a cold start had just
+/// connected (`ext_power_at_start`), blacking out DC ESS -- and every
+/// LGCIU1 discrete gated on it -- until something else repowers the
+/// aircraft. Comfortably past the settle actually observed.
+///
+/// Gated on `spawn::epoch` rather than counted only from `Efb::new`
+/// (W157's review of this guard's first version, fixes/W98.md): `Efb::new`
+/// runs once per plugin session (`XPluginEnable`), but X-Plane does not
+/// reload the plugin for a same-aircraft reposition or restart-flight, so
+/// a guard that only ever reset at construction gave every second-and-
+/// later spawn in the same session no settle protection at all.
+const SPAWN_SETTLE_S: f64 = 3.;
+
+/// Whether `update_ground`'s "aircraft started moving" auto-disconnect may
+/// start counting `moving_for_s`. See `SPAWN_SETTLE_S`.
+fn moving_disconnect_armed(age_s: f64) -> bool {
+    age_s >= SPAWN_SETTLE_S
+}
+
 pub struct Efb {
     ids: Ids,
     refs: Refs,
@@ -543,6 +650,16 @@ pub struct Efb {
     was_moving: bool,
     /// Seconds the aircraft has kept rolling above the moving threshold.
     moving_for_s: f64,
+    /// Seconds since `spawn_epoch_seen` was last (re)detected, gating
+    /// `moving_for_s` against the spawn settle (`SPAWN_SETTLE_S`,
+    /// `moving_disconnect_armed`). Reset to 0 whenever `spawn::epoch()`
+    /// moves past `spawn_epoch_seen`, not just once at `Efb::new` -- see
+    /// `SPAWN_SETTLE_S`'s doc comment.
+    age_s: f64,
+    /// The `spawn::epoch()` value last seen, so a fresh
+    /// `XPLM_MSG_PLANE_LOADED`/`XPLM_MSG_AIRPORT_LOADED` can be told apart
+    /// from every other tick.
+    spawn_epoch_seen: u64,
     /// Seconds until boarding starts after a deboard request (the page's
     /// 500 ms timeout, A380Payload.tsx:483-485).
     deboard_in: Option<f64>,
@@ -672,6 +789,12 @@ impl Efb {
                 "AIRFRAME_TO_CG_PERCENT_MAC",
             ]
             .map(|n| get(n)),
+            airframe_zfw_cg_disagree: get("AIRFRAME_ZFW_CG_DISAGREE"),
+            airframe_weight_disagree: get("AIRFRAME_WEIGHT_DISAGREE"),
+            airframe_cg_out_of_range: get("AIRFRAME_CG_OUT_OF_RANGE"),
+            airframe_cg_at_fwd_limit: get("AIRFRAME_CG_AT_FWD_LIMIT"),
+            airframe_cg_excess_aft: get("AIRFRAME_CG_EXCESS_AFT"),
+            airframe_to_cg_out_of_range: get("AIRFRAME_TO_CG_OUT_OF_RANGE"),
         };
         // The settings' variables keep their own prefixes (A32NX_, A380X_).
         let mut ids = ids;
@@ -703,6 +826,8 @@ impl Efb {
             gpu_raw_for_s: 0.,
             was_moving: false,
             moving_for_s: 0.,
+            age_s: 0.,
+            spawn_epoch_seen: crate::spawn::epoch(),
             deboard_in: None,
             ext_power_at_start: true,
             power_logged: None,
@@ -896,8 +1021,25 @@ impl Efb {
         // starts rather than on every change of speed.
         // X-Plane settles a freshly placed aircraft onto its gear with a
         // moment of ground speed; only a roll kept up for a second is the
-        // aircraft starting to move.
-        self.moving_for_s = if ground_kt > 0.3 { self.moving_for_s + delta } else { 0. };
+        // aircraft starting to move. That settle can itself run past the
+        // 1-second threshold below (every kept log's `A32NX_IS_STATIONARY`
+        // reads 0 for up to ~1.7s right after spawn), so this is also
+        // gated on `moving_disconnect_armed`, which stays false for
+        // `SPAWN_SETTLE_S` after each spawn (`spawn::epoch`, not just
+        // `Efb::new` -- a reposition or restart-flight is a fresh spawn
+        // too, and gets its own grace period the same way) -- otherwise
+        // the settle alone used to disconnect the ground power
+        // `ext_power_at_start` had just connected (every kept log: "ground
+        // power connected for a cold start" immediately followed by
+        // "ground power disconnected").
+        let epoch = crate::spawn::epoch();
+        if epoch != self.spawn_epoch_seen {
+            self.spawn_epoch_seen = epoch;
+            self.age_s = 0.;
+        }
+        self.age_s += delta;
+        self.moving_for_s =
+            if moving_disconnect_armed(self.age_s) && ground_kt > 0.3 { self.moving_for_s + delta } else { 0. };
         let moving = self.moving_for_s >= 1.;
         if moving && !self.was_moving && self.any_ext_power(vars) {
             self.toggle_gpu(vars);
@@ -1200,7 +1342,92 @@ impl Efb {
         for (v, id) in o.weights.iter().zip(&self.ids.weights) {
             published::set(*v, vars.read(id));
         }
+        self.update_cg_checks(vars);
     }
+
+    /// D12/D14: the CG/weight-disagree and CG-envelope discretes, computed
+    /// once here (the real owner of every input) and published as plain
+    /// named variables an `FbwProc` trigger reads through
+    /// `TRIGGER_REAL_OWNER_VARS` (`deep/ecam/fbw_tests.rs`). The arithmetic
+    /// itself lives in the pure, `Vars`-free `cg_checks` below, so it can be
+    /// unit-tested directly (`efb.rs`'s own test module, no `Xplm`/`Vars`
+    /// involved at all -- unlike `Fuel::new`, W89.md's flagged risk this
+    /// design deliberately avoids by never constructing a full `Efb` in a
+    /// test).
+    fn update_cg_checks(&mut self, vars: &mut Vars) {
+        let w = &self.ids.weights;
+        let out = cg_checks(CgInputs {
+            zfw_cg: vars.read(&w[4]),
+            zfw_cg_desired: vars.read(&w[5]),
+            gw: vars.read(&w[2]),
+            gw_desired: vars.read(&w[3]),
+            gw_cg: vars.read(&w[6]),
+            to_cg: vars.read(&w[8]),
+        });
+        vars.write(&self.ids.airframe_zfw_cg_disagree, out.zfw_cg_disagree as i32 as f64);
+        vars.write(&self.ids.airframe_weight_disagree, out.weight_disagree as i32 as f64);
+        vars.write(&self.ids.airframe_cg_out_of_range, out.cg_out_of_range as i32 as f64);
+        vars.write(&self.ids.airframe_to_cg_out_of_range, out.to_cg_out_of_range as i32 as f64);
+        vars.write(&self.ids.airframe_cg_at_fwd_limit, out.cg_at_fwd_limit as i32 as f64);
+        vars.write(&self.ids.airframe_cg_excess_aft, out.cg_excess_aft as i32 as f64);
+    }
+}
+
+/// The five real inputs `update_cg_checks` reads (`AIRFRAME_*`/`AIRFRAME_*_
+/// DESIRED`, `efb.rs`'s own `Ids::weights`), lifted out so the arithmetic
+/// below takes no `Vars`/`Efb` at all.
+struct CgInputs {
+    zfw_cg: f64,
+    zfw_cg_desired: f64,
+    gw: f64,
+    gw_desired: f64,
+    gw_cg: f64,
+    to_cg: f64,
+}
+
+struct CgOutputs {
+    zfw_cg_disagree: bool,
+    weight_disagree: bool,
+    cg_out_of_range: bool,
+    to_cg_out_of_range: bool,
+    cg_at_fwd_limit: bool,
+    cg_excess_aft: bool,
+}
+
+/// D12/D14's pure arithmetic: every `AIRFRAME_*` discrete this Phase 2 pass
+/// adds, from the five real inputs above. No `Vars`/`Xplm` involved, so this
+/// is directly unit-testable (see `cg_checks_tests` below).
+fn cg_checks(i: CgInputs) -> CgOutputs {
+    // D12: crew-entered "desired" vs the fully precise computed "actual"
+    // figure, each strictly beyond its own GENERIC tolerance (a value
+    // sitting exactly on the band is not treated as a fault of arbitrary
+    // sign).
+    let zfw_cg_disagree = (i.zfw_cg - i.zfw_cg_desired).abs() > ZFW_CG_DISAGREE_TOLERANCE_PCT;
+    let weight_disagree = (i.gw - i.gw_desired).abs() > WEIGHT_DISAGREE_TOLERANCE_KG;
+
+    // D14: the real CG-envelope comparator against `airframe.json5`'s own
+    // polygons.
+    let in_flight_envelope = point_in_polygon(i.gw_cg, i.gw, FLIGHT_ENVELOPE);
+    let cg_out_of_range = !in_flight_envelope;
+
+    // `AIRFRAME_GW_DESIRED` (the crew-entered target GW) is the closest real
+    // proxy available for a "predicted take-off gross weight" figure -- no
+    // published FMS-predicted-TOW channel was found. A proxy, not a literal
+    // predicted-TOW channel; flagged in E-FUEL-DESIGN.md D14 for Phase 3 to
+    // confirm or improve.
+    let to_cg_out_of_range = !point_in_polygon(i.to_cg, i.gw_desired, MTOW_ENVELOPE);
+
+    // In-envelope, but a `FWD_MARGIN_PCT` nudge toward lower %MAC would fall
+    // out of it: "close to the forward boundary" for any polygon shape,
+    // without hand-coding which edge is the forward one.
+    let cg_at_fwd_limit = in_flight_envelope && !point_in_polygon(i.gw_cg - FWD_MARGIN_PCT, i.gw, FLIGHT_ENVELOPE);
+
+    // FCOM PRO-ABN-ECAM p.5164's own real number (see `AFT_CG_EXCESS_PCT`'s
+    // doc comment): a direct, cited threshold, not a margin against the
+    // structural aft limit.
+    let cg_excess_aft = i.gw_cg > AFT_CG_EXCESS_PCT;
+
+    CgOutputs { zfw_cg_disagree, weight_disagree, cg_out_of_range, to_cg_out_of_range, cg_at_fwd_limit, cg_excess_aft }
 }
 
 #[cfg(test)]
@@ -1279,6 +1506,15 @@ mod tests {
     }
 
     #[test]
+    fn moving_disconnect_waits_out_the_spawn_settle() {
+        assert!(!moving_disconnect_armed(0.), "must not arm right after a spawn");
+        assert!(!moving_disconnect_armed(1.7), "the settle seen in every kept log must not arm it");
+        assert!(!moving_disconnect_armed(SPAWN_SETTLE_S - 0.01));
+        assert!(moving_disconnect_armed(SPAWN_SETTLE_S));
+        assert!(moving_disconnect_armed(10.), "armed for the rest of that spawn");
+    }
+
+    #[test]
     fn settings_map_as_sync_ts_maps_them() {
         let boarding = &SETTINGS[Efb::setting_index("CONFIG_BOARDING_RATE")];
         assert_eq!(boarding.to_number("REAL"), 2.);
@@ -1294,5 +1530,101 @@ mod tests {
         assert_eq!(pins.to_number(pins.default), (1 | 8 | 64 | 1 << 14 | 1 << 15 | 1 << 16 | 1 << 17 | 1 << 18 | 1 << 19) as f64);
         let ini = write_ini(&[(stored_key("REFUEL_RATE_SETTING"), "2".to_string())].into_iter().collect());
         assert_eq!(parse_ini(&ini).get("A380X_REFUEL_RATE_SETTING").map(String::as_str), Some("2"));
+    }
+
+    // ---- Phase 2 (E-FUEL-DESIGN.md D12/D14) -------------------------------
+
+    fn nominal_inputs() -> CgInputs {
+        // A point well inside every envelope: 35% MAC at 400,000 kg is
+        // inside `FLIGHT_ENVELOPE` and `MTOW_ENVELOPE` alike, comfortably
+        // clear of the 0.5% margins and the 50% aft limit.
+        CgInputs { zfw_cg: 35.0, zfw_cg_desired: 35.0, gw: 400_000.0, gw_desired: 400_000.0, gw_cg: 35.0, to_cg: 35.0 }
+    }
+
+    #[test]
+    fn cg_and_weight_disagree_use_their_own_generic_tolerance_band() {
+        let mut i = nominal_inputs();
+        let healthy = cg_checks(CgInputs { zfw_cg: i.zfw_cg, zfw_cg_desired: i.zfw_cg_desired, gw: i.gw, gw_desired: i.gw_desired, gw_cg: i.gw_cg, to_cg: i.to_cg });
+        assert!(!healthy.zfw_cg_disagree && !healthy.weight_disagree, "matching actual/desired figures must not disagree");
+
+        i.zfw_cg_desired = i.zfw_cg - ZFW_CG_DISAGREE_TOLERANCE_PCT; // exactly at the boundary
+        assert!(!cg_checks(clone_inputs(&i)).zfw_cg_disagree, "exactly at the tolerance boundary is not a fault (strict >, not >=)");
+        i.zfw_cg_desired = i.zfw_cg - ZFW_CG_DISAGREE_TOLERANCE_PCT - 0.01;
+        assert!(cg_checks(clone_inputs(&i)).zfw_cg_disagree, "beyond the tolerance is a fault");
+
+        let mut w = nominal_inputs();
+        w.gw_desired = w.gw - WEIGHT_DISAGREE_TOLERANCE_KG;
+        assert!(!cg_checks(clone_inputs(&w)).weight_disagree, "exactly at the tolerance boundary is not a fault");
+        w.gw_desired = w.gw - WEIGHT_DISAGREE_TOLERANCE_KG - 1.0;
+        assert!(cg_checks(clone_inputs(&w)).weight_disagree, "beyond the tolerance is a fault");
+    }
+
+    #[test]
+    fn cg_out_of_range_uses_the_real_flight_envelope_polygon() {
+        let inside = cg_checks(nominal_inputs());
+        assert!(!inside.cg_out_of_range, "35% MAC at 400,000 kg is inside airframe.json5's own flight envelope");
+
+        let mut outside = nominal_inputs();
+        outside.gw_cg = 10.0; // far forward of every polygon point
+        assert!(cg_checks(clone_inputs(&outside)).cg_out_of_range, "10% MAC is outside the flight envelope on every polygon vertex");
+
+        let mut aft_outside = nominal_inputs();
+        aft_outside.gw_cg = 60.0; // far aft of every polygon point
+        assert!(cg_checks(clone_inputs(&aft_outside)).cg_out_of_range);
+    }
+
+    #[test]
+    fn cg_at_fwd_limit_fires_only_a_margin_before_the_real_forward_edge() {
+        // The flight envelope's forward edge sits at 28% MAC between
+        // 270,000 kg and 375,000 kg (airframe.json5:65-73). At 300,000 kg,
+        // comfortably inside (30%) must be quiet; just inside the margin
+        // (28 + FWD_MARGIN_PCT/2) must fire; already outside (27%) must not
+        // re-fire this id (that is `AIRFRAME_CG_OUT_OF_RANGE`'s own job).
+        let comfortable = cg_checks(CgInputs { zfw_cg: 30.0, zfw_cg_desired: 30.0, gw: 300_000.0, gw_desired: 300_000.0, gw_cg: 30.0, to_cg: 30.0 });
+        assert!(!comfortable.cg_at_fwd_limit && !comfortable.cg_out_of_range);
+
+        let near_fwd = cg_checks(CgInputs { zfw_cg: 28.2, zfw_cg_desired: 28.2, gw: 300_000.0, gw_desired: 300_000.0, gw_cg: 28.2, to_cg: 28.2 });
+        assert!(near_fwd.cg_at_fwd_limit, "28.2% MAC is within the 0.5% margin of the 28% forward edge");
+        assert!(!near_fwd.cg_out_of_range, "still inside the envelope itself");
+
+        let past_fwd = cg_checks(CgInputs { zfw_cg: 27.0, zfw_cg_desired: 27.0, gw: 300_000.0, gw_desired: 300_000.0, gw_cg: 27.0, to_cg: 27.0 });
+        assert!(!past_fwd.cg_at_fwd_limit, "already out of range is AIRFRAME_CG_OUT_OF_RANGE's own alert, not this one");
+        assert!(past_fwd.cg_out_of_range);
+    }
+
+    #[test]
+    fn cg_excess_aft_uses_the_fcom_s_own_50_percent_figure() {
+        let under = cg_checks(CgInputs { zfw_cg: 49.9, zfw_cg_desired: 49.9, gw: 400_000.0, gw_desired: 400_000.0, gw_cg: 49.9, to_cg: 30.0 });
+        assert!(!under.cg_excess_aft, "FCOM PRO-ABN-ECAM p.5164: the trigger is exceeding 50%, not merely close to it");
+        let at = cg_checks(CgInputs { zfw_cg: 50.0, zfw_cg_desired: 50.0, gw: 400_000.0, gw_desired: 400_000.0, gw_cg: 50.0, to_cg: 30.0 });
+        assert!(!at.cg_excess_aft, "strict >, matching the FCOM's own \"exceeds 50%\" wording");
+        let over = cg_checks(CgInputs { zfw_cg: 50.1, zfw_cg_desired: 50.1, gw: 400_000.0, gw_desired: 400_000.0, gw_cg: 50.1, to_cg: 30.0 });
+        assert!(over.cg_excess_aft);
+    }
+
+    #[test]
+    fn to_cg_out_of_range_checks_the_mtow_envelope_against_the_desired_gw_proxy() {
+        let inside = cg_checks(CgInputs { zfw_cg: 35.0, zfw_cg_desired: 35.0, gw: 400_000.0, gw_desired: 400_000.0, gw_cg: 35.0, to_cg: 35.0 });
+        assert!(!inside.to_cg_out_of_range);
+        let outside = cg_checks(CgInputs { zfw_cg: 35.0, zfw_cg_desired: 35.0, gw: 400_000.0, gw_desired: 400_000.0, gw_cg: 35.0, to_cg: 10.0 });
+        assert!(outside.to_cg_out_of_range, "10% MAC take-off CG is outside the mtow envelope on every polygon vertex");
+    }
+
+    /// `CgInputs` derives no `Clone` (kept minimal; nothing else needs one),
+    /// so the tests above that build one variant from another copy it by
+    /// hand.
+    fn clone_inputs(i: &CgInputs) -> CgInputs {
+        CgInputs { zfw_cg: i.zfw_cg, zfw_cg_desired: i.zfw_cg_desired, gw: i.gw, gw_desired: i.gw_desired, gw_cg: i.gw_cg, to_cg: i.to_cg }
+    }
+
+    #[test]
+    fn point_in_polygon_matches_the_real_flight_envelope_shape() {
+        // A textbook even-odd ray-casting sanity check against the exact
+        // polygon this design cites (airframe.json5:65-73): a point clearly
+        // inside, one clearly outside on each side, and one on a vertex.
+        assert!(point_in_polygon(35.0, 400_000.0, FLIGHT_ENVELOPE));
+        assert!(!point_in_polygon(0.0, 400_000.0, FLIGHT_ENVELOPE));
+        assert!(!point_in_polygon(100.0, 400_000.0, FLIGHT_ENVELOPE));
+        assert!(!point_in_polygon(35.0, 1_000_000.0, FLIGHT_ENVELOPE), "above every polygon point's weight");
     }
 }

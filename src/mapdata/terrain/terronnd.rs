@@ -145,9 +145,9 @@ pub struct Frame {
 ///
 /// `rgba` is `Arc<[u8]>` rather than `Vec<u8>` so a consumer that only wants
 /// a shared, read-only handle (e.g. the XPHFBW screen compositor's
-/// `mapdata::terrain_layer`/`wxr::layer`, docs on those functions) can clone
+/// `mapdata::terrain_layer`, docs on that function) can clone
 /// it for free instead of copying the buffer; the pixels are never mutated
-/// again once a `Display::render`/wxr `rebuild` finishes building them.
+/// again once a `Display::render` finishes building them.
 pub struct NativeImage {
     pub width: u32,
     pub height: u32,

@@ -109,6 +109,12 @@ const APU_FIRE_MAX_HEAT_W: f64 = 300_000.0;
 const APU_FIRE_MAX_SMOKE_KG_S: f64 = 0.008;
 const LAVATORY_FIRE_MAX_HEAT_W: f64 = 20_000.0;
 const LAVATORY_FIRE_MAX_SMOKE_KG_S: f64 = 0.002;
+/// ECAM completeness pass (E-FIRE §D/§E), matching `registry.rs`'s own
+/// same-named constants (self-contained-module convention, module doc).
+const AVNCS_FIRE_MAX_HEAT_W: f64 = 20_000.0;
+const AVNCS_FIRE_MAX_SMOKE_KG_S: f64 = 0.002;
+const LDCR_FIRE_MAX_HEAT_W: f64 = 20_000.0;
+const LDCR_FIRE_MAX_SMOKE_KG_S: f64 = 0.002;
 const APU_DUCT_LEAK_MAX_HEAT_W: f64 = 25_000.0;
 
 /// Wing/nacelle anti-ice duct bore, m: the WAI duct diameter
@@ -317,6 +323,13 @@ pub struct ThermalZonesLive {
     /// door is free. A jam freezes the door where it is; it does not move
     /// it (`registry.rs`, ATA 32).
     gear_door_jammed_at: [Option<f64>; 3],
+    // ---- ECAM-completeness additions (E-AIR-DESIGN.md, ATA 21 AIR/VENT).
+    // Independent LRU faults, not part of the zone thermal network -- same
+    // shape as `pneumatic_ducts::live`'s own additions.
+    fwd_cargo_trv_fault: f64,
+    ths_bay_vent_fault: f64,
+    bulk_cargo_duct_temp_c: f64,
+    trim_air_duct_temp_c: f64,
 }
 
 impl Default for ThermalZonesLive {
@@ -342,7 +355,7 @@ impl ThermalZonesLive {
             })
             .collect();
         let damage_vars = a380.damage.components.iter().map(|c| format!("THERMAL_COMPONENT_{}_DAMAGE", c.name.to_uppercase())).collect();
-        Self { a380, zone_vars, damage_vars, gear_door_jammed_at: [None; 3] }
+        Self { a380, zone_vars, damage_vars, gear_door_jammed_at: [None; 3], fwd_cargo_trv_fault: 0.0, ths_bay_vent_fault: 0.0, bulk_cargo_duct_temp_c: 20.0, trim_air_duct_temp_c: 20.0 }
     }
 
     /// Whether the electric ventilation fans have a bus to run on
@@ -417,6 +430,22 @@ impl ThermalZonesLive {
                 self.a380.network.inject_heat_w(zone, severity * LAVATORY_FIRE_MAX_HEAT_W);
                 self.a380.network.inject_smoke_kg_s(zone, severity * LAVATORY_FIRE_MAX_SMOKE_KG_S);
             }
+        }
+
+        // ECAM completeness pass (E-FIRE §D/§E): the aft/main/upper
+        // avionics bays' equipment fires, and the FWD Lower Crew Rest
+        // module's own furnishings/waste-bin fire.
+        for (zone, id) in [(z.aft_avionics, f(26, 11)), (z.main_avionics, f(26, 12)), (z.upper_avionics, f(26, 13))] {
+            let severity = faults.get(id);
+            if severity > 0.0 {
+                self.a380.network.inject_heat_w(zone, severity * AVNCS_FIRE_MAX_HEAT_W);
+                self.a380.network.inject_smoke_kg_s(zone, severity * AVNCS_FIRE_MAX_SMOKE_KG_S);
+            }
+        }
+        let ldcr = faults.get(f(26, 14));
+        if ldcr > 0.0 {
+            self.a380.network.inject_heat_w(z.fwd_lower_crew_rest, ldcr * LDCR_FIRE_MAX_HEAT_W);
+            self.a380.network.inject_smoke_kg_s(z.fwd_lower_crew_rest, ldcr * LDCR_FIRE_MAX_SMOKE_KG_S);
         }
     }
 
@@ -559,6 +588,31 @@ impl crate::deep::live::Area for ThermalZonesLive {
         let outside = Self::outside_air(truth);
         self.a380.network.step(truth.dt_s, &outside, solar_flux_w_m2(truth));
         self.a380.damage.update(&self.a380.network, truth.dt_s);
+
+        // ---- ECAM-completeness additions (E-AIR-DESIGN.md). ata=21, n=8/9
+        // -- the highest existing ata=21 id in this area's own registry is
+        // 7 (`registry.rs`), so these do not collide.
+        self.fwd_cargo_trv_fault = faults.get(f(21, 8));
+        self.ths_bay_vent_fault = faults.get(f(21, 9));
+
+        // 211800024/028, ata=21 n=10/11: the bulk cargo heater duct and the
+        // cockpit/cabin trim-air duct each get their own overheat, modelled
+        // the same way `pneumatic_ducts`' pack ACM overheat is (this pass):
+        // a real, already-computed zone air temperature (this area's own
+        // thermal network, not invented) plus a fault-driven excess. The
+        // duct itself has no thermal node of its own in this network or in
+        // `a380_systems` (the design sheet's own finding), so the duct's
+        // real outlet air is approximated by the zone it feeds -- **the
+        // only cited numbers are the FCOM's own 70 C trips** (E-AIR-
+        // FCOM.json 211800024/211800028, FCOM p.4669/p.4675), applied in
+        // `fbw/ata21_22_23.rs`, not here. The +120 C excess at full fault is
+        // GENERIC (no public duct-overheat magnitude exists to cite),
+        // chosen only to clear 70 C from any realistic zone baseline.
+        const DUCT_OVERHEAT_EXCESS_C: f64 = 120.0;
+        let bulk_cargo_duct_overheat = faults.get(f(21, 10));
+        self.bulk_cargo_duct_temp_c = self.a380.network.air_temp_c(self.a380.zones.cargo_bulk) + bulk_cargo_duct_overheat * DUCT_OVERHEAT_EXCESS_C;
+        let trim_air_duct_overheat = faults.get(f(21, 11));
+        self.trim_air_duct_temp_c = self.a380.network.air_temp_c(self.a380.zones.cabin_main_deck) + trim_air_duct_overheat * DUCT_OVERHEAT_EXCESS_C;
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -570,6 +624,10 @@ impl crate::deep::live::Area for ThermalZonesLive {
         for (i, name) in self.damage_vars.iter().enumerate() {
             out(name, self.a380.damage.damage_fraction(i));
         }
+        out("DEEP_THERM_FWD_CARGO_TRV_FAULT", self.fwd_cargo_trv_fault);
+        out("DEEP_THERM_THS_BAY_VENT_FAULT", self.ths_bay_vent_fault);
+        out("DEEP_THERM_BULK_CARGO_DUCT_TEMPERATURE_C", self.bulk_cargo_duct_temp_c);
+        out("DEEP_THERM_TRIM_AIR_DUCT_TEMPERATURE_C", self.trim_air_duct_temp_c);
     }
 }
 
@@ -625,7 +683,13 @@ mod tests {
         for name in required {
             assert!(map.contains_key(name), "{name} is read by an ECAM trigger but never published");
         }
-        assert_eq!(map.len(), 26 * 3 + 5, "26 zones x 3 variables plus the 5 registered thermal components");
+        // +4 for the ECAM-completeness additions (E-AIR-DESIGN.md):
+        // DEEP_THERM_FWD_CARGO_TRV_FAULT, DEEP_THERM_THS_BAY_VENT_FAULT,
+        // DEEP_THERM_BULK_CARGO_DUCT_TEMPERATURE_C, DEEP_THERM_TRIM_AIR_
+        // DUCT_TEMPERATURE_C; and two new zones (E-FIRE §D/§E: Aft
+        // Avionics, FWD Lower Crew Rest), 26 -> 28 --
+        // `topology_a380::tests::zone_count_matches_the_named_topology`.
+        assert_eq!(map.len(), 28 * 3 + 5 + 4, "28 zones x 3 variables plus the 5 registered thermal components plus the 4 ECAM-completeness additions");
     }
 
     #[test]

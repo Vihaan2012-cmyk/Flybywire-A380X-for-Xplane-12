@@ -82,6 +82,7 @@ pub mod ata21_22_23;
 pub mod ata24;
 pub mod ata26;
 pub mod ata27;
+pub mod ata46_49_52_56;
 pub mod ata28;
 pub mod ata29;
 pub mod ata31_33;
@@ -261,6 +262,7 @@ pub fn wirings() -> Vec<FbwProc> {
     ata24::wire(&mut v);
     ata26::wire(&mut v);
     ata27::wire(&mut v);
+    ata46_49_52_56::wire(&mut v);
     ata28::wire(&mut v);
     ata29::wire(&mut v);
     ata31_33::wire(&mut v);

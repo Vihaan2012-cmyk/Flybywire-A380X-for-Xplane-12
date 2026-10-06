@@ -279,6 +279,24 @@ struct Ids {
     jettison_nozzle: [u64; 2],
     tank_leak: [u64; N_TANKS],
     gallery_leak: [u64; 2],
+    // Phase 2 (E-FUEL-DESIGN.md D1-D17) additions.
+    apu_feed_pump: u64,
+    apu_feed_valve: u64,
+    eng_lp_valve: [u64; N_ENGINES],
+    feed_main: [u64; N_ENGINES],
+    feed_stby: [u64; N_ENGINES],
+    /// `[left, right]` for each wing-pump group.
+    wing_outer: [u64; 2],
+    wing_mid_fwd: [u64; 2],
+    wing_mid_aft: [u64; 2],
+    wing_inner_fwd: [u64; 2],
+    wing_inner_aft: [u64; 2],
+    leak_detector_fault: u64,
+    fqdc: [u64; 2],
+    fqms: [u64; 2],
+    seq_norm: u64,
+    seq_altn: u64,
+    wb_backup: u64,
 }
 
 /// The one failure on `component` whose registered `model_field` contains
@@ -357,9 +375,35 @@ impl Ids {
             jettison_nozzle: [fid(&reg, "28_fuel.nozzle.jettison_left", "effective_cda_m2"), fid(&reg, "28_fuel.nozzle.jettison_right", "effective_cda_m2")],
             tank_leak,
             gallery_leak: [fid(&reg, "28_fuel.gallery.forward", "gallery_leak_fraction"), fid(&reg, "28_fuel.gallery.aft", "gallery_leak_fraction")],
+            apu_feed_pump: fid(&reg, "28_fuel.pump.apu_feed", "apu_feed_pump_degradation"),
+            apu_feed_valve: fid(&reg, "28_fuel.valve.apu_feed", "JettisonValve"),
+            eng_lp_valve: std::array::from_fn(|i| fid(&reg, &format!("28_fuel.valve.eng_lp.{}", i + 1), "JettisonValve")),
+            feed_main: std::array::from_fn(|i| fid(&reg, &format!("28_fuel.pump.feed_main.{}", i + 1), "feed_pump_degradation")),
+            feed_stby: std::array::from_fn(|i| fid(&reg, &format!("28_fuel.pump.feed_stby.{}", i + 1), "feed_pump_degradation")),
+            wing_outer: [fid(&reg, "28_fuel.pump.outer.left", "pump_degradation_fraction"), fid(&reg, "28_fuel.pump.outer.right", "pump_degradation_fraction")],
+            wing_mid_fwd: [fid(&reg, "28_fuel.pump.mid_fwd.left", "pump_degradation_fraction"), fid(&reg, "28_fuel.pump.mid_fwd.right", "pump_degradation_fraction")],
+            wing_mid_aft: [fid(&reg, "28_fuel.pump.mid_aft.left", "pump_degradation_fraction"), fid(&reg, "28_fuel.pump.mid_aft.right", "pump_degradation_fraction")],
+            wing_inner_fwd: [fid(&reg, "28_fuel.pump.inner_fwd.left", "pump_degradation_fraction"), fid(&reg, "28_fuel.pump.inner_fwd.right", "pump_degradation_fraction")],
+            wing_inner_aft: [fid(&reg, "28_fuel.pump.inner_aft.left", "pump_degradation_fraction"), fid(&reg, "28_fuel.pump.inner_aft.right", "pump_degradation_fraction")],
+            leak_detector_fault: fid(&reg, "28_fuel.leak_detector", "LeakDetector"),
+            fqdc: [fid(&reg, "28_fuel.computer.fqdc.1", "fqms_low_confidence"), fid(&reg, "28_fuel.computer.fqdc.2", "fqms_low_confidence")],
+            fqms: [fid(&reg, "28_fuel.computer.fqms.1", "fqms_low_confidence"), fid(&reg, "28_fuel.computer.fqms.2", "fqms_low_confidence")],
+            seq_norm: fid(&reg, "28_fuel.computer.transfer_sequencer", "transfer_sequencer_norm_fault"),
+            seq_altn: fid(&reg, "28_fuel.computer.transfer_sequencer", "transfer_sequencer_altn_fault"),
+            wb_backup: fid(&reg, "28_fuel.computer.wb_backup", "wb_backup_fault"),
         }
     }
 }
+
+/// GENERIC, shared by every pump/valve *direct reading* fault this Phase 2
+/// pass adds (D1-D4, D12's individual crossfeed valves): the same
+/// well-clear-of-normal-wear reasoning `ata28.rs`'s own `PUMP_FAILED_
+/// FRACTION` already states for the trim pumps, reused here for every other
+/// named pump and for a valve's own stuck fraction where no dynamic
+/// commanded-position model applies (unlike the jettison/APU-feed/engine-LP
+/// valves, which use a commanded-vs-actual-position disagreement instead --
+/// see `tick_valve_position_fault`).
+const COMPONENT_FAULT_FRACTION: f64 = 0.5;
 
 // ---------------------------------------------------------------------------
 // Per-tank state.
@@ -514,6 +558,50 @@ pub struct FuelLive {
     /// long-haul grade `thermal.rs`'s own doc names as what most A380
     /// operators actually load; the crew/dispatch can change it.
     pub fuel_type: FuelType,
+    /// Whether [`Self::sync_from_real`] has already run once. See that
+    /// method's own doc: this ledger's construction-time seed
+    /// (`seed_default_fuel_load`) is a placeholder until the real fuel
+    /// system has published a reading to replace it with, and it must only
+    /// ever be replaced once, not every tick (`tick_transfers`'s own doc
+    /// explains why this ledger does not otherwise track the real one).
+    synced_from_real: bool,
+
+    // ---- Phase 2 (E-FUEL-DESIGN.md) additions -----------------------------
+    apu_feed_valve: JettisonValve,
+    apu_feed_valve_fault: bool,
+    /// FCOM PRO-ABN-ECAM p.5147: `281800004` is specifically the valve
+    /// abnormally *open* (not closed when the APU stopped drawing fuel),
+    /// distinct from p.5146's `281800003` "abnormally closed" -- the same
+    /// commanded-vs-actual-position shape D5's `jettison_valve_not_closed`
+    /// already uses, reused here rather than re-derived.
+    apu_feed_valve_not_closed: bool,
+    apu_feed_pump_fault: bool,
+    eng_lp_valve: [JettisonValve; N_ENGINES],
+    eng_lp_valve_fault: [bool; N_ENGINES],
+    feed_main_fault: [bool; N_ENGINES],
+    feed_stby_fault: [bool; N_ENGINES],
+    /// `[left, right]` for each wing-pump group's own direct fault reading.
+    wing_outer_fault: [bool; 2],
+    wing_mid_fwd_fault: [bool; 2],
+    wing_mid_aft_fault: [bool; 2],
+    wing_inner_fwd_fault: [bool; 2],
+    wing_inner_aft_fault: [bool; 2],
+    leak_detector_self_fault: bool,
+    outer_transfer_fault: bool,
+    jettison_valve_not_closed: [bool; 2],
+    wing_imbalance_kg: f64,
+    wing_imbalance_known: bool,
+    fqdc_fault: [bool; 2],
+    fqms_fault: [bool; 2],
+    transfer_sequencer_norm_fault: bool,
+    transfer_sequencer_altn_fault: bool,
+    wb_backup_fault: bool,
+    crossfeed_valve_fault: [bool; 4],
+    /// D11: one `LeakDetector` per feed tank, resolving a leak to a specific
+    /// engine's own feed line instead of the whole-aircraft aggregate.
+    eng_leak_detectors: [LeakDetector; N_ENGINES],
+    eng_leak_detected: [bool; N_ENGINES],
+    eng_contamination_detected: [bool; N_ENGINES],
 }
 
 impl Default for FuelLive {
@@ -555,6 +643,34 @@ impl FuelLive {
             fuel_cg_ft: 0.0,
             commands: FuelCommands::default(),
             fuel_type: FuelType::JetA1,
+            synced_from_real: false,
+            apu_feed_valve: JettisonValve::new(),
+            apu_feed_valve_fault: false,
+            apu_feed_valve_not_closed: false,
+            apu_feed_pump_fault: false,
+            eng_lp_valve: [JettisonValve::new(); N_ENGINES],
+            eng_lp_valve_fault: [false; N_ENGINES],
+            feed_main_fault: [false; N_ENGINES],
+            feed_stby_fault: [false; N_ENGINES],
+            wing_outer_fault: [false; 2],
+            wing_mid_fwd_fault: [false; 2],
+            wing_mid_aft_fault: [false; 2],
+            wing_inner_fwd_fault: [false; 2],
+            wing_inner_aft_fault: [false; 2],
+            leak_detector_self_fault: false,
+            outer_transfer_fault: false,
+            jettison_valve_not_closed: [false; 2],
+            wing_imbalance_kg: 0.0,
+            wing_imbalance_known: false,
+            fqdc_fault: [false; 2],
+            fqms_fault: [false; 2],
+            transfer_sequencer_norm_fault: false,
+            transfer_sequencer_altn_fault: false,
+            wb_backup_fault: false,
+            crossfeed_valve_fault: [false; 4],
+            eng_leak_detectors: [LeakDetector::new(), LeakDetector::new(), LeakDetector::new(), LeakDetector::new()],
+            eng_leak_detected: [false; N_ENGINES],
+            eng_contamination_detected: [false; N_ENGINES],
         };
         live.seed_default_fuel_load(ambient_c);
         live
@@ -607,6 +723,28 @@ impl FuelLive {
         self.tanks[i].temp_c = temp_c;
         let capacity_kg = self.tanks[i].shape.capacity_m3() * self.tanks[i].density_kg_m3();
         self.tanks[i].mass_kg = kg.max(0.0).min(capacity_kg.max(0.0));
+    }
+
+    /// W216: gives this ledger a real starting point instead of
+    /// [`Self::seed_default_fuel_load`]'s fixed 95%-of-capacity guess, the
+    /// one time a real reading exists to give it one
+    /// (`Truth::fuel_tank_quantity_gal`'s own doc: `None` until
+    /// `src/fuel.rs` has published at least one frame). `gallons` is in
+    /// `ALL_TANKS` order (the same order `Truth::fuel_tank_quantity_gal`
+    /// documents). Deliberately NOT a per-tick resync -- called at most
+    /// once, from [`FuelLive::tick`] -- so this ledger's own burn/transfer/
+    /// leak model (`tick_transfers`'s own doc: no second live
+    /// `fuel_network::FuelNetwork`) runs exactly as it always has
+    /// afterward, and every existing test in this module (none of which
+    /// set `Truth::fuel_tank_quantity_gal`, so it stays `None` for all of
+    /// them) is unaffected.
+    fn sync_from_real(&mut self, gallons: [f64; N_TANKS]) {
+        for (i, &tank) in ALL_TANKS.iter().enumerate() {
+            let density = self.tanks[i].density_kg_m3();
+            let kg = gallons[i].max(0.0) * geometry::GAL_TO_M3 * density;
+            self.load_tank(tank, kg, self.tanks[i].temp_c);
+        }
+        self.synced_from_real = true;
     }
 
     pub fn tank_mass_kg(&self, tank: Tank) -> f64 {
@@ -672,6 +810,15 @@ impl crate::deep::live::Area for FuelLive {
     }
 
     fn tick(&mut self, truth: &Truth, faults: &Faults) {
+        // W216: see `sync_from_real`'s own doc. Runs before anything else
+        // this tick does, so the rest of this function's transfer/burn/
+        // leak/thermal logic (below) acts on the real starting point from
+        // its very first tick, not the construction-time seed.
+        if !self.synced_from_real {
+            if let Some(gallons) = truth.fuel_tank_quantity_gal {
+                self.sync_from_real(gallons);
+            }
+        }
         let dt = truth.dt_s.max(0.0);
         let ambient_pa = truth.environment.ambient_pressure_pa.max(1.0);
         // The wing skin the fuel exchanges heat with is X-Plane's own
@@ -853,7 +1000,50 @@ impl crate::deep::live::Area for FuelLive {
         // by jettison flow while a real leak is also present.
         let metered_flow =
             truth.engine_fuel_flow_kg_s.iter().map(|f| f.max(0.0)).sum::<f64>() + self.commands.apu_fuel_flow_kg_s.max(0.0) + self.jettison_flow_kg_s[0].max(0.0) + self.jettison_flow_kg_s[1].max(0.0);
-        self.leak_detected = self.leak_detector.update(self.indicated_fob_kg, metered_flow, dt, LEAK_WINDOW_S, LEAK_THRESHOLD_KG, LEAK_CONFIRM_WINDOWS);
+        let raw_leak_detected = self.leak_detector.update(self.indicated_fob_kg, metered_flow, dt, LEAK_WINDOW_S, LEAK_THRESHOLD_KG, LEAK_CONFIRM_WINDOWS);
+        // D6: the leak-detection function's own self-fault forces its
+        // result to false regardless of the real discrepancy -- an honest
+        // "detector cannot see a real leak right now" effect, not a
+        // fabricated leak.
+        self.leak_detector_self_fault = faults.get(self.ids.leak_detector_fault) > 0.0;
+        self.leak_detected = raw_leak_detected && !self.leak_detector_self_fault;
+
+        // D11: the same leak-detection principle, resolved to one feed tank
+        // (and so one engine) at a time instead of summed over the whole
+        // aircraft -- the exact constants `LEAK_WINDOW_S`/`LEAK_THRESHOLD_
+        // KG`/`LEAK_CONFIRM_WINDOWS` this file already cites and justifies,
+        // reused verbatim, not re-derived.
+        //
+        // **Known limitation, found while implementing and testing this**
+        // (not present in the aggregate whole-aircraft detector, which is
+        // transfer-invariant): while `tick_transfers`'s own wing-to-feed CG
+        // transfer is actively replenishing this feed tank from its own
+        // side's wing tanks (true whenever that side still has any wing
+        // fuel at all, i.e. most of a normal flight), the transfer-in mass
+        // can mask a real wall leak's effect on this one tank's own
+        // balance, because only `flow` (the engine's own declared burn) is
+        // treated as accounted here -- the transfer-in is not. The
+        // aggregate `FUEL_LEAK_DETECTED` alert (this same file, above) does
+        // not have this gap, since moving mass between compartments cannot
+        // change the whole aircraft's total. Flagged for a Phase 3
+        // improvement (netting the tick's own transfer-in against the
+        // discrepancy before comparing) rather than silently accepted.
+        for eng in 0..N_ENGINES {
+            let idx = Self::feed_tank_index(eng);
+            let indicated = self.tanks[idx].indicated_mass_kg;
+            let flow = truth.engine_fuel_flow_kg_s[eng].max(0.0);
+            self.eng_leak_detected[eng] = self.eng_leak_detectors[eng].update(indicated, flow, dt, LEAK_WINDOW_S, LEAK_THRESHOLD_KG, LEAK_CONFIRM_WINDOWS) && !self.leak_detector_self_fault;
+        }
+
+        // D16: an already-registered, already-published per-engine value
+        // (`filter_water_fraction`) exposed as a ready "detected" discrete,
+        // the same "any nonzero fault reading counts as detected"
+        // convention this file already uses for `baffle_damage_detected`.
+        for eng in 0..N_ENGINES {
+            self.eng_contamination_detected[eng] = self.filter_water_fraction[eng] > 0.0;
+        }
+
+        self.tick_named_units(truth, faults, dt);
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -900,6 +1090,43 @@ impl crate::deep::live::Area for FuelLive {
         }
         for pump in 0..2 {
             out(&format!("FUEL_TRIM_PUMP_DEGRADATION:{}", pump + 1), self.trim_pump_degradation[pump]);
+        }
+
+        // ---- Phase 2 (E-FUEL-DESIGN.md) additions -------------------------
+        out("FUEL_APU_FEED_PUMP_FAULT", b(self.apu_feed_pump_fault));
+        out("FUEL_APU_FEED_VALVE_FAULT", b(self.apu_feed_valve_fault));
+        out("FUEL_APU_FEED_VALVE_NOT_CLOSED", b(self.apu_feed_valve_not_closed));
+        out("FUEL_APU_FEED_VALVE_POSITION", self.apu_feed_valve.position);
+        for eng in 0..N_ENGINES {
+            let n = eng + 1;
+            out(&format!("FUEL_ENG_LP_VALVE_FAULT:{n}"), b(self.eng_lp_valve_fault[eng]));
+            out(&format!("FUEL_FEED_PUMP_FAULT:main_{n}"), b(self.feed_main_fault[eng]));
+            out(&format!("FUEL_FEED_PUMP_FAULT:stby_{n}"), b(self.feed_stby_fault[eng]));
+            out(&format!("FUEL_ENG_LEAK_DETECTED:{n}"), b(self.eng_leak_detected[eng]));
+            out(&format!("FUEL_ENG_CONTAMINATION_DETECTED:{n}"), b(self.eng_contamination_detected[eng]));
+        }
+        for (side, name) in [(0usize, "left"), (1, "right")] {
+            out(&format!("FUEL_WING_PUMP_FAULT:outer_{name}"), b(self.wing_outer_fault[side]));
+            out(&format!("FUEL_WING_PUMP_FAULT:mid_fwd_{name}"), b(self.wing_mid_fwd_fault[side]));
+            out(&format!("FUEL_WING_PUMP_FAULT:mid_aft_{name}"), b(self.wing_mid_aft_fault[side]));
+            out(&format!("FUEL_WING_PUMP_FAULT:inner_fwd_{name}"), b(self.wing_inner_fwd_fault[side]));
+            out(&format!("FUEL_WING_PUMP_FAULT:inner_aft_{name}"), b(self.wing_inner_aft_fault[side]));
+        }
+        out("FUEL_LEAK_DETECTOR_FAULT", b(self.leak_detector_self_fault));
+        out("FUEL_OUTER_TRANSFER_FAULT", b(self.outer_transfer_fault));
+        out("FUEL_JETTISON_VALVE_NOT_CLOSED:1", b(self.jettison_valve_not_closed[0]));
+        out("FUEL_JETTISON_VALVE_NOT_CLOSED:2", b(self.jettison_valve_not_closed[1]));
+        out("FUEL_WING_IMBALANCE_KG", self.wing_imbalance_kg);
+        out("FUEL_WING_IMBALANCE_KNOWN", b(self.wing_imbalance_known));
+        out("FUEL_FQDC_FAULT:1", b(self.fqdc_fault[0]));
+        out("FUEL_FQDC_FAULT:2", b(self.fqdc_fault[1]));
+        out("FUEL_FQMS_FAULT:1", b(self.fqms_fault[0]));
+        out("FUEL_FQMS_FAULT:2", b(self.fqms_fault[1]));
+        out("FUEL_TRANSFER_SEQUENCER_FAULT:norm", b(self.transfer_sequencer_norm_fault));
+        out("FUEL_TRANSFER_SEQUENCER_FAULT:altn", b(self.transfer_sequencer_altn_fault));
+        out("FUEL_WB_BACKUP_FAULT", b(self.wb_backup_fault));
+        for i in 0..4 {
+            out(&format!("FUEL_CROSSFEED_VALVE_FAULT:{}", i + 1), b(self.crossfeed_valve_fault[i]));
         }
     }
 }
@@ -1050,9 +1277,16 @@ impl FuelLive {
         // side's own pump), so both sides run it independently rather than
         // splitting one combined budget between them.
         let sides = [(Tank::LeftInner, Tank::LeftMid, Tank::LeftOuter, [Tank::Feed1, Tank::Feed2]), (Tank::RightInner, Tank::RightMid, Tank::RightOuter, [Tank::Feed3, Tank::Feed4])];
-        for (inner, mid, outer, feeds) in sides {
+        for (side, (inner, mid, outer, feeds)) in sides.into_iter().enumerate() {
             if let Some(src) = self.cg_source_index(inner, mid, outer, outer_retained) {
-                let share = cg_achieved * dt / feeds.len() as f64;
+                // D4's real effect: whichever tank is this side's active
+                // source has its own named pump's health applied as an
+                // extra derate on top of the valve-only `cg_achieved` rate
+                // above (which stays unchanged, so `FUEL_CG_TRANSFER_
+                // DEGRADED`'s own existing trigger is unaffected by this
+                // pass's new pump faults).
+                let pump_derate = 1.0 - self.wing_pump_derate(side, ALL_TANKS[src]);
+                let share = cg_achieved * pump_derate * dt / feeds.len() as f64;
                 for feed in feeds {
                     let feed_idx = ALL_TANKS.iter().position(|&x| x == feed).expect("feed tanks are in ALL_TANKS");
                     self.move_fuel(src, feed_idx, share);
@@ -1171,6 +1405,162 @@ impl FuelLive {
             let valve_disagree = stuck > 0.0 && (position - target).abs() > VALVE_DISAGREE_TOLERANCE;
             let rate_short = commanded && clear_flow > 0.0 && flow < clear_flow * (1.0 - TRANSFER_TOLERANCE);
             self.jettison_fault[side] = valve_disagree || rate_short;
+
+            // D5: the valve has not returned closed when jettison was
+            // deselected -- gated on the same real stuck fault as the fault
+            // monitor above, not on a healthy valve's own 5 s closing
+            // travel (which would otherwise sit above the position
+            // tolerance for nearly the whole confirm window on every normal
+            // deselection).
+            self.jettison_valve_not_closed[side] = stuck > 0.0 && position > VALVE_DISAGREE_TOLERANCE && !commanded;
+        }
+    }
+
+    /// Phase 2 (E-FUEL-DESIGN.md): every named-unit direct reading and
+    /// discrete this pass adds that is not already covered by an existing
+    /// physical loop above. See each `D<n>` reference in the doc comments
+    /// below.
+    fn tick_named_units(&mut self, truth: &Truth, faults: &Faults, dt: f64) {
+        let fault = |frac: f64| frac >= COMPONENT_FAULT_FRACTION;
+
+        // D1: APU feed pump (direct reading) and valve (commanded-vs-actual
+        // position, the same shape `tick_jettison` already uses, gated on
+        // `commands.apu_fuel_flow_kg_s` -- the real, already-existing input
+        // for "is the APU drawing fuel" -- instead of a cockpit switch.
+        self.apu_feed_pump_fault = fault(faults.get(self.ids.apu_feed_pump));
+        let apu_commanded = self.commands.apu_fuel_flow_kg_s > 0.0;
+        let apu_stuck = faults.get(self.ids.apu_feed_valve);
+        self.apu_feed_valve.step(apu_commanded, JETTISON_VALVE_TRAVEL_S, apu_stuck, dt);
+        let apu_target = if apu_commanded { 1.0 } else { 0.0 };
+        self.apu_feed_valve_fault = apu_stuck > 0.0 && (self.apu_feed_valve.position - apu_target).abs() > VALVE_DISAGREE_TOLERANCE;
+        self.apu_feed_valve_not_closed = apu_stuck > 0.0 && self.apu_feed_valve.position > VALVE_DISAGREE_TOLERANCE && !apu_commanded;
+
+        // D2: engine LP (fire) shutoff valves, commanded by the engine
+        // master switch (`Truth::engine_master_on`) -- the real open/close
+        // behaviour `src/fuel.rs`'s own module doc names, cited even though
+        // it lives outside `deep`.
+        for eng in 0..N_ENGINES {
+            let commanded = truth.controls.engine_master_on[eng];
+            let stuck = faults.get(self.ids.eng_lp_valve[eng]);
+            self.eng_lp_valve[eng].step(commanded, JETTISON_VALVE_TRAVEL_S, stuck, dt);
+            let target = if commanded { 1.0 } else { 0.0 };
+            self.eng_lp_valve_fault[eng] = stuck > 0.0 && (self.eng_lp_valve[eng].position - target).abs() > VALVE_DISAGREE_TOLERANCE;
+        }
+
+        // D3: feed-tank main/standby pumps. Direct readings only: this
+        // model's own engine burn (`Truth::engine_fuel_flow_kg_s`) does not
+        // run through pump pressure, so -- like the trim-pump precedent --
+        // there is no further modelled consequence beyond the reading
+        // itself.
+        for eng in 0..N_ENGINES {
+            self.feed_main_fault[eng] = fault(faults.get(self.ids.feed_main[eng]));
+            self.feed_stby_fault[eng] = fault(faults.get(self.ids.feed_stby[eng]));
+        }
+
+        // D4: wing tank transfer pumps, outer/mid/inner, each side. Direct
+        // readings for the ECAM discretes, but a real effect too: whichever
+        // tank `cg_source_index` is drawing from this tick has its own
+        // pump's health applied as an extra derate on the mass actually
+        // moved, on top of the existing valve-only `cg_achieved` rate --
+        // see `tick_transfers`'s own per-side loop, which reads
+        // `wing_pump_derate` below.
+        for side in 0..2 {
+            self.wing_outer_fault[side] = fault(faults.get(self.ids.wing_outer[side]));
+            self.wing_mid_fwd_fault[side] = fault(faults.get(self.ids.wing_mid_fwd[side]));
+            self.wing_mid_aft_fault[side] = fault(faults.get(self.ids.wing_mid_aft[side]));
+            self.wing_inner_fwd_fault[side] = fault(faults.get(self.ids.wing_inner_fwd[side]));
+            self.wing_inner_aft_fault[side] = fault(faults.get(self.ids.wing_inner_aft[side]));
+        }
+
+        // D7: outer-tank transfer fault -- re-classified MODEL from the
+        // prior chapter-level UNSOURCED bucket (E-FUEL-DESIGN.md D7): the
+        // same physical path `cg_transfer.rs`/`registry.rs` already model
+        // and register (`outer_xfer_left`/`_right`), new publish only.
+        self.outer_transfer_fault = fault(faults.get(self.ids.outer_xfer[0])) || fault(faults.get(self.ids.outer_xfer[1]));
+
+        // D9: wing balance status, from the real bridge
+        // (`Truth::fuel_tank_quantity_gal`) rather than this ledger's own
+        // duplicate tanks -- see this file's own module doc and W216.md.
+        // `None` until `src/fuel.rs` has published a reading: both
+        // WINGS_BALANCED/NOT_BALANCED stay silent rather than falling back
+        // to this ledger's own (possibly different) answer.
+        match truth.fuel_tank_quantity_gal {
+            Some(gal) => {
+                let left_kg: f64 = gal[0..5].iter().sum::<f64>() * geometry::GAL_TO_M3 * REFERENCE_DENSITY_15C_KG_M3;
+                let right_kg: f64 = gal[5..10].iter().sum::<f64>() * geometry::GAL_TO_M3 * REFERENCE_DENSITY_15C_KG_M3;
+                self.wing_imbalance_kg = (left_kg - right_kg).abs();
+                self.wing_imbalance_known = true;
+            }
+            None => {
+                self.wing_imbalance_kg = 0.0;
+                self.wing_imbalance_known = false;
+            }
+        }
+
+        // D10: FQDC/FQMS channel faults and the transfer sequencer.
+        // Discrete computer-health verdicts (no numeric threshold), the
+        // same shape `ata24.rs`'s `ELEC_TR_APU_FAULT` already uses. Each
+        // active channel fault also forces its own real, already-modelled
+        // consequence: that channel's own half of the gauging chain loses
+        // confidence, exactly the way a probe/densitometer fault already
+        // does.
+        for ch in 0..2 {
+            self.fqdc_fault[ch] = faults.get(self.ids.fqdc[ch]) > 0.0;
+            self.fqms_fault[ch] = faults.get(self.ids.fqms[ch]) > 0.0;
+            if self.fqdc_fault[ch] || self.fqms_fault[ch] {
+                self.fqms_low_confidence = true;
+            }
+        }
+        self.transfer_sequencer_norm_fault = faults.get(self.ids.seq_norm) > 0.0;
+        self.transfer_sequencer_altn_fault = faults.get(self.ids.seq_altn) > 0.0;
+
+        // D12: the four crossfeed valves, individually (retires the old
+        // `FUEL_IMBALANCE_XFEED_FAULT` aggregate, `registry.rs`), and the
+        // weight & balance backup computation fault (a discrete health
+        // verdict, the same D10 pattern).
+        for i in 0..4 {
+            self.crossfeed_valve_fault[i] = fault(faults.get(self.ids.crossfeed[i]));
+        }
+        self.wb_backup_fault = faults.get(self.ids.wb_backup) > 0.0;
+    }
+
+    /// D4's real effect: the pump derate on top of `cg_achieved`'s existing
+    /// valve-only rate, for whichever tank `cg_source_index` chose as this
+    /// side's source this tick. `None` (no derate) once `src` is not one of
+    /// the three named groups -- it always is, `cg_source_index` only ever
+    /// returns `inner`/`mid`/`outer`'s own index.
+    fn wing_pump_derate(&self, side: usize, src_tank: Tank) -> f64 {
+        let d = match src_tank {
+            Tank::LeftOuter | Tank::RightOuter => self.wing_outer_health(side),
+            Tank::LeftMid | Tank::RightMid => self.wing_mid_health(side),
+            Tank::LeftInner | Tank::RightInner => self.wing_inner_health(side),
+            _ => 0.0,
+        };
+        d.clamp(0.0, 1.0)
+    }
+    fn wing_outer_health(&self, side: usize) -> f64 {
+        if self.wing_outer_fault[side] {
+            1.0
+        } else {
+            0.0
+        }
+    }
+    fn wing_mid_health(&self, side: usize) -> f64 {
+        // Two pumps in parallel (fwd/aft): both must be faulted for the
+        // path to lose flow, the same redundancy the trim pumps already
+        // model (`tick_transfers`'s own `trim_pump_loss`, the *healthier*
+        // of the two).
+        if self.wing_mid_fwd_fault[side] && self.wing_mid_aft_fault[side] {
+            1.0
+        } else {
+            0.0
+        }
+    }
+    fn wing_inner_health(&self, side: usize) -> f64 {
+        if self.wing_inner_fwd_fault[side] && self.wing_inner_aft_fault[side] {
+            1.0
+        } else {
+            0.0
         }
     }
 }
@@ -1691,6 +2081,23 @@ mod tests {
         consumed.extend(ids.jettison_nozzle);
         consumed.extend(ids.tank_leak);
         consumed.extend(ids.gallery_leak);
+        // Phase 2 (E-FUEL-DESIGN.md) additions.
+        consumed.push(ids.apu_feed_pump);
+        consumed.push(ids.apu_feed_valve);
+        consumed.extend(ids.eng_lp_valve);
+        consumed.extend(ids.feed_main);
+        consumed.extend(ids.feed_stby);
+        consumed.extend(ids.wing_outer);
+        consumed.extend(ids.wing_mid_fwd);
+        consumed.extend(ids.wing_mid_aft);
+        consumed.extend(ids.wing_inner_fwd);
+        consumed.extend(ids.wing_inner_aft);
+        consumed.push(ids.leak_detector_fault);
+        consumed.extend(ids.fqdc);
+        consumed.extend(ids.fqms);
+        consumed.push(ids.seq_norm);
+        consumed.push(ids.seq_altn);
+        consumed.push(ids.wb_backup);
         consumed.sort_unstable();
         consumed.dedup();
 
@@ -1933,5 +2340,364 @@ mod tests {
         for &t in ALL_TANKS.iter() {
             assert!(live.tank_mass_kg(t) >= 0.0, "{t:?} must never go negative: {}", live.tank_mass_kg(t));
         }
+    }
+
+    /// [`FuelLive::sync_from_real`] (W216): a real reading replaces the
+    /// construction-time 95%-of-capacity seed exactly once, then this
+    /// ledger's own transfer/burn/leak model runs unmodified -- a second,
+    /// very different real reading on a later tick must not re-apply.
+    /// `Truth::default()` (every other test in this file) carries `None`
+    /// for `fuel_tank_quantity_gal`, so none of them exercise this path.
+    #[test]
+    fn a_real_reading_replaces_the_construction_seed_exactly_once() {
+        let mut live = FuelLive::new();
+        let seeded_feed1 = live.tank_mass_kg(Tank::Feed1);
+
+        // A real dispatch load nothing like the 95% seed: every tank at
+        // 10% of its own capacity.
+        let mut real = [0.0; N_TANKS];
+        for (i, &tank) in ALL_TANKS.iter().enumerate() {
+            real[i] = TankShape::of(tank).capacity_gal * 0.1;
+        }
+        let mut truth = Truth::default();
+        truth.dt_s = 1.0;
+        truth.fuel_tank_quantity_gal = Some(real);
+        live.tick(&truth, &Faults::default());
+        let synced_feed1 = live.tank_mass_kg(Tank::Feed1);
+        assert!(
+            synced_feed1 < seeded_feed1 * 0.5,
+            "a real reading must replace the seed, not add to it: seed {seeded_feed1} kg, after sync {synced_feed1} kg"
+        );
+
+        // A second, very different real reading must not re-apply: the
+        // sync is one-shot.
+        for (i, &tank) in ALL_TANKS.iter().enumerate() {
+            real[i] = TankShape::of(tank).capacity_gal * 0.95;
+        }
+        truth.fuel_tank_quantity_gal = Some(real);
+        live.tick(&truth, &Faults::default());
+        let after_second_reading = live.tank_mass_kg(Tank::Feed1);
+        assert!(
+            after_second_reading < seeded_feed1 * 0.5,
+            "a second real reading must not re-sync: {after_second_reading} kg (would jump back near the original 95% seed if it wrongly did)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2 (E-FUEL-DESIGN.md): named-unit model tests.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apu_feed_pump_fault_fires_on_pump_degradation_and_not_on_a_cold_aircraft() {
+        let mut live = FuelLive::new();
+        let id = live.ids.apu_feed_pump;
+        let healthy = run(&mut live, &Truth::default(), &Faults::default(), 1.0);
+        assert_eq!(healthy.get("FUEL_APU_FEED_PUMP_FAULT"), Some(&0.0));
+
+        let mut live = FuelLive::new();
+        let out = run(&mut live, &Truth::default(), &Faults::from_pairs([(id, 1.0)]), 1.0);
+        assert_eq!(out.get("FUEL_APU_FEED_PUMP_FAULT"), Some(&1.0), "a degraded APU feed pump must raise its own fault reading");
+    }
+
+    #[test]
+    fn apu_feed_valve_stuck_open_fires_and_not_when_commanded_open() {
+        let mut live = FuelLive::new();
+        let id = live.ids.apu_feed_valve;
+        live.commands.apu_fuel_flow_kg_s = 5.0; // APU drawing fuel: valve commanded open.
+        // Fully open first, healthy, then seize it at the fully-open
+        // position it was already commanded to: not a disagreement. The
+        // valve takes JETTISON_VALVE_TRAVEL_S (5 s) to reach fully open, so
+        // this must run past that many real seconds, not merely many ticks.
+        for _ in 0..200 {
+            live.tick(&Truth::default(), &Faults::default());
+        }
+        for _ in 0..5 {
+            live.tick(&Truth::default(), &Faults::from_pairs([(id, 1.0)]));
+        }
+        let commanded_open = published(&live);
+        assert_eq!(commanded_open.get("FUEL_APU_FEED_VALVE_FAULT"), Some(&0.0), "a valve stuck at the position it was already commanded to is not a disagreement");
+
+        let mut live = FuelLive::new();
+        live.commands.apu_fuel_flow_kg_s = 5.0;
+        let id = live.ids.apu_feed_valve;
+        // Open the valve first (healthy) well past VALVE_DISAGREE_TOLERANCE
+        // (0.05), then seize it there, then stop the APU drawing fuel: the
+        // valve cannot follow the command to shut.
+        for _ in 0..75 {
+            live.tick(&Truth::default(), &Faults::default());
+        }
+        let armed = Faults::from_pairs([(id, 1.0)]);
+        live.tick(&Truth::default(), &armed);
+        live.commands.apu_fuel_flow_kg_s = 0.0;
+        for _ in 0..50 {
+            live.tick(&Truth::default(), &armed);
+        }
+        let out = published(&live);
+        assert_eq!(out.get("FUEL_APU_FEED_VALVE_FAULT"), Some(&1.0), "a valve stuck open after the APU stops drawing fuel must raise a fault");
+
+        let mut cold = FuelLive::new();
+        let cold_out = run(&mut cold, &Truth::default(), &Faults::from_pairs([(id, 1.0)]), 5.0);
+        assert_eq!(cold_out.get("FUEL_APU_FEED_VALVE_FAULT"), Some(&0.0), "the APU never commanded open, so the valve never moved and never disagrees");
+    }
+
+    #[test]
+    fn engine_lp_valve_fault_fires_per_engine_on_a_command_disagreement() {
+        let mut live = FuelLive::new();
+        let truth = Truth { controls: crate::deep::live::Controls { engine_master_on: [true; 4], ..Default::default() }, ..Truth::default() };
+        let id = live.ids.eng_lp_valve[1]; // engine 2
+        // Open well past VALVE_DISAGREE_TOLERANCE (0.05) before seizing it:
+        // the valve takes JETTISON_VALVE_TRAVEL_S (5 s) to travel fully.
+        for _ in 0..75 {
+            live.tick(&truth, &Faults::default());
+        }
+        let armed = Faults::from_pairs([(id, 1.0)]);
+        let off = Truth { controls: crate::deep::live::Controls { engine_master_on: [true, false, true, true], ..Default::default() }, ..Truth::default() };
+        for _ in 0..50 {
+            live.tick(&off, &armed);
+        }
+        let out = published(&live);
+        assert_eq!(out.get("FUEL_ENG_LP_VALVE_FAULT:2"), Some(&1.0), "engine 2's own LP valve must disagree once its master is off but the valve stays open");
+        assert_eq!(out.get("FUEL_ENG_LP_VALVE_FAULT:1"), Some(&0.0));
+        assert_eq!(out.get("FUEL_ENG_LP_VALVE_FAULT:3"), Some(&0.0));
+
+        let cold = run(&mut FuelLive::new(), &Truth::default(), &Faults::from_pairs([(id, 1.0)]), 5.0);
+        assert_eq!(cold.get("FUEL_ENG_LP_VALVE_FAULT:2"), Some(&0.0), "master never commanded on, so the valve never moved and never disagrees");
+    }
+
+    #[test]
+    fn feed_pump_faults_are_direct_readings_per_pump_and_silent_when_healthy() {
+        let mut live = FuelLive::new();
+        let main_id = live.ids.feed_main[2]; // feed tank 3's main pump
+        let healthy = run(&mut live, &Truth::default(), &Faults::default(), 1.0);
+        assert_eq!(healthy.get("FUEL_FEED_PUMP_FAULT:main_3"), Some(&0.0));
+
+        let mut live = FuelLive::new();
+        let out = run(&mut live, &Truth::default(), &Faults::from_pairs([(main_id, 1.0)]), 1.0);
+        assert_eq!(out.get("FUEL_FEED_PUMP_FAULT:main_3"), Some(&1.0));
+        assert_eq!(out.get("FUEL_FEED_PUMP_FAULT:stby_3"), Some(&0.0), "the standby pump is untouched");
+    }
+
+    #[test]
+    fn a_faulted_wing_pump_is_read_directly_and_throttles_the_real_transfer_it_serves() {
+        // registry.rs: the outer-tank pump's own real effect is on
+        // `tick_transfers`'s per-side CG-transfer source selection.
+        let mut clear = FuelLive::new();
+        full_tanks(&mut clear, 10.0);
+        let clear_out = run(&mut clear, &Truth::default(), &Faults::default(), 5.0);
+
+        let mut faulted = FuelLive::new();
+        full_tanks(&mut faulted, 10.0);
+        let id = faulted.ids.wing_outer[0]; // left outer pump
+        let faulted_out = run(&mut faulted, &Truth::default(), &Faults::from_pairs([(id, 1.0)]), 5.0);
+        assert_eq!(faulted_out.get("FUEL_WING_PUMP_FAULT:outer_left"), Some(&1.0));
+        assert_eq!(clear_out.get("FUEL_WING_PUMP_FAULT:outer_left"), Some(&0.0));
+
+        // With every wing tank full, the outer tanks are retained (not yet
+        // the active source), so this fault has nothing to throttle *yet* --
+        // this only proves the reading is direct and per-pump, not that the
+        // real effect drove a specific mass difference (a full-flight-length
+        // scenario is unit-tested through `cg_source_index`/`achieved_
+        // transfer_rate_kg_s` directly instead, both already covered
+        // elsewhere in this module and in `cg_transfer.rs`).
+        let mut healthy_mid = FuelLive::new();
+        healthy_mid.load_tank(Tank::LeftInner, 0.0, 10.0);
+        healthy_mid.load_tank(Tank::LeftMid, TankShape::of(Tank::LeftMid).capacity_m3() * REFERENCE_DENSITY_15C_KG_M3 * 0.5, 10.0);
+        healthy_mid.load_tank(Tank::LeftOuter, TankShape::of(Tank::LeftOuter).capacity_m3() * REFERENCE_DENSITY_15C_KG_M3 * 0.5, 10.0);
+        for t in [Tank::Feed1, Tank::Feed2, Tank::Feed3, Tank::Feed4, Tank::RightInner, Tank::RightMid, Tank::RightOuter, Tank::Trim] {
+            healthy_mid.load_tank(t, 0.0, 10.0);
+        }
+        let before = healthy_mid.tank_mass_kg(Tank::LeftMid);
+        let healthy_run = run(&mut healthy_mid, &Truth::default(), &Faults::default(), 30.0);
+        let after_healthy = healthy_mid.tank_mass_kg(Tank::LeftMid);
+        let _ = healthy_run;
+
+        let mut faulted_mid = FuelLive::new();
+        faulted_mid.load_tank(Tank::LeftInner, 0.0, 10.0);
+        faulted_mid.load_tank(Tank::LeftMid, TankShape::of(Tank::LeftMid).capacity_m3() * REFERENCE_DENSITY_15C_KG_M3 * 0.5, 10.0);
+        faulted_mid.load_tank(Tank::LeftOuter, TankShape::of(Tank::LeftOuter).capacity_m3() * REFERENCE_DENSITY_15C_KG_M3 * 0.5, 10.0);
+        for t in [Tank::Feed1, Tank::Feed2, Tank::Feed3, Tank::Feed4, Tank::RightInner, Tank::RightMid, Tank::RightOuter, Tank::Trim] {
+            faulted_mid.load_tank(t, 0.0, 10.0);
+        }
+        let fwd_id = faulted_mid.ids.wing_mid_fwd[0];
+        let aft_id = faulted_mid.ids.wing_mid_aft[0];
+        let _ = run(&mut faulted_mid, &Truth::default(), &Faults::from_pairs([(fwd_id, 1.0), (aft_id, 1.0)]), 30.0);
+        let after_faulted = faulted_mid.tank_mass_kg(Tank::LeftMid);
+
+        assert!(before > after_healthy, "the mid tank must actually drain when it is the active CG-transfer source");
+        assert!(after_faulted > after_healthy, "both mid pumps faulted must slow the real transfer out of the mid tank: {after_faulted} kg drained vs {after_healthy} kg healthy");
+    }
+
+    #[test]
+    fn leak_detector_self_fault_suppresses_the_aggregate_leak_alert_but_fires_its_own() {
+        let mut live = FuelLive::new();
+        full_tanks(&mut live, 10.0);
+        let detector_fault_id = live.ids.leak_detector_fault;
+        let leak_id = live.ids.tank_leak[1]; // feed 1
+        let out = run(&mut live, &Truth::default(), &Faults::from_pairs([(detector_fault_id, 1.0), (leak_id, 1.0)]), 200.0);
+        assert_eq!(out.get("FUEL_LEAK_DETECTOR_FAULT"), Some(&1.0));
+        assert_eq!(out.get("FUEL_LEAK_DETECTED"), Some(&0.0), "the detector's own fault must suppress the real leak it can no longer see");
+
+        let mut healthy_detector = FuelLive::new();
+        full_tanks(&mut healthy_detector, 10.0);
+        let healthy_out = run(&mut healthy_detector, &Truth::default(), &Faults::from_pairs([(leak_id, 1.0)]), 200.0);
+        assert_eq!(healthy_out.get("FUEL_LEAK_DETECTED"), Some(&1.0), "the same leak must still be caught with the detector itself healthy");
+    }
+
+    #[test]
+    fn per_engine_leak_detector_resolves_a_leak_to_the_one_feed_tank_it_is_on() {
+        let mut live = FuelLive::new();
+        // Every wing/trim tank empty, only Feed3 loaded: unlike `full_tanks`,
+        // this leaves no fuel for `tick_transfers`'s own wing-to-feed CG
+        // transfer to replenish Feed3 from -- with any wing fuel at all on
+        // that side, the continuous transfer-in would mask the leak's
+        // effect on this one tank's own mass (the aggregate whole-aircraft
+        // detector is transfer-invariant; a single tank's own balance is
+        // not).
+        for &tank in ALL_TANKS.iter() {
+            live.load_tank(tank, 0.0, 10.0);
+        }
+        let feed3_capacity_kg = TankShape::of(Tank::Feed3).capacity_m3() * REFERENCE_DENSITY_15C_KG_M3;
+        live.load_tank(Tank::Feed3, feed3_capacity_kg * 0.9, 10.0);
+        let truth = Truth { engine_running: [true; 4], engine_fuel_flow_kg_s: [1.0; 4], ..Truth::default() };
+        let leak_id = live.ids.tank_leak[5]; // feed 3 (ALL_TANKS index 5)
+        let out = run(&mut live, &truth, &Faults::from_pairs([(leak_id, 1.0)]), 200.0);
+        assert_eq!(out.get("FUEL_ENG_LEAK_DETECTED:3"), Some(&1.0), "a feed-3 tank-wall leak must resolve to engine 3");
+        assert_eq!(out.get("FUEL_ENG_LEAK_DETECTED:1"), Some(&0.0));
+        assert_eq!(out.get("FUEL_ENG_LEAK_DETECTED:2"), Some(&0.0));
+        assert_eq!(out.get("FUEL_ENG_LEAK_DETECTED:4"), Some(&0.0));
+    }
+
+    #[test]
+    fn per_engine_contamination_is_detected_from_the_existing_filter_water_fraction() {
+        let mut live = FuelLive::new();
+        let id = live.ids.filter_water[2]; // engine 3
+        let healthy = run(&mut live, &Truth::default(), &Faults::default(), 1.0);
+        for n in 1..=4 {
+            assert_eq!(healthy.get(&format!("FUEL_ENG_CONTAMINATION_DETECTED:{n}")), Some(&0.0));
+        }
+        let mut live = FuelLive::new();
+        let out = run(&mut live, &Truth::default(), &Faults::from_pairs([(id, 0.3)]), 1.0);
+        assert_eq!(out.get("FUEL_ENG_CONTAMINATION_DETECTED:3"), Some(&1.0));
+        assert_eq!(out.get("FUEL_ENG_CONTAMINATION_DETECTED:1"), Some(&0.0));
+    }
+
+    #[test]
+    fn wing_balance_uses_the_real_bridge_and_stays_silent_when_it_is_unknown() {
+        let mut live = FuelLive::new();
+        let unknown = run(&mut live, &Truth::default(), &Faults::default(), 1.0);
+        assert_eq!(unknown.get("FUEL_WING_IMBALANCE_KNOWN"), Some(&0.0), "Truth::fuel_tank_quantity_gal is None by default");
+
+        let mut balanced_gal = [1000.0; N_TANKS];
+        balanced_gal[10] = 0.0; // trim tank excluded from the wing groups
+        let mut live = FuelLive::new();
+        let mut truth = Truth::default();
+        truth.dt_s = 1.0;
+        truth.fuel_tank_quantity_gal = Some(balanced_gal);
+        let out = run(&mut live, &truth, &Faults::default(), 1.0);
+        assert_eq!(out.get("FUEL_WING_IMBALANCE_KNOWN"), Some(&1.0));
+        assert!(out["FUEL_WING_IMBALANCE_KG"] < 1.0, "five equal tanks per side must balance: {}", out["FUEL_WING_IMBALANCE_KG"]);
+
+        let mut imbalanced_gal = [1000.0; N_TANKS];
+        imbalanced_gal[10] = 0.0;
+        imbalanced_gal[0] = 0.0; // empty the left outer and left mid tanks:
+        imbalanced_gal[2] = 0.0; // comfortably past the 3000 kg limit, not right at its edge.
+        let mut live = FuelLive::new();
+        let mut truth = Truth::default();
+        truth.dt_s = 1.0;
+        truth.fuel_tank_quantity_gal = Some(imbalanced_gal);
+        let out = run(&mut live, &truth, &Faults::default(), 1.0);
+        assert!(out["FUEL_WING_IMBALANCE_KG"] > 3000.0, "draining one side's own outer tank must show a real imbalance: {}", out["FUEL_WING_IMBALANCE_KG"]);
+    }
+
+    #[test]
+    fn fqdc_and_fqms_channel_faults_are_discrete_and_cost_the_gauging_chain_its_confidence() {
+        let mut live = FuelLive::new();
+        let id = live.ids.fqdc[0];
+        let healthy = run(&mut live, &Truth::default(), &Faults::default(), 1.0);
+        assert_eq!(healthy.get("FUEL_FQDC_FAULT:1"), Some(&0.0));
+        assert_eq!(healthy.get("FUEL_FQMS_LOW_CONFIDENCE"), Some(&0.0));
+
+        let mut live = FuelLive::new();
+        let out = run(&mut live, &Truth::default(), &Faults::from_pairs([(id, 1.0)]), 1.0);
+        assert_eq!(out.get("FUEL_FQDC_FAULT:1"), Some(&1.0));
+        assert_eq!(out.get("FUEL_FQMS_LOW_CONFIDENCE"), Some(&1.0), "an FQDC channel fault must cost the gauging chain its confidence, the same real consequence a probe fault already produces");
+    }
+
+    #[test]
+    fn transfer_sequencer_and_wb_backup_faults_are_discrete_and_silent_when_healthy() {
+        let mut live = FuelLive::new();
+        let norm_id = live.ids.seq_norm;
+        let altn_id = live.ids.seq_altn;
+        let wb_id = live.ids.wb_backup;
+        let healthy = run(&mut live, &Truth::default(), &Faults::default(), 1.0);
+        assert_eq!(healthy.get("FUEL_TRANSFER_SEQUENCER_FAULT:norm"), Some(&0.0));
+        assert_eq!(healthy.get("FUEL_TRANSFER_SEQUENCER_FAULT:altn"), Some(&0.0));
+        assert_eq!(healthy.get("FUEL_WB_BACKUP_FAULT"), Some(&0.0));
+
+        let mut live = FuelLive::new();
+        let out = run(&mut live, &Truth::default(), &Faults::from_pairs([(norm_id, 1.0), (wb_id, 1.0)]), 1.0);
+        assert_eq!(out.get("FUEL_TRANSFER_SEQUENCER_FAULT:norm"), Some(&1.0));
+        assert_eq!(out.get("FUEL_TRANSFER_SEQUENCER_FAULT:altn"), Some(&0.0));
+        assert_eq!(out.get("FUEL_WB_BACKUP_FAULT"), Some(&1.0));
+        let _ = altn_id;
+    }
+
+    #[test]
+    fn each_crossfeed_valve_fault_is_wired_individually_and_the_others_stay_quiet() {
+        let mut live = FuelLive::new();
+        full_tanks(&mut live, 10.0);
+        let id = live.ids.crossfeed[1]; // valve 2
+        let healthy = run(&mut live, &crossfeed_selected_truth(), &Faults::default(), 1.0);
+        assert_eq!(healthy.get("FUEL_CROSSFEED_VALVE_FAULT:2"), Some(&0.0));
+
+        let mut live = FuelLive::new();
+        full_tanks(&mut live, 10.0);
+        let out = run(&mut live, &crossfeed_selected_truth(), &Faults::from_pairs([(id, 1.0)]), 1.0);
+        assert_eq!(out.get("FUEL_CROSSFEED_VALVE_FAULT:2"), Some(&1.0));
+        assert_eq!(out.get("FUEL_CROSSFEED_VALVE_FAULT:1"), Some(&0.0));
+        assert_eq!(out.get("FUEL_CROSSFEED_VALVE_FAULT:3"), Some(&0.0));
+        assert_eq!(out.get("FUEL_CROSSFEED_VALVE_FAULT:4"), Some(&0.0));
+    }
+
+    #[test]
+    fn outer_transfer_fault_publishes_from_the_already_registered_outer_valves() {
+        let mut live = FuelLive::new();
+        let id = live.ids.outer_xfer[1];
+        let healthy = run(&mut live, &Truth::default(), &Faults::default(), 1.0);
+        assert_eq!(healthy.get("FUEL_OUTER_TRANSFER_FAULT"), Some(&0.0));
+        let mut live = FuelLive::new();
+        let out = run(&mut live, &Truth::default(), &Faults::from_pairs([(id, 1.0)]), 1.0);
+        assert_eq!(out.get("FUEL_OUTER_TRANSFER_FAULT"), Some(&1.0));
+    }
+
+    #[test]
+    fn a_jettison_valve_stuck_open_after_deselection_is_flagged_not_closed() {
+        let truth = jettison_selected_truth();
+        let mut live = FuelLive::new();
+        full_tanks(&mut live, 10.0);
+        let id = live.ids.jettison_valve[0];
+        // Open healthily first, then seize it, then deselect.
+        for _ in 0..30 {
+            live.tick(&truth, &Faults::default());
+        }
+        let armed = Faults::from_pairs([(id, 1.0)]);
+        live.tick(&truth, &armed);
+        let deselected = Truth { controls: crate::deep::live::Controls { jettison_armed: false, jettison_valve_selected: [false; 2], ..Default::default() }, ..Truth::default() };
+        for _ in 0..30 {
+            live.tick(&deselected, &armed);
+        }
+        let out = published(&live);
+        assert_eq!(out.get("FUEL_JETTISON_VALVE_NOT_CLOSED:1"), Some(&1.0));
+
+        let mut healthy = FuelLive::new();
+        full_tanks(&mut healthy, 10.0);
+        for _ in 0..30 {
+            healthy.tick(&truth, &Faults::default());
+        }
+        for _ in 0..30 {
+            healthy.tick(&deselected, &Faults::default());
+        }
+        let healthy_out = published(&healthy);
+        assert_eq!(healthy_out.get("FUEL_JETTISON_VALVE_NOT_CLOSED:1"), Some(&0.0), "a healthy valve closes on deselection and must not be flagged");
     }
 }

@@ -23,7 +23,7 @@ additive document, not a patch to either endpoint.
 ## How to regenerate
 
 ```
-CATALOGUE_OUT=/path/to/catalogue.json CARGO_TARGET_DIR=D:/fbw-xp-systems/target-p4 \
+CATALOGUE_OUT=/path/to/catalogue.json CARGO_TARGET_DIR=D:/A380/fbw-xp-systems/target-p4 \
   cargo test --lib -- --ignored --exact study::catalogue::tests::dump_catalogue
 ```
 

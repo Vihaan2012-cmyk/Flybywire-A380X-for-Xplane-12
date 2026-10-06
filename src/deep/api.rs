@@ -39,6 +39,12 @@ pub enum Area {
     Integration = 18,
     Fuel = 19,
     Oxygen = 20,
+    /// ATA 23: CIDS, PTT switches, the ATSU/datalink router, and the HF/
+    /// SATCOM/VHF transceivers' own LRU faults (`E-AIR-DESIGN.md`, ATA 23).
+    Communications = 21,
+    /// ATA 22: the FCU (AFS control panel) and its two MFD backups, and
+    /// the TCAS/AP mode arbitration fault (`E-AIR-DESIGN.md`, ATA 22).
+    AutoFlight = 22,
 }
 
 pub const fn failure_id(area: Area, ata: u16, n: u16) -> u64 {

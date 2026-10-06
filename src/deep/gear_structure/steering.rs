@@ -91,6 +91,15 @@ pub fn body_steering_angle_deg(nose_commanded_angle_deg: f64, groundspeed_ms: f6
     (BODY_GAIN * nose_commanded_angle_deg * phase).clamp(-MAX_BODY_ANGLE_DEG, MAX_BODY_ANGLE_DEG)
 }
 
+/// Above this fault severity the nosewheel disconnect mechanism no longer
+/// responds to a new selection (GENERIC, this crate's own BITE-flag
+/// convention, e.g. `ANTISKID_BITE_THRESHOLD`).
+const DISC_MECHANISM_FAIL_THRESHOLD: f64 = 0.5;
+/// Above this fault severity the nosewheel steering angle limit switch/
+/// software clamp is defeated, letting a genuine over-limit angle occur
+/// (GENERIC, same convention).
+const OVERTRAVEL_FAIL_THRESHOLD: f64 = 0.5;
+
 /// Faults this steering system carries, each a fraction 0 (healthy) .. 1
 /// (fully failed).
 #[derive(Clone, Copy, Debug, Default)]
@@ -99,6 +108,18 @@ pub struct SteeringFaults {
     pub shimmy_damper_fail: f64,
     /// Steering actuator internal leak: reduces slew rate.
     pub actuator_leak: f64,
+    /// `E-IND-DESIGN.md` 320800057/059: the nosewheel disconnect (towing)
+    /// mechanism resists commanded release/engagement, so it stops
+    /// responding to new selections above `DISC_MECHANISM_FAIL_THRESHOLD`.
+    /// Only meaningful on the nose position; harmless (never armed) on the
+    /// two body positions, which have no disconnect mechanism at all.
+    pub disc_mechanism_fail: f64,
+    /// `E-IND-DESIGN.md` 320800056: the nosewheel steering angle limit
+    /// switch/software clamp is defeated above
+    /// `OVERTRAVEL_FAIL_THRESHOLD`, letting a genuine over-limit angle
+    /// occur that this model's own healthy clamp otherwise prevents. Only
+    /// meaningful on the nose position.
+    pub steer_overtravel_fail: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -109,6 +130,10 @@ pub struct SteeringInputs {
     pub commanded_angle_deg: f64,
     pub groundspeed_ms: f64,
     pub dt_s: f64,
+    /// `E-IND-DESIGN.md` 320800057/059: the nosewheel disconnect (towing)
+    /// lever selected. Only meaningful on the nose position; the two body
+    /// positions have no disconnect mechanism and always pass `false`.
+    pub disconnect_selected: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -122,6 +147,10 @@ pub struct SteeringOutputs {
     /// The net damping at the current speed/fault state has gone unstable
     /// (a genuine, ongoing shimmy tendency, not just noise).
     pub shimmy_unstable: bool,
+    /// `E-IND-DESIGN.md` 320800057/059: whether the nosewheel is currently
+    /// mechanically disconnected from its steering actuator. Always `false`
+    /// on the two body positions (no disconnect mechanism exists there).
+    pub disconnected: bool,
 }
 
 pub struct SteeringActuator {
@@ -129,15 +158,20 @@ pub struct SteeringActuator {
     base_angle_deg: f64,
     perturbation_deg: f64,
     perturbation_rate: f64,
+    /// `E-IND-DESIGN.md` 320800057/059: persistent disconnect state, so a
+    /// jammed mechanism (`disc_mechanism_fail`) can genuinely freeze it
+    /// rather than the output being recomputed fresh from the selection
+    /// every tick.
+    disconnected: bool,
 }
 
 impl SteeringActuator {
     pub fn new_nose() -> Self {
-        Self { max_angle_deg: MAX_NOSE_ANGLE_DEG, base_angle_deg: 0.0, perturbation_deg: 0.0, perturbation_rate: 0.0 }
+        Self { max_angle_deg: MAX_NOSE_ANGLE_DEG, base_angle_deg: 0.0, perturbation_deg: 0.0, perturbation_rate: 0.0, disconnected: false }
     }
 
     pub fn new_body() -> Self {
-        Self { max_angle_deg: MAX_BODY_ANGLE_DEG, base_angle_deg: 0.0, perturbation_deg: 0.0, perturbation_rate: 0.0 }
+        Self { max_angle_deg: MAX_BODY_ANGLE_DEG, base_angle_deg: 0.0, perturbation_deg: 0.0, perturbation_rate: 0.0, disconnected: false }
     }
 
     /// The groundspeed at which the net effective damping reaches zero for
@@ -150,7 +184,22 @@ impl SteeringActuator {
 
     pub fn step(&mut self, inputs: &SteeringInputs, faults: &SteeringFaults) -> SteeringOutputs {
         let dt = inputs.dt_s.max(0.0);
-        let target = inputs.commanded_angle_deg.clamp(-self.max_angle_deg, self.max_angle_deg);
+
+        // `E-IND-DESIGN.md` 320800057/059: the disconnect mechanism only
+        // responds to a new selection while healthy; a jam freezes it at
+        // whatever state it was last in, regardless of the new selection.
+        if faults.disc_mechanism_fail < DISC_MECHANISM_FAIL_THRESHOLD {
+            self.disconnected = inputs.disconnect_selected;
+        }
+
+        // `E-IND-DESIGN.md` 320800056: healthy behaviour clamps the
+        // commanded angle to this actuator's own travel limit, exactly as
+        // before. An armed overtravel failure is a real defeat of that
+        // limit switch/software clamp, so it is the one case allowed to
+        // skip it -- everything else about the actuator (rate, shimmy) is
+        // unchanged.
+        let overtravel = faults.steer_overtravel_fail >= OVERTRAVEL_FAIL_THRESHOLD;
+        let target = if overtravel { inputs.commanded_angle_deg } else { inputs.commanded_angle_deg.clamp(-self.max_angle_deg, self.max_angle_deg) };
         let rate = NOMINAL_STEERING_RATE_DEG_S * (1.0 - faults.actuator_leak.clamp(0.0, 1.0)).max(0.0);
         let diff = target - self.base_angle_deg;
         let step = diff.signum() * (rate * dt).min(diff.abs());
@@ -190,11 +239,15 @@ impl SteeringActuator {
         self.perturbation_deg = to_deg(delta).clamp(-MAX_PERTURBATION_DEG, MAX_PERTURBATION_DEG);
         self.perturbation_rate = delta_dot;
 
+        let bound = self.max_angle_deg + MAX_PERTURBATION_DEG;
+        let angle_deg = if overtravel { self.base_angle_deg + self.perturbation_deg } else { (self.base_angle_deg + self.perturbation_deg).clamp(-bound, bound) };
+
         SteeringOutputs {
-            angle_deg: (self.base_angle_deg + self.perturbation_deg).clamp(-self.max_angle_deg - MAX_PERTURBATION_DEG, self.max_angle_deg + MAX_PERTURBATION_DEG),
+            angle_deg,
             base_angle_deg: self.base_angle_deg,
             shimmy_deg: self.perturbation_deg,
             shimmy_unstable: c_net < 0.0,
+            disconnected: self.disconnected,
         }
     }
 }
@@ -225,7 +278,7 @@ mod tests {
         // step diverged (multiplier -1.5 per sub-step) and the angle was NaN
         // from the first seconds of the session onward.
         let mut s = SteeringActuator::new_nose();
-        let inputs = SteeringInputs { commanded_angle_deg: 0.0, groundspeed_ms: 0.0, dt_s: 1.0 / 36.0 };
+        let inputs = SteeringInputs { commanded_angle_deg: 0.0, groundspeed_ms: 0.0, dt_s: 1.0 / 36.0, disconnect_selected: false };
         let mut out = SteeringOutputs::default();
         for _ in 0..3_600 {
             out = s.step(&inputs, &healthy());
@@ -239,7 +292,7 @@ mod tests {
     #[test]
     fn a_healthy_damper_settles_and_stays_bounded_at_high_speed() {
         let mut s = SteeringActuator::new_nose();
-        let inputs = SteeringInputs { commanded_angle_deg: 0.0, groundspeed_ms: 90.0, dt_s: 0.01 };
+        let inputs = SteeringInputs { commanded_angle_deg: 0.0, groundspeed_ms: 90.0, dt_s: 0.01, disconnect_selected: false };
         let mut out = SteeringOutputs::default();
         for _ in 0..2_000 {
             out = s.step(&inputs, &healthy());
@@ -251,11 +304,11 @@ mod tests {
     #[test]
     fn a_failed_damper_lets_the_perturbation_grow_at_a_speed_just_above_its_critical_speed() {
         let mut s = SteeringActuator::new_nose();
-        let faults = SteeringFaults { shimmy_damper_fail: 1.0, actuator_leak: 0.0 };
+        let faults = SteeringFaults { shimmy_damper_fail: 1.0, ..SteeringFaults::default() };
         // 4 m/s is just above `critical_speed_ms(1.0)` (3.33 m/s): a mild,
         // gradual instability, not an instant slam into the perturbation
         // cap, so "early" and "late" amplitudes stay distinguishable.
-        let inputs = SteeringInputs { commanded_angle_deg: 0.0, groundspeed_ms: 4.0, dt_s: 0.01 };
+        let inputs = SteeringInputs { commanded_angle_deg: 0.0, groundspeed_ms: 4.0, dt_s: 0.01, disconnect_selected: false };
         let mut early = 0.0;
         let mut out = SteeringOutputs::default();
         for i in 0..3_000 {
@@ -271,7 +324,7 @@ mod tests {
     #[test]
     fn the_actuator_tracks_a_commanded_angle_within_its_travel_limit() {
         let mut s = SteeringActuator::new_body();
-        let inputs = SteeringInputs { commanded_angle_deg: 45.0, groundspeed_ms: 0.0, dt_s: 0.1 };
+        let inputs = SteeringInputs { commanded_angle_deg: 45.0, groundspeed_ms: 0.0, dt_s: 0.1, disconnect_selected: false };
         let mut out = SteeringOutputs::default();
         for _ in 0..50 {
             out = s.step(&inputs, &healthy());
@@ -290,9 +343,53 @@ mod tests {
     #[test]
     fn numerically_safe_at_rest_and_dt_zero() {
         let mut s = SteeringActuator::new_nose();
-        let inputs = SteeringInputs { commanded_angle_deg: 0.0, groundspeed_ms: 0.0, dt_s: 0.0 };
+        let inputs = SteeringInputs { commanded_angle_deg: 0.0, groundspeed_ms: 0.0, dt_s: 0.0, disconnect_selected: false };
         let out = s.step(&inputs, &healthy());
         assert!(out.angle_deg.is_finite());
         assert!(!out.shimmy_deg.is_nan());
+    }
+
+    /// `E-IND-DESIGN.md` 320800056 STEER N/W STEER ANGLE LIMIT EXCEEDED: the
+    /// healthy clamp always holds; an armed `steer_overtravel_fail` is the
+    /// one case that lets a commanded angle past `MAX_NOSE_ANGLE_DEG`
+    /// through.
+    #[test]
+    fn steer_overtravel_fail_lets_a_commanded_angle_exceed_the_healthy_clamp() {
+        let mut s = SteeringActuator::new_nose();
+        let big_command = SteeringInputs { commanded_angle_deg: MAX_NOSE_ANGLE_DEG + 40.0, groundspeed_ms: 0.0, dt_s: 0.5, disconnect_selected: false };
+
+        let mut healthy_actuator = SteeringActuator::new_nose();
+        let mut healthy_out = SteeringOutputs::default();
+        for _ in 0..50 {
+            healthy_out = healthy_actuator.step(&big_command, &healthy());
+        }
+        assert!(healthy_out.angle_deg.abs() <= MAX_NOSE_ANGLE_DEG + MAX_PERTURBATION_DEG + 1e-6, "the healthy clamp must hold: {}", healthy_out.angle_deg);
+
+        let faults = SteeringFaults { steer_overtravel_fail: 1.0, ..SteeringFaults::default() };
+        let mut out = SteeringOutputs::default();
+        for _ in 0..50 {
+            out = s.step(&big_command, &faults);
+        }
+        assert!(out.angle_deg.abs() > MAX_NOSE_ANGLE_DEG + MAX_PERTURBATION_DEG, "an armed overtravel failure must let the angle exceed the healthy clamp, got {}", out.angle_deg);
+    }
+
+    /// `E-IND-DESIGN.md` 320800057/059 STEER N/W STEER DISC FAULT / NOT DISC:
+    /// healthy, the disconnect state tracks a new selection; an armed
+    /// `disc_mechanism_fail` freezes it regardless of the selection.
+    #[test]
+    fn disc_mechanism_fail_freezes_the_disconnect_state_against_a_new_selection() {
+        let mut s = SteeringActuator::new_nose();
+        let not_selected = SteeringInputs { commanded_angle_deg: 0.0, groundspeed_ms: 0.0, dt_s: 0.1, disconnect_selected: false };
+        let out = s.step(&not_selected, &healthy());
+        assert!(!out.disconnected, "must start connected");
+
+        let selected = SteeringInputs { disconnect_selected: true, ..not_selected };
+        let out = s.step(&selected, &healthy());
+        assert!(out.disconnected, "a healthy mechanism must respond to a new selection");
+
+        // Now jam it, and try to deselect: a jammed mechanism must not move.
+        let faults = SteeringFaults { disc_mechanism_fail: 1.0, ..SteeringFaults::default() };
+        let out = s.step(&not_selected, &faults);
+        assert!(out.disconnected, "a jammed mechanism must stay stuck disconnected against a new deselection");
     }
 }

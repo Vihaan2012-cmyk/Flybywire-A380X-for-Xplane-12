@@ -113,7 +113,10 @@ impl XphfbwHost {
         let tag: &'static str = Box::leak(tag.to_string().into_boxed_str());
         let views = view_list(panel_cfg);
         let loaded = vec![None; views.len()];
-        crate::display::set_bridge(Some(tag), Some(session));
+        // S08: hands the view list's `screen` field over too, so
+        // display/mod.rs's `Bridge` can work out which view governs each
+        // screen (`view_for_screen`) once, here, instead of every frame.
+        crate::display::set_bridge(Some(tag), Some(session), &views);
         Some(Self {
             session,
             env: EnvRefs::new(xplm),
@@ -197,7 +200,7 @@ impl XphfbwHost {
         if self.gone {
             return;
         }
-        self.apply_deferred();
+        self.apply_deferred(vars);
         self.publish(vars, time);
         for name in h_events {
             self.broadcast(Downlink::HEvent { name: name.clone() });
@@ -260,7 +263,7 @@ impl XphfbwHost {
     /// Everything `pre_tick`'s uplink drain kept besides writes: events go
     /// to `self.events` for lib.rs's tick, calls go to the pending list
     /// `post_tick` retries, everything else is answered straight away.
-    fn apply_deferred(&mut self) {
+    fn apply_deferred(&mut self, vars: &mut Vars) {
         let deferred = std::mem::take(&mut self.deferred);
         let mut broadcasts: Vec<Downlink> = Vec::new();
         let mut sends: Vec<(u32, Downlink)> = Vec::new();
@@ -276,6 +279,31 @@ impl XphfbwHost {
                 }
                 Uplink::SetString { name, value } => {
                     self.strings.insert(name.clone(), value.clone());
+                    // This bridge's own copy of the "string vs number" ARINC429
+                    // bug js_bridge.rs's `set_string` had (E:/fbw-debug/fixes/
+                    // W123.md, W176.md): FlyByWire's `Arinc429Word`/
+                    // `Arinc429Register` always write their packed word through
+                    // `SetSimVarValue(name, 'string', ...)`
+                    // (app/js/msfs/coherent.js's `setValue_String` ->
+                    // `app/src/renderer.rs`'s `setString` -> this
+                    // `Uplink::SetString`), but every reader uses a numeric
+                    // unit, resolved through `Vars` the same way
+                    // `resolve_new_slots`/`publish` below do. `self.strings`
+                    // above and `Vars` are otherwise disjoint, so without this
+                    // a numeric read of this name never saw what a string
+                    // write set. Mirror a numeric-looking value into `vars`
+                    // too; genuine text (the EWD/PFD memo lines, also
+                    // 'string') does not parse as a number and is unaffected.
+                    // `host` is built here, inside this arm only, rather than
+                    // once above the loop: hoisting it would hold `&mut
+                    // self.state` for the whole match, conflicting with the
+                    // `Uplink::Call` arm's own `&mut self` uses below.
+                    if name.starts_with("L:") {
+                        if let Ok(numeric) = value.trim().parse::<f64>() {
+                            let mut host = VarsHost::new(vars, &mut self.state, &self.env, 0.);
+                            host.set_var(&name, "number", numeric);
+                        }
+                    }
                     broadcasts.push(Downlink::StringValue { name, value });
                 }
                 Uplink::Call { view, id, name, args_json } => {
@@ -311,6 +339,14 @@ impl XphfbwHost {
                 Uplink::Loaded { view, ok, text } => {
                     if let Some(slot) = self.loaded.get_mut(view as usize) {
                         *slot = Some(ok);
+                    }
+                    // Mirrored into shared memory (SlotHeader::view_loaded)
+                    // so the app's own UI thread can watch a screen's
+                    // Loaded state (app/src/views.rs's watch_loaded)
+                    // without draining this uplink ring itself -- only the
+                    // plugin does that, here.
+                    if let Some(cell) = self.session.slots.header().view_loaded.get(view as usize) {
+                        cell.store(if ok { 1 } else { 2 }, Ordering::Relaxed);
                     }
                     if ok {
                         crate::log(&format!("js: xphfbw view {view} loaded: {text}"));
@@ -483,6 +519,15 @@ impl XphfbwHost {
             self.gone = true;
             self.displays_active = false;
             self.session.slots.header().displays_active.store(0, Ordering::Relaxed);
+            // S08: per-screen `bridge_active` reads `view_loaded` (S10)
+            // straight out of shared memory rather than the aggregate flag
+            // above, so it needs its own clear here too, or a screen whose
+            // view had already loaded would keep reading a stale "loaded"
+            // and stay on a bridge nobody is publishing to any more.
+            for cell in self.session.slots.header().view_loaded.iter() {
+                cell.store(0, Ordering::Relaxed);
+            }
+            crate::display::mark_bridge_gone();
             crate::log("js: xphfbw: the XPHFBW process is gone; the plugin's own instruments resume");
         }
         self.gone
@@ -521,7 +566,7 @@ impl Drop for XphfbwHost {
     /// drives (the leaked `Session`/tag memory itself outlives this, which
     /// is fine: it is a fixed, small, one-time-per-session leak).
     fn drop(&mut self) {
-        crate::display::set_bridge(None, None);
+        crate::display::set_bridge(None, None, &[]);
     }
 }
 
@@ -570,6 +615,10 @@ htmlgauge00=A380X/SystemsHost/index.html, 0,0,1,1
             assert!(self.session.uplink.push(&Uplink::Event { name: name.to_string(), values }.encode()));
         }
 
+        fn set_string(&self, name: &str, value: &str) {
+            assert!(self.session.uplink.push(&Uplink::SetString { name: name.to_string(), value: value.to_string() }.encode()));
+        }
+
         fn call(&self, id: u64, name: &str, args_json: &str) {
             assert!(self.session.uplink.push(&Uplink::Call { view: self.view, id, name: name.to_string(), args_json: args_json.to_string() }.encode()));
         }
@@ -596,6 +645,12 @@ htmlgauge00=A380X/SystemsHost/index.html, 0,0,1,1
 
         fn downlink(&self) -> Vec<Downlink> {
             self.session.downlinks[self.view as usize].drain().iter().filter_map(|b| Downlink::decode(b)).collect()
+        }
+
+        /// `SlotHeader::view_loaded[self.view]`, as `app/src/views.rs`'s
+        /// `watch_loaded` reads it.
+        fn loaded_flag(&self) -> u32 {
+            self.session.slots.header().view_loaded[self.view as usize].load(Ordering::Relaxed)
         }
     }
 
@@ -784,6 +839,28 @@ htmlgauge00=A380X/SystemsHost/index.html, 0,0,1,1
         assert_eq!(host.session.slots.header().displays_active.load(Ordering::Relaxed), 1);
     }
 
+    /// `app/src/views.rs`'s `watch_loaded` watchdog reads `view_loaded`
+    /// straight out of shared memory instead of draining the uplink ring
+    /// (which only the plugin does): prove the plugin actually keeps that
+    /// mirror current, ok and failed alike, not just `self.loaded`
+    /// (`views_loaded`/`displays_active`'s own bookkeeping).
+    #[test]
+    fn loaded_reports_are_mirrored_into_shared_memory_for_the_app_to_watch() {
+        let t = tag();
+        let mut host = XphfbwHost::start(&t, xplm(), PANEL_CFG, None).unwrap();
+        let pfd = FakeView::open(&t, 0);
+        let mut vars = vars();
+        assert_eq!(pfd.loaded_flag(), 0, "not yet reported");
+        pfd.loaded(false);
+        host.pre_tick(&mut vars);
+        host.post_tick(&mut vars, 0., &[], &[]);
+        assert_eq!(pfd.loaded_flag(), 2, "reported failed");
+        pfd.loaded(true);
+        host.pre_tick(&mut vars);
+        host.post_tick(&mut vars, 0., &[], &[]);
+        assert_eq!(pfd.loaded_flag(), 1, "reported ok");
+    }
+
     #[test]
     fn h_events_and_provider_events_reach_every_views_downlink() {
         let t = tag();
@@ -810,6 +887,33 @@ htmlgauge00=A380X/SystemsHost/index.html, 0,0,1,1
         host.pre_tick(&mut vars);
         host.post_tick(&mut vars, 0., &[], &[]);
         assert_eq!(host.take_events(), vec![("H:A32NX_CHRONO_TOGGLE".to_string(), 1.)]);
+    }
+
+    /// Regression guard for the CEF bridge's own copy of the ARINC429
+    /// "string vs number" bug (E:/fbw-debug/fixes/W123.md, W176.md):
+    /// `Arinc429Word.toSimVarValue` always writes through
+    /// `SetSimVarValue(name, 'string', ...)`, which reaches this plugin as
+    /// `Uplink::SetString`, but every reader registers a numeric slot
+    /// (`getVar`/`Vars`). Before this fix a numeric-looking string write
+    /// never reached `Vars`, so a slot registered for the same name stayed
+    /// at its unwritten default (0) forever even though the writer ran.
+    #[test]
+    fn set_string_of_a_packed_arinc_word_is_visible_to_a_numeric_slot() {
+        let t = tag();
+        let mut host = XphfbwHost::start(&t, xplm(), PANEL_CFG, None).unwrap();
+        let view = FakeView::open(&t, 0);
+        let word_slot = view.register("L:A32NX_TEST_ARINC_WORD", "number");
+        let memo_slot = view.register("L:A32NX_TEST_MEMO_LINE", "number");
+        view.set_string("L:A32NX_TEST_ARINC_WORD", "12345");
+        // Genuine text (the EWD/PFD memo lines use the same 'string' unit)
+        // must not leak a bogus number into a numeric slot for the same kind
+        // of name.
+        view.set_string("L:A32NX_TEST_MEMO_LINE", "ENG 1 FIRE");
+        let mut vars = vars();
+        host.pre_tick(&mut vars);
+        host.post_tick(&mut vars, 0., &[], &[]);
+        assert_eq!(view.read(word_slot), 12345.);
+        assert_eq!(view.read(memo_slot), 0.);
     }
 
     /// A helper making a `VariableIdentifier` the same way `VarsHost` does

@@ -69,7 +69,7 @@
 use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
 use crate::physics::gas;
-use crate::xp::Xplm;
+use crate::xp::{DataRef, Xplm};
 use crate::Vars;
 
 /// Commonly published A320 crew oxygen cylinder full charge (see module
@@ -124,6 +124,38 @@ const MASK_DEPLOY_CABIN_ALT_FT: f64 = 14_000.;
 /// Pascals per psi (exact).
 const PSI_TO_PA: f64 = 6894.757;
 
+/// (W209) The pure part of `Oxygen::mirror_hypoxia_trigger`: with no mask
+/// donned, X-Plane should feel exactly the real cabin altitude (so its own
+/// hypoxia/black-out effect tracks a real FBW-modelled decompression
+/// instead of X-Plane's own independent stock pressurization schedule);
+/// with a mask donned, the diluter-demand regulator's protection
+/// (`gas::diluter_demand_protection_fraction`, the same ramp this module's
+/// regulator mass-flow math above already uses) reduces it toward sea
+/// level, matching `sim/cockpit2/oxygen/indicators/pilot_felt_altitude_ft`'s
+/// own documented semantics ("will be lower than cabin pressure altitude
+/// when on oxygen").
+fn felt_altitude_ft(cabin_altitude_ft: f64, masks_on: bool) -> f64 {
+    if masks_on {
+        cabin_altitude_ft * (1. - gas::diluter_demand_protection_fraction(cabin_altitude_ft))
+    } else {
+        cabin_altitude_ft
+    }
+}
+
+/// `PRESS_CABIN_ALTITUDE_B1` is an ARINC 429 word, packed the way FlyByWire
+/// packs every one (`fbw-common/.../shared/arinc429.rs`, `to_arinc429`): a
+/// 32 bit float's bits in the low half of the `f64`, the SSM in the two bits
+/// above. Read raw it is about 1.4e10 -- a live 2,900 ft cabin read
+/// 14,046,068,736 -- which fed X-Plane's hypoxia effect a felt altitude of
+/// fourteen billion feet (the screen blacked out a few seconds after every
+/// load) and dropped the passenger masks on every flight. Only a word in
+/// normal operation carries a cabin altitude; anything else is no reading.
+fn cabin_altitude_ft(packed: f64) -> Option<f64> {
+    const SSM_NORMAL_OPERATION: u64 = 3;
+    let bits = packed as u64;
+    ((bits >> 32) & 0b11 == SSM_NORMAL_OPERATION).then(|| f32::from_bits(bits as u32) as f64)
+}
+
 struct Ids {
     /// New here: no FBW L:var exists for a crew oxygen mask switch.
     crew_mask_on: VariableIdentifier,
@@ -142,6 +174,21 @@ struct Ids {
     cabin_altitude_ft: VariableIdentifier,
 }
 
+struct Refs {
+    /// `sim/operation/override/override_oxygen_system` (X-Plane's SDK doc,
+    /// `Resources/plugins/DataRefs.txt`): needed to make
+    /// `pilot_felt_altitude_ft` writable (see `Oxygen::mirror_hypoxia_trigger`,
+    /// W209).
+    override_oxygen_system: Option<DataRef>,
+    /// `sim/cockpit2/oxygen/indicators/pilot_felt_altitude_ft` ("pressure
+    /// altitude felt by the pilot's body ... This is what triggers the
+    /// hypoxia black-out effect", writeable only with
+    /// `override_oxygen_system`). Driven from FlyByWire's own cabin
+    /// altitude (`Ids::cabin_altitude_ft`) instead of being left to
+    /// X-Plane's own independent stock pressurization schedule (W209).
+    pilot_felt_altitude_ft: Option<DataRef>,
+}
+
 /// Servicing asked for from the Study panel, done on the next update.
 static SERVICE_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -152,6 +199,7 @@ pub fn request_service() {
 
 pub struct Oxygen {
     ids: Ids,
+    refs: Refs,
     /// hyperrealism.md physics workstream 5: the crew bottle's actual
     /// oxygen mass, kg (the ideal-gas state variable); pressure is derived
     /// from this, the bottle's fixed volume and `CREW_BOTTLE_TEMP_K`, rather
@@ -163,7 +211,7 @@ pub struct Oxygen {
 }
 
 impl Oxygen {
-    pub fn new(vars: &mut Vars, _xplm: &Xplm) -> Self {
+    pub fn new(vars: &mut Vars, xplm: &Xplm) -> Self {
         let ids = Ids {
             crew_mask_on: vars.get("OXYGEN CREW MASK ON".into()),
             crew_quantity_percent: vars.get("OXYGEN_CREW_QUANTITY_PERCENT".into()),
@@ -177,25 +225,83 @@ impl Oxygen {
             // a380_systems air_conditioning/cpiom_b.rs:861.
             cabin_altitude_ft: vars.get("PRESS_CABIN_ALTITUDE_B1".into()),
         };
+        // W209: X-Plane's own hypoxia trigger, previously left entirely to
+        // X-Plane's own independent stock pressurization schedule (see
+        // `mirror_hypoxia_trigger`'s doc).
+        let refs = Refs {
+            override_oxygen_system: xplm.find("sim/operation/override/override_oxygen_system"),
+            pilot_felt_altitude_ft: xplm.find("sim/cockpit2/oxygen/indicators/pilot_felt_altitude_ft"),
+        };
         let crew_full_mass_kg = gas::ideal_gas_mass_kg(CREW_FULL_PSI * PSI_TO_PA, crew_bottle_volume_m3(), CREW_BOTTLE_TEMP_K);
-        Self { ids, crew_mass_kg: crew_full_mass_kg, crew_full_mass_kg, pax_percent: 100., pax_deployed: false }
+        Self { ids, refs, crew_mass_kg: crew_full_mass_kg, crew_full_mass_kg, pax_percent: 100., pax_deployed: false }
     }
 
     /// After the systems tick, so `PRESS_CABIN_ALTITUDE_B1` is this tick's.
-    /// `_xplm` is unused today (kept for signature symmetry with the other
-    /// slot modules, e.g. `Lights::update`, and in case a future X-Plane-only
-    /// input is needed); the real logic is in [`Self::step`], which the
-    /// tests below call directly so they need no `Xplm` at all (matching how
-    /// `lights.rs`'s own tests avoid needing one, see that file's test doc).
-    pub fn update<W: systems::simulation::SimulatorReaderWriter>(&mut self, vars: &mut W, _xplm: &Xplm, delta: f64) {
+    /// `xplm` (W209: no longer unused) drives X-Plane's own hypoxia trigger
+    /// from the same cabin altitude `step` already reads -- see
+    /// `mirror_hypoxia_trigger`'s doc. `step` itself still takes only `W`
+    /// (FlyByWire's own vars), so the tests below can still call it directly
+    /// with no `Xplm` at all (matching how `lights.rs`'s own tests avoid
+    /// needing one, see that file's test doc); `felt_altitude_ft` above is a
+    /// pure function for the same reason.
+    pub fn update<W: systems::simulation::SimulatorReaderWriter>(&mut self, vars: &mut W, xplm: &Xplm, delta: f64) {
         self.step(vars, delta);
+        self.mirror_hypoxia_trigger(vars, xplm);
+    }
+
+    /// (W209) X-Plane runs its own hypoxia/black-out effect off
+    /// `sim/cockpit2/oxygen/indicators/pilot_felt_altitude_ft`, computed by
+    /// X-Plane's own independent stock pressurization/oxygen model when not
+    /// overridden -- the `.acf` has `_auto_pressurization 1`
+    /// (`FlyByWire A380X.acf:38116`) and grepping this whole crate for
+    /// `sim/cockpit2/pressurization`/`sim/cockpit2/oxygen` found zero prior
+    /// references -- so X-Plane's blackout effect could trigger off its own
+    /// schedule while FlyByWire's CPCS (the very `cabin_altitude_ft` this
+    /// module already reads, `PRESS_CABIN_ALTITUDE_B1`) says the cabin is
+    /// fine, or stay silent during an FBW-modelled decompression. Claims
+    /// `override_oxygen_system` only, not `override_pressurization`:
+    /// writing `pilot_felt_altitude_ft` directly is the SDK's documented way
+    /// to drive the hypoxia effect without also reproducing X-Plane's own
+    /// outflow-valve/fan physical simulation (a materially bigger, riskier
+    /// claim this fix does not attempt -- see the report's RISK section).
+    fn mirror_hypoxia_trigger<W: systems::simulation::SimulatorReaderWriter>(&self, vars: &mut W, xplm: &Xplm) {
+        let Some(felt) = self.refs.pilot_felt_altitude_ft else { return };
+        // No valid CPCS word (cold and dark, CPCS unpowered or failed): hand
+        // the effect back to X-Plane's own model rather than invent a cabin
+        // altitude for it.
+        let Some(cabin_alt) = cabin_altitude_ft(vars.read(&self.ids.cabin_altitude_ft)) else {
+            if let Some(d) = self.refs.override_oxygen_system {
+                xplm.set_i(d, 0);
+            }
+            return;
+        };
+        if let Some(d) = self.refs.override_oxygen_system {
+            xplm.set_i(d, 1);
+        }
+        let masks_on = vars.read(&self.ids.crew_mask_on) != 0.;
+        xplm.set_f(felt, felt_altitude_ft(cabin_alt, masks_on) as f32);
+    }
+
+    /// Hands X-Plane's own hypoxia/oxygen system back
+    /// (`override_oxygen_system`, claimed every tick in
+    /// `mirror_hypoxia_trigger`), matching the release convention every
+    /// other override this plugin takes already follows
+    /// (`flight_controls::FlightControls::release`, `handling::.../release`,
+    /// `engine_commands::EngineCommands::release`).
+    pub fn release(&self, xplm: &Xplm) {
+        if let Some(d) = self.refs.override_oxygen_system {
+            xplm.set_i(d, 0);
+        }
     }
 
     fn step<W: systems::simulation::SimulatorReaderWriter>(&mut self, vars: &mut W, delta: f64) {
         if SERVICE_REQUESTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.service();
         }
-        let cabin_alt = vars.read(&self.ids.cabin_altitude_ft);
+        // With no valid CPCS word there is no cabin altitude to act on: no
+        // automatic mask drop and no altitude dilution until the CPCS reports
+        // one (the real masks drop on a real, reported cabin altitude).
+        let cabin_alt = cabin_altitude_ft(vars.read(&self.ids.cabin_altitude_ft)).unwrap_or(0.);
         let masks_on = vars.read(&self.ids.crew_mask_on) != 0.;
 
         // hyperrealism.md physics workstream 5: crew consumption is now a
@@ -277,6 +383,24 @@ mod tests {
     use super::*;
     use crate::aspects::test_vars::TestVars;
 
+    /// A cabin altitude as FlyByWire's CPCS publishes it: an ARINC 429 word
+    /// in normal operation (SSM 3 above the f32 bits).
+    fn packed(ft: f64) -> f64 {
+        ((3u64 << 32) | (ft as f32).to_bits() as u64) as f64
+    }
+
+    #[test]
+    fn the_cabin_altitude_word_is_decoded_and_only_trusted_in_normal_operation() {
+        // The live value read off a parked aircraft on 2026-09-26, which fed
+        // X-Plane a felt altitude of 14 billion feet before this decode.
+        let live = cabin_altitude_ft(14_046_068_736.).expect("normal-operation word");
+        assert!((2_800. ..3_000.).contains(&live), "decoded {live}");
+        assert_eq!(cabin_altitude_ft(packed(8000.)), Some(8000.));
+        // Failure warning (SSM 0) and no computed data (SSM 1): no reading.
+        assert_eq!(cabin_altitude_ft((8000_f32).to_bits() as f64), None);
+        assert_eq!(cabin_altitude_ft(((1u64 << 32) | (8000_f32).to_bits() as u64) as f64), None);
+    }
+
     #[test]
     fn the_cabin_altitude_variable_this_module_reads_is_one_the_systems_register() {
         // Guards the citation at the top of this file: if FlyByWire ever
@@ -312,15 +436,16 @@ mod tests {
             pax_flow_lpm: vars.get("OXYGEN_PAX_FLOW_LPM".into()),
             cabin_altitude_ft: vars.get("PRESS_CABIN_ALTITUDE_B1".into()),
         };
+        let refs = Refs { override_oxygen_system: None, pilot_felt_altitude_ft: None };
         let crew_full_mass_kg = gas::ideal_gas_mass_kg(CREW_FULL_PSI * PSI_TO_PA, crew_bottle_volume_m3(), CREW_BOTTLE_TEMP_K);
-        Oxygen { ids, crew_mass_kg: crew_full_mass_kg, crew_full_mass_kg, pax_percent: 100., pax_deployed: false }
+        Oxygen { ids, refs, crew_mass_kg: crew_full_mass_kg, crew_full_mass_kg, pax_percent: 100., pax_deployed: false }
     }
 
     #[test]
     fn crew_oxygen_only_depletes_with_a_mask_donned() {
         let mut vars = TestVars::default();
         let mut o = oxygen_with(&mut vars);
-        vars.write(&o.ids.cabin_altitude_ft, 8000.);
+        vars.write(&o.ids.cabin_altitude_ft, packed(8000.));
         vars.write(&o.ids.crew_mask_on, 0.);
         o.step(&mut vars, 3600.);
         assert_eq!(o.crew_quantity_percent(), 100., "no mask, no consumption");
@@ -334,7 +459,7 @@ mod tests {
     fn crew_bottle_pressure_follows_the_ideal_gas_law() {
         let mut vars = TestVars::default();
         let mut o = oxygen_with(&mut vars);
-        vars.write(&o.ids.cabin_altitude_ft, 35_000.);
+        vars.write(&o.ids.cabin_altitude_ft, packed(35_000.));
         vars.write(&o.ids.crew_mask_on, 1.);
         // Deplete halfway.
         o.crew_mass_kg = o.crew_full_mass_kg / 2.;
@@ -349,13 +474,13 @@ mod tests {
     fn higher_cabin_altitude_drains_the_crew_bottle_faster() {
         let mut vars_low = TestVars::default();
         let mut low = oxygen_with(&mut vars_low);
-        vars_low.write(&low.ids.cabin_altitude_ft, 1000.);
+        vars_low.write(&low.ids.cabin_altitude_ft, packed(1000.));
         vars_low.write(&low.ids.crew_mask_on, 1.);
         low.step(&mut vars_low, 600.);
 
         let mut vars_high = TestVars::default();
         let mut high = oxygen_with(&mut vars_high);
-        vars_high.write(&high.ids.cabin_altitude_ft, 40_000.);
+        vars_high.write(&high.ids.cabin_altitude_ft, packed(40_000.));
         vars_high.write(&high.ids.crew_mask_on, 1.);
         high.step(&mut vars_high, 600.);
 
@@ -368,7 +493,7 @@ mod tests {
         let mut o = oxygen_with(&mut vars);
         o.crew_mass_kg = o.crew_full_mass_kg * 0.10;
         vars.write(&o.ids.crew_mask_on, 0.);
-        vars.write(&o.ids.cabin_altitude_ft, 0.);
+        vars.write(&o.ids.cabin_altitude_ft, packed(0.));
         o.step(&mut vars, 0.001);
         assert_eq!(vars.read(&o.ids.crew_low_pressure), 1.);
 
@@ -381,12 +506,12 @@ mod tests {
     fn passenger_masks_stay_up_below_the_threshold_and_drop_above_it() {
         let mut vars = TestVars::default();
         let mut o = oxygen_with(&mut vars);
-        vars.write(&o.ids.cabin_altitude_ft, 9000.);
+        vars.write(&o.ids.cabin_altitude_ft, packed(9000.));
         o.step(&mut vars, 60.);
         assert!(!o.pax_masks_deployed());
         assert_eq!(o.pax_quantity_percent(), 100.);
 
-        vars.write(&o.ids.cabin_altitude_ft, 14_500.);
+        vars.write(&o.ids.cabin_altitude_ft, packed(14_500.));
         o.step(&mut vars, 60.);
         assert!(o.pax_masks_deployed());
     }
@@ -395,13 +520,13 @@ mod tests {
     fn once_deployed_the_generator_runs_to_exhaustion_even_if_altitude_drops_back() {
         let mut vars = TestVars::default();
         let mut o = oxygen_with(&mut vars);
-        vars.write(&o.ids.cabin_altitude_ft, 15_000.);
+        vars.write(&o.ids.cabin_altitude_ft, packed(15_000.));
         o.step(&mut vars, 1.);
         assert!(o.pax_masks_deployed());
 
         // Cabin altitude comes back down (the crew descends); the fired
         // generators do not un-fire.
-        vars.write(&o.ids.cabin_altitude_ft, 6000.);
+        vars.write(&o.ids.cabin_altitude_ft, packed(6000.));
         o.step(&mut vars, PAX_SUPPLY_MINUTES * 60.);
         assert!(o.pax_masks_deployed());
         assert!(o.pax_quantity_percent() < 1., "should be exhausted after a full supply duration: {}", o.pax_quantity_percent());
@@ -411,7 +536,7 @@ mod tests {
     fn pax_generator_flow_matches_the_published_output_over_its_duration() {
         let mut vars = TestVars::default();
         let mut o = oxygen_with(&mut vars);
-        vars.write(&o.ids.cabin_altitude_ft, 15_000.);
+        vars.write(&o.ids.cabin_altitude_ft, packed(15_000.));
         o.step(&mut vars, 1.);
         let flow_lpm = vars.read(&o.ids.pax_flow_lpm);
         assert!((flow_lpm - PAX_GENERATOR_OUTPUT_LITERS / PAX_SUPPLY_MINUTES).abs() < 1e-9);
@@ -459,5 +584,26 @@ mod tests {
         let v320_liters = CREW_FREE_AIR_LITERS * 14.696 / CREW_FULL_PSI;
         let expected_m3 = v320_liters / 1000. * CREW_COUNT / A320_CREW_COUNT;
         assert!((crew_bottle_volume_m3() - expected_m3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn felt_altitude_tracks_real_cabin_altitude_with_no_mask_donned() {
+        // W209: unmasked, X-Plane's hypoxia trigger should see FlyByWire's
+        // real cabin altitude exactly, so a genuine FBW-modelled
+        // decompression is felt and a normal cruise cabin is not.
+        assert_eq!(felt_altitude_ft(35_000., false), 35_000.);
+        assert_eq!(felt_altitude_ft(8_000., false), 8_000.);
+    }
+
+    #[test]
+    fn felt_altitude_drops_toward_sea_level_once_masked_at_full_protection_altitude() {
+        let felt = felt_altitude_ft(34_000., true);
+        assert!(felt < 1., "{felt}");
+    }
+
+    #[test]
+    fn felt_altitude_is_unchanged_by_masking_at_sea_level() {
+        // No protection needed (or delivered) with no altitude gap to close.
+        assert_eq!(felt_altitude_ft(0., true), 0.);
     }
 }

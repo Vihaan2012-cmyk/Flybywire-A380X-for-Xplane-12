@@ -12,7 +12,7 @@ FBW's A380X OANS (fbw-common/src/systems/instruments/src/OANC and the A380X ND/M
 2. **Provider.** The default folder is `<X-Plane>/Output/fbw-a380x/amdb/`, configurable in Output/preferences/fbw_a380x_oans.ini. Answer requests in the exact shapes, including search and nearby queries.
 3. **Auth checks.** Prefer answering the client's own auth and subscription checks faithfully. Use a SourcePatch (src/js/msfs/mod.rs; examples in js_bridge.rs `native_ports`) only if unavoidable, and justify it.
 4. **Documentation.** docs/oans.md: the exact folder layout and file format the user must supply, with a minimal valid example airport.
-5. **Tests.** Parsing, request shapes, and search. Keep the full suite green; use CARGO_TARGET_DIR=D:\fbw-build\target-oans.
+5. **Tests.** Parsing, request shapes, and search. Keep the full suite green; use CARGO_TARGET_DIR=D:\A380\fbw-build\target-oans.
 
 ## Report
 Findings, data format, hooks, and test results.

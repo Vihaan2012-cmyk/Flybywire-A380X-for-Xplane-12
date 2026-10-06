@@ -289,6 +289,29 @@ const PLUGIN_OWNED_ITEM_VARS: &[&str] = &[
     "OVHD_ELEC_ENG_GEN_4_PB_IS_ON",
 ];
 
+/// Variables a *trigger* (not just a procedure line) may read although no
+/// `deep::live::Area` publishes them, because they are published by a real
+/// owner outside `deep` -- `src/efb.rs`, the real owner of every
+/// weight/CG/balance figure this crate has (`E-FUEL-DESIGN.md` D12/D14).
+/// `PLUGIN_OWNED_ITEM_VARS` above is documented as item-only ("a trigger
+/// gets no such allowance"); this is the parallel allowance for triggers a
+/// real, non-`deep` owner publishes -- a real gap `E-FUEL-DESIGN.md` D17
+/// found, not a workaround for it. Each name here is written every tick by
+/// `Efb::update_cg_checks` (`efb.rs`), from the pure `cg_checks` function
+/// `efb.rs`'s own test module exercises directly (its
+/// `cg_and_weight_disagree_...`/`cg_out_of_range_...`/`cg_at_fwd_limit_...`/
+/// `cg_excess_aft_...`/`to_cg_out_of_range_...` tests) -- no full `Efb`
+/// construction needed (see D17's own honesty note on why that is deliberately
+/// avoided here, unlike `Fuel::new`).
+const TRIGGER_REAL_OWNER_VARS: &[&str] = &[
+    "AIRFRAME_ZFW_CG_DISAGREE",
+    "AIRFRAME_WEIGHT_DISAGREE",
+    "AIRFRAME_CG_OUT_OF_RANGE",
+    "AIRFRAME_CG_AT_FWD_LIMIT",
+    "AIRFRAME_CG_EXCESS_AFT",
+    "AIRFRAME_TO_CG_OUT_OF_RANGE",
+];
+
 fn vars_of(c: &Cond) -> Vec<String> {
     let mut v = Vec::new();
     cond_vars(c, &mut v);
@@ -344,7 +367,7 @@ fn no_wired_trigger_reads_a_variable_nobody_publishes() {
     let mut bad = Vec::new();
     for p in fbw::wirings() {
         for v in vars_of(&p.trigger) {
-            if !published.contains(&v) {
+            if !published.contains(&v) && !TRIGGER_REAL_OWNER_VARS.contains(&v.as_str()) {
                 bad.push(format!("{} ({}) reads unpublished {v}", p.id, p.title));
             }
         }
@@ -359,7 +382,7 @@ fn no_wired_trigger_is_permanently_true_or_permanently_false() {
     // `failure_audit::reachability` is the same three-valued check our own
     // 304 alerts are held to.
     let published = published_set();
-    let known = |n: &str| published.contains(n);
+    let known = |n: &str| published.contains(n) || TRIGGER_REAL_OWNER_VARS.contains(&n);
     for p in fbw::wirings() {
         assert_eq!(reachability(&p.trigger, &known), Tri::Reachable, "{} ({}) is not reachable: its trigger has a fixed answer", p.id, p.title);
     }
@@ -741,5 +764,504 @@ fn the_per_instance_counts_these_triggers_enumerate_are_still_what_the_areas_pub
     assert_eq!(count("GEAR_UPLOCKED:"), 5, "the two L/G procedures enumerate 5 legs (ata32::LEGS)");
     assert_eq!(count("GEAR_DOOR_POSITION:"), 5, "L/G DOORS NOT CLOSED enumerates 5 doors (ata32::LEGS)");
     assert_eq!(count("FUEL_TRIM_PUMP_DEGRADATION:"), 2, "the trim pump procedures name both pumps");
-    assert_eq!(count("DEEP_SMOKE_LAV_"), 16, "eight lavatory detectors, each with a reading and an alarm");
+    // ECAM completeness pass (E-FIRE §A): each of the eight lavatory
+    // detectors now also publishes its own circuit fault, alongside its
+    // pre-existing reading and alarm.
+    assert_eq!(count("DEEP_SMOKE_LAV_"), 24, "eight lavatory detectors, each with a reading, an alarm and a circuit fault");
+}
+
+// ---------------------------------------------------------------------------
+// E-ELEC Phase 2 (2026-09-27): behaviour tests for the newly-wired ata24 and
+// ata34 procedures, against E-ELEC-FCOM.json and E-ELEC-DESIGN.md.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apu_bat_fault_fires_on_the_apu_battery_alone() {
+    let flying = engines_running();
+    let healthy = run(flying.clone(), &Faults::default(), 20);
+    let apu_bat = failure_id(|f| f.component == "24_elec.misc.apu-bat", "the APU battery misc fault");
+    let armed = run(flying, &Faults::from_pairs([(apu_bat, 1.0)]), 20);
+
+    let p = wiring(240_800_013);
+    assert!(!holds(&p.trigger, &healthy), "ELEC APU BAT FAULT must be quiet with the APU battery healthy");
+    assert!(holds(&p.trigger, &armed), "ELEC APU BAT FAULT must fire once the APU battery fault is armed");
+}
+
+#[test]
+fn drive_disc_fault_fires_only_on_the_armed_generator() {
+    let flying = engines_running();
+    let healthy = run(flying.clone(), &Faults::default(), 20);
+    let disc2 = failure_id(|f| f.component == "24_elec.misc.drive-disc-2", "generator 2's drive-disconnect detector");
+    let armed = run(flying, &Faults::from_pairs([(disc2, 1.0)]), 20);
+
+    for (n, id) in [(1, 240_800_032), (2, 240_800_033), (3, 240_800_034), (4, 240_800_035)] {
+        let p = wiring(id);
+        assert!(!holds(&p.trigger, &healthy), "ELEC DRIVE {n} DISC FAULT must be quiet with every drive healthy");
+        assert_eq!(holds(&p.trigger, &armed), n == 2, "only generator 2's drive-disconnect detector was armed, but DRIVE {n} DISC FAULT read {}", holds(&p.trigger, &armed));
+    }
+}
+
+#[test]
+fn drive_oil_leak_on_generator_1_eventually_raises_level_lo_ovht_and_press_lo_there_alone() {
+    // A full leak (magnitude 1) at 0.02 L/s drains the 8 L reservoir well
+    // inside a real flight's worth of ticks; a large dt keeps the test fast
+    // without changing the model's own per-second rates.
+    let leaking = Truth { dt_s: 30.0, ..engines_running() };
+    let leak1 = failure_id(|f| f.component == "24_elec.misc.drive-oil-1", "generator 1's drive-oil leak");
+    let healthy = run(engines_running(), &Faults::default(), 5);
+    let drained = run(leaking, &Faults::from_pairs([(leak1, 1.0)]), 60);
+
+    let level_lo = [240_800_040, 240_800_041, 240_800_042, 240_800_043];
+    let ovht = [240_800_044, 240_800_045, 240_800_046, 240_800_047];
+    let press_lo = [240_800_048, 240_800_049, 240_800_050, 240_800_051];
+    for i in 0..4 {
+        assert!(!holds(&wiring(level_lo[i]).trigger, &healthy), "DRIVE {} OIL LEVEL LO must be quiet healthy", i + 1);
+        assert!(!holds(&wiring(ovht[i]).trigger, &healthy), "DRIVE {} OIL OVHT must be quiet healthy", i + 1);
+        assert!(!holds(&wiring(press_lo[i]).trigger, &healthy), "DRIVE {} OIL PRESS LO must be quiet healthy", i + 1);
+        let expect = i == 0;
+        assert_eq!(holds(&wiring(level_lo[i]).trigger, &drained), expect, "DRIVE {} OIL LEVEL LO mismatch after generator 1's own leak", i + 1);
+        assert_eq!(holds(&wiring(press_lo[i]).trigger, &drained), expect, "DRIVE {} OIL PRESS LO mismatch after generator 1's own leak", i + 1);
+    }
+    assert!(holds(&wiring(ovht[0]).trigger, &drained), "DRIVE 1 OIL OVHT must fire once the starved bearing's own heat term crosses 200 degC");
+}
+
+#[test]
+fn enmu_and_elmu_faults_fire_independently() {
+    let flying = engines_running();
+    let healthy = run(flying.clone(), &Faults::default(), 10);
+    let enmu1 = failure_id(|f| f.component == "24_elec.misc.enmu-1", "ENMU 1");
+    let elmu = failure_id(|f| f.component == "24_elec.misc.elmu", "the ELMU");
+    let enmu1_armed = run(flying.clone(), &Faults::from_pairs([(enmu1, 1.0)]), 10);
+    let elmu_armed = run(flying, &Faults::from_pairs([(elmu, 1.0)]), 10);
+
+    assert!(!holds(&wiring(240_800_052).trigger, &healthy));
+    assert!(holds(&wiring(240_800_052).trigger, &enmu1_armed), "ELEC ELEC NETWORK MANAGEMENT 1 FAULT must fire once ENMU 1 is armed");
+    assert!(!holds(&wiring(240_800_053).trigger, &enmu1_armed), "ENMU 2 is untouched");
+    assert!(!holds(&wiring(240_800_069).trigger, &enmu1_armed), "the ELMU is untouched by the ENMU fault");
+    assert!(holds(&wiring(240_800_069).trigger, &elmu_armed), "ELEC LOAD MANAGEMENT FAULT must fire once the ELMU is armed");
+}
+
+#[test]
+fn psc_and_ssc_faults_fire_independently_per_centre_and_per_condition() {
+    let flying = engines_running();
+    let healthy = run(flying.clone(), &Faults::default(), 10);
+    let psc1 = failure_id(|f| f.component == "24_elec.misc.psc-1", "PSC 1");
+    let ssc1_degraded = failure_id(|f| f.component == "24_elec.misc.ssc-1-comm-degraded", "SSC 1 communication degraded");
+    let ssc1_fault = failure_id(|f| f.component == "24_elec.misc.ssc-1-supply-fault", "SSC 1 supply fault");
+    let ssc1_redund = failure_id(|f| f.component == "24_elec.misc.ssc-1-redund-lost", "SSC 1 redundancy lost");
+
+    let psc1_armed = run(flying.clone(), &Faults::from_pairs([(psc1, 1.0)]), 10);
+    let ssc1_degraded_armed = run(flying.clone(), &Faults::from_pairs([(ssc1_degraded, 1.0)]), 10);
+    let ssc1_fault_armed = run(flying.clone(), &Faults::from_pairs([(ssc1_fault, 1.0)]), 10);
+    let ssc1_redund_armed = run(flying, &Faults::from_pairs([(ssc1_redund, 1.0)]), 10);
+
+    assert!(!holds(&wiring(240_800_070).trigger, &healthy));
+    assert!(holds(&wiring(240_800_070).trigger, &psc1_armed), "ELEC PRIMARY SUPPLY CENTER 1 FAULT must fire once PSC1 is armed");
+    assert!(!holds(&wiring(240_800_071).trigger, &psc1_armed), "PSC2 is untouched");
+
+    assert!(holds(&wiring(240_800_074).trigger, &ssc1_degraded_armed), "SSC1 DEGRADED must fire on its own comm-degraded fault");
+    assert!(!holds(&wiring(240_800_076).trigger, &ssc1_degraded_armed), "SSC1 FAULT must stay quiet on a comm-degraded fault alone");
+    assert!(!holds(&wiring(240_800_078).trigger, &ssc1_degraded_armed), "SSC1 REDUND LOST must stay quiet on a comm-degraded fault alone");
+
+    assert!(holds(&wiring(240_800_076).trigger, &ssc1_fault_armed), "SSC1 FAULT must fire on its own supply fault");
+    assert!(!holds(&wiring(240_800_074).trigger, &ssc1_fault_armed), "SSC1 DEGRADED must stay quiet on a supply fault alone");
+
+    assert!(holds(&wiring(240_800_078).trigger, &ssc1_redund_armed), "SSC1 REDUND LOST must fire on its own redundancy fault");
+    assert!(!holds(&wiring(240_800_076).trigger, &ssc1_redund_armed), "SSC1 FAULT must stay quiet on a redundancy fault alone");
+}
+
+#[test]
+fn ext_pwr_fault_needs_both_the_unit_armed_and_that_receptacle_on_line() {
+    let ext1 = failure_id(|f| f.component == "24_elec.misc.ext-pwr-1-fault", "external power unit 1");
+    // On the ground, cold, with generator/APU power absent: the network's
+    // own tie logic brings a plugged-in ground cart on line
+    // (`command_contactors`'s `gpu_plugged_in` branch of `need_tie`) once
+    // `EXT_PWR_AVAIL:1` is set -- represented here directly through the
+    // already-armed misc fault plus a cold truth; the on-line gate itself is
+    // exercised by asserting the procedure is silent when nothing is armed.
+    let cold = Truth { dt_s: 0.1, ..Truth::default() };
+    let quiet = run(cold.clone(), &Faults::default(), 10);
+    let armed_not_on_line = run(cold, &Faults::from_pairs([(ext1, 1.0)]), 10);
+    let p = wiring(240_800_056);
+    assert!(!holds(&p.trigger, &quiet), "ELEC EXT PWR 1 FAULT must be quiet with nothing armed");
+    assert!(!holds(&p.trigger, &armed_not_on_line), "ELEC EXT PWR 1 FAULT must stay quiet while receptacle 1 is not on line, even with the unit armed");
+}
+
+#[test]
+fn static_inv_and_rat_faults_expose_their_already_computed_verdicts() {
+    let flying = engines_running();
+    let healthy = run(flying.clone(), &Faults::default(), 10);
+    let inv = failure_id(|f| f.component == "24_elec.static-inv", "the static inverter's efficiency loss");
+    let rat = failure_id(|f| f.component == "24_elec.rat", "the RAT's own jam/no-power fault");
+    let inv_armed = run(flying.clone(), &Faults::from_pairs([(inv, 1.0)]), 10);
+    let rat_armed = run(flying, &Faults::from_pairs([(rat, 1.0)]), 10);
+
+    assert!(!holds(&wiring(240_800_080).trigger, &healthy), "ELEC STATIC INV FAULT must be quiet healthy");
+    assert!(holds(&wiring(240_800_080).trigger, &inv_armed), "ELEC STATIC INV FAULT must fire once the static inverter degrades past half");
+    assert!(!holds(&wiring(240_800_072).trigger, &healthy), "ELEC RAT FAULT must be quiet healthy");
+    assert!(holds(&wiring(240_800_072).trigger, &rat_armed), "ELEC RAT FAULT must fire on the RAT's own standing health verdict, independent of any commanded deployment");
+}
+
+#[test]
+fn ac_ess_bus_altn_bus_tie_off_and_remote_cb_ctl_are_readouts_not_faults() {
+    let flying = engines_running();
+    let healthy = run(flying.clone(), &Faults::default(), 20);
+    // AC ESS ALTN needs a real AC1 loss to observe the network transfer to
+    // AC4 -- confirmed quiet on a fully healthy network here; the transfer
+    // itself is exercised by deep::electrical's own bus-fault tests.
+    assert!(!holds(&wiring(240_800_011).trigger, &healthy), "ELEC AC ESS BUS ALTN must be quiet when AC1 is feeding the ESS bus normally");
+
+    let bus_tie_off = failure_id(|f| f.component == "24_elec.misc.bus-tie-off", "the bus tie pushbutton");
+    let remote_cb = failure_id(|f| f.component == "17_breakers.misc.remote-cb-ctl", "the remote C/B control pushbutton");
+    let tie_armed = run(flying.clone(), &Faults::from_pairs([(bus_tie_off, 1.0)]), 10);
+    let cb_armed = run(flying, &Faults::from_pairs([(remote_cb, 1.0)]), 10);
+    assert!(!holds(&wiring(240_800_019).trigger, &healthy), "ELEC BUS TIE OFF must be quiet with the pushbutton in its normal position");
+    assert!(holds(&wiring(240_800_019).trigger, &tie_armed), "ELEC BUS TIE OFF must fire once the pushbutton is set off");
+    assert!(!holds(&wiring(240_800_073).trigger, &healthy), "ELEC REMOTE C/B CTL ACTIVE must be quiet with the maintenance pushbutton off");
+    assert!(holds(&wiring(240_800_073).trigger, &cb_armed), "ELEC REMOTE C/B CTL ACTIVE must fire once the maintenance pushbutton is left on");
+}
+
+#[test]
+fn cabin_supply_center_ovht_and_its_detector_fault_are_independent() {
+    let flying = engines_running();
+    let healthy = run(flying.clone(), &Faults::default(), 10);
+    let ovht_l = failure_id(|f| f.component == "24_elec.misc.cabin-ovht-l", "the left cabin supply center overheat detector trip");
+    let det_l = failure_id(|f| f.component == "24_elec.misc.cabin-ovht-det-l", "the left cabin supply center detector's own health");
+    let ovht_armed = run(flying.clone(), &Faults::from_pairs([(ovht_l, 1.0)]), 10);
+    let det_armed = run(flying, &Faults::from_pairs([(det_l, 1.0)]), 10);
+
+    assert!(!holds(&wiring(240_800_022).trigger, &healthy));
+    assert!(holds(&wiring(240_800_022).trigger, &ovht_armed), "ELEC CABIN L SUPPLY CENTER OVHT must fire on its own detector trip");
+    assert!(!holds(&wiring(240_800_024).trigger, &ovht_armed), "the detector's own health fault must stay quiet on a real trip");
+    assert!(holds(&wiring(240_800_024).trigger, &det_armed), "ELEC CABIN L SUPPLY CENTER OVHT DET FAULT must fire on the detector's own health fault");
+    assert!(!holds(&wiring(240_800_022).trigger, &det_armed), "a detector health fault alone must not read as a real overheat");
+    assert!(!holds(&wiring(240_800_023).trigger, &ovht_armed), "the right-side pair is untouched");
+}
+
+#[test]
+fn nav_air_data_disagree_family_reads_the_adr_voters_own_outlier_flags() {
+    // `DEEP_ADR_n_OUTLIER` is itself already tested against a real blocked
+    // static-port pair in `sensors/live.rs`'s own
+    // `blocking_one_systems_static_ports_makes_the_published_adr_voter_
+    // disagree`; this test is over the *composition* these three procedures
+    // build on top of that already-proven published flag, using a synthetic
+    // published map the same way `holds` is built to accept.
+    let mut none = std::collections::BTreeMap::new();
+    none.insert("DEEP_ADR_1_OUTLIER".to_string(), 0.0);
+    none.insert("DEEP_ADR_2_OUTLIER".to_string(), 0.0);
+    none.insert("DEEP_ADR_3_OUTLIER".to_string(), 0.0);
+    let mut one = none.clone();
+    one.insert("DEEP_ADR_1_OUTLIER".to_string(), 1.0);
+    let mut all3 = none.clone();
+    all3.insert("DEEP_ADR_1_OUTLIER".to_string(), 1.0);
+    all3.insert("DEEP_ADR_2_OUTLIER".to_string(), 1.0);
+    all3.insert("DEEP_ADR_3_OUTLIER".to_string(), 1.0);
+
+    let disagree = wiring(340_800_009);
+    let all_disagree = wiring(340_800_010);
+    let degraded = wiring(340_800_007);
+    assert!(!holds(&disagree.trigger, &none), "NAV AIR DATA DISAGREE must be quiet with every ADR agreeing");
+    assert!(holds(&disagree.trigger, &one), "NAV AIR DATA DISAGREE must fire once any one ADR is flagged an outlier");
+    assert!(!holds(&all_disagree.trigger, &one), "NAV ALL AIR DATA DISAGREE needs all three ADRs flagged, not just one");
+    assert!(!holds(&degraded.trigger, &one), "NAV ADR 1+2+3 DATA DEGRADED needs all three ADRs flagged too");
+    assert!(holds(&all_disagree.trigger, &all3), "NAV ALL AIR DATA DISAGREE must fire once all three are flagged");
+    assert!(holds(&degraded.trigger, &all3), "NAV ADR 1+2+3 DATA DEGRADED must fire once all three are flagged");
+}
+
+#[test]
+fn nav_gpws_lanes_follow_their_own_ac_bus_and_the_combo_needs_both() {
+    let healthy = run(engines_running(), &Faults::default(), 20);
+    let ac1_dead = Truth { ac_bus_volts: [0.0, 115.0, 115.0, 115.0], ..engines_running() };
+    let ac1_down = run(ac1_dead, &Faults::default(), 20);
+
+    let lane1 = wiring(341_800_026);
+    let lane2 = wiring(341_800_027);
+    let combo = wiring(341_800_028);
+    assert!(!holds(&lane1.trigger, &healthy), "SURV GPWS 1 FAULT must be quiet with AC ESS powered");
+    assert!(!holds(&combo.trigger, &healthy));
+    // AC ESS's own feed (AC1 normally) losing AC1 alone does not necessarily
+    // kill AC ESS if the ALTN transfer to AC4 holds it up; this only checks
+    // the combo cannot fire with AC4 still healthy, which lane 2's own gate
+    // guarantees regardless of AC1.
+    assert!(!holds(&lane2.trigger, &ac1_down), "SURV GPWS 2 FAULT reads AC 4, not AC 1, so it must stay quiet");
+    assert!(!holds(&combo.trigger, &ac1_down), "the combo needs both lanes down, not just one bus");
+}
+
+// ---------------------------------------------------------------------------
+// E-FCTL (ATA 27), ECAM completeness pass, Phase 2 -- 271800001/002,
+// 271800025/027, 271800045-047, 271800050/052 (`ata27.rs`'s own addendum).
+// ---------------------------------------------------------------------------
+
+/// A powered, cold-stick aircraft: `ata27::network_alive` reads
+/// `ELEC_AC_n_BUS_IS_POWERED`, which `deep::electrical` derives from its own
+/// generator physics (engine speed and the generator pushbutton, not a raw
+/// bus-voltage override -- confirmed against `deep::electrical::live.rs`'s
+/// own `gen_on_line` computation), so this reuses the same real,
+/// engines-running base every other chapter's "must fire" test does
+/// (`elec_gen_fault_fires_when_that_generator_fails`'s own `engines_
+/// running()`), with every sidestick/pedal axis at its rest position.
+fn fctl_powered() -> Truth {
+    Truth {
+        // `engines_running()` alone leaves `prim_healthy` at its
+        // cold-and-dark default (`false`) and no hydraulic pressure, which
+        // the coordinator follow-up's per-PRIM-channel gate and the flap/
+        // slat wingtip-brake test both need to be real.
+        prim_healthy: [true; 3],
+        sec_healthy: [true; 3],
+        hydraulic_pressure_pa: [5000.0 * 6894.757; 2],
+        ..engines_running()
+    }
+}
+
+#[test]
+fn config_sidestick_fault_by_takeover_fires_on_the_opposite_sides_pushbutton_and_not_cold() {
+    let healthy = run(fctl_powered(), &Faults::default(), 30);
+    let l = wiring(271_800_001);
+    let r = wiring(271_800_002);
+    assert!(!holds(&l.trigger, &healthy), "CONFIG L SIDESTICK FAULT must be quiet with neither take-over pressed");
+    assert!(!holds(&r.trigger, &healthy), "CONFIG R SIDESTICK FAULT must be quiet with neither take-over pressed");
+
+    // 271800001 (L) is the *captain's* stick disabled, which the FCOM's own
+    // triggering text (p.5015) says happens when the *opposite* (F.O.'s)
+    // take-over pushbutton is pressed -- `Truth::prim_left_sidestick_
+    // disabled`.
+    let fo_pressed = run(Truth { prim_left_sidestick_disabled: true, ..fctl_powered() }, &Faults::default(), 30);
+    assert!(holds(&l.trigger, &fo_pressed), "CONFIG L SIDESTICK FAULT must fire when the F.O.'s take-over disables the captain's stick");
+    assert!(!holds(&r.trigger, &fo_pressed), "the F.O.'s own stick take-over must not also flag CONFIG R SIDESTICK FAULT");
+
+    let capt_pressed = run(Truth { prim_right_sidestick_disabled: true, ..fctl_powered() }, &Faults::default(), 30);
+    assert!(holds(&r.trigger, &capt_pressed), "CONFIG R SIDESTICK FAULT must fire when the captain's take-over disables the F.O.'s stick");
+    assert!(!holds(&l.trigger, &capt_pressed), "the captain's own take-over must not also flag CONFIG L SIDESTICK FAULT");
+
+    let cold = run(Truth { dt_s: 0.1, prim_left_sidestick_disabled: true, ..Truth::default() }, &Faults::default(), 30);
+    assert!(!holds(&l.trigger, &cold), "CONFIG L SIDESTICK FAULT must stay quiet cold and dark even with the Truth bit set");
+}
+
+#[test]
+fn f_ctl_l_sidestick_fault_needs_both_axes_lost_and_sensor_fault_needs_only_a_disagreement() {
+    let pitch_a_open = failure_id(|f| f.component == "27_fctl.l_sidestick_pitch" && f.name.contains("channel A open circuit"), "captain's pitch stick channel A");
+    let pitch_b_open = failure_id(|f| f.component == "27_fctl.l_sidestick_pitch" && f.name.contains("channel B open circuit"), "captain's pitch stick channel B");
+    let roll_a_open = failure_id(|f| f.component == "27_fctl.l_sidestick_roll" && f.name.contains("channel A open circuit"), "captain's roll stick channel A");
+    let roll_b_open = failure_id(|f| f.component == "27_fctl.l_sidestick_roll" && f.name.contains("channel B open circuit"), "captain's roll stick channel B");
+
+    let healthy = run(fctl_powered(), &Faults::default(), 30);
+    let fault = wiring(271_800_025);
+    let sensor_fault = wiring(271_800_027);
+    assert!(!holds(&fault.trigger, &healthy), "F/CTL L SIDESTICK FAULT must be quiet with both transducers healthy");
+    assert!(!holds(&sensor_fault.trigger, &healthy));
+
+    // Only the pitch axis lost: not yet "the stick has failed outright".
+    let pitch_only = run(fctl_powered(), &Faults::from_pairs([(pitch_a_open, 1.0), (pitch_b_open, 1.0)]), 30);
+    assert!(!holds(&fault.trigger, &pitch_only), "one axis lost is not the whole stick");
+
+    // Both axes, both channels: the whole stick.
+    let both_axes = run(
+        fctl_powered(),
+        &Faults::from_pairs([(pitch_a_open, 1.0), (pitch_b_open, 1.0), (roll_a_open, 1.0), (roll_b_open, 1.0)]),
+        30,
+    );
+    assert!(holds(&fault.trigger, &both_axes), "F/CTL L SIDESTICK FAULT must fire when both channels of both axes are lost");
+
+    // A persistent disagreement (one channel drifting) trips the narrower
+    // SENSOR FAULT, not the plain FAULT -- needs real elapsed time to cross
+    // `TRANSDUCER_DISAGREE_RAD` and clear `TRANSDUCER_DISAGREE_TIMER_S`.
+    let pitch_a_drift = failure_id(|f| f.component == "27_fctl.l_sidestick_pitch" && f.name.contains("channel A drift"), "captain's pitch stick channel A drift");
+    let disagreeing = run(fctl_powered(), &Faults::from_pairs([(pitch_a_drift, 1.0)]), 300);
+    assert!(!holds(&fault.trigger, &disagreeing), "a channel disagreement is not the same as losing the axis outright");
+    assert!(holds(&sensor_fault.trigger, &disagreeing), "F/CTL L SIDESTICK SENSOR FAULT must fire once the channels have disagreed long enough");
+
+    let cold = run(Truth { dt_s: 0.1, ..Truth::default() }, &Faults::from_pairs([(pitch_a_open, 1.0), (pitch_b_open, 1.0), (roll_a_open, 1.0), (roll_b_open, 1.0)]), 30);
+    assert!(!holds(&fault.trigger, &cold), "F/CTL L SIDESTICK FAULT must stay quiet cold and dark");
+}
+
+#[test]
+fn rudder_pedal_fault_and_sensor_fault_mirror_the_sidestick_pattern() {
+    let a_open = failure_id(|f| f.component == "27_fctl.rudder_pedal" && f.name.contains("channel A open circuit"), "rudder pedal channel A");
+    let b_open = failure_id(|f| f.component == "27_fctl.rudder_pedal" && f.name.contains("channel B open circuit"), "rudder pedal channel B");
+    let a_drift = failure_id(|f| f.component == "27_fctl.rudder_pedal" && f.name.contains("channel A drift"), "rudder pedal channel A drift");
+
+    let healthy = run(fctl_powered(), &Faults::default(), 30);
+    let fault = wiring(271_800_050);
+    let sensor_fault = wiring(271_800_052);
+    assert!(!holds(&fault.trigger, &healthy), "F/CTL RUDDER PEDAL FAULT must be quiet with a healthy transducer");
+    assert!(!holds(&sensor_fault.trigger, &healthy));
+
+    let both_open = run(fctl_powered(), &Faults::from_pairs([(a_open, 1.0), (b_open, 1.0)]), 30);
+    assert!(holds(&fault.trigger, &both_open), "F/CTL RUDDER PEDAL FAULT must fire when both channels are lost");
+
+    let disagreeing = run(fctl_powered(), &Faults::from_pairs([(a_drift, 1.0)]), 300);
+    assert!(!holds(&fault.trigger, &disagreeing), "a channel disagreement is not the same as losing the pedal transducer outright");
+    assert!(holds(&sensor_fault.trigger, &disagreeing), "F/CTL RUDDER PEDAL SENSOR FAULT must fire once the channels have disagreed long enough");
+
+    let cold = run(Truth { dt_s: 0.1, ..Truth::default() }, &Faults::from_pairs([(a_open, 1.0), (b_open, 1.0)]), 30);
+    assert!(!holds(&fault.trigger, &cold), "F/CTL RUDDER PEDAL FAULT must stay quiet cold and dark");
+}
+
+#[test]
+fn prim_and_sec_pin_prog_disagree_fires_on_the_new_identity_mismatch_and_not_cold() {
+    let prim_mismatch = failure_id(|f| f.component == "27_fctl.prim_pin_prog" && f.name.contains("configuration identity mismatch"), "PRIM pin-programming mismatch");
+    let sec_mismatch = failure_id(|f| f.component == "27_fctl.sec_pin_prog" && f.name.contains("configuration identity mismatch"), "SEC pin-programming mismatch");
+
+    let healthy = run(fctl_powered(), &Faults::default(), 30);
+    let prim_versions = wiring(271_800_045);
+    let sec_versions = wiring(271_800_046);
+    let prim_pin_prog = wiring(271_800_047);
+    for p in [&prim_versions, &sec_versions, &prim_pin_prog] {
+        assert!(!holds(&p.trigger, &healthy), "{} must be quiet with every unit's identity agreeing", p.title);
+    }
+
+    // A discrete identity check needs no confirm delay to settle in this
+    // port's own model, but `.confirm(0.6)` still applies at the FWS layer
+    // this test does not exercise; a handful of frames is enough here.
+    let prim_armed = run(fctl_powered(), &Faults::from_pairs([(prim_mismatch, 1.0)]), 30);
+    assert!(holds(&prim_versions.trigger, &prim_armed), "F/CTL PRIM VERSIONS DISAGREE must fire when the PRIM identity component disagrees");
+    assert!(holds(&prim_pin_prog.trigger, &prim_armed), "F/CTL PRIMs PIN PROG DISAGREE must fire on the same underlying disagreement");
+    assert!(!holds(&sec_versions.trigger, &prim_armed), "arming the PRIM mismatch must not also flag the SECs");
+
+    let sec_armed = run(fctl_powered(), &Faults::from_pairs([(sec_mismatch, 1.0)]), 30);
+    assert!(holds(&sec_versions.trigger, &sec_armed), "F/CTL SEC VERSIONS DISAGREE must fire when the SEC identity component disagrees");
+    assert!(!holds(&prim_versions.trigger, &sec_armed));
+
+    let cold = run(Truth { dt_s: 0.1, ..Truth::default() }, &Faults::from_pairs([(prim_mismatch, 1.0)]), 30);
+    assert!(!holds(&prim_versions.trigger, &cold), "F/CTL PRIM VERSIONS DISAGREE must stay quiet cold and dark even with the identity component disagreeing");
+}
+
+// ---------------------------------------------------------------------------
+// E-FCTL, coordinator follow-up (2026-09-27): re-examined MODEL ids and the
+// wirable half of the deferred SFCC lever/wingtip-brake group.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn two_gyrometers_fault_fires_when_a_rate_gyro_pair_is_lost_and_not_cold() {
+    let pitch_a = failure_id(|f| f.component == "27_fctl.rate_gyro_pitch" && f.name.contains("channel A open circuit"), "pitch rate gyro channel A");
+    let pitch_b = failure_id(|f| f.component == "27_fctl.rate_gyro_pitch" && f.name.contains("channel B open circuit"), "pitch rate gyro channel B");
+    let p = wiring(271_800_018);
+
+    let healthy = run(fctl_powered(), &Faults::default(), 30);
+    assert!(!holds(&p.trigger, &healthy), "F/CTL TWO GYROMETERs FAULT must be quiet with every gyro pair healthy");
+
+    let both_lost = run(fctl_powered(), &Faults::from_pairs([(pitch_a, 1.0), (pitch_b, 1.0)]), 30);
+    assert!(holds(&p.trigger, &both_lost), "F/CTL TWO GYROMETERs FAULT must fire when one axis's pair is lost outright");
+
+    let cold = run(Truth { dt_s: 0.1, ..Truth::default() }, &Faults::from_pairs([(pitch_a, 1.0), (pitch_b, 1.0)]), 30);
+    assert!(!holds(&p.trigger, &cold), "F/CTL TWO GYROMETERs FAULT must stay quiet cold and dark");
+}
+
+#[test]
+fn r_sidestick_fault_and_sensor_fault_fire_without_the_stick_ever_moving() {
+    let pitch_a_open = failure_id(|f| f.component == "27_fctl.r_sidestick_pitch" && f.name.contains("channel A open circuit"), "F.O. pitch stick channel A");
+    let pitch_b_open = failure_id(|f| f.component == "27_fctl.r_sidestick_pitch" && f.name.contains("channel B open circuit"), "F.O. pitch stick channel B");
+    let roll_a_open = failure_id(|f| f.component == "27_fctl.r_sidestick_roll" && f.name.contains("channel A open circuit"), "F.O. roll stick channel A");
+    let roll_b_open = failure_id(|f| f.component == "27_fctl.r_sidestick_roll" && f.name.contains("channel B open circuit"), "F.O. roll stick channel B");
+    let pitch_a_drift = failure_id(|f| f.component == "27_fctl.r_sidestick_pitch" && f.name.contains("channel A drift"), "F.O. pitch stick channel A drift");
+
+    let fault = wiring(271_800_026);
+    let sensor_fault = wiring(271_800_028);
+    let healthy = run(fctl_powered(), &Faults::default(), 30);
+    assert!(!holds(&fault.trigger, &healthy), "F/CTL R SIDESTICK FAULT must be quiet with a healthy F.O. stick");
+    assert!(!holds(&sensor_fault.trigger, &healthy));
+
+    let both_axes = run(fctl_powered(), &Faults::from_pairs([(pitch_a_open, 1.0), (pitch_b_open, 1.0), (roll_a_open, 1.0), (roll_b_open, 1.0)]), 30);
+    assert!(holds(&fault.trigger, &both_axes), "F/CTL R SIDESTICK FAULT must fire on both channels of both axes lost -- the stick never moved, only its transducers failed");
+
+    let disagreeing = run(fctl_powered(), &Faults::from_pairs([(pitch_a_drift, 1.0)]), 300);
+    assert!(!holds(&fault.trigger, &disagreeing));
+    assert!(holds(&sensor_fault.trigger, &disagreeing), "F/CTL R SIDESTICK SENSOR FAULT must fire once the F.O.'s channels have disagreed long enough");
+
+    let cold = run(Truth { dt_s: 0.1, ..Truth::default() }, &Faults::from_pairs([(pitch_a_open, 1.0), (pitch_b_open, 1.0), (roll_a_open, 1.0), (roll_b_open, 1.0)]), 30);
+    assert!(!holds(&fault.trigger, &cold), "F/CTL R SIDESTICK FAULT must stay quiet cold and dark");
+}
+
+#[test]
+fn load_alleviation_fault_fires_on_the_fcoms_two_of_three_accelerometer_vote() {
+    let left_1 = failure_id(|f| f.component == "27_fctl.load_alleviation" && f.name.contains("left wing accelerometer 1"), "LAF left accel 1");
+    let left_2 = failure_id(|f| f.component == "27_fctl.load_alleviation" && f.name.contains("left wing accelerometer 2"), "LAF left accel 2");
+    let p = wiring(271_800_029);
+
+    let healthy = run(fctl_powered(), &Faults::default(), 30);
+    assert!(!holds(&p.trigger, &healthy), "F/CTL LOAD ALLEVIATION FAULT must be quiet with every accelerometer healthy");
+
+    let one_failed = run(fctl_powered(), &Faults::from_pairs([(left_1, 1.0)]), 30);
+    assert!(!holds(&p.trigger, &one_failed), "one of three accelerometers failed is not yet the FCOM's 2-of-3 vote");
+
+    let two_failed = run(fctl_powered(), &Faults::from_pairs([(left_1, 1.0), (left_2, 1.0)]), 30);
+    assert!(holds(&p.trigger, &two_failed), "F/CTL LOAD ALLEVIATION FAULT must fire on two of three left-wing accelerometers failed");
+
+    let cold = run(Truth { dt_s: 0.1, ..Truth::default() }, &Faults::from_pairs([(left_1, 1.0), (left_2, 1.0)]), 30);
+    assert!(!holds(&p.trigger, &cold), "F/CTL LOAD ALLEVIATION FAULT must stay quiet cold and dark");
+}
+
+#[test]
+fn per_prim_elevator_rudder_and_sidestick_monitor_channels_fire_only_while_that_prim_is_healthy() {
+    let elev2 = failure_id(|f| f.component == "27_fctl.prim_2_elevator_channel", "PRIM 2 elevator channel");
+    let rud3 = failure_id(|f| f.component == "27_fctl.prim_3_rudder_channel", "PRIM 3 rudder channel");
+    let stick1 = failure_id(|f| f.component == "27_fctl.prim_1_sidestick_monitor", "PRIM 1 sidestick monitor");
+
+    let elev2_proc = wiring(271_800_034);
+    let rud3_proc = wiring(271_800_041);
+    let stick1_proc = wiring(271_800_042);
+
+    let healthy = run(fctl_powered(), &Faults::default(), 30);
+    for p in [&elev2_proc, &rud3_proc, &stick1_proc] {
+        assert!(!holds(&p.trigger, &healthy), "{} ({}) must be quiet with every PRIM channel healthy", p.id, p.title);
+    }
+
+    let armed = run(fctl_powered(), &Faults::from_pairs([(elev2, 1.0), (rud3, 1.0), (stick1, 1.0)]), 30);
+    assert!(holds(&elev2_proc.trigger, &armed), "271800034 F/CTL PRIM 2 ELEVATOR ACTUATOR FAULT must fire");
+    assert!(holds(&rud3_proc.trigger, &armed), "271800041 F/CTL PRIM 3 RUDDER ACTUATOR FAULT must fire");
+    assert!(holds(&stick1_proc.trigger, &armed), "271800042 F/CTL PRIM 1 SIDESTICK SENSOR FAULT must fire");
+    assert!(!holds(&wiring(271_800_033).trigger, &armed), "PRIM 1's own elevator channel is untouched");
+
+    // Killing the whole PRIM must not double the channel alert on top of
+    // FlyByWire's own wired whole-unit 271800036-038.
+    let mut prim1_dead = fctl_powered();
+    prim1_dead.prim_healthy[0] = false;
+    let dead = run(prim1_dead, &Faults::from_pairs([(stick1, 1.0)]), 30);
+    assert!(!holds(&stick1_proc.trigger, &dead), "a channel fault on a wholly-dead PRIM must not double up with FlyByWire's own PRIM 1 FAULT");
+}
+
+#[test]
+fn flap_lever_sys_fault_fires_per_sfcc_channel_and_not_cold() {
+    let chan1 = failure_id(|f| f.component == "27_fctl.flap_lever_csu" && f.name.contains("SFCC 1 communication loss"), "flap lever SFCC 1 comm loss");
+    let chan2 = failure_id(|f| f.component == "27_fctl.flap_lever_csu" && f.name.contains("SFCC 2 communication loss"), "flap lever SFCC 2 comm loss");
+    let sys1 = wiring(272_800_014);
+    let sys2 = wiring(272_800_015);
+
+    let healthy = run(fctl_powered(), &Faults::default(), 30);
+    assert!(!holds(&sys1.trigger, &healthy) && !holds(&sys2.trigger, &healthy));
+
+    let lost1 = run(fctl_powered(), &Faults::from_pairs([(chan1, 1.0)]), 30);
+    assert!(holds(&sys1.trigger, &lost1), "272800014 F/CTL FLAPS LEVER SYS 1 FAULT must fire");
+    assert!(!holds(&sys2.trigger, &lost1));
+
+    let lost2 = run(fctl_powered(), &Faults::from_pairs([(chan2, 1.0)]), 30);
+    assert!(holds(&sys2.trigger, &lost2), "272800015 F/CTL FLAPS LEVER SYS 2 FAULT must fire");
+    assert!(!holds(&sys1.trigger, &lost2));
+
+    let cold = run(Truth { dt_s: 0.1, ..Truth::default() }, &Faults::from_pairs([(chan1, 1.0)]), 30);
+    assert!(!holds(&sys1.trigger, &cold), "272800014 must stay quiet cold and dark");
+}
+
+#[test]
+fn flaps_and_slats_locked_fire_once_the_wingtip_brake_actually_engages() {
+    // A real asymmetry: the left flap PCU runs away while the right stays
+    // commanded to the same target, which the pre-existing `HighLiftPair`
+    // asymmetry monitor (`live.rs`'s own `HIGH_LIFT_ASYMMETRY_RAD`/`_TIMER_S`)
+    // must trip and command the wingtip brake -- the same signal
+    // `272800016` now reads.
+    let flap_l_runaway = failure_id(|f| f.component == "27_fctl.flap_l" && f.name.contains("PCU hardover"), "left flap PCU hardover");
+    let flaps_locked = wiring(272_800_016);
+
+    let healthy = run(fctl_powered(), &Faults::default(), 30);
+    assert!(!holds(&flaps_locked.trigger, &healthy), "F/CTL FLAPS LOCKED must be quiet with a healthy flap system");
+
+    // No explicit flap command is needed: the left PCU runs away off its
+    // (zero) command while the right stays healthy and holds at zero, which
+    // is exactly the divergence `HighLiftPair`'s own asymmetry monitor
+    // watches for.
+    let runaway = run(fctl_powered(), &Faults::from_pairs([(flap_l_runaway, 1.0)]), 150);
+    assert!(holds(&flaps_locked.trigger, &runaway), "F/CTL FLAPS LOCKED must fire once the wingtip brake engages on a real left/right flap asymmetry");
+
+    let cold = run(Truth { dt_s: 0.1, ..Truth::default() }, &Faults::from_pairs([(flap_l_runaway, 1.0)]), 150);
+    assert!(!holds(&flaps_locked.trigger, &cold), "F/CTL FLAPS LOCKED must stay quiet cold and dark");
 }

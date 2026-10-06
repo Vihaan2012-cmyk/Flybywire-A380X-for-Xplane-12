@@ -51,7 +51,7 @@
 # broken because the APU never reached a running state to shut down from.
 #
 # Result: `cargo +stable-x86_64-pc-windows-gnu test -p systems --release
-# --lib apu::` (CARGO_TARGET_DIR=/d/fbw-build/target-main, run from
+# --lib apu::` (CARGO_TARGET_DIR=/d/A380/fbw-build/target-main, run from
 # fbw-a380x/src/wasm/systems): 173 passed / 27 failed -> 191 passed / 9
 # failed. All 5 target failures from the task are now fixed:
 #   - test_bed.apu_is_available() assertion (apu/mod.rs ~1285/1911)

@@ -121,6 +121,13 @@ pub struct IfeFaults {
     pub seat_fault: [f64; Zone::COUNT],
     /// Per server, 0..1: at 1.0 the server has failed outright.
     pub server_fault: [f64; N_SERVERS],
+    /// ECAM completeness pass (E-FIRE §, `260800032` SMOKE IFE BAY DET
+    /// FAULT, cross-area addition): a monitored smoke-sensing element's
+    /// own circuit/self-test fault, per zone -- orthogonal to `seat_fault`
+    /// above, the same class of mapping `sensors::smoke_detector`'s own
+    /// `circuit_fault` field uses. Does not affect `zone_temp_c`/the smoke
+    /// comparison at all; drives only [`IfeOutputs::zone_smoke_detector_fault`].
+    pub smoke_detector_fault: [f64; Zone::COUNT],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -160,6 +167,8 @@ pub struct IfeOutputs {
     pub zone_power_w: [f64; Zone::COUNT],
     pub zone_temp_c: [f64; Zone::COUNT],
     pub zone_tripped: [bool; Zone::COUNT],
+    /// `IfeFaults.smoke_detector_fault[i] > 0.0`, direct pass-through.
+    pub zone_smoke_detector_fault: [bool; Zone::COUNT],
     pub server_power_w: [f64; N_SERVERS],
     pub server_failed: [bool; N_SERVERS],
     pub content_available: bool,
@@ -248,6 +257,7 @@ impl IfeSystem {
             out.zone_power_w[i] = commanded_w;
             out.zone_temp_c[i] = state.temp_c;
             out.zone_tripped[i] = state.tripped;
+            out.zone_smoke_detector_fault[i] = faults.smoke_detector_fault[i] > 0.0;
         }
 
         let mut any_server_healthy = false;
@@ -331,6 +341,27 @@ mod tests {
         let (out, _) = s.step(&IfeInputs::default(), &IfeFaults::default(), 1.0);
         assert_eq!(out.zone_power_w[Zone::Aft.index()], 0.0);
         assert!(out.zone_power_w[Zone::Fwd.index()] > 0.0, "other zones are unaffected");
+    }
+
+    /// E-FIRE ECAM completeness pass, cross-area addition for `260800032`
+    /// SMOKE IFE BAY DET FAULT: the smoke detector's own circuit fault is
+    /// independent of the seat-wiring/thermal path entirely.
+    #[test]
+    fn a_smoke_detector_circuit_fault_is_independent_of_the_seat_wiring_thermal_path() {
+        let mut s = IfeSystem::new();
+        let healthy = s.step(&IfeInputs::default(), &IfeFaults::default(), 1.0).0;
+        assert!(healthy.zone_smoke_detector_fault.iter().all(|&f| !f));
+
+        let mut s2 = IfeSystem::new();
+        let mut faults = IfeFaults::default();
+        faults.smoke_detector_fault[Zone::Mid.index()] = 1.0;
+        let (out, _) = s2.step(&IfeInputs::default(), &faults, 1.0);
+        assert!(out.zone_smoke_detector_fault[Zone::Mid.index()]);
+        assert!(!out.zone_smoke_detector_fault[Zone::Fwd.index()], "only the faulted zone's own detector is affected");
+        // No heat, no trip: the circuit fault does not touch the thermal
+        // path at all.
+        assert!((out.zone_temp_c[Zone::Mid.index()] - ZONE_AMBIENT_C).abs() < 1e-6);
+        assert!(!out.zone_tripped[Zone::Mid.index()]);
     }
 
     #[test]

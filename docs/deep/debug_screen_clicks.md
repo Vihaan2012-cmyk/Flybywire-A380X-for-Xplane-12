@@ -35,7 +35,7 @@ each had a real, distinct defect.
    <id>`, then its `TRIS`, then `ATTR_manip_none` (e.g. lines 9708-9711 of the
    installed OBJ for `SCREEN_DU_MFD`). **This is not broken** —
    `docs/screens.md`'s "the converter writes none yet" note about
-   `ATTR_manip_device` is stale; the converter (`D:\msfs2xp-aircraft`,
+   `ATTR_manip_device` is stale; the converter (`D:\A380\msfs2xp-aircraft`,
    read-only) was already fixed to emit it, in both builds checked. `.acf`
    (`FlyByWire A380X.acf`) has no panel/avionics setting that would block
    this; the `_obja` attachment list only carries geometry file names and LOD
@@ -155,7 +155,7 @@ off-screen (`WindowInfo::set_as_windowless`) CEF browser per instrument view
 via `browser_host_create_browser_sync`, and `send_input_event`
 (`views.rs:375-391`) drives clicks into it with `BrowserHost::
 send_mouse_click_event`. Neither ever calls `BrowserHost::set_focus(true)`
-(`_cef_browser_host_t::SetFocus`, `D:\fbw-build\cef\include\cef_browser.h:398-401`,
+(`_cef_browser_host_t::SetFocus`, `D:\A380\fbw-build\cef\include\cef_browser.h:398-401`,
 bound as `set_focus(&self, focus: c_int)` in the vendored `cef` crate,
 version pinned in `Cargo.lock` to `152.3.0+152.0.6`) on any browser, ever.
 
@@ -251,7 +251,7 @@ imports.
   by `views.rs`'s own `view_size_is_the_panel_cfg_size_except_headless_
   hosts_are_1x1` test. Only the missing `set_focus` (Bug 2 above) was found
   wrong here.
-- **Converter output** (`D:\msfs2xp-aircraft`, read-only): both the
+- **Converter output** (`D:\A380\msfs2xp-aircraft`, read-only): both the
   installed aircraft's and a fresh conversion's OBJs already carry
   `ATTR_cockpit_device`+`ATTR_manip_device` correctly on every screen mesh
   (Bug candidate ruled out — see above); `docs/screens.md`'s note that "the

@@ -63,7 +63,7 @@ this plugin never modifies.
 
 ## 2. X-Plane's side: a point sample, not a reflectivity field
 
-`XPLMWeather.h` (SDK 4.3.0, D:\fbw-build\xpsdk\SDK\CHeaders\XPLM), `XPLM400`:
+`XPLMWeather.h` (SDK 4.3.0, D:\A380\fbw-build\xpsdk\SDK\CHeaders\XPLM), `XPLM400`:
 
 - **`XPLMGetWeatherAtLocation(lat, lon, alt_m, &XPLMWeatherInfo_t)`**: the
   weather at one point. Its header is explicit -- "This call is not

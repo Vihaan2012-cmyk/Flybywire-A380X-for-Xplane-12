@@ -77,40 +77,11 @@
 
 use std::collections::BTreeMap;
 
+pub use super::frame::{DerivedFailure, Faults, PublishedFrame};
+
+use super::flight_controls::live::SurfaceAngles;
 use super::integration::weather_truth::EnvironmentTruth;
 
-/// What every area published on the previous frame, by variable name.
-///
-/// This is how one area reads another's output. The areas are deliberately
-/// independent -- none may call into another, so that each stays separately
-/// testable -- but the aircraft is not: a pneumatic duct's overheat loop
-/// watches the temperature of the bay it runs through, and that bay is the
-/// thermal area's to compute. Passing the previous frame's published values
-/// back in keeps the areas decoupled while letting the physics join up.
-///
-/// A name nobody published reads as `None`, never as zero: an area must be
-/// able to tell "the bay is at 0 C" from "nothing models that bay".
-#[derive(Clone, Debug, Default)]
-pub struct PublishedFrame(pub BTreeMap<String, f64>);
-
-impl PublishedFrame {
-    /// What another area published for `name` last frame, if anything did.
-    pub fn get(&self, name: &str) -> Option<f64> {
-        self.0.get(name).copied()
-    }
-
-    /// `get`, with a caller-chosen stand-in for "nobody models this yet".
-    /// The fallback belongs to the caller because only it knows what a
-    /// physically sane substitute is -- ambient for a duct pressure, say,
-    /// never zero.
-    pub fn get_or(&self, name: &str, fallback: f64) -> f64 {
-        self.get(name).unwrap_or(fallback)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
 
 /// The doors [`Truth::door_open_fraction`] carries, in its own order.
 ///
@@ -124,7 +95,7 @@ impl PublishedFrame {
 /// These are the doors the plugin has a real mechanical position for; the
 /// fuel hose and the ground power connection are interactive points too
 /// but are not doors and are not carried.
-pub const DOOR_NAMES: [&str; 8] = ["M1L", "M2L", "M2R", "M4L", "M5L", "U1L", "CARGO_FWD", "CARGO_AFT"];
+pub const DOOR_NAMES: [&str; 13] = ["M1L", "M2L", "M2R", "M4L", "M5L", "U1L", "U1R", "U2L", "U2R", "U3L", "U3R", "CARGO_FWD", "CARGO_AFT"];
 
 /// Everything the deep areas read about the rest of the simulation.
 ///
@@ -234,6 +205,17 @@ pub struct Truth {
     /// with the coarse solve, not because the coarse solve outranks them.
     pub ac_bus_volts: [f64; 4],
     pub dc_bus_volts: [f64; 2],
+    /// Whether FlyByWire's own electrical system currently reports each of
+    /// those same six buses powered -- `ELEC_AC_{1..4}_BUS_IS_POWERED` /
+    /// `ELEC_DC_{1,2}_BUS_IS_POWERED`, read the same way and for the same
+    /// reason as `ac_bus_volts`/`dc_bus_volts` above. Exists so
+    /// `deep::electrical` can capture FBW's own answer immediately before
+    /// its own `publish` overwrites those exact names with this area's
+    /// authoritative one (`docs/deep/authority.md`), and republish it under
+    /// `DEEP_ELEC_*_FBW_RAW_*` so the override is auditable instead of
+    /// silent -- see `deep::electrical::live::ElectricalLive`'s own doc.
+    pub ac_bus_powered: [bool; 4],
+    pub dc_bus_powered: [bool; 2],
     /// PRIM 1/2/3 and SEC 1/2/3 health, true = healthy, indexed like
     /// `prim.rs`'s own `prim_discrete`/`sec_discrete` arrays (0 = PRIM1/
     /// SEC1). Straight from FlyByWire's own compiled Simulink
@@ -245,6 +227,60 @@ pub struct Truth {
     /// availability, not an approximation from `ac_bus_volts` above.
     pub prim_healthy: [bool; 3],
     pub sec_healthy: [bool; 3],
+    /// PRIM 1's own `fctl_logic.{left,right}_sidestick_disabled`/
+    /// `{left,right}_sidestick_priority_locked` (E-FCTL, ECAM completeness
+    /// pass; `src/prim.rs`'s own `A32NX_PRIM_1_{LEFT,RIGHT}_SIDESTICK_
+    /// DISABLED`/`_PRIORITY_LOCKED`, in turn FlyByWire's compiled
+    /// `A380PrimComputerFctl.cpp:1770-1790` driven only by
+    /// `capt_priority_takeover_pressed`/`fo_priority_takeover_pressed`).
+    /// PRIM 1 stands in for all three: every PRIM reads the identical
+    /// priority-takeover cockpit input, so all three compute the identical
+    /// bit every tick -- confirmed against the compiled source, not
+    /// assumed, in `E-FCTL-DESIGN.md` section 3.1.
+    pub prim_left_sidestick_disabled: bool,
+    pub prim_right_sidestick_disabled: bool,
+    pub prim_left_sidestick_priority_locked: bool,
+    pub prim_right_sidestick_priority_locked: bool,
+    /// The flap/slat lever handle's own detent index, `FLAPS_HANDLE_INDEX`
+    /// -- the same variable `engine_commands.rs`/`handling.rs` already read
+    /// (E-FCTL, ECAM completeness pass). Always exactly at a detent (this
+    /// port has no continuous handle-angle source, see
+    /// `E-FCTL-DESIGN.md`'s note against `272800013`), so this feeds the
+    /// flap/slat lever CSU channels' own two-channel electrical-fault
+    /// modelling, not an "out of detent" physics this port cannot source.
+    pub flap_lever_handle_index: f64,
+    /// The captain's raw pitch/roll sidestick axis and the rudder pedal
+    /// axis, straight from `src/prim.rs`'s own `SimReadings.inputs[0..3]`
+    /// (`A32NX_CAPT_SIDESTICK_PITCH_RAW`/`_ROLL_RAW`/`A32NX_RUDDER_PEDAL_
+    /// RAW`, published alongside the `fctl_logic` bus so this area sees the
+    /// identical value the real compiled PRIM/SEC laws consume -- E-FCTL,
+    /// ECAM completeness pass). There is no independent F.O. stick axis in
+    /// this port (`prim.rs` only ever assigns `fo_pitch_stick_pos` a
+    /// constant -- confirmed by search, `fbw_types.rs`'s `fo_*_stick_pos`
+    /// fields are written nowhere from a live X-Plane input); the F.O.
+    /// sidestick's own transducers are still modelled against a fixed
+    /// neutral position (coordinator follow-up, 2026-09-27: a real
+    /// transducer pair that is never moved can still fail or disagree, and
+    /// the FCOM's own trigger for those ids never requires deflection --
+    /// `E-FCTL-FCOM.json`). A ratio (X-Plane's own -1..+1 axis convention),
+    /// not radians, despite the `DualTransducer`/`TransducerFaults`
+    /// machinery's field names, which this pass reuses unchanged for the
+    /// same two-channel-disagreement shape rather than inventing a new one
+    /// for a differently-scaled input.
+    pub capt_sidestick_pitch_raw: f64,
+    pub capt_sidestick_roll_raw: f64,
+    pub rudder_pedal_raw: f64,
+    /// The *sensed* (not X-Plane-truth) body rotation rate, straight from
+    /// `src/prim.rs`'s `SimReadings.body_rotation_velocity_rad_s`, which in
+    /// turn reads the same native datarefs `physics::adirs::Adiru::publish`
+    /// overwrites with its own strapdown-IRS sensor model every tick
+    /// (`adirs.rs:1502-1504`) -- a real, already-failable quantity, not an
+    /// invented one (coordinator follow-up, 2026-09-27, `271800018` F/CTL
+    /// TWO GYROMETERs FAULT). Pitch/yaw/roll, matching `SimReadings`' own
+    /// `x=pitch/y=yaw/z=roll` axis order.
+    pub body_rate_pitch_raw: f64,
+    pub body_rate_yaw_raw: f64,
+    pub body_rate_roll_raw: f64,
     /// Hydraulic system pressures, green and yellow, Pa -- FlyByWire's own,
     /// with the same standing as `ac_bus_volts` above.
     pub hydraulic_pressure_pa: [f64; 2],
@@ -273,6 +309,24 @@ pub struct Truth {
     /// `e.hp_port_pressure`/`e.hp_port_temp`), just read unconditionally.
     pub engine_hp_port_pressure_pa: [f64; 4],
     pub engine_hp_port_temp_k: [f64; 4],
+    /// Per engine: the IP8 tap's own upstream port condition, *always* --
+    /// the same reasoning as `engine_hp_port_pressure_pa`/`_temp_k` just
+    /// above, mirrored for the other port. A consumer that runs its own
+    /// IP8-tap/HP-valve switchover model (`deep::pneumatic_ducts`'s
+    /// upstream stage) needs the real, unswitched IP8 reading to drive it;
+    /// `engine_bleed_pressure_pa`/`_temp_k` cannot serve that, because they
+    /// already carry whichever port `engine_commands.rs:466`'s own switch
+    /// picked for the customer bleed. Feeding that pre-switched pair into
+    /// such a model double-switches the port and can hand its passive tap
+    /// (no actuator lag of its own) a genuinely hot HP6 slug labelled as
+    /// IP8 the instant the *other*, unrelated switch opens -- the W91
+    /// all-engine precooler-outlet spike at TOGA
+    /// (`E:/fbw-debug/fixes/W91.md`). Same source as `engine_hp_port_
+    /// pressure_pa` documents (`e.ip_port_pressure`/`e.ip_port_temp`), just
+    /// read unconditionally instead of only when the switch happens to
+    /// pick IP8.
+    pub engine_ip_port_pressure_pa: [f64; 4],
+    pub engine_ip_port_temp_k: [f64; 4],
     /// Per engine: real fuel flow into the combustor, kg/s --
     /// `physics::engine`'s own `EngineOutputs::fuel_flow_kg_s`, the same
     /// number `ENGINE_FF:n` (kg/h) and `ENGINE_FUEL_DEMAND_KG_S:n` (kg/s)
@@ -286,6 +340,45 @@ pub struct Truth {
     /// them would be invented. See `docs/deep/truth-requests.md` for this
     /// noted as unsourced rather than guessed.
     pub engine_fuel_flow_kg_s: [f64; 4],
+    /// The real thrust lever angle, degrees -- `AUTOTHRUST_TLA:n`, the same
+    /// Var `fadec.rs` writes every tick from `throttle.rs`'s own lever/axis
+    /// reading and the same one `Controls::reverser_deploy_commanded` is
+    /// already derived from (`plugin.rs`'s own sourcing table). Carried
+    /// here too, unswitched and per engine, because `deep::engine_
+    /// accessories` needs the raw angle itself (not just the reverser's
+    /// boolean opening-authorisation derivative of it) to compose FlyByWire's
+    /// own take-off-power detent logic (`E-ENG-DESIGN.md` Pattern 18,
+    /// `FwsFlightPhases.ts:215-247`'s 33.3/36.7/43.3 degree thresholds).
+    pub engine_tla_deg: [f64; 4],
+    /// A flex/derated take-off temperature is entered, `L:A32NX_AIRLINER_
+    /// TO_FLEX_TEMP != 0` -- the same Var and the same "!= 0" test
+    /// `FwsFlightPhases.ts:215` uses for its own `eng1TLAFTO`, one flag for
+    /// the whole aircraft (FlyByWire's own comment there: "until we have
+    /// proper FADECs", every engine reads engine 1's own flag). Needed to
+    /// build FlyByWire's own take-off-power detent logic exactly
+    /// (`E-ENG-DESIGN.md` Pattern 18): with a flex temperature set, the MCT
+    /// TLA band *is* take-off power, not just at/above MCT.
+    pub to_flex_temp_set: bool,
+    /// The real fuel system's own per-tank quantity, US gallons, tanks
+    /// 1..11 in `flight_model.cfg`'s `Tank.N` order (the same order
+    /// `weight_balance::parse().tanks` and `deep::fuel::live::ALL_TANKS`
+    /// already use) -- `src/fuel.rs`'s own `FUEL_TANK_QUANTITY_n`
+    /// (`Fuel::publish`'s `aspect_quantity`), read back rather than
+    /// duplicated. `None` until `fuel.rs` has published at least one frame
+    /// (a fresh `Vars` reads 0.0 for an unwritten name, indistinguishable
+    /// from eleven genuinely empty tanks, so this is only ever `Some` once
+    /// a real reading exists to tell the two apart -- see `deep/plugin.rs`'s
+    /// `truth()`).
+    ///
+    /// This exists for exactly one purpose: giving `deep::fuel::live`'s own,
+    /// deliberately separate, ledger (its own doc, `deep/fuel/live.rs`'s
+    /// `tick_transfers`, explains why it does not own a second live
+    /// `fuel_network::FuelNetwork`) a real starting point instead of its
+    /// fixed 95%-of-capacity seed, once, the first time a real reading
+    /// exists -- not a per-tick resync, and not a second source of truth
+    /// for anything outside that one area. Nothing else in `deep` should
+    /// read this field.
+    pub fuel_tank_quantity_gal: Option<[f64; 11]>,
     /// External (ground) power plugged in and available at the aircraft's
     /// receptacle -- any of its four connections. `deep::electrical` has
     /// wanted this since `sources.rs`/`live.rs` were written (its own
@@ -317,6 +410,18 @@ pub struct Truth {
     /// MSFS's opposite convention, which is why that sign looks flipped
     /// there and not here).
     pub pitch_deg: f64,
+    /// Roll (bank) attitude, degrees, positive right wing down
+    /// (`sim/flightmodel/position/phi`'s own native sign). E-ELEC Phase 2:
+    /// `340800017 NAV CAPT AND F/O ATT DISAGREE`'s own minimal
+    /// `InertialReference` needs a real roll input, which no `Truth` field
+    /// carried before this pass.
+    pub roll_deg: f64,
+    /// True heading, degrees (`sim/flightmodel/position/psi`). E-ELEC Phase
+    /// 2: `340800020 NAV CAPT AND F/O HDG DISAGREE`'s own minimal
+    /// `InertialReference`; the FCOM's own TRUE-reference threshold (5 deg)
+    /// is used, not the MAGNETIC one (7 deg), since no magnetic-variation
+    /// input reaches `Truth` either.
+    pub heading_true_deg: f64,
     pub groundspeed_m_s: f64,
     /// Angle of attack, degrees (`sim/flightmodel/position/alpha`, the
     /// X-Plane SDK's own AoA dataref).
@@ -348,6 +453,62 @@ pub struct Truth {
     /// does not carry), which is why this is elevation, not an invented
     /// W/m^2 number.
     pub sun_elevation_deg: f64,
+    /// Each air-conditioning FDAC's two channels, per pack (index 0 =
+    /// FDAC 1, 1 = FDAC 2; per FDAC, index 0 = channel 1, 1 = channel 2):
+    /// `COND_FDAC_{1,2}_CHANNEL_{1,2}_FAILURE`, a real, already-computed
+    /// discrete FlyByWire's own `FullDigitalAgcController` publishes for
+    /// each channel independently (`full_digital_agu_controller.rs:57-60`),
+    /// read directly rather than re-derived -- see `E-AIR-DESIGN.md`
+    /// 211800022.
+    pub fdac_channel_failure: [[bool; 2]; 2],
+    /// Each outflow-valve control module's two channels, per OCSM 1..4
+    /// (index 0..4; per OCSM, index 0 = channel 1, 1 = channel 2):
+    /// `PRESS_OCSM_{1..4}_CHANNEL_{1,2}_FAILURE`, real, already-computed
+    /// per-channel discretes FlyByWire's own `OutflowValveControlModule`
+    /// publishes (`outflow_valve_control_module.rs:80-82`) -- see
+    /// `E-AIR-DESIGN.md` 213800015.
+    pub ocsm_channel_failure: [[bool; 2]; 4],
+    /// X-Plane's own real exterior vertical speed, ft/min (positive climb,
+    /// negative descent): MSFS `VERTICAL SPEED`, `sim/flightmodel/position/
+    /// vh_ind_fpm` -- see `E-AIR-DESIGN.md` 213800008.
+    pub vertical_speed_fpm: f64,
+    /// FlyByWire's own FMS-computed landing (destination runway) elevation,
+    /// ft: the ARINC 429 `L:A32NX_FM1_LANDING_ELEVATION` word, already
+    /// published for the SD PRESS page (`LandingElevation.tsx`) and
+    /// `FwsCore.landingElevation` -- see `E-AIR-DESIGN.md` 213800008.
+    /// `0.0` (sea level) when the word's SSM is not Normal Operation (no FMS
+    /// destination entered), the same convention `cabin_pressure_pa` uses.
+    pub landing_elevation_ft: f64,
+    /// FlyByWire's own aircraft-wide A/THR status, `L:A32NX_AUTOTHRUST_
+    /// STATUS` (enum: 0 disengaged, 1 armed, 2 engaged) -- real, already
+    /// published (`FwsCore.ts:3121`). See `E-AIR-DESIGN.md` 220800009-012.
+    pub athr_status: f64,
+    /// FlyByWire's own per-AP engagement discretes, `L:A32NX_AUTOPILOT_
+    /// {1,2}_ACTIVE` -- real, already published (`OitAvncsFbwSystemsAppLdgCap.
+    /// tsx`, `FwsFlightPhases.ts:496-497`). See `E-AIR-DESIGN.md` 220800002.
+    pub ap1_active: bool,
+    pub ap2_active: bool,
+    /// **Not yet written by FlyByWire.** Per-engine autothrust-servo fault,
+    /// `L:A32NX_AUTOTHRUST_ENG_{1..4}_FAULT` -- specified in
+    /// `E:/fbw-debug/ecam/E-AIR-FBW-WRITES.md` for 220800009-012 AUTO FLT
+    /// ENG n A/THR OFF. Reads `false` (healthy) until that write exists, the
+    /// same convention every other bridge here uses for an unpublished name.
+    pub athr_eng_fault: [bool; 4],
+    /// **Not yet written by FlyByWire.** Whether the FWD cargo compartment's
+    /// own trim-air demand exceeds what the packs can currently supply,
+    /// `L:A32NX_COND_PACK_FLOW_INSUFFICIENT_FWD_CRG` -- specified in
+    /// `E:/fbw-debug/ecam/E-AIR-FBW-WRITES.md` for 211800045 AIR PACK REGUL
+    /// DEGRADED. Reads `false` until that write exists.
+    pub pack_flow_insufficient_fwd_crg: bool,
+    /// What each of the three ADIRUs' inertial references outputs, as
+    /// FlyByWire's own `adirs.rs` publishes it (`L:A32NX_ADIRS_IR_<n>_*`
+    /// ARINC 429 words) from `physics::adirs`'s strapdown sensor model --
+    /// the real, independently drifting IR solutions the PFDs and HUD show,
+    /// not X-Plane's attitude. Index 0 is IR 1.
+    pub ir: [IrOutputs; 3],
+    /// FlyByWire's `L:A32NX_ATT_HDG_SWITCHING_KNOB`: 0 CAPT ON 3, 1 NORM,
+    /// 2 F/O ON 3. See [`capt_fo_ir`].
+    pub att_hdg_switching_knob: f64,
     /// What every area published last frame. Empty on the first frame and
     /// whenever an area has not published a name yet, so read it through
     /// `get`/`get_or` and never assume a zero means anything.
@@ -374,10 +535,18 @@ pub struct Controls {
     /// (1st/2nd shot): `true` while pressed.
     pub fire_agent_pb_pressed: [[bool; 2]; 4],
     pub fire_agent_pb_apu_pressed: bool,
-    /// No real cargo-bay fire pushbutton or agent pushbutton exists in this
-    /// port (`fire_and_smoke_protection.rs` models 8 engine bottles and 1
-    /// APU bottle, no cargo ones) -- left out entirely rather than adding a
-    /// field with nothing real behind it. See `docs/deep/truth-requests.md`.
+    /// Cargo-bay fire agent (extinguisher bottle) discharge pushbutton,
+    /// `[fwd, aft]`: `true` once pressed. FlyByWire's own behaviour XML
+    /// marks this button "(Inop.)" (`A380_Cockpit_Behavior.xml`
+    /// `PUSH_OVHD_CARGOSMOKE_{FWD,AFT}`'s tooltip) and no FBW system
+    /// consumes `A32NX_CARGOSMOKE_{FWD,AFT}_DISCHARGED` -- but a real
+    /// cockpit control writes it (a one-shot latch, not a momentary press:
+    /// the click sets it to 1 and there is no release-to-0 code in FBW's
+    /// own XML), and `deep::fire_ice`'s cargo bottle model already existed
+    /// and only lacked this command (W194; see that module's former
+    /// `NO_CARGO_FIRE_COMMAND`). Source: `A32NX_CARGOSMOKE_FWD_DISCHARGED`
+    /// / `_AFT_DISCHARGED`.
+    pub cargo_agent_pb_pressed: [bool; 2],
     pub wing_anti_ice_selected: bool,
     pub nacelle_anti_ice_selected: [bool; 4],
     pub engine_bleed_pb_auto: [bool; 4],
@@ -420,6 +589,13 @@ pub struct Controls {
     pub brake_pedal_pos: [f64; 2],
     pub engine_master_on: [bool; 4],
     pub eng_gen_pb_on: [bool; 4],
+    /// `[CAPT, F.O]` EFIS baro-reference mode, FlyByWire's own raw
+    /// `A32NX_FCU_EFIS_{L,R}_DISPLAY_BARO_MODE` enum, read only to compare
+    /// the two sides against each other -- `340800018 NAV CAPT AND F/O
+    /// BARO REF DISAGREE` (E-ELEC Phase 2). This port does not need to
+    /// know which enum value means STD vs QNH, only whether the two sides
+    /// agree.
+    pub baro_mode: [f64; 2],
     /// `[1, 2]`: the A380's two APU generator pushbuttons.
     pub apu_gen_pb_on: [bool; 2],
     /// `[1, 2]`: the two battery pushbuttons' AUTO/OFF position.
@@ -447,6 +623,20 @@ pub struct Controls {
     /// the N3 and weight-on-wheels interlocks are all in that area's own
     /// model and are not pre-empted here.
     pub reverser_deploy_commanded: [bool; 2],
+    /// The FCU (autoflight control unit) guarded switch, `true` in the OFF
+    /// position (`E-IND-DESIGN.md` 311800001). No real dataref found for
+    /// this port yet; defaults to the normal (guard down, switch on)
+    /// position.
+    pub fcu_switch_off: bool,
+    /// The gravity/free-fall gear-extension handle selected
+    /// (`E-IND-DESIGN.md` 320800042; `gear_structure::live`'s own module doc
+    /// previously named this exact gap -- "no real dataref found"). No real
+    /// dataref found for this port yet; defaults to not selected.
+    pub gravity_extend_selected: bool,
+    /// The nosewheel steering disconnect (towing) lever selected
+    /// (`E-IND-DESIGN.md` 320800057/059). No real dataref found for this
+    /// port yet; defaults to not selected (nosewheel steering connected).
+    pub nw_steer_disc_selected: bool,
 }
 
 impl Default for Controls {
@@ -464,6 +654,7 @@ impl Default for Controls {
             fire_pb_apu_released: false,
             fire_agent_pb_pressed: [[false; 2]; 4],
             fire_agent_pb_apu_pressed: false,
+            cargo_agent_pb_pressed: [false; 2],
             wing_anti_ice_selected: false,
             nacelle_anti_ice_selected: [false; 4],
             engine_bleed_pb_auto: [true; 4],
@@ -484,12 +675,16 @@ impl Default for Controls {
             brake_pedal_pos: [0.0; 2],
             engine_master_on: [false; 4],
             eng_gen_pb_on: [true; 4],
+            baro_mode: [0.0; 2],
             apu_gen_pb_on: [true; 2],
             bat_pb_auto: [true; 2],
             ground_spoiler_lever_armed: false,
             apu_master_sw_on: false,
             apu_start_pb_on: false,
             reverser_deploy_commanded: [false; 2],
+            fcu_switch_off: false,
+            gravity_extend_selected: false,
+            nw_steer_disc_selected: false,
         }
     }
 }
@@ -559,16 +754,44 @@ impl Default for Truth {
             apu_bleed_pressure_pa: 101_325.0,
             ac_bus_volts: [0.0; 4],
             dc_bus_volts: [0.0; 2],
+            ac_bus_powered: [false; 4],
+            dc_bus_powered: [false; 2],
             // A cold-and-dark aircraft has no live computer, matching
             // `ac_bus_volts`/`dc_bus_volts` above reading no power either.
             prim_healthy: [false; 3],
             sec_healthy: [false; 3],
+            prim_left_sidestick_disabled: false,
+            prim_right_sidestick_disabled: false,
+            prim_left_sidestick_priority_locked: false,
+            prim_right_sidestick_priority_locked: false,
+            // 0 is FlyByWire's own "flaps up" detent index, the correct
+            // cold-and-dark default (matching the flight-loaded state every
+            // FBW flight file starts from).
+            flap_lever_handle_index: 0.0,
+            // Sticks/pedals centred: no fault to see and nothing for the
+            // disagreement monitor to trip on a cold-and-dark aircraft.
+            capt_sidestick_pitch_raw: 0.0,
+            capt_sidestick_roll_raw: 0.0,
+            rudder_pedal_raw: 0.0,
+            body_rate_pitch_raw: 0.0,
+            body_rate_yaw_raw: 0.0,
+            body_rate_roll_raw: 0.0,
             hydraulic_pressure_pa: [0.0; 2],
             engine_n2_frac: [0.0; 4],
             engine_n3_frac: [0.0; 4],
             engine_hp_port_pressure_pa: [101_325.0; 4],
             engine_hp_port_temp_k: [288.15; 4],
+            engine_ip_port_pressure_pa: [101_325.0; 4],
+            engine_ip_port_temp_k: [288.15; 4],
             engine_fuel_flow_kg_s: [0.0; 4],
+            // A cold engine's thrust lever sits at idle, 0 degrees, same as
+            // every other engine reading this default documents.
+            engine_tla_deg: [0.0; 4],
+            // No flex temperature entered by default.
+            to_flex_temp_set: false,
+            // Not yet known: see the field's own doc for why this is `None`
+            // rather than eleven zeros.
+            fuel_tank_quantity_gal: None,
             gpu_plugged_in: false,
             controls: Controls::default(),
             commanded_surfaces: CommandedSurfaces::default(),
@@ -582,6 +805,8 @@ impl Default for Truth {
             // already describe.
             aircraft_mass_kg: 277_000.0,
             pitch_deg: 0.0,
+            roll_deg: 0.0,
+            heading_true_deg: 0.0,
             groundspeed_m_s: 0.0,
             angle_of_attack_deg: 0.0,
             radio_height_ft: 0.0,
@@ -590,69 +815,50 @@ impl Default for Truth {
             cabin_pressure_pa: 101_325.0,
             cabin_temp_k: 288.15,
             sun_elevation_deg: 0.0,
+            // A cold-and-dark aircraft has no live FDAC/OCSM channel either,
+            // matching `prim_healthy`/`sec_healthy` above.
+            fdac_channel_failure: [[false; 2]; 2],
+            ocsm_channel_failure: [[false; 2]; 4],
+            vertical_speed_fpm: 0.0,
+            landing_elevation_ft: 0.0,
+            athr_status: 0.0,
+            ap1_active: false,
+            ap2_active: false,
+            athr_eng_fault: [false; 4],
+            pack_flow_insufficient_fwd_crg: false,
+            // Unpowered IRs publish nothing valid.
+            ir: [IrOutputs::default(); 3],
+            att_hdg_switching_knob: 1.0,
             published: PublishedFrame::default(),
         }
     }
 }
 
-/// How badly each failure is armed, by `deep::api` failure id.
-///
-/// Absent means healthy. Every magnitude is clamped to 0..1 on the way in,
-/// so an area can use it as a fraction without checking.
-#[derive(Clone, Debug, Default)]
-pub struct Faults(BTreeMap<u64, f64>);
-
-impl Faults {
-    pub fn from_pairs(pairs: impl IntoIterator<Item = (u64, f64)>) -> Self {
-        Self(pairs.into_iter().map(|(id, m)| (id, m.clamp(0.0, 1.0))).collect())
-    }
-
-    /// This failure's magnitude, 0 if it is not armed at all.
-    pub fn get(&self, id: u64) -> f64 {
-        self.0.get(&id).copied().unwrap_or(0.0)
-    }
-
-    /// Whether anything at all is armed -- areas with an expensive
-    /// healthy-case shortcut can check this first.
-    pub fn any(&self) -> bool {
-        self.0.values().any(|&m| m > 0.0)
-    }
+/// One inertial reference's outputs, degrees, each `None` unless its ARINC
+/// 429 word is in Normal Operation (a failed, unaligned or unpowered IR, or
+/// a parameter it cannot compute, such as the flight path angle at low
+/// ground speed, publishes No Computed Data or Failure Warning instead).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct IrOutputs {
+    pub pitch_deg: Option<f64>,
+    pub roll_deg: Option<f64>,
+    /// `TRUE_HEADING`: the magnetic `HEADING` word differs from it by the
+    /// same magnetic variation on every IR, so a disagreement is identical
+    /// in either reference.
+    pub true_heading_deg: Option<f64>,
+    pub flight_path_angle_deg: Option<f64>,
 }
 
-/// One of FlyByWire's own failures, as a deep area's verdict on a
-/// component the two models share.
-///
-/// This is level 2 of `docs/deep/authority.md`: the deep area has
-/// concluded that a physical component `a380_systems` also models is no
-/// longer working, and says so in the only vocabulary `a380_systems`
-/// accepts -- its own failure ids, the ones `crate::failures`'
-/// `a380_failures()`/`extra::extra_failures()` catalogue. The plugin feeds
-/// these into `crate::failures` beside the ones the crew armed, so a
-/// derived failure and an armed one reach `a380_systems` by the same path.
-///
-/// Every field but `magnitude` is fixed at build time, because a derived
-/// failure the crew cannot clear is only tolerable if the crew can see
-/// *why*: [`deep_component`](Self::deep_component) and
-/// [`reason`](Self::reason) are what the Study page shows next to it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DerivedFailure {
-    /// The id in `crate::failures`' catalogue -- FlyByWire's own
-    /// (`a380_failures()`) or this port's extra one, both of which
-    /// `failures::set_magnitude` accepts.
-    pub fbw_id: u64,
-    /// How far gone, 0 healthy .. 1 fully failed. An area emits every
-    /// coupling it owns every frame, healthy ones at `0.0`; [`Deep::tick`]
-    /// keeps only those above zero. Ids whose FlyByWire side is binary
-    /// (most of them) get `1.0` or `0.0` and nothing in between -- the
-    /// granularity limit `authority.md` names.
-    pub magnitude: f64,
-    /// The deep component that concluded it, by its registry id, e.g.
-    /// `"24_elec.vfg-1"`.
-    pub deep_component: &'static str,
-    /// Why, in one phrase a pilot can read: "own overload element tripped
-    /// it off line", "feeder breaker open".
-    pub reason: &'static str,
+/// Which IR drives the captain's and the first officer's displays
+/// (0-based), for an ATT/HDG switching knob position: FlyByWire's own
+/// `getSupplier` (`PFDUtils.tsx`), IR 3 replacing IR 1 at CAPT ON 3 (0) and
+/// IR 2 at F/O ON 3 (2).
+pub fn capt_fo_ir(att_hdg_switching_knob: f64) -> (usize, usize) {
+    let knob = att_hdg_switching_knob.round();
+    (if knob == 0.0 { 2 } else { 0 }, if knob == 2.0 { 2 } else { 1 })
 }
+
+
 
 /// One area's live system.
 pub trait Area {
@@ -681,6 +887,29 @@ pub trait Area {
     /// models something FlyByWire does not model at all -- level 1 of
     /// `authority.md`, where publishing is the whole of the job.
     fn derived_failures(&self, _out: &mut dyn FnMut(DerivedFailure)) {}
+
+    /// This area's live flight-control-surface angles (and, per angle,
+    /// whether a fault currently makes that angle diverge from FlyByWire's
+    /// own commanded position), for `deep::integration::
+    /// flight_control_surfaces::SurfaceOverrideWriter`. `None` for every
+    /// area except `deep::flight_controls`'s own live system, which
+    /// overrides this to return its real `surface_angles()`; the default
+    /// here is the correct answer for every other area, the same way
+    /// `derived_failures`'s empty default is.
+    fn flight_control_surface_angles(&self) -> Option<SurfaceAngles> {
+        None
+    }
+
+    /// The breakers area itself, for a host that opens and resets its units
+    /// directly (the MSFS module's EFB page and RESET panel). `None` for
+    /// every other area.
+    fn as_breakers(&self) -> Option<&crate::deep::breakers::live::BreakersLive> {
+        None
+    }
+
+    fn as_breakers_mut(&mut self) -> Option<&mut crate::deep::breakers::live::BreakersLive> {
+        None
+    }
 }
 
 /// Every area's live system, owned in one place.
@@ -718,6 +947,14 @@ impl Deep {
         &self.truth
     }
 
+    /// This tick's live flight-control-surface angles, from whichever area
+    /// implements them (today, only `deep::flight_controls` -- see
+    /// `Area::flight_control_surface_angles`'s own doc). Call after `tick`,
+    /// the same as every other per-tick read from `Deep`.
+    pub fn flight_control_surface_angles(&self) -> Option<SurfaceAngles> {
+        self.areas.iter().find_map(|a| a.flight_control_surface_angles())
+    }
+
     /// Step every area, then publish. `publish` runs after every area has
     /// ticked so that no area can see half a frame.
     ///
@@ -747,18 +984,28 @@ impl Deep {
         }
         self.derived = derived;
         let mut published = std::mem::take(&mut self.truth.published);
-        published.0.clear();
+        published.begin();
         for area in &self.areas {
             area.publish(&mut |name, value| {
-                published.0.insert(name.to_string(), value);
+                published.set(name, value);
                 out(name, value);
             });
         }
+        published.finish();
         self.last_published = published;
     }
 
     pub fn area_names(&self) -> Vec<&'static str> {
         self.areas.iter().map(|a| a.name()).collect()
+    }
+
+    /// The breakers area, if it is one of these.
+    pub fn breakers(&self) -> Option<&crate::deep::breakers::live::BreakersLive> {
+        self.areas.iter().find_map(|a| a.as_breakers())
+    }
+
+    pub fn breakers_mut(&mut self) -> Option<&mut crate::deep::breakers::live::BreakersLive> {
+        self.areas.iter_mut().find_map(|a| a.as_breakers_mut())
     }
 
     /// Every FlyByWire failure the areas concluded was real on the last
@@ -817,9 +1064,11 @@ impl Deep {
 pub fn all_areas() -> Deep {
     Deep::new()
         .with_area(crate::deep::apu::live::live_system())
+        .with_area(crate::deep::autoflight::live::live_system())
         .with_area(crate::deep::avionics_network::live::live_system())
         .with_area(crate::deep::breakers::live::live_system())
         .with_area(crate::deep::cabin::live::live_system())
+        .with_area(crate::deep::communications::live::live_system())
         .with_area(crate::deep::electrical::live::live_system())
         .with_area(crate::deep::engine_accessories::live::live_system())
         .with_area(crate::deep::environment::live::live_system())

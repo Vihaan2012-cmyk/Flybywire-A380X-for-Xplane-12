@@ -4,7 +4,7 @@ Code:
 - FBW patch (real, cited efficiency added to already-real pump physics):
   `D:\fbw-aircraft\fbw-common\src\wasm\systems\systems\src\hydraulic\mod.rs`,
   `electrical_pump_physics.rs`. Diff saved at
-  `D:\fbw-xp-systems\patches\fbw-rust\fluids.patch`.
+  `D:\A380\fbw-xp-systems\patches\fbw-rust\fluids.patch`.
 - Plugin physics: `src/physics/fluids.rs` (orifice flow, heat transfer, Jet A
   properties, pump curves), `src/physics/gas.rs` (ideal/real gas law, O2
   regulator physics), `src/physics/hydraulics.rs` (engine-load contract

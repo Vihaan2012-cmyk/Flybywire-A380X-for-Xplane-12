@@ -120,7 +120,7 @@ I could not find a source for a genuine third position and did not invent
 one.
 
 **What is missing, and where:** the clickable 3D geometry. `docs/team.md`
-already establishes that the converter (`D:\msfs2xp-aircraft`) is a
+already establishes that the converter (`D:\A380\msfs2xp-aircraft`) is a
 different tool with a single lead who edits it, and this repo's job is to
 *describe* a needed converter change, not make it. I've put that exact
 description in `docs/team.md`'s "Needed converter change" note: give

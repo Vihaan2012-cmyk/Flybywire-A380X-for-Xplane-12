@@ -1,5 +1,5 @@
 //! The A380 load catalogue: every consumer named in
-//! `D:\fbw-xp-systems\src\breakers.rs`'s ~130 ATA-grouped entries becomes its
+//! `D:\A380\fbw-xp-systems\src\breakers.rs`'s ~130 ATA-grouped entries becomes its
 //! own [`network::Load`] here (same id, name, ATA chapter, bus and rating
 //! basis, cited back to the exact `breakers.rs` function/line it came from),
 //! plus the major consumers that catalogue does not enumerate at all: fuel
@@ -247,13 +247,13 @@ fn ata21(net: &mut Network, cat: &mut Catalog) {
     add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
     let spec = motor_spec("hotair-2", "HOT AIR VALVE 2", 21, BusId::AcEss, 50.0, 0.8, 2.0, 0.3, "breakers.rs::ata21 HOT AIR VALVE 2");
     add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
-    let spec = motor_spec("fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, BusId::Dc2, 50.0, 0.8, 2.0, 0.3, "breakers.rs::ata21 FWD CARGO ISOL VALVE (VCM Fwd DC2 channel)");
+    let spec = motor_spec("fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, BusId::Dc1, 50.0, 0.8, 2.0, 0.3, "breakers.rs::ata21 FWD CARGO ISOL VALVE (VCM Fwd's own primary channel, DC1/411PP -- ventilation_control_module.rs VentilationControlModule::new(.., VcmId::Fwd, [DirectCurrent(1), DirectCurrentEssential]), channel 1 backed by powered_by[0] and default-active; fixes/W161.md, matching fixes/W115.md -- was wired to DC2, VCM Aft's bus)");
     add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
-    let spec = motor_spec("fwd-extract-fan", "FWD CARGO EXTRACT FAN", 21, BusId::Dc2, 150.0, 0.85, 3.0, 1.0, "breakers.rs::ata21 FWD CARGO EXTRACT FAN");
+    let spec = frequency_sensitive_motor_spec("fwd-extract-fan", "FWD CARGO EXTRACT FAN", 21, BusId::Ac1, 150.0, 0.85, 3.0, 1.0, VF_MOTOR_RATED_FREQUENCY_HZ, "breakers.rs::ata21 FWD CARGO EXTRACT FAN (the fan's own dedicated bus, not the VCM's channel bus -- ventilation_control_module.rs ForwardCargoVentilationControlSystem::new(AlternatingCurrent(1)), really gated in receive_power/fwd_extraction_fan_is_on; a direct-drive VFG-fed induction motor like CAB FAN 1-4, not a DC valve actuator, so it takes the same frequency_sensitive_motor_spec treatment; fixes/W161.md, matching fixes/W115.md -- was wired to VCM Fwd's DC channel, which the fan does not draw from at all)");
     add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
-    let spec = motor_spec("bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, BusId::DcEss, 50.0, 0.8, 2.0, 0.3, "breakers.rs::ata21 BULK CARGO ISOL VALVE (VCM Aft DC_ESS channel)");
+    let spec = motor_spec("bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, BusId::Dc2, 50.0, 0.8, 2.0, 0.3, "breakers.rs::ata21 BULK CARGO ISOL VALVE (VCM Aft's own primary channel, DC2/214PP -- ventilation_control_module.rs VentilationControlModule::new(.., VcmId::Aft, [DirectCurrent(2), DirectCurrentEssential]), channel 1 backed by powered_by[0] and default-active; fixes/W161.md, matching fixes/W115.md -- was on DC_ESS, Aft's secondary/standby channel)");
     add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
-    let spec = motor_spec("bulk-extract-fan", "BULK CARGO EXTRACT FAN", 21, BusId::DcEss, 150.0, 0.85, 3.0, 1.0, "breakers.rs::ata21 BULK CARGO EXTRACT FAN");
+    let spec = frequency_sensitive_motor_spec("bulk-extract-fan", "BULK CARGO EXTRACT FAN", 21, BusId::Ac4, 150.0, 0.85, 3.0, 1.0, VF_MOTOR_RATED_FREQUENCY_HZ, "breakers.rs::ata21 BULK CARGO EXTRACT FAN (the fan's own dedicated bus, not the VCM's channel bus -- ventilation_control_module.rs BulkVentilationControlSystem::new(AlternatingCurrent(4)), really gated in receive_power/bulk_extraction_fan_is_on; a direct-drive VFG-fed induction motor like CAB FAN 1-4, not a DC valve actuator, so it takes the same frequency_sensitive_motor_spec treatment; fixes/W161.md, matching fixes/W115.md -- was wired to VCM Aft's DC_ESS channel, which the fan does not draw from at all)");
     add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
     let spec = resistive_spec("cargo-heater", "BULK CARGO HEATER", 21, BusId::Ac2, 1000.0, "breakers.rs::ata21 BULK CARGO HEATER (1000 W typical cargo-bay heater element, typical/derived; mod.rs AirHeater::new(AC2))");
     add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
@@ -268,7 +268,16 @@ fn ata21(net: &mut Network, cat: &mut Catalog) {
         let spec = avionics_spec(id, name, 21, bus, 50.0, "breakers.rs::ata21 TADD (mod.rs TrimAirDriveDevice::new)");
         add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
     }
-    const VCM: [(&str, &str, BusId); 4] = [("vcm-fwd-1", "VCM FWD CHANNEL 1", BusId::Dc2), ("vcm-fwd-2", "VCM FWD CHANNEL 2", BusId::DcEss), ("vcm-aft-1", "VCM AFT CHANNEL 1", BusId::Dc2), ("vcm-aft-2", "VCM AFT CHANNEL 2", BusId::DcEss)];
+    // fixes/W185.md: vcm-fwd-1 was wired to BusId::Dc2 (VCM Aft's own
+    // channel-1 bus). VCM Fwd's own primary/default-active channel
+    // (channel 1 / powered_by[0]) is DC1 -- mod.rs
+    // VentilationControlModule::new(.., VcmId::Fwd, [DirectCurrent(1)
+    // /* 411PP */, DirectCurrentEssential /* 109PP */]), vs VcmId::Aft's
+    // [DirectCurrent(2) /* 214PP */, DirectCurrentEssential /* 109PP */].
+    // Same class of bug fixes/W115.md/fixes/W161.md fixed for
+    // fwd-isol-valve/fwd-extract-fan; flagged as a follow-up by
+    // fixes/W161.md but not fixed there.
+    const VCM: [(&str, &str, BusId); 4] = [("vcm-fwd-1", "VCM FWD CHANNEL 1", BusId::Dc1), ("vcm-fwd-2", "VCM FWD CHANNEL 2", BusId::DcEss), ("vcm-aft-1", "VCM AFT CHANNEL 1", BusId::Dc2), ("vcm-aft-2", "VCM AFT CHANNEL 2", BusId::DcEss)];
     for (id, name, bus) in VCM {
         let spec = avionics_spec(id, name, 21, bus, 50.0, "breakers.rs::ata21 VCM (mod.rs VentilationControlModule::new)");
         add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
@@ -721,6 +730,78 @@ fn ata31_recorders(net: &mut Network, cat: &mut Catalog) {
     add(net, cat, LoadCategory::Other, spec.clone(), rated_current(&spec));
 }
 
+/// ATA31 -- the CDS/KCCU/HUD/video/recorder avionics family E-IND's own
+/// `ata31_33.rs` design sheet (`E:/fbw-debug/ecam/E-IND-DESIGN.md`) models as
+/// single-fed DC ESS avionics LRUs, the same LRU-power pattern
+/// `ata31_recorders` above already uses for the CVR/DFDR/QAR: each is its
+/// own small box on the CDS/avionics network with no public A380-specific
+/// wattage, so every rating here is GENERIC at the same "typical avionics
+/// LRU class figure" this file cites throughout for boxes of similar size
+/// (a display-unit-class LRU, a keyboard/cursor-control unit, a HUD
+/// projector/combiner unit, a video multiplexer, a small recorder
+/// accessory).
+fn ata31_ind_group(net: &mut Network, cat: &mut Catalog) {
+    // CDS EFIS backup control panels (311800002/003) and EFIS control
+    // panels (311800004/005/006): small avionics LRUs, same class as the
+    // rest of this function.
+    let spec = avionics_spec("capt-efis-bkup-ctl", "CAPT EFIS BKUP CTL", 31, BusId::DcEss, 30.0, "E-IND-DESIGN.md 311800002 (GENERIC: typical small avionics LRU class figure, same figure this file's other CDS-class entries cite; real A380 equipment, no public per-box wattage)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("fo-efis-bkup-ctl", "F/O EFIS BKUP CTL", 31, BusId::DcEss, 30.0, "E-IND-DESIGN.md 311800003 (same class as CAPT EFIS BKUP CTL)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("capt-efis-ctl-panel", "CAPT EFIS CTL PANEL", 31, BusId::DcEss, 30.0, "E-IND-DESIGN.md 311800004/006 (GENERIC: typical small avionics LRU class figure)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("fo-efis-ctl-panel", "F/O EFIS CTL PANEL", 31, BusId::DcEss, 30.0, "E-IND-DESIGN.md 311800005/006 (same class as CAPT EFIS CTL PANEL)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+
+    // CDS display units' own monitoring power (311800007/008/009/010/011):
+    // a DU that has lost power cannot be cross-monitored either (module's
+    // own reasoning: power loss is a sound subset of "not monitored").
+    let spec = avionics_spec("capt-pfd-du", "CAPT PFD DU", 31, BusId::DcEss, 60.0, "E-IND-DESIGN.md 311800007/010 (GENERIC: typical display-unit-class avionics LRU figure); feed DC ESS per FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus:42 (409PP)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("capt-nd-du", "CAPT ND DU", 31, BusId::DcEss, 60.0, "E-IND-DESIGN.md 311800008/011 (same class as CAPT PFD DU); dual feed DC ESS + DC 1 per FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus:43 (415PP or 105PP)");
+    let a = rated_current(&spec);
+    add_dual(net, cat, LoadCategory::Essential, spec, a, BusId::Dc1);
+    let spec = avionics_spec("capt-ewd-du", "CAPT EWD DU", 31, BusId::DcEss, 60.0, "E-IND-DESIGN.md 311800009 (same class as CAPT PFD DU); feed DC ESS per FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus:48 (423PP)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("fo-pfd-du", "F/O PFD DU", 31, BusId::Dc2, 60.0, "E-IND-DESIGN.md 311800010 (same class as CAPT PFD DU); feed DC 2 per FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus:45");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("fo-nd-du", "F/O ND DU", 31, BusId::Dc1, 60.0, "E-IND-DESIGN.md 311800011 (same class as CAPT PFD DU); dual feed DC 1 + DC 2 per FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus:46");
+    let a = rated_current(&spec);
+    add_dual(net, cat, LoadCategory::Essential, spec, a, BusId::Dc2);
+
+    // KCCU (cursor/keyboard unit), both sides -- whole-unit power loss
+    // (313800003/004); the cursor-only and keyboard-only paths
+    // (313800001/002/005/006) are this same load's own two independent
+    // BITE failures, added in `registry.rs` against this component.
+    let spec = avionics_spec("kccu-capt", "CAPT KCCU", 31, BusId::DcEss, 40.0, "E-IND-DESIGN.md 313800001/003/005 (GENERIC: typical small avionics keyboard/cursor-control-unit LRU figure)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("kccu-fo", "F/O KCCU", 31, BusId::DcEss, 40.0, "E-IND-DESIGN.md 313800002/004/006 (same class as CAPT KCCU)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+
+    // Captain's CDS mailbox peripheral (313800007).
+    let spec = avionics_spec("cds-mailbox-capt", "CAPT CDS MAILBOX", 31, BusId::DcEss, 20.0, "E-IND-DESIGN.md 313800007 (GENERIC: typical small CDS peripheral LRU figure)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+
+    // HUD (316800001/002: whole-unit power, and its own FPV-disagree
+    // failure added in `registry.rs`).
+    let spec = avionics_spec("hud", "HUD", 31, BusId::DcEss, 50.0, "E-IND-DESIGN.md 316800001/002 (GENERIC: typical HUD projector/combiner-unit avionics LRU figure)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+
+    // Video multiplexer (318800001).
+    let spec = avionics_spec("video-multiplexer", "VIDEO MULTIPLEXER", 31, BusId::DcEss, 30.0, "E-IND-DESIGN.md 318800001 (GENERIC: typical small avionics LRU class figure)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+
+    // Two more ATA31-mandatory-equipment-class recorder accessories, joining
+    // `ata31_recorders`'s own CVR/DFDR/QAR: the flight-data accelerometer
+    // (319800001) and the DFDAU that frames/multiplexes parameters ahead of
+    // the CVR/DFDR (319800004 -- the real, distinct LRU that id actually
+    // names, not the recorder system "as a whole").
+    let spec = avionics_spec("recorder-accelerometer", "RECORDER ACCELEROMETER", 31, BusId::DcEss, 20.0, "E-IND-DESIGN.md 319800001 (GENERIC: typical small avionics accessory LRU figure, same ATA31-mandatory-equipment class as ata31_recorders' own CVR/DFDR/QAR)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+    let spec = avionics_spec("dfdau", "DFDAU", 31, BusId::DcEss, 50.0, "E-IND-DESIGN.md 319800004 (GENERIC: typical avionics LRU class figure, same ATA31-mandatory-equipment class as ata31_recorders' own CVR/DFDR/QAR)");
+    add(net, cat, LoadCategory::Essential, spec.clone(), rated_current(&spec));
+}
+
 /// ATA35 -- crew/passenger oxygen system consumers `ata35_oxygen`
 /// catalogues (the shutoff valve's own position-indication circuit is
 /// handled with the rest of [`position_indication_supplies`]).
@@ -884,8 +965,8 @@ fn position_indication_supplies(net: &mut Network, cat: &mut Catalog) {
     }
     position_indication_load(net, cat, "hotair-1", "HOT AIR VALVE 1", 21, BusId::AcEss, "pairs with HOT AIR VALVE 1's own actuator breaker");
     position_indication_load(net, cat, "hotair-2", "HOT AIR VALVE 2", 21, BusId::AcEss, "pairs with HOT AIR VALVE 2's own actuator breaker");
-    position_indication_load(net, cat, "fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, BusId::Dc2, "pairs with FWD CARGO ISOL VALVE's own actuator breaker");
-    position_indication_load(net, cat, "bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, BusId::DcEss, "pairs with BULK CARGO ISOL VALVE's own actuator breaker");
+    position_indication_load(net, cat, "fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, BusId::Dc1, "pairs with FWD CARGO ISOL VALVE's own actuator breaker (fixes/W161.md: DC1, VCM Fwd's own primary channel)");
+    position_indication_load(net, cat, "bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, BusId::Dc2, "pairs with BULK CARGO ISOL VALVE's own actuator breaker (fixes/W161.md: DC2, VCM Aft's own primary channel)");
     for pack in 1..=2u32 {
         for side in 1..=2u32 {
             let parent_id: &'static str = Box::leak(format!("pack-{pack}-flow-valve-{side}").into_boxed_str());
@@ -928,6 +1009,7 @@ pub fn build(net: &mut Network) -> Catalog {
     ata24_power_sources_extra(net, &mut cat);
     ata23_comms(net, &mut cat);
     ata31_recorders(net, &mut cat);
+    ata31_ind_group(net, &mut cat);
     ata35_oxygen_extra(net, &mut cat);
     ata49_apu_extra(net, &mut cat);
     ata73_74_engine(net, &mut cat);
@@ -1094,5 +1176,42 @@ mod tests {
             let idx = net.load_index(id).unwrap_or_else(|| panic!("{id} missing"));
             assert!(net.loads[idx].commanded_on, "{id} should default on in the raw catalogue; live.rs is what gates it");
         }
+    }
+
+    /// fixes/W161.md (goes with fixes/W115.md's identical correction in
+    /// src/breakers.rs, which this self-contained module does not `use`).
+    /// The two extraction fans also move to `frequency_sensitive_motor_spec`
+    /// now that they are correctly on the VFG-fed AC1/AC4 buses -- same
+    /// treatment as CAB FAN 1-4 (loads.rs:116-121's own doc comment on
+    /// which A380 loads genuinely need it).
+    #[test]
+    fn cargo_ventilation_loads_sit_on_their_real_bus() {
+        let mut net = Network::new();
+        build(&mut net);
+        let bus_of = |id: &str| net.loads[net.load_index(id).unwrap_or_else(|| panic!("no load {id}"))].spec.bus.label();
+        let freq_of = |id: &str| net.loads[net.load_index(id).unwrap_or_else(|| panic!("no load {id}"))].spec.rated_frequency_hz;
+        assert_eq!(bus_of("fwd-isol-valve"), "DC1", "VCM Fwd's own primary channel is DC1 (411PP), not DC2 (that's VCM Aft's)");
+        assert_eq!(bus_of("bulk-isol-valve"), "DC2", "VCM Aft's own primary channel is DC2 (214PP), matching fwd-isol-valve's primary-channel convention, not its DC_ESS standby channel");
+        assert_eq!(bus_of("fwd-extract-fan"), "AC1", "the forward extraction fan's own dedicated bus (ForwardCargoVentilationControlSystem::new), not any VCM channel bus");
+        assert_eq!(bus_of("bulk-extract-fan"), "AC4", "the bulk extraction fan's own dedicated bus (BulkVentilationControlSystem::new), not any VCM channel bus");
+        assert_eq!(freq_of("fwd-extract-fan"), VF_MOTOR_RATED_FREQUENCY_HZ, "now a VFG-fed direct-drive fan motor like CAB FAN 1-4, not a frequency-insensitive DC valve actuator");
+        assert_eq!(freq_of("bulk-extract-fan"), VF_MOTOR_RATED_FREQUENCY_HZ, "same as fwd-extract-fan");
+        assert_eq!(freq_of("fwd-isol-valve"), 0.0, "the isolation valve is a DC motor-operated actuator, not a VFG-fed motor -- unchanged by this fix");
+        assert_eq!(freq_of("bulk-isol-valve"), 0.0, "same as fwd-isol-valve");
+    }
+
+    /// fixes/W185.md (goes with fixes/W161.md's own follow-up flag): same
+    /// VCM-Fwd-channel-1 bus bug as `deep::breakers::catalog`'s own
+    /// `vcm_channel_breakers_sit_on_their_real_bus`, pinned here for this
+    /// module's own, separately-defined `VCM` array.
+    #[test]
+    fn vcm_channel_loads_sit_on_their_real_bus() {
+        let mut net = Network::new();
+        build(&mut net);
+        let bus_of = |id: &str| net.loads[net.load_index(id).unwrap_or_else(|| panic!("no load {id}"))].spec.bus.label();
+        assert_eq!(bus_of("vcm-fwd-1"), "DC1", "VCM Fwd's own primary channel is DC1 (411PP), not DC2 (that's VCM Aft's channel 1)");
+        assert_eq!(bus_of("vcm-fwd-2"), "DC_ESS", "VCM Fwd's standby channel (109PP)");
+        assert_eq!(bus_of("vcm-aft-1"), "DC2", "VCM Aft's own primary channel is DC2 (214PP)");
+        assert_eq!(bus_of("vcm-aft-2"), "DC_ESS", "VCM Aft's standby channel (109PP), same physical bus as vcm-fwd-2");
     }
 }

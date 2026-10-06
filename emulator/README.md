@@ -1,7 +1,7 @@
 # fbw_a380_emulator
 
 A deterministic, X-Plane-free test bench for the FlyByWire A380X X-Plane
-port (`D:\fbw-xp-systems`). `Emulator` owns FlyByWire's real
+port (`D:\A380\fbw-xp-systems`). `Emulator` owns FlyByWire's real
 `Simulation<A380>`, the plugin's real `Vars`, breaker/circuit catalogues,
 failure catalogue, and the engine-coupling physics modules, and ticks them
 in the plugin's own `Plugin::tick` order -- no X-Plane process, no
@@ -10,8 +10,8 @@ reimplemented behaviour.
 ## Build and test
 
 ```
-cd /d/fbw-xp-systems/emulator
-CARGO_TARGET_DIR=/d/fbw-build/target-main cargo +stable-x86_64-pc-windows-gnu test --release
+cd /d/A380/fbw-xp-systems/emulator
+CARGO_TARGET_DIR=/d/A380/fbw-build/target-main cargo +stable-x86_64-pc-windows-gnu test --release
 ```
 
 ## Using it

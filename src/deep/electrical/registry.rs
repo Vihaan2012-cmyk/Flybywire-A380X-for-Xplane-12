@@ -192,6 +192,18 @@ pub fn register(r: &mut Registry) {
     register_component(r, &mut counters, 24, "24_elec.rat".to_string(), "RAT".to_string(), "sources::Rat", &[("jammed", "turbine fails to fully deploy/partially seized: 0 healthy .. 1 no power even when deployed", "0..1, fraction of aerodynamic power lost", "less (or, at 1.0, no) emergency electrical power available from the RAT in an all-generation-lost configuration")]);
     register_component(r, &mut counters, 24, "24_elec.gpu".to_string(), "GPU (ground power)".to_string(), "sources::GroundPower", &[("weak_cart", "a weak/miswired ground cart: 0 healthy .. 1 up to 5x reactance", "0..1, series reactance grows toward 5x", "the main AC buses the four external power contactors feed sag harder under load while on ground power")]);
 
+    // ---- E-ELEC additions: `MISC_FAULTS`' own eighteen computer-health/
+    // monitoring/lubrication-leak components (ata24 unwired-id pass,
+    // `E:/fbw-debug/ecam/E-ELEC-DESIGN.md`). One component + one failure
+    // each, following the same `register_component` shape as every source
+    // above; `super::live::MISC_FAULTS` is the single list both this
+    // registration and `super::live::route_failures` read, so they cannot
+    // drift apart.
+    for &(suffix, name, meaning) in &super::live::MISC_FAULTS {
+        let comp_id = format!("24_elec.misc.{suffix}");
+        register_component(r, &mut counters, 24, comp_id, name.to_string(), "misc::Health", &[("fault", meaning, "0..1 (boolean for every entry but the two drive-oil-leak channels, which are continuous, 0..1, exactly as `apu::oil::OilFaults::leak` already is)", "see this failure's own name/meaning for the specific effect")]);
+    }
+
     // ---------------------------------------------------------------------
     // ECAM alerts. Trigger/procedure variable names follow this plugin's
     // existing `ELEC_*` convention (`circuits.rs`/`breakers.rs`); none of

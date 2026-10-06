@@ -546,8 +546,25 @@ impl Host for VarsHost<'_> {
         self.state.strings.get(name).cloned().unwrap_or_default()
     }
 
+    /// `SetSimVarValue(name, 'string', value)`. FlyByWire's own
+    /// `Arinc429Word.toSimVarValue` (fbw-common `shared/src/arinc429.ts`)
+    /// always writes its packed ARINC word this way, then every reader
+    /// (`Arinc429Word.fromSimVarValue`, or a plain numeric
+    /// `GetSimVarValue`) reads it back with a numeric unit through
+    /// `get_var`/`vars` below. Mirror a numeric-looking value into `vars`
+    /// too, under the same identifier `get_var`/`set_var` use for this
+    /// name, so it is not invisible to every numeric reader (and so
+    /// `is_unwritten_named` stops flagging it). Genuine text (e.g. the EWD
+    /// memo lines, which also arrive through this same 'string' path) does
+    /// not parse as a number and stays in `state.strings` only.
     fn set_string(&mut self, name: &str, value: &str) {
         self.state.strings.insert(name.to_string(), value.to_string());
+        if name.starts_with("L:") {
+            if let Ok(numeric) = value.trim().parse::<f64>() {
+                let id = self.id(name);
+                self.vars.write(&id, numeric);
+            }
+        }
     }
 
     /// `Facilities.getMagVar`: X-Plane's own magnetic variation model, the
@@ -617,6 +634,36 @@ pub(crate) fn direct_call(name: &str, args_json: &str) -> Option<CallReply> {
     // leaving it unanswered/rejected) matters, so the EFB's failure list
     // does not treat every toggle as a Coherent error.
     if name == "COMM_BUS_WASM_CALLBACK" {
+        return Some(CallReply::Resolved("null".to_string()));
+    }
+    // BingComponent (@microsoft/msfs-sdk): the ND/MFD/FCU/EWD/etc. weather-
+    // radar and moving-map widgets call these every render tick, even where
+    // the aircraft never shows the resulting Bing tiles (this port has no
+    // Bing map service). Several of these calls (SHOW_MAP,
+    // SET_3D_MAP_CAMERA_TRANSFORM/_FOV, SET_MAP_PARAMS, ...) are bare
+    // expression statements with no `.catch()` in the installed bundle, so
+    // a Rejected reply meant a new Error + an unhandled-promise-rejection
+    // console warning every frame those widgets render; SET_LOAD_LATLON is
+    // `await`ed by OANS's `executeCoherentSearch` with no try/catch, so
+    // rejecting it silently dropped the GET_NEAREST_AIRSPACES call right
+    // after it too. Resolving to `null` matches PLAY_INSTRUMENT_SOUND/
+    // OPEN_WEB_BROWSER/COMM_BUS_WASM_CALLBACK above: nothing here reads the
+    // resolved value.
+    const MAP_NO_OP_CALLS: [&str; 12] = [
+        "SHOW_MAP",
+        "SHOW_MAP_WEATHER",
+        "SHOW_MAP_ISOLINES",
+        "SET_MAP_RESOLUTION",
+        "SET_MAP_CLEAR_COLOR",
+        "SET_MAP_WEATHER_RADAR_COLORS",
+        "SET_MAP_HEIGHT_COLORS",
+        "SET_MAP_ALTITUDE_RANGE",
+        "SET_MAP_PARAMS",
+        "SET_3D_MAP_CAMERA_TRANSFORM",
+        "SET_3D_MAP_CAMERA_FOV",
+        "SET_LOAD_LATLON",
+    ];
+    if MAP_NO_OP_CALLS.contains(&name) {
         return Some(CallReply::Resolved("null".to_string()));
     }
     crate::mapdata::plugin::coherent_call(name, args_json).map(|reply| match reply {
@@ -1052,9 +1099,6 @@ fn native_ports() -> Vec<crate::js::msfs::SourcePatch> {
     // [oans] amdb.ts's two Navigraph calls, sent through fetch() instead of
     // axios (which cannot run here): src/oans/plugin.rs.
     patches.extend(crate::oans::plugin::source_patches());
-    // [wxr] EfisTawsBridge.ts's permanently-failed wxr1Failed/wxr2Failed,
-    // tied to real AESU bus power instead: src/wxr/mod.rs.
-    patches.extend(crate::wxr::source_patches());
     // [ecam_patches] ECAM/FWS and instrument gaps (top50 #9, 16, 18-27, 36-40):
     // src/ecam_patches.rs.
     patches.extend(crate::ecam_patches::source_patches());
@@ -1316,6 +1360,11 @@ fn start_navdata() {
     match crate::navdata::NavData::load(&root) {
         Ok(mut nav) => {
             nav.set_magvar_source(Box::new(|lat, lon| crate::xp::magnetic_variation(lat, lon).map_or(0., f64::from)));
+            // [weather] GET_METAR_BY_IDENT/GET_METAR_BY_LATLON (W156):
+            // X-Plane's own last-downloaded METAR. The signature matches
+            // exactly, so the function itself is the source -- no adapter
+            // closure needed, unlike magvar's unit conversion above.
+            nav.set_metar_source(Box::new(crate::xp::metar_for_airport));
             add_provider(Box::new(nav));
         }
         Err(e) => crate::log(&format!("navdata: {e}")),
@@ -1325,6 +1374,20 @@ fn start_navdata() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bing_map_calls_resolve_instead_of_rejecting_every_frame() {
+        // BingComponent's per-render-tick calls (sendCameraTransform/
+        // sendFov/onWxrModeChanged etc., every installed *.js bundle): a
+        // Rejected reply used to throw an unhandled promise rejection each
+        // frame those widgets render.
+        assert!(matches!(direct_call("SHOW_MAP", "[1,true]"), Some(CallReply::Resolved(_))));
+        assert!(matches!(direct_call("SET_3D_MAP_CAMERA_TRANSFORM", "[1,[]]"), Some(CallReply::Resolved(_))));
+        assert!(matches!(direct_call("SET_LOAD_LATLON", "[0.0,0.0]"), Some(CallReply::Resolved(_))));
+        // A genuinely unhandled name is still None here -- the Rejected
+        // fallback lives in `JsHost::call`, not `direct_call`.
+        assert!(direct_call("SOME_UNKNOWN_CALL", "[]").is_none());
+    }
 
     #[test]
     fn systems_units_come_from_flybywires_msfs_glue() {
@@ -1341,6 +1404,31 @@ mod tests {
         assert!((c.write(c.read(123.)) - 123.).abs() < 1e-9);
         assert!(matches!(Conversion::between(None, "feet"), Conversion::Raw));
         assert_eq!(Conversion::between(Some("Feet"), "Bool").read(3.), 1.);
+    }
+
+    /// Regression guard for the ARINC429 "string vs number" bridge bug
+    /// (E:/fbw-debug/fixes/W123.md): `Arinc429Word.toSimVarValue` always
+    /// writes through `SetSimVarValue(name, 'string', ...)`, but every
+    /// reader uses `Arinc429Word.fromSimVarValue` (`GetSimVarValue(name,
+    /// 'number')`). Before this fix a numeric-looking string write never
+    /// reached `vars`, so A32NX_EGPWS_ALERT_1_DISCRETE_WORD_1 and friends
+    /// stayed at their unwritten default (0) forever even though FlyByWire's
+    /// TypeScript called SetSimVarValue on them every tick.
+    #[test]
+    fn set_string_of_a_packed_arinc_word_is_visible_to_a_numeric_reader() {
+        let xplm: &'static crate::xp::Xplm = Box::leak(Box::new(crate::xp::Xplm::dummy()));
+        let mut vars = crate::Vars::new(xplm);
+        let mut state = HostState::default();
+        let env = EnvRefs::new(xplm);
+        let mut host = VarsHost::new(&mut vars, &mut state, &env, 0.);
+
+        host.set_string("L:A32NX_TEST_ARINC_WORD", "12345");
+        assert_eq!(host.get_var("L:A32NX_TEST_ARINC_WORD", "number"), 12345.);
+
+        // Genuine text (the EWD/PFD memo lines use the same 'string' unit)
+        // must not leak a bogus number into the named-var registry.
+        host.set_string("L:A32NX_TEST_MEMO_LINE", "ENG 1 FIRE");
+        assert_eq!(host.get_var("L:A32NX_TEST_MEMO_LINE", "number"), 0.);
     }
 
     #[test]

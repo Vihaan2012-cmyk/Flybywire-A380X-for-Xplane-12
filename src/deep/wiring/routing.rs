@@ -4,7 +4,7 @@
 //! their bundles genuinely share a zone).
 //!
 //! The circuit ids, real bus feeds and consumer descriptions below are
-//! reproduced from `D:\fbw-xp-systems\src\breakers.rs`'s own catalogue
+//! reproduced from `D:\A380\fbw-xp-systems\src\breakers.rs`'s own catalogue
 //! (read in full for this task's context, per `docs/deep/BRIEF.md`'s own
 //! instruction to read it) as **literal data** -- this module does not
 //! `use` or otherwise depend on `crate::breakers` (this push's
@@ -188,10 +188,20 @@ fn catalogue() -> Vec<RouteEntry> {
         // valve/extract fan pairs, local to their own cargo compartment.
         RouteEntry { circuit: "cab-fan-1", bus: "AC1", path: &[MainAvionics, Cockpit], wire: FEEDER_150C },
         RouteEntry { circuit: "cab-fan-2", bus: "AC2", path: &[MainAvionics, Cockpit], wire: FEEDER_150C },
-        RouteEntry { circuit: "fwd-isol-valve", bus: "DC2", path: &[MainAvionics, CargoFwd], wire: VALVE_ACTUATOR_WIRE },
-        RouteEntry { circuit: "fwd-extract-fan", bus: "DC2", path: &[MainAvionics, CargoFwd], wire: FEEDER_150C },
-        RouteEntry { circuit: "bulk-isol-valve", bus: "DC_ESS", path: &[MainAvionics, CargoAft], wire: VALVE_ACTUATOR_WIRE },
-        RouteEntry { circuit: "bulk-extract-fan", bus: "DC_ESS", path: &[MainAvionics, CargoAft], wire: FEEDER_150C },
+        // fixes/W161.md (goes with fixes/W115.md's identical correction in
+        // src/breakers.rs, which this self-contained module does not
+        // reference): fwd-isol-valve is VCM Fwd's own primary channel, DC1
+        // (ventilation_control_module.rs VentilationControlModule::new(..,
+        // VcmId::Fwd, [DirectCurrent(1), DirectCurrentEssential]), channel 1
+        // = powered_by[0], default-active); bulk-isol-valve is VCM Aft's own
+        // primary channel, DC2 (same function, VcmId::Aft). Both extract
+        // fans have their own dedicated bus, independent of either VCM
+        // channel (ForwardCargoVentilationControlSystem::new(AC1) /
+        // BulkVentilationControlSystem::new(AC4)).
+        RouteEntry { circuit: "fwd-isol-valve", bus: "DC1", path: &[MainAvionics, CargoFwd], wire: VALVE_ACTUATOR_WIRE },
+        RouteEntry { circuit: "fwd-extract-fan", bus: "AC1", path: &[MainAvionics, CargoFwd], wire: FEEDER_150C },
+        RouteEntry { circuit: "bulk-isol-valve", bus: "DC2", path: &[MainAvionics, CargoAft], wire: VALVE_ACTUATOR_WIRE },
+        RouteEntry { circuit: "bulk-extract-fan", bus: "AC4", path: &[MainAvionics, CargoAft], wire: FEEDER_150C },
         RouteEntry { circuit: "cargo-heater", bus: "AC2", path: &[MainAvionics, CargoAft], wire: FEEDER_150C },
     ]
 }
@@ -390,5 +400,22 @@ mod tests {
         for e in catalogue() {
             assert!(!net.route_of(e.circuit).is_empty(), "{} has no route", e.circuit);
         }
+    }
+
+    /// fixes/W161.md (goes with fixes/W115.md's identical correction in
+    /// src/breakers.rs). Also pins that the fwd pair now shares a side with
+    /// itself (DC1/AC1, both Side1) and the bulk pair shares a side with
+    /// itself (DC2/AC4, both Side2), which was not true of the buses this
+    /// fix replaces.
+    #[test]
+    fn cargo_ventilation_routes_cite_their_real_bus() {
+        let entries = catalogue();
+        let bus_of = |id: &str| entries.iter().find(|e| e.circuit == id).unwrap_or_else(|| panic!("no route entry {id}")).bus;
+        assert_eq!(bus_of("fwd-isol-valve"), "DC1");
+        assert_eq!(bus_of("bulk-isol-valve"), "DC2");
+        assert_eq!(bus_of("fwd-extract-fan"), "AC1");
+        assert_eq!(bus_of("bulk-extract-fan"), "AC4");
+        assert_eq!(side_of_bus(bus_of("fwd-isol-valve")), side_of_bus(bus_of("fwd-extract-fan")), "the fwd valve and fwd fan should now sit on the same segregation side");
+        assert_eq!(side_of_bus(bus_of("bulk-isol-valve")), side_of_bus(bus_of("bulk-extract-fan")), "the bulk valve and bulk fan should now sit on the same segregation side");
     }
 }

@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Chromium Embedded Framework. The runtime (CEF 152) is exported once to
-# D:\fbw-build\cef; builds find it through CEF_PATH.
+# D:\A380\fbw-build\cef; builds find it through CEF_PATH.
 cef = { version = "=152.3.0", default-features = false }
 # FlyByWire's systems and the plugin's shared-memory bridge (src/remote).
 fbw_a380_systems_xp = { path = ".." }

@@ -41,9 +41,9 @@ URL="$(npx wrangler deploy 2>&1 | tee /dev/stderr | grep -o 'https://[^ ]*worker
 
 echo "== installer"
 cd "$ROOT/installer"
-FBW_XP_RELEASES_URL="$URL" CARGO_TARGET_DIR=/d/fbw-build/target-installer \
+FBW_XP_RELEASES_URL="$URL" CARGO_TARGET_DIR=/d/A380/fbw-build/target-installer \
   cargo +stable-x86_64-pc-windows-gnu build --release
-cp /d/fbw-build/target-installer/release/fbw-a380x-installer.exe "$DIST/FlyByWire-A380X-XP-Installer-$VERSION.exe"
+cp /d/A380/fbw-build/target-installer/release/fbw-a380x-installer.exe "$DIST/FlyByWire-A380X-XP-Installer-$VERSION.exe"
 
 echo
 echo "Published $VERSION at $URL"

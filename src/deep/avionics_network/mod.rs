@@ -8,7 +8,7 @@
 //! modules from overheating (`ventilation`), and the resulting per-function
 //! data availability a consuming system can read (`consequences`).
 //!
-//! See `D:\fbw-xp-systems\docs\deep\BRIEF.md` for the project-wide rules
+//! See `D:\A380\fbw-xp-systems\docs\deep\BRIEF.md` for the project-wide rules
 //! this module follows (SI units, `Faults` structs default-healthy,
 //! std-only, no crate-internal dependencies).
 

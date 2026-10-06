@@ -114,6 +114,101 @@ impl Accumulator {
         }
         net_in_m3 / dt
     }
+
+    /// Instantaneous flow the accumulator's own port would exchange with a
+    /// line held at `line_pressure_pa_gauge`, evaluated at the accumulator's
+    /// CURRENT state (m^3/s, positive = charging: line -> accumulator, the
+    /// same sign convention `step`'s return already uses). The same
+    /// port-orifice formula `step`'s own per-sub-step body uses, but a
+    /// single pure evaluation: it does NOT touch `gas_volume_m3`, so unlike
+    /// `step` it is safe to call many times in the same tick with different
+    /// trial pressures -- which is exactly what a `network::Network`
+    /// bisection residual does (see `topology.rs`'s `manifold_injection`
+    /// closure, which folds this in alongside the EDPs/relief valve the
+    /// same way `network::Network::step_with_pressure_dependent`'s own doc
+    /// describes, fixes/W72.md's mechanism). This exists because freezing
+    /// THIS accumulator's exchange flow for a whole tick, the way `step`
+    /// alone used to be used for, raced MANIFOLD's own tiny capacitance
+    /// exactly like the EDP/relief bug fixes/W72.md fixed -- producing the
+    /// separate 2257/2892 psi two-level chatter fixes/W174.md's SECONDARY
+    /// CHATTER section documents (Log-keep-123124.txt, t=1.3-9.6s):
+    /// `HYD_GREEN_ACCUMULATOR_PRESSURE_PSI` alternating between its
+    /// bled-dry precharge floor (2612.0 psi) and ~2890.5 psi, in lock-step
+    /// with MANIFOLD/ESSENTIAL.
+    /// (build fix, INT-P4) Takes `dt_s` and bounds the raw port-orifice
+    /// value by what this accumulator's own fixed shell can physically
+    /// exchange in that one tick -- the same bound `step`'s own per-
+    /// substep `(gas_volume_m3 - dv).clamp(1e-9, shell_volume_m3)` already
+    /// enforced on mainline. Without it, a bisection residual (this
+    /// function's own reason for existing) can search trial pressures far
+    /// from `self`'s actual state -- e.g. a cold, empty manifold (0 Pa)
+    /// against a freshly-constructed accumulator sitting at its full
+    /// precharge (`Accumulator::a380`'s ~2612 psi, all gas, zero fluid) --
+    /// where the unbounded formula reports a large "discharge" the
+    /// accumulator has no fluid left to give (`fluid_volume_m3() == 0`
+    /// there), and the solver treats that phantom capacity as a real
+    /// pressure source, converging MANIFOLD to a value nothing physically
+    /// backs (confirmed by hand: `the_green_circuit_can_be_pressurised_
+    /// on_its_electric_pumps_with_no_engines` jumped to ~1843 psi in the
+    /// first 0.02 s tick with the electric pumps still at ~0 flow, purely
+    /// from this). `advance` already self-corrects its OWN state this way;
+    /// this brings the value the SOLVE sees into line with what `advance`
+    /// will actually be able to commit afterward.
+    pub fn exchange_flow_at(&self, line_pressure_pa_gauge: f64, faults: &AccumulatorFaults, dt_s: f64) -> f64 {
+        let line_pa_abs = line_pressure_pa_gauge + fluid::ATM_PA;
+        let density = fluid::density_kg_m3(60.0);
+        let p_acc = self.pressure_pa(faults);
+        let dp = line_pa_abs - p_acc;
+        let sign = if dp >= 0.0 { 1.0 } else { -1.0 };
+        let raw = sign * 0.61 * self.port_area_m2.max(0.0) * (2.0 * dp.abs() / density).sqrt();
+        if dt_s <= 0.0 {
+            return raw;
+        }
+        if raw > 0.0 {
+            // Charging (line -> accumulator): bounded by how much more gas
+            // volume can still compress before `advance`'s own `1e-9` floor.
+            let max_in = (self.gas_volume_m3 - 1e-9).max(0.0) / dt_s;
+            raw.min(max_in)
+        } else {
+            // Discharging (accumulator -> line): bounded by the fluid
+            // actually on hand (the ullage left before the shell ceiling).
+            let max_out = (self.shell_volume_m3 - self.gas_volume_m3).max(0.0) / dt_s;
+            raw.max(-max_out)
+        }
+    }
+
+    /// Commits this tick's state change from a flow ALREADY DECIDED
+    /// elsewhere (`committed_flow_m3_s`, the same sign convention
+    /// `exchange_flow_at`/`step` both use: positive = charging), sub-stepped
+    /// the same `SUBSTEPS` = 20 way `step` always sub-stepped its own
+    /// internally re-derived flow. Away from the shell-volume clamp this is
+    /// numerically identical to one un-sub-stepped update (20 equal slivers
+    /// of the same constant rate integrate to the same total as one); the
+    /// sub-stepping still earns its keep right at the clamp, where it lets
+    /// `gas_volume_m3` ease up against `(1e-9, shell_volume_m3)` a
+    /// twentieth of a tick at a time instead of jumping straight past it in
+    /// one whole-`dt` step. The caller (`topology.rs`) is expected to pass
+    /// `exchange_flow_at` evaluated at the NETWORK's now-converged pressure
+    /// -- the same read-after-solve pattern `fixes/W72.md`'s EDIT5 already
+    /// established for the EDPs' own telemetry read-back -- so the state
+    /// this commits matches what the pressure solve actually resolved,
+    /// rather than a pre-solve, lagged estimate.
+    pub fn advance(&mut self, committed_flow_m3_s: f64, dt_s: f64) -> f64 {
+        let dt = dt_s.max(0.0);
+        if dt <= 0.0 {
+            return 0.0;
+        }
+        const SUBSTEPS: usize = 20;
+        let sub_dt = dt / SUBSTEPS as f64;
+        let dv_per_substep = committed_flow_m3_s * sub_dt;
+        let mut net_in_m3 = 0.0;
+        for _ in 0..SUBSTEPS {
+            let new_gas = (self.gas_volume_m3 - dv_per_substep).clamp(1e-9, self.shell_volume_m3);
+            net_in_m3 += self.gas_volume_m3 - new_gas;
+            self.gas_volume_m3 = new_gas;
+        }
+        net_in_m3 / dt
+    }
 }
 
 #[cfg(test)]
@@ -242,5 +337,97 @@ mod tests {
         let flow = acc.step(5000.0 * PSI_PA, &faults_ok(), 0.0);
         assert_eq!(flow, 0.0);
         assert!(acc.pressure_pa(&faults_ok()).is_finite());
+    }
+
+    #[test]
+    fn exchange_flow_at_is_pure_and_matches_the_port_formula() {
+        let acc = Accumulator::a380();
+        let faults = faults_ok();
+        let line_pa = 5000.0 * PSI_PA;
+        // A typical tick (0.02 s): the raw port flow at this dp is far
+        // below what a whole tick's worth of this accumulator's own 0.5
+        // gallon shell could absorb, so the (build fix, INT-P4) physical
+        // capacity bound added to `exchange_flow_at` does not engage here
+        // and the expected value below is unchanged.
+        let flow = acc.exchange_flow_at(line_pa, &faults, 0.02);
+
+        // Hand-computed from the same formula `step`'s own per-sub-step
+        // body uses, at the resting state `Accumulator::a380` starts in
+        // (full gas, no fluid, at its 2612 psi precharge): port area is
+        // `Accumulator::a380`'s own 3.0e-5 m^2 constant (module doc).
+        let density = fluid::density_kg_m3(60.0);
+        let p_acc = acc.pressure_pa(&faults);
+        let dp = (line_pa + fluid::ATM_PA) - p_acc;
+        let expected = 0.61 * 3.0e-5 * (2.0 * dp / density).sqrt();
+        assert!((flow - expected).abs() / expected < 1e-9, "flow {flow} expected {expected}");
+
+        // Pure: must not have touched the accumulator's own state, unlike
+        // `step`/`advance`.
+        assert_eq!(acc.fluid_volume_m3(), 0.0, "exchange_flow_at must not mutate state");
+    }
+
+    /// (build fix, INT-P4) A freshly constructed accumulator has zero
+    /// fluid on hand (all gas, at its own precharge pressure) -- it cannot
+    /// discharge anything into a line sitting below that precharge, no
+    /// matter how large the raw pressure-difference formula reports,
+    /// because there is no fluid behind the port to push. Without the
+    /// physical-capacity bound this is a phantom flow a bisection residual
+    /// (`topology.rs`'s `manifold_injection`) would treat as a real
+    /// pressure source, pulling a cold, empty manifold up toward the
+    /// accumulator's own precharge in a single tick.
+    #[test]
+    fn a_fresh_accumulator_with_no_fluid_cannot_phantom_discharge_into_an_empty_line() {
+        let acc = Accumulator::a380();
+        let faults = faults_ok();
+        assert_eq!(acc.fluid_volume_m3(), 0.0, "setup: fresh accumulator starts with no fluid");
+        // An empty manifold: 0 Pa gauge, far below the ~2612 psi precharge,
+        // so the raw (unbounded) formula would report a large discharge.
+        let flow = acc.exchange_flow_at(0.0, &faults, 0.02);
+        assert_eq!(flow, 0.0, "no fluid on hand means no flow, whatever the raw formula would otherwise say: {flow}");
+    }
+
+    /// The mirror case: an accumulator with only a sliver of gas ullage
+    /// left to compress cannot take in more than that sliver in one tick,
+    /// even against a line pressure high enough that the raw formula alone
+    /// would ask for far more.
+    #[test]
+    fn an_almost_full_accumulator_is_capped_to_its_remaining_ullage() {
+        let mut acc = Accumulator::a380();
+        let faults = faults_ok();
+        // A tiny sliver of gas ullage left (the shell is ~1.893e-3 m^3;
+        // 1e-7 is a fraction of a percent of that) -- not the numerical
+        // floor itself, so the polytropic relation still gives a finite
+        // (if very high) accumulator pressure, letting a plausible high
+        // line pressure still read as a charging attempt (dp > 0).
+        acc.gas_volume_m3 = 1e-7;
+        let p_acc = acc.pressure_pa(&faults);
+        let line_pa = p_acc + 10.0 * PSI_PA - fluid::ATM_PA; // just above the accumulator's own pressure
+        let dt = 0.02;
+        let max_in = (acc.gas_volume_m3 - 1e-9) / dt;
+        let flow = acc.exchange_flow_at(line_pa, &faults, dt);
+        assert!(flow <= max_in + 1e-15, "must not exceed the remaining ullage's own rate, got {flow} > {max_in}");
+        assert!(flow >= 0.0, "still a charging flow, just capped: {flow}");
+    }
+
+    #[test]
+    fn advance_applies_a_committed_flow_and_clamps_at_the_shell_both_ways() {
+        let mut acc = Accumulator::a380();
+        let shell = GALLON_M3 * 0.5;
+
+        // A huge committed charging flow for a whole second: far more than
+        // the shell can hold. `advance` must clamp, not overshoot into a
+        // negative gas volume (which `fluid_volume_m3` would report as
+        // exceeding the shell).
+        let avg = acc.advance(10.0, 1.0);
+        assert!(acc.fluid_volume_m3() <= shell + 1e-12, "should not exceed the shell volume, got {}", acc.fluid_volume_m3());
+        assert!(avg > 0.0, "reported average flow should still be positive (charging)");
+
+        // Symmetric check discharging from a charged state: a huge negative
+        // committed flow must not drive fluid volume negative either.
+        let before = acc.fluid_volume_m3();
+        assert!(before > 0.0, "should have taken in fluid from the charge above");
+        acc.advance(-10.0, 1.0);
+        assert!(acc.fluid_volume_m3() >= 0.0, "should not go negative, got {}", acc.fluid_volume_m3());
+        assert!(acc.fluid_volume_m3() <= before, "should have given fluid back, not gained more");
     }
 }

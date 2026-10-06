@@ -6,15 +6,18 @@
 //! here stays self-contained (BRIEF rule 2).
 //!
 //! ## New Vars this registry's ECAM triggers assume
-//! None of `fire_ice`'s physics modules are wired into the plugin's main
-//! update loop or `Vars`/dataref registry yet (BRIEF: "nothing else in the
-//! crate references your code yet"), so every trigger below names a
-//! plausible, not-yet-published simulator variable, following this
-//! crate's existing naming style (`FIRE_DETECTED_ENG:n`,
-//! `ANTI_ICE_WING_VALVE_OPEN:n`, etc. -- see the existing pattern in
-//! `a380_systems`'s own `FIRE_DETECTED_ENG{n}`/`FIRE_FDU_DISCRETE_WORD`,
-//! read as naming precedent, not a dependency). Whoever wires `fire_ice`
-//! into the simulation loop must publish these under these exact names.
+//! `fire_ice` is wired into the plugin's main update loop now (this doc
+//! predates that). It once named its variables following FlyByWire's own
+//! style as "naming precedent, not a dependency" -- true only while
+//! nothing published under those names yet. Two of them (`FIRE_DETECTED_
+//! APU`/`FIRE_DETECTED_MLG`) turned out to be identical to `a380_systems`'s
+//! own live variables of the same name, not just similarly styled, and
+//! since `deep.tick` runs after FlyByWire's own `simulation.tick`, this
+//! crate was silently overwriting FlyByWire's own fire detection every
+//! frame (W162). Every `FIRE_DETECTED_*`/`FIRE_SQUIB_*_IS_DISCHARGED` name
+//! below is now `DEEP_`-prefixed for exactly this reason; the rest
+//! (`ANTI_ICE_WING_VALVE_OPEN:n` etc.) were checked and do not collide
+//! with any FlyByWire variable, so they keep their original names.
 //! Listed in full in `PROGRESS.md`.
 
 use crate::deep::api::*;
@@ -147,28 +150,90 @@ fn register_extinguishing(r: &mut Registry) {
     }
     n += 1;
     register_bottle(r, &mut n, "26_fire.apu_bottle1", "APU fire bottle", None);
-    // The cargo bottles' squib failure is registered honestly, not
-    // silently reused from the engine/APU wording: `live.rs`'s
-    // `FireIceLive::step_bottles` passes a permanently-false fire command
-    // for both cargo bottles (`Self::NO_CARGO_FIRE_COMMAND`), because no
-    // cargo fire pushbutton or agent pushbutton exists anywhere in
-    // `Truth::controls` in this port (`Controls`'s own doc,
-    // `docs/deep/truth-requests.md`) -- unlike the engine/APU squibs, which
-    // this same pass wired to the real fire/agent pushbuttons. With no
-    // command that can ever discharge the bottle, whether the squib would
-    // fail to fire is unobservable; the leak failure on the same component
-    // is unaffected (it drains independently of any command) and its own
-    // low-pressure switch is published. This is not this pass's decision to
-    // fix by inventing a control: `Truth`/`Controls` live outside this
-    // directory, so the honest fix is to say so here and name what would be
-    // needed (`cargo_fire_pb_released`/`cargo_agent_pb_pressed`, one pair
-    // per hold, mirroring the engine/APU fields already added) rather than
-    // to leave the generic engine/APU wording implying it already works.
-    const CARGO_SQUIB_EFFECT: &str = "would reduce/zero the agent delivered when the bottle is fired, but no cargo fire/agent pushbutton exists in this port's Truth::controls (see docs/deep/truth-requests.md), so the bottle can never actually be commanded to discharge and this failure is currently unobservable -- unlike the engine/APU squibs, which the real fire/agent pushbuttons now drive";
-    n += 1;
-    register_bottle(r, &mut n, "26_fire.cargo_fwd_bottle", "Cargo FWD suppression bottle", Some(CARGO_SQUIB_EFFECT));
-    n += 1;
-    register_bottle(r, &mut n, "26_fire.cargo_aft_bottle", "Cargo AFT suppression bottle", Some(CARGO_SQUIB_EFFECT));
+    // (W194) The cargo bottles now have a real command: `live.rs`'s
+    // `FireIceLive::step_bottles` passes `truth.controls.
+    // cargo_agent_pb_pressed[b]`, sourced from the real PUSH_OVHD_
+    // CARGOSMOKE_FWD/_AFT overhead pushbuttons (FlyByWire's own tooltip for
+    // them says "(Inop.)" -- no FBW system consumes the name, but this
+    // port's own bottle model already existed and only lacked the
+    // command).
+    //
+    // (E-FIRE §F, ECAM completeness pass) Each hold's single `squib_
+    // failure` is split into `knockdown_squib_fault`/`extended_squib_
+    // fault` -- the general two-bottle cargo fire-suppression
+    // architecture (US Patent 9,248,326/8,925,642) has bottle 1 discharge
+    // rapidly for initial knockdown and bottle 2 be timed to discharge
+    // later for extended suppression, exactly the two-stage shape
+    // `CargoSuppressionSystem::step` already implements internally --
+    // matching real hardware (two bottles, two squibs) rather than one. A
+    // new `distribution_fault` (the line/valve between the bottle
+    // manifold and the hold, independent of either bottle) is added
+    // alongside it.
+    for (field, title) in [("cargo_fwd_bottle", "Cargo FWD"), ("cargo_aft_bottle", "Cargo AFT")] {
+        let component_id = format!("26_fire.{field}");
+        n += 1;
+        let leak_id = failure_id(Area::FireIce, ATA_FIRE_PROTECTION, n);
+        n += 1;
+        let knockdown_id = failure_id(Area::FireIce, ATA_FIRE_PROTECTION, n);
+        n += 1;
+        let extended_id = failure_id(Area::FireIce, ATA_FIRE_PROTECTION, n);
+        n += 1;
+        let distribution_id = failure_id(Area::FireIce, ATA_FIRE_PROTECTION, n);
+
+        r.component(ComponentDef {
+            id: component_id.clone(),
+            area: Area::FireIce,
+            ata: ATA_FIRE_PROTECTION,
+            name: format!("{title} suppression bottle"),
+            params: vec![
+                ParamDef { name: "leak".into(), meaning: "slow continuous agent leak from the valve seat/body: 0 healthy .. 1 max modelled leak orifice".into(), healthy: 0.0 },
+                ParamDef { name: "knockdown_squib_fault".into(), meaning: "the knockdown (bottle 1) squib fails to fully rupture its disc: 0 healthy .. 1 no knockdown discharge at all".into(), healthy: 0.0 },
+                ParamDef { name: "extended_squib_fault".into(), meaning: "the extended (bottle 2) squib fails to fully rupture its disc: 0 healthy .. 1 no metered/extended discharge at all".into(), healthy: 0.0 },
+                ParamDef { name: "distribution_fault".into(), meaning: "the agent-distribution line/valve from the bottle manifold to this hold: 0 healthy .. 1 no agent reaches the hold regardless of either bottle".into(), healthy: 0.0 },
+            ],
+            failures: vec![leak_id, knockdown_id, extended_id, distribution_id],
+        });
+        r.failure(FailureDef {
+            id: leak_id,
+            area: Area::FireIce,
+            ata: ATA_FIRE_PROTECTION,
+            name: format!("{title} suppression bottle leak"),
+            component: component_id.clone(),
+            model_field: "deep::fire_ice::extinguishing::CargoSuppressionFaults.leak".into(),
+            magnitude: "0..1, scales the leak orifice area; a full-severity leak empties the bottle over roughly 9-10 hours".into(),
+            effect: "bottle mass/pressure fall over time; if not caught before use, delivers less agent (or none) when actually fired".into(),
+        });
+        r.failure(FailureDef {
+            id: knockdown_id,
+            area: Area::FireIce,
+            ata: ATA_FIRE_PROTECTION,
+            name: format!("{title} knockdown (bottle 1) squib failure"),
+            component: component_id.clone(),
+            model_field: "deep::fire_ice::extinguishing::CargoSuppressionFaults.knockdown_squib_fault".into(),
+            magnitude: "0..1, reduces the achieved knockdown-stage discharge orifice area; at 1.0 the knockdown stage never discharges at all".into(),
+            effect: "reduced or (at 1.0) zero agent delivered during the initial high-rate knockdown discharge, PUSH_OVHD_CARGOSMOKE_FWD/_AFT (W194), regardless of the extended stage's own health".into(),
+        });
+        r.failure(FailureDef {
+            id: extended_id,
+            area: Area::FireIce,
+            ata: ATA_FIRE_PROTECTION,
+            name: format!("{title} extended (bottle 2) squib failure"),
+            component: component_id.clone(),
+            model_field: "deep::fire_ice::extinguishing::CargoSuppressionFaults.extended_squib_fault".into(),
+            magnitude: "0..1, reduces the achieved metered/extended-stage discharge orifice area; at 1.0 the extended stage never discharges at all".into(),
+            effect: "reduced or (at 1.0) zero agent delivered once the system has switched to the metered/extended stage, regardless of the knockdown stage's own health".into(),
+        });
+        r.failure(FailureDef {
+            id: distribution_id,
+            area: Area::FireIce,
+            ata: ATA_FIRE_PROTECTION,
+            name: format!("{title} agent distribution path fault"),
+            component: component_id,
+            model_field: "deep::fire_ice::extinguishing::CargoSuppressionFaults.distribution_fault".into(),
+            magnitude: "0..1, gates the effective discharge orifice area the same way either squib fault does".into(),
+            effect: "reduced or (at 1.0) zero agent reaches the hold even with both bottles/squibs fully healthy".into(),
+        });
+    }
 
     // Cargo optical smoke detectors.
     for bay in ["fwd", "aft"] {
@@ -219,6 +284,46 @@ fn register_extinguishing(r: &mut Registry) {
         magnitude: "0..1, raises the link's effective melt temperature up to 50 C above its 77 C design rating".into(),
         effect: "delays the automatic extinguisher's discharge past the design trigger temperature".into(),
     });
+
+    // ECAM completeness pass (E-FIRE §E, `260800054`/`055` SMOKE FWD LWR
+    // CAB REST BTL 1/2 FAULT): the FWD Lower Crew Rest (LDCR) module's own
+    // two-bottle suppression circuit. Sourced as a real 2-bottle
+    // architecture for this exact class of compartment: FCOM PRO-ABN-ECAM
+    // p.4985 registers the identical procedure for the *aft* LDCR module
+    // ("The fire extinguishing bottle 1(2) in the aft lower deck cabin
+    // crew rest compartment is failed"), confirming Airbus fits this class
+    // of lower-deck crew-rest module with two numbered bottles, not the
+    // single lavatory-style extinguisher `registry.rs:100-103`'s own
+    // waste-bin unit uses. Each bottle's own squib-circuit fault is a pass-
+    // through discrete (same class as `smoke_detector::circuit_fault`), not
+    // the cargo bays' two-stage knockdown/metered physics -- no FCOM or
+    // FBW text distinguishes a knockdown/extended split for this smaller
+    // module, so none is invented. Wired directly off `FIRE_LDCR_BTL_
+    // {1,2}_SQUIB_FAULT` in `deep::ecam::fbw::ata26` (module doc:
+    // `live::FireIceLive`'s own doc block on `ldcr_bottle_squib_fault`).
+    for bottle in ["1", "2"] {
+        n += 1;
+        let fid = failure_id(Area::FireIce, ATA_FIRE_PROTECTION, n);
+        let component_id = format!("26_fire.ldcr_bottle_{bottle}");
+        r.component(ComponentDef {
+            id: component_id.clone(),
+            area: Area::FireIce,
+            ata: ATA_FIRE_PROTECTION,
+            name: format!("FWD Lower Crew Rest (LDCR) suppression bottle {bottle}"),
+            params: vec![ParamDef { name: "squib_fault".into(), meaning: "0 healthy .. 1 (any nonzero) this bottle's own squib circuit reports faulted".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::FireIce,
+            ata: ATA_FIRE_PROTECTION,
+            name: format!("LDCR bottle {bottle} squib circuit fault"),
+            component: component_id,
+            model_field: "deep::fire_ice::live::FireIceLive.ldcr_bottle_squib_fault".into(),
+            magnitude: "0..1, any nonzero arms the discrete".into(),
+            effect: format!("FIRE_LDCR_BTL_{bottle}_SQUIB_FAULT goes true, independent of whether the module has ever been commanded to discharge (FCOM PRO-ABN-ECAM p.4985)"),
+        });
+    }
 }
 
 fn register_bottle(r: &mut Registry, n: &mut u16, component_id: &str, title: &str, squib_effect_override: Option<&str>) {
@@ -480,14 +585,14 @@ fn register_ecam(r: &mut Registry) {
     // -- Fire warnings (level 3, red, CRC) --
     for eng in 1..=4u16 {
         r.alert(
-            EcamAlert::new(&format!("ENG_{eng}_FIRE"), ATA_FIRE_PROTECTION, &format!("ENG {eng} FIRE"), Level::Warning, var(&format!("FIRE_DETECTED_ENG:{eng}")).on())
+            EcamAlert::new(&format!("ENG_{eng}_FIRE"), ATA_FIRE_PROTECTION, &format!("ENG {eng} FIRE"), Level::Warning, var(&format!("DEEP_FIRE_DETECTED_ENG:{eng}")).on())
                 .confirm(0.0)
                 .step(line(&format!("THR LEVER {eng}"), "IDLE").done(var(&format!("AUTOTHRUST_TLA:{eng}")).le(0.0)))
                 .step(line(&format!("ENG {eng} MASTER"), "OFF").done(var(&format!("ENGINE_MASTER:{eng}")).off()))
                 .step(line(&format!("ENG {eng} FIRE PB"), "PUSH").done(var(&format!("FIRE_BUTTON_ENG:{eng}")).on()))
                 .step(line("IF FIRE ON THE FIRE PB", "").colour("white"))
-                .step(line("AGENT 1", "DISCH").only_if(var(&format!("FIRE_BUTTON_ENG:{eng}")).on()).done(var(&format!("FIRE_SQUIB_1_ENG_{eng}_IS_DISCHARGED")).on()).after(10.0))
-                .step(line("AFTER 30 S IF FIRE PERSISTS: AGENT 2", "DISCH").only_if(var(&format!("FIRE_BUTTON_ENG:{eng}")).on()).done(var(&format!("FIRE_SQUIB_2_ENG_{eng}_IS_DISCHARGED")).on()).after(30.0))
+                .step(line("AGENT 1", "DISCH").only_if(var(&format!("FIRE_BUTTON_ENG:{eng}")).on()).done(var(&format!("DEEP_FIRE_SQUIB_1_ENG_{eng}_IS_DISCHARGED")).on()).after(10.0))
+                .step(line("AFTER 30 S IF FIRE PERSISTS: AGENT 2", "DISCH").only_if(var(&format!("FIRE_BUTTON_ENG:{eng}")).on()).done(var(&format!("DEEP_FIRE_SQUIB_2_ENG_{eng}_IS_DISCHARGED")).on()).after(30.0))
                 .inop_sys(&format!("ENG {eng}"))
                 .raised_by(&[failure_id(Area::FireIce, ATA_FIRE_PROTECTION, 100 + (eng as u16 - 1))]),
         );
@@ -498,15 +603,22 @@ fn register_ecam(r: &mut Registry) {
         // and the APU compartment running away thermally
         // (`thermal_zones::registry`). The APU is shut down before the
         // bottle is fired, so the agent meets a stopped, unfuelled APU.
-        EcamAlert::new("APU_FIRE", ATA_FIRE_PROTECTION, "APU FIRE", Level::Warning, var("FIRE_DETECTED_APU").on())
+        // W162: `DEEP_FIRE_DETECTED_APU`, not FlyByWire's own
+        // `FIRE_DETECTED_APU` -- this trigger evaluates this area's own
+        // model output, and the two used to collide (this area silently
+        // overwrote FlyByWire's own APU fire detection every frame, since
+        // `deep.tick` runs after `simulation.tick`).
+        EcamAlert::new("APU_FIRE", ATA_FIRE_PROTECTION, "APU FIRE", Level::Warning, var("DEEP_FIRE_DETECTED_APU").on())
             .step(line("APU MASTER SW", "OFF").done(var("OVHD_APU_MASTER_SW_PB_IS_ON").off()))
             .step(line("APU FIRE PB", "PUSH").done(var("FIRE_BUTTON_APU").on()))
-            .step(line("AGENT", "DISCH").only_if(var("FIRE_BUTTON_APU").on()).done(var("FIRE_SQUIB_1_APU_1_IS_DISCHARGED").on()).after(1.0))
+            .step(line("AGENT", "DISCH").only_if(var("FIRE_BUTTON_APU").on()).done(var("DEEP_FIRE_SQUIB_1_APU_1_IS_DISCHARGED").on()).after(1.0))
             .inop_sys("APU")
             .raised_by(&[failure_id(Area::FireIce, ATA_FIRE_PROTECTION, 104)]),
     );
     r.alert(
-        EcamAlert::new("MLG_BAY_FIRE", ATA_FIRE_PROTECTION, "L/R WHEEL WELL FIRE", Level::Warning, var("FIRE_DETECTED_MLG").on())
+        // W162: `DEEP_FIRE_DETECTED_MLG`, not FlyByWire's own
+        // `FIRE_DETECTED_MLG` -- same reason as APU FIRE above.
+        EcamAlert::new("MLG_BAY_FIRE", ATA_FIRE_PROTECTION, "L/R WHEEL WELL FIRE", Level::Warning, var("DEEP_FIRE_DETECTED_MLG").on())
             .status_line("MLG bay fire detected, no dedicated extinguishing system fitted (matches FBW's own precedent)")
             .raised_by(&[failure_id(Area::FireIce, ATA_FIRE_PROTECTION, 105)]),
     );

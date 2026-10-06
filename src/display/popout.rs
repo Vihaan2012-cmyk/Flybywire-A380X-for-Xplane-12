@@ -84,6 +84,15 @@ pub fn apply(displays: &mut super::Displays, screen: usize, act: Act) {
                 // the popup's window out, it does not make one.
                 (api.set_popup_visible)(handle, 1);
                 (api.pop_out)(handle);
+                // X-Plane's own default geometry for a freshly popped-out
+                // window is not derived from the device's screen size at
+                // all: measured (PrintWindow capture, 2026-09-25) as an
+                // identical 198x1080 sliver for the EFB (1430x1000), the
+                // PFD and the EWD (768x1024 each). Size and place the OS
+                // window ourselves, right after `pop_out`, or the user gets
+                // a window too narrow to read anything in.
+                let (left, top, right, bottom) = pop_out_rect(screen, s.def.width, s.def.height);
+                (api.set_geometry_os)(handle, left, top, right, bottom);
                 crate::log(&format!("{id}: popped out to its own window"));
             }
             Act::PopUp => {
@@ -96,6 +105,22 @@ pub fn apply(displays: &mut super::Displays, screen: usize, act: Act) {
             }
         }
     }
+}
+
+/// Where to put a freshly popped-out screen's OS window: sized 1:1 to its
+/// own screen (matching `CreateAvionics::bezel_width/height`, so nothing is
+/// scaled), and cascaded by screen index so popping out several screens in
+/// a row does not stack their windows exactly on top of each other. A
+/// fixed, monitor-agnostic starting point -- there is no bound
+/// `XPLMGetAllMonitorBoundsOS` call yet to place it on a specific monitor --
+/// so on a second monitor smaller than a wide screen like the FCU
+/// (2560x1280) the user still has to drag an edge, but it is now a real,
+/// resizable window instead of X-Plane's 198 px default sliver.
+fn pop_out_rect(screen: usize, width: u32, height: u32) -> (c_int, c_int, c_int, c_int) {
+    let step = (screen as c_int % 8) * 48;
+    let left = 80 + step;
+    let top = 80 + step;
+    (left, top, left + width as c_int, top + height as c_int)
 }
 
 /// Whether X-Plane currently has this screen in a window of its own.
@@ -172,6 +197,29 @@ mod tests {
                 assert_eq!(unpack(refcon(screen, act)), (screen, act), "screen {screen} {act:?}");
             }
         }
+    }
+
+    #[test]
+    fn pop_out_rect_sizes_the_window_to_the_screen_not_xplanes_default_sliver() {
+        // The bug this guards: X-Plane's own default pop-out geometry was
+        // measured as 198x1080 for every screen regardless of its own size
+        // (EFB 1430x1000, PFD/EWD 768x1024). The window must come out at
+        // the screen's own width/height, not some unrelated default.
+        let (left, top, right, bottom) = pop_out_rect(0, 1430, 1000);
+        assert_eq!((right - left, bottom - top), (1430, 1000));
+        let (left, top, right, bottom) = pop_out_rect(6, 768, 1024);
+        assert_eq!((right - left, bottom - top), (768, 1024));
+    }
+
+    #[test]
+    fn pop_out_rect_does_not_stack_consecutive_screens_on_the_same_spot() {
+        // Popping out several screens in a row (the "put every popped-out
+        // screen away again" comment on `Commands::register` implies users
+        // do open more than one at a time) should not leave every window
+        // exactly on top of the last.
+        let (l0, t0, ..) = pop_out_rect(0, 768, 1024);
+        let (l1, t1, ..) = pop_out_rect(1, 768, 1024);
+        assert_ne!((l0, t0), (l1, t1));
     }
 
     #[test]

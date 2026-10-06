@@ -41,6 +41,22 @@ pub const EFB_SCREEN: &str = "SCREEN_EFB";
 pub const EFB_WIDTH: u32 = 1430;
 pub const EFB_HEIGHT: u32 = 1000;
 
+/// The EFB is drawn at twice its CSS size: XPHFBW lays the page out at
+/// 1430x1000 and Chromium paints it at a 2x device scale into a 2860x2000
+/// buffer and X-Plane device, so the tablet's small settings text stays
+/// sharp when it fills much of the view (it looked low-res at 1x,
+/// 2026-09-27). Taps still arrive in CSS pixels: the plugin's per-screen
+/// `scale` (device texels over CSS size) maps them back.
+pub const EFB_SUPERSAMPLE: u32 = 2;
+
+/// A screen's device size in texels: its CSS size times its supersampling
+/// (only the EFB supersamples). Used for the X-Plane device, the shared
+/// `ScreenBlock` and the browser's paint buffer alike, so all three agree.
+pub fn device_size(screen_id: &str, css_width: u32, css_height: u32) -> (u32, u32) {
+    let s = if screen_id == EFB_SCREEN { EFB_SUPERSAMPLE } else { 1 };
+    (css_width * s, css_height * s)
+}
+
 /// One `[VCockpitNN]` section with at least one gauge left after
 /// `EXCLUDED_GAUGES` is filtered out: one XPHFBW off-screen browser view
 /// (xphfbw-app.md's "one off-screen CEF browser per instrument view").

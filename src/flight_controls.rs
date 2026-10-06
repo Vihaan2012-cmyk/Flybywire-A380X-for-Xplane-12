@@ -48,6 +48,21 @@
 //!   up, -2..+10 (trimmable_horizontal_stabilizer.rs:806-809, mod.rs:2111-2114,
 //!   flight_model.cfg:619-620); MSFS gets it unchanged as ELEVATOR TRIM
 //!   POSITION (a380_systems_wasm trimmable_horizontal_stabilizer.rs:406-421).
+//!   In X-Plane it must ALSO go to `sim/flightmodel2/controls/
+//!   stabilizer_deflection_degrees` (see `Refs::stabilizer`): the converted
+//!   `.acf` is a "new v12 flying stabiliser" airframe
+//!   (`_using_new_v12_flying_stab_trim 1`, `_stab_trim_up`/`_dn` 10/2, zero
+//!   baked incidence on wings 8/9 -- `msfs2xp-aircraft/src/acf.rs` is
+//!   already right about this), and that dataref, not `elv_trim`, is what
+//!   X-Plane's aerodynamic model reads once `override_control_surfaces` is
+//!   set (developer.x-plane.com/article/stabilizer-trim-and-servo/: "you
+//!   will need to actuate the THS directly with the dataref
+//!   sim/flightmodel2/controls/stabilizer_deflection_degrees... Your pitch
+//!   trim input is no longer automatically applied to the stabilizer
+//!   incidence if you are overriding the flight controls since you
+//!   indicated you are responsible for it"). Its documented sign,
+//!   "positive for leading-edge nose up" (DataRefs.txt:5439), already
+//!   matches FlyByWire's convention above, unlike `elv1_def`.
 //!
 //! X-Plane has fewer, differently cut surfaces than the A380 (the converted
 //! .acf): two aileron sets, one elevator per side, one rudder, and five
@@ -184,6 +199,153 @@ fn gear_load(xplm: &Xplm, tire_force: Option<DataRef>) -> String {
     )
 }
 
+/// X-Plane's own force totals and inertia, for `FBW_FCTL_STATS`.
+struct BalanceRefs {
+    fnrml: [Option<DataRef>; 4],
+    g_nrml: Option<DataRef>,
+    mass: Option<DataRef>,
+    tire_force: Option<DataRef>,
+    tire_deflection: Option<DataRef>,
+    tire_brake: Option<DataRef>,
+    tire_skid: Option<DataRef>,
+    gear_z: Option<DataRef>,
+    faxil_gear: Option<DataRef>,
+    cg_z: Option<DataRef>,
+    zfw_cg_z: Option<DataRef>,
+    /// X-Plane's own airframe contact points (not the tyres): x, y, z, force.
+    contact: [Option<DataRef>; 4],
+    contact_active: Option<DataRef>,
+    /// Where X-Plane applies each engine's thrust.
+    thrust_points: Option<DataRef>,
+    /// X-Plane's wing flex: each wing's root-to-tip line, degrees from its
+    /// entered dihedral. Its flex curled the wing under the aircraft (30 Sep).
+    wing_tip: Option<DataRef>,
+    unitmass: [Option<DataRef>; 3],
+    /// L, M, N totals (N.m) and P, Q, R accelerations (deg/s^2, as
+    /// DataRefs.txt documents them).
+    moments: [Option<DataRef>; 3],
+    accels: [Option<DataRef>; 3],
+}
+
+impl BalanceRefs {
+    fn new(xplm: &Xplm) -> Self {
+        let f = |n: &str| xplm.find(n);
+        Self {
+            fnrml: ["gear", "aero", "prop", "total"].map(|k| f(&format!("sim/flightmodel/forces/fnrml_{k}"))),
+            g_nrml: f("sim/flightmodel/forces/g_nrml"),
+            mass: f("sim/flightmodel/weight/m_total"),
+            tire_force: f("sim/flightmodel2/gear/tire_vertical_force_n_mtr"),
+            tire_deflection: f("sim/flightmodel2/gear/tire_vertical_deflection_mtr"),
+            tire_brake: f("sim/flightmodel2/gear/tire_part_brake"),
+            tire_skid: f("sim/flightmodel2/gear/tire_skid_ratio"),
+            gear_z: f("sim/aircraft/parts/acf_gear_znodef"),
+            faxil_gear: f("sim/flightmodel/forces/faxil_gear"),
+            cg_z: f("sim/flightmodel2/misc/cg_offset_z"),
+            zfw_cg_z: f("sim/flightmodel2/misc/zfw_cg_offset_z"),
+            contact: ["x", "y", "z", "force"].map(|k| f(&format!("sim/flightmodel2/misc/contact/{k}"))),
+            contact_active: f("sim/flightmodel2/misc/contact/active"),
+            thrust_points: f("sim/flightmodel/engine/POINT_XYZ"),
+            wing_tip: f("sim/flightmodel2/wing/wing_tip_deflection_deg"),
+            unitmass: ["xx", "yy", "zz"].map(|a| f(&format!("sim/aircraft/weight/acf_J{a}_unitmass"))),
+            moments: ["L", "M", "N"].map(|a| f(&format!("sim/flightmodel/forces/{a}_total"))),
+            accels: ["P", "Q", "R"].map(|a| f(&format!("sim/flightmodel/position/{a}_dot"))),
+        }
+    }
+}
+
+/// Where along the aircraft the tyre loads centre, metres from the default
+/// CG (+ aft): on a still aircraft this is where X-Plane's gear says the CG
+/// is, to set beside `cg_offset_z`. `None` with nothing on the wheels.
+fn load_centroid_m(forces: &[f64], gear_z_m: &[f64]) -> Option<f64> {
+    let total: f64 = forces.iter().sum();
+    (total > 1.).then(|| forces.iter().zip(gear_z_m).map(|(f, z)| f * z).sum::<f64>() / total)
+}
+
+/// Where the aircraft's weight is going, and the inertia X-Plane is really
+/// flying with. The gear's tyre forces summed to about 75% of the weight
+/// on a stationary aircraft (2026-09-26; 74% again, identical to the newton
+/// for twenty samples, at 370 t on 2026-09-25), and they centred 5-8 m
+/// ahead of X-Plane's own `cg_offset_z` (2026-09-29). `implied I/m` is each
+/// axis's moment over its angular acceleration per kilogram -- compare it
+/// with `J unitmass`. (Until 2026-09-29 it divided by the acceleration in
+/// deg/s^2 as if it were rad/s^2, which read as an inertia 57 times too
+/// small.) `faxil gear`, `brake` and `skid` show whether the tyres are
+/// holding the aircraft against something horizontal; all ten gear slots
+/// are read in case X-Plane carries load in one the .acf does not define.
+fn balance_probe(xplm: &Xplm, r: &BalanceRefs) -> String {
+    let get = |d: Option<DataRef>| d.map_or(f64::NAN, |d| xplm.get_f(d) as f64);
+    let mass = get(r.mass);
+    let weight_kn = mass * 9.81 / 1000.;
+    let [gear, aero, prop, total] = r.fnrml.map(|d| get(d) / 1000.);
+    let per_gear = |d: Option<DataRef>| {
+        let mut v = [0f32; 10];
+        if let Some(d) = d {
+            xplm.get_vf(d, &mut v);
+        }
+        v.map(f64::from)
+    };
+    let round = |v: [f64; 10], scale: f64| v.map(|x| (x * scale).round());
+    let forces_n = per_gear(r.tire_force);
+    let tyres = round(forces_n, 1. / 1000.);
+    let deflection_mm = round(per_gear(r.tire_deflection), 1000.);
+    let brake = round(per_gear(r.tire_brake), 100.);
+    let skid = round(per_gear(r.tire_skid), 100.);
+    let centroid = load_centroid_m(&forces_n, &per_gear(r.gear_z));
+    let implied = |axis: usize| get(r.moments[axis]) / get(r.accels[axis]).to_radians() / mass;
+    // The tyres carried 70-83% of a parked A380's weight: whatever else the
+    // ground is holding up is one of these.
+    let [cx, cy, cz, cf] = r.contact.map(per_gear);
+    let mut active = [0; 10];
+    if let Some(d) = r.contact_active {
+        xplm.get_vi(d, &mut active);
+    }
+    let contacts: Vec<String> = (0..10)
+        .filter(|&i| active[i] != 0 || cf[i].abs() > 1.)
+        .map(|i| format!("#{i} at x/y/z {:+.1}/{:+.1}/{:+.1} m {:.0} kN", cx[i], cy[i], cz[i], cf[i] / 1000.))
+        .collect();
+    let mut points = [0f32; 12];
+    if let Some(d) = r.thrust_points {
+        xplm.get_vf(d, &mut points);
+    }
+    let thrust_at: Vec<String> = points.chunks(3).map(|p| format!("{:+.1}/{:+.1}/{:+.1}", p[0], p[1], p[2])).collect();
+    let mut tips = [0f32; 8];
+    if let Some(d) = r.wing_tip {
+        xplm.get_vf(d, &mut tips);
+    }
+    let tips = tips.map(|t| (f64::from(t) * 100.).round() / 100.);
+    format!(
+        "balance: weight {weight_kn:.0} kN; tyres {tyres:?} kN (sum {:.0}), deflection {deflection_mm:?} mm, brake {brake:?} %, skid {skid:?} %; wing tip deflection {tips:?} deg (wing slots 0-7: left and right of each segment, root outward); airframe contacts {}; thrust points x/y/z m {thrust_at:?}; tyre loads centre {} m, X-Plane cg_offset_z {:+.3} m (zero-fuel {:+.3}); X-Plane fnrml gear {gear:.0} aero {aero:.0} prop {prop:.0} total {total:.0} kN, faxil gear {:.0} kN; g_nrml {:.3}; J unitmass xx/yy/zz {:.1}/{:.1}/{:.1} m2; implied I/m roll/pitch/yaw {:.1}/{:.1}/{:.1} m2",
+        tyres.iter().sum::<f64>(),
+        if contacts.is_empty() { "none".to_owned() } else { contacts.join(", ") },
+        centroid.map_or("-".to_owned(), |c| format!("{c:+.2}")),
+        get(r.cg_z),
+        get(r.zfw_cg_z),
+        get(r.faxil_gear) / 1000.,
+        get(r.g_nrml),
+        get(r.unitmass[0]),
+        get(r.unitmass[1]),
+        get(r.unitmass[2]),
+        implied(0),
+        implied(1),
+        implied(2),
+    )
+}
+
+#[cfg(test)]
+mod balance_probe_tests {
+    use super::load_centroid_m;
+
+    #[test]
+    fn the_tyre_loads_centre_where_their_moment_balances() {
+        // 2026-09-25, 370 t, standing still: nose, body pair, wing pair.
+        let forces = [809_668., 512_473., 512_473., 434_002., 434_002., 0., 0., 0., 0., 0.];
+        let z = [-27.78, 4.18, 4.18, 0.7, 0.7, 0., 0., 0., 0., 0.];
+        let c = load_centroid_m(&forces, &z).unwrap();
+        assert!((c + 6.51).abs() < 0.01, "{c}");
+        assert_eq!(load_centroid_m(&[0.; 10], &z), None, "airborne: no centre");
+    }
+}
+
 /// Whether the aeroplane pitched the way the elevator asked it to.
 ///
 /// The one sign this port cannot read off anything: X-Plane documents
@@ -232,7 +394,7 @@ fn pitch_verdict(elevator_te_down_deg: f64, q_dot_rad_s2: f64) -> &'static str {
 /// travel of 2, saturating X-Plane's trim at +1.00 and leaving the aircraft
 /// permanently at full nose-up trim whatever FlyByWire commanded. Crossed,
 /// the same 5.8 degrees is 0.58 of a 10 degree travel, and the pair line up
-/// with FlyByWire's own THS range (-2 to +12 degrees,
+/// with FlyByWire's own THS range (-2 to +10 degrees, 12 degrees of travel,
 /// `a380_systems/hydraulic/mod.rs`) at both ends.
 pub fn trim_ratio(ths_deg: f64, travel_up_deg: f64, travel_down_deg: f64) -> f64 {
     let travel = if ths_deg >= 0. { travel_down_deg } else { travel_up_deg };
@@ -240,6 +402,20 @@ pub fn trim_ratio(ths_deg: f64, travel_up_deg: f64, travel_down_deg: f64) -> f64
         return 0.;
     }
     (ths_deg / travel).clamp(-1., 1.)
+}
+
+/// The stabiliser's own physical angle (degrees, positive nose up), for
+/// `sim/flightmodel2/controls/stabilizer_deflection_degrees` -- the dataref
+/// X-Plane 12's "flying stabiliser trim" model actually reads (see
+/// `Refs::stabilizer`). Clamped to the aircraft's real travel exactly the
+/// way `trim_ratio` selects and crosses it (see that function's doc);
+/// unlike `trim_ratio` the result stays in degrees, because this dataref is
+/// documented in degrees, not a -1..1 ratio.
+pub fn trim_degrees(ths_deg: f64, travel_up_deg: f64, travel_down_deg: f64) -> f64 {
+    if travel_up_deg <= 0. || travel_down_deg <= 0. {
+        return 0.;
+    }
+    ths_deg.clamp(-travel_up_deg, travel_down_deg)
 }
 
 /// Each destination segment's span-weighted mean of the source segments over
@@ -316,6 +492,27 @@ impl Surfaces {
 // The plugin side.
 // ---------------------------------------------------------------------------
 
+/// `deep::integration::flight_control_surfaces`'s override namespace (that
+/// file's own module doc, "A distinct override namespace"; W125's review,
+/// `E:/fbw-debug/fixes/W124.md`): a *separate* set of Vars this crate's
+/// deep-systems layer writes, one value + one active flag per surface,
+/// never FlyByWire's own `HYD_*_DEFLECTION`/`HYD_FINAL_THS_DEFLECTION`
+/// above. `read` (below) prefers a surface's override value over FlyByWire's
+/// own only while its active flag says a fault is actually moving that
+/// surface off command.
+struct DeepOverrideIds {
+    ailerons: [[VariableIdentifier; 3]; 2],
+    ailerons_active: [[VariableIdentifier; 3]; 2],
+    elevators: [[VariableIdentifier; 2]; 2],
+    elevators_active: [[VariableIdentifier; 2]; 2],
+    rudders: [VariableIdentifier; 2],
+    rudders_active: [VariableIdentifier; 2],
+    spoilers: [[VariableIdentifier; 8]; 2],
+    spoilers_active: [[VariableIdentifier; 8]; 2],
+    ths: VariableIdentifier,
+    ths_active: VariableIdentifier,
+}
+
 struct Ids {
     ailerons: [[VariableIdentifier; 3]; 2],
     elevators: [[VariableIdentifier; 2]; 2],
@@ -323,6 +520,7 @@ struct Ids {
     spoilers: [[VariableIdentifier; 8]; 2],
     ths: VariableIdentifier,
     tracking_mode: VariableIdentifier,
+    deep_override: DeepOverrideIds,
 }
 
 struct Refs {
@@ -344,10 +542,20 @@ struct Refs {
     trim_requested: Option<DataRef>,
     trim_travel_up: Option<DataRef>,
     trim_travel_down: Option<DataRef>,
+    /// `sim/flightmodel2/controls/stabilizer_deflection_degrees`: the one
+    /// dataref X-Plane 12's "flying stabiliser trim" actually reads for its
+    /// aerodynamic pitching moment once `override_control_surfaces` is set.
+    /// `trim_actual`/`trim_requested` above are still written too, but only
+    /// so X-Plane's simulated trim motor has nothing to hunt towards -- see
+    /// this struct's module doc comment for why they no longer move the
+    /// stabiliser themselves.
+    stabilizer: Option<DataRef>,
     /// `FBW_FCTL_STATS` only: what the aeroplane did about it.
     pitch_rate: Option<DataRef>,
     pitch_accel: Option<DataRef>,
     theta: Option<DataRef>,
+    /// The force balance, for [`balance_probe`].
+    balance: BalanceRefs,
     /// Vertical load on each leg, and the total pitching moment: where the
     /// aeroplane's weight actually sits, and what is moving it.
     tire_force: Option<DataRef>,
@@ -358,6 +566,17 @@ struct Refs {
     pitch_moment_aero: Option<DataRef>,
     pitch_moment_prop: Option<DataRef>,
     pitch_moment_gear: Option<DataRef>,
+    /// X-Plane's own balance, for the stats line: the CG offset it is
+    /// actually flying with, the .acf reference it is offset from, and the
+    /// masses behind it.
+    cg_offset_z: Option<DataRef>,
+    cg_reference_z: Option<DataRef>,
+    mass_total: Option<DataRef>,
+    mass_fuel: Option<DataRef>,
+    /// The gear as X-Plane's flight model places it (no deflection), and the
+    /// deprecated CG shift, to tell a balance problem from a frame offset.
+    gear_z_nodef: Option<DataRef>,
+    cgz_ref_to_default: Option<DataRef>,
 }
 
 pub struct FlightControls {
@@ -388,6 +607,28 @@ impl FlightControls {
         // (ailerons.rs:141-146, elevators.rs:257-262, rudder.rs:340-345,
         // trimmable_horizontal_stabilizer.rs:420-425).
         let tracking_mode = get("FLIGHT_CONTROLS_TRACKING_MODE".to_owned());
+        // `deep::integration::flight_control_surfaces`'s override namespace
+        // (`DeepOverrideIds`'s own doc; `deep/integration/
+        // flight_control_surfaces.rs`'s module doc, "A distinct override
+        // namespace"). Same `side`/`part`/`which`/`k` strings as the
+        // `HYD_*` names just above, `DEEP_HYD_..._OVERRIDE_DEFLECTION`/
+        // `_OVERRIDE_ACTIVE` instead.
+        let deep_override = DeepOverrideIds {
+            ailerons: SIDES.map(|side| {
+                ["INWARD", "MIDDLE", "OUTWARD"].map(|part| get(format!("DEEP_HYD_AIL_{side}_{part}_OVERRIDE_DEFLECTION")))
+            }),
+            ailerons_active: SIDES.map(|side| {
+                ["INWARD", "MIDDLE", "OUTWARD"].map(|part| get(format!("DEEP_HYD_AIL_{side}_{part}_OVERRIDE_ACTIVE")))
+            }),
+            elevators: SIDES.map(|side| ["INWARD", "OUTWARD"].map(|part| get(format!("DEEP_HYD_ELEV_{side}_{part}_OVERRIDE_DEFLECTION")))),
+            elevators_active: SIDES.map(|side| ["INWARD", "OUTWARD"].map(|part| get(format!("DEEP_HYD_ELEV_{side}_{part}_OVERRIDE_ACTIVE")))),
+            rudders: ["UPPER", "LOWER"].map(|which| get(format!("DEEP_HYD_{which}_RUD_OVERRIDE_DEFLECTION"))),
+            rudders_active: ["UPPER", "LOWER"].map(|which| get(format!("DEEP_HYD_{which}_RUD_OVERRIDE_ACTIVE"))),
+            spoilers: SIDES.map(|side| [1, 2, 3, 4, 5, 6, 7, 8].map(|k| get(format!("DEEP_HYD_SPOILER_{k}_{side}_OVERRIDE_DEFLECTION")))),
+            spoilers_active: SIDES.map(|side| [1, 2, 3, 4, 5, 6, 7, 8].map(|k| get(format!("DEEP_HYD_SPOILER_{k}_{side}_OVERRIDE_ACTIVE")))),
+            ths: get("DEEP_HYD_FINAL_THS_OVERRIDE_DEFLECTION".to_owned()),
+            ths_active: get("DEEP_HYD_FINAL_THS_OVERRIDE_ACTIVE".to_owned()),
+        };
         let refs = Refs {
             override_surfaces: xplm.find("sim/operation/override/override_control_surfaces"),
             aileron1: xplm.find("sim/flightmodel2/wing/aileron1_deg"),
@@ -410,20 +651,28 @@ impl FlightControls {
             trim_requested: xplm.find("sim/cockpit2/controls/elevator_trim"),
             trim_travel_up: xplm.find("sim/aircraft/controls/acf_hstb_trim_up"),
             trim_travel_down: xplm.find("sim/aircraft/controls/acf_hstb_trim_dn"),
+            stabilizer: xplm.find("sim/flightmodel2/controls/stabilizer_deflection_degrees"),
             tire_force: xplm.find("sim/flightmodel2/gear/tire_vertical_force_n_mtr"),
             pitch_moment: xplm.find("sim/flightmodel/forces/M_total"),
             pitch_moment_aero: xplm.find("sim/flightmodel/forces/M_aero"),
             pitch_moment_prop: xplm.find("sim/flightmodel/forces/M_prop"),
             pitch_moment_gear: xplm.find("sim/flightmodel/forces/M_gear"),
+            cg_offset_z: xplm.find("sim/flightmodel2/misc/cg_offset_z"),
+            cg_reference_z: xplm.find("sim/aircraft/weight/acf_cgZ_original"),
+            mass_total: xplm.find("sim/flightmodel/weight/m_total"),
+            mass_fuel: xplm.find("sim/flightmodel/weight/m_fuel_total"),
+            gear_z_nodef: xplm.find("sim/aircraft/parts/acf_gear_znodef"),
+            cgz_ref_to_default: xplm.find("sim/flightmodel/misc/cgz_ref_to_default"),
             pitch_rate: xplm.find("sim/flightmodel/position/Q"),
             pitch_accel: xplm.find("sim/flightmodel/position/Q_dot"),
+            balance: BalanceRefs::new(xplm),
             theta: xplm.find("sim/flightmodel/position/theta"),
         };
         if let Some(d) = refs.override_surfaces {
             xplm.set_i(d, 1);
         }
         Self {
-            ids: Ids { ailerons, elevators, rudders, spoilers, ths, tracking_mode },
+            ids: Ids { ailerons, elevators, rudders, spoilers, ths, tracking_mode, deep_override },
             refs,
             stats_at: None,
             hyd_green: get("HYD_GREEN_SYSTEM_1_SECTION_PRESSURE".to_owned()),
@@ -431,22 +680,34 @@ impl FlightControls {
         }
     }
 
+    /// Reads FlyByWire's own actuator `Var`s, except for a surface whose
+    /// `deep::integration::flight_control_surfaces` override active flag is
+    /// set this tick (`Ids::deep_override`'s own doc; W125's review,
+    /// `E:/fbw-debug/fixes/W124.md`) -- that surface reads the deep-systems
+    /// override value instead, in the same normalised 0..1 (degrees for
+    /// THS) representation `Actuators` already uses, so nothing downstream
+    /// of this function needs to know the substitution happened.
     fn read<V: SimulatorReaderWriter>(&self, vars: &mut V) -> Actuators {
         let ids = &self.ids;
-        let mut a = Actuators { ths_deg: vars.read(&ids.ths), ..Default::default() };
+        let o = &ids.deep_override;
+        let ths_deg = if vars.read(&o.ths_active) != 0.0 { vars.read(&o.ths) } else { vars.read(&ids.ths) };
+        let mut a = Actuators { ths_deg, ..Default::default() };
         for side in [LEFT, RIGHT] {
             for (i, id) in ids.ailerons[side].iter().enumerate() {
-                a.ailerons[side][i] = vars.read(id);
+                a.ailerons[side][i] =
+                    if vars.read(&o.ailerons_active[side][i]) != 0.0 { vars.read(&o.ailerons[side][i]) } else { vars.read(id) };
             }
             for (i, id) in ids.elevators[side].iter().enumerate() {
-                a.elevators[side][i] = vars.read(id);
+                a.elevators[side][i] =
+                    if vars.read(&o.elevators_active[side][i]) != 0.0 { vars.read(&o.elevators[side][i]) } else { vars.read(id) };
             }
             for (i, id) in ids.spoilers[side].iter().enumerate() {
-                a.spoilers[side][i] = vars.read(id);
+                a.spoilers[side][i] =
+                    if vars.read(&o.spoilers_active[side][i]) != 0.0 { vars.read(&o.spoilers[side][i]) } else { vars.read(id) };
             }
         }
         for (i, id) in ids.rudders.iter().enumerate() {
-            a.rudders[i] = vars.read(id);
+            a.rudders[i] = if vars.read(&o.rudders_active[i]) != 0.0 { vars.read(&o.rudders[i]) } else { vars.read(id) };
         }
         a
     }
@@ -461,7 +722,7 @@ impl FlightControls {
     /// when the aeroplane pitches somewhere nobody asked it to, is a
     /// surface actually there, or is something else moving the aircraft?
     /// The sidestick and the 3D model both look right either way.
-    fn log_stats<V: SimulatorReaderWriter>(&mut self, vars: &mut V, xplm: &Xplm, s: &Surfaces, trim_ratio: f64) {
+    fn log_stats<V: SimulatorReaderWriter>(&mut self, vars: &mut V, xplm: &Xplm, s: &Surfaces, trim_ratio: f64, stab_deg: f64) {
         use std::sync::OnceLock;
         static ON: OnceLock<bool> = OnceLock::new();
         if !*ON.get_or_init(|| std::env::var("FBW_FCTL_STATS").is_ok_and(|v| v.trim() != "0" && !v.trim().is_empty())) {
@@ -473,7 +734,7 @@ impl FlightControls {
         }
         self.stats_at = Some(now);
         crate::log(&format!(
-            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2} (X-Plane trim travel up {:.3} dn {:.3}, as read); spoilers L{:?}; hyd {:.0}/{:.0} psi; pitch {:+.1} deg, rate {:+.2}, accel {:+.3} deg/s2 [{}]; gear {}; pitch moment {:+.0} = aero {:+.0} + thrust {:+.0} + gear {:+.0} kN.m (+ is nose up)",
+            "fctl (TE-down +): elev L{:+.1} R{:+.1}, ail L{:+.1} R{:+.1}, rud {:+.1}, THS {:+.1} deg -> trim {:+.2} ratio, stabilizer_deflection_degrees {:+.2} (X-Plane trim travel up {:.3} dn {:.3}, as read); spoilers L{:?}; hyd {:.0}/{:.0} psi; pitch {:+.1} deg, rate {:+.2}, accel {:+.3} deg/s2 [{}]; gear {}; pitch moment {:+.0} = aero {:+.0} + thrust {:+.0} + gear {:+.0} kN.m (+ is nose up); X-Plane balance: cg_offset_z {:+.3} m from acf_cgZ_original {:+.2} ft, mass {:.0} kg of which fuel {:.0} kg; gear z (no deflection) {:?}; cgz_ref_to_default {:+.3}",
             s.elevators_deg[LEFT],
             s.elevators_deg[RIGHT],
             s.ailerons_deg[LEFT][0],
@@ -481,6 +742,7 @@ impl FlightControls {
             s.rudder_deg,
             s.ths_deg,
             trim_ratio,
+            stab_deg,
             self.refs.trim_travel_up.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
             self.refs.trim_travel_down.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
             s.spoilers_deg[LEFT].iter().map(|v| v.round() as i32).collect::<Vec<_>>(),
@@ -495,7 +757,18 @@ impl FlightControls {
             self.refs.pitch_moment_aero.map_or(f64::NAN, |d| xplm.get_f(d) as f64 / 1000.),
             self.refs.pitch_moment_prop.map_or(f64::NAN, |d| xplm.get_f(d) as f64 / 1000.),
             self.refs.pitch_moment_gear.map_or(f64::NAN, |d| xplm.get_f(d) as f64 / 1000.),
+            self.refs.cg_offset_z.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
+            self.refs.cg_reference_z.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
+            self.refs.mass_total.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
+            self.refs.mass_fuel.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
+            self.refs.gear_z_nodef.map(|d| {
+                let mut z = [0f32; 5];
+                xplm.get_vf(d, &mut z);
+                z.map(|v| (v * 100.).round() / 100.)
+            }),
+            self.refs.cgz_ref_to_default.map_or(f64::NAN, |d| xplm.get_f(d) as f64),
         ));
+        crate::log(&balance_probe(xplm, &self.refs.balance));
     }
 
     pub fn update<V: SimulatorReaderWriter>(&mut self, vars: &mut V, xplm: &Xplm) {
@@ -571,14 +844,26 @@ impl FlightControls {
             Some(t) if t > 0. => t,
             _ => ACF_STAB_TRIM_DEG,
         };
-        let ratio = trim_ratio(s.ths_deg, travel(r.trim_travel_up), travel(r.trim_travel_down));
+        let (travel_up_deg, travel_down_deg) = (travel(r.trim_travel_up), travel(r.trim_travel_down));
+        let ratio = trim_ratio(s.ths_deg, travel_up_deg, travel_down_deg);
         // Both the requested and the actual trim, so X-Plane's own trim
-        // motor has nothing to run towards.
+        // motor has nothing to run towards. Neither one moves the
+        // stabiliser aerodynamically once `override_control_surfaces` is
+        // set -- see `Refs::stabilizer`'s doc comment -- so they are
+        // cosmetic/compatibility writes only.
         for d in [r.trim_requested, r.trim_actual].into_iter().flatten() {
             xplm.set_f(d, ratio as f32);
         }
+        // The write that actually pitches the aeroplane: the stabiliser's
+        // real angle, clamped the same crossed way as `ratio` but kept in
+        // degrees, because `override_control_surfaces` stops X-Plane
+        // applying trim to the stabiliser incidence itself.
+        let stab_deg = trim_degrees(s.ths_deg, travel_up_deg, travel_down_deg);
+        if let Some(d) = r.stabilizer {
+            xplm.set_f(d, stab_deg as f32);
+        }
         // After the  borrow above has ended.
-        self.log_stats(vars, xplm, &s, ratio);
+        self.log_stats(vars, xplm, &s, ratio, stab_deg);
     }
 
     /// Hand the surfaces back to X-Plane.
@@ -606,6 +891,35 @@ mod tests {
             spoilers: [[n_spoiler; 8]; 2],
             ths_deg: 0.,
         }
+    }
+
+    #[test]
+    fn read_prefers_the_deep_override_only_while_its_active_flag_is_set() {
+        use crate::aspects::test_vars::TestVars;
+        use crate::xp::Xplm;
+        let xplm: &'static Xplm = Box::leak(Box::new(Xplm::dummy()));
+        let mut vars = TestVars::default();
+        let fc = FlightControls::new(&mut vars, xplm);
+
+        // FlyByWire's own healthy command: neutral (0.4, see
+        // `neutral_actuators_give_neutral_surfaces` below for why 0.4).
+        let fbw_id = vars.get("HYD_AIL_LEFT_INWARD_DEFLECTION".to_owned());
+        vars.write(&fbw_id, 0.4);
+        // Nothing armed yet: the active flag defaults to whatever `TestVars`
+        // starts an unwritten slot at, which is 0.0 -- `read` must still
+        // fall back to FlyByWire's own value.
+        let a = fc.read(&mut vars);
+        assert_eq!(a.ailerons[LEFT][0], 0.4, "inactive override must not shadow FlyByWire's own value");
+
+        // Now the deep override goes active with a different value.
+        let active_id = vars.get("DEEP_HYD_AIL_LEFT_INWARD_OVERRIDE_ACTIVE".to_owned());
+        let value_id = vars.get("DEEP_HYD_AIL_LEFT_INWARD_OVERRIDE_DEFLECTION".to_owned());
+        vars.write(&active_id, 1.0);
+        vars.write(&value_id, 0.9);
+        let a = fc.read(&mut vars);
+        assert_eq!(a.ailerons[LEFT][0], 0.9, "an active override must be preferred over FlyByWire's own value");
+        // FlyByWire's own Var is untouched by this whole exchange.
+        assert_eq!(vars.read(&fbw_id), 0.4);
     }
 
     #[test]
@@ -734,17 +1048,38 @@ mod tests {
         // degrees nose up, used to saturate at +1.00 here; against the 10
         // degree travel it is a little over half.
         assert!(close(trim_ratio(5.8, 2., 10.), 0.58));
-        // Both ends of FlyByWire's own THS range (-2 to +12 degrees) land
-        // where they should against this pairing, which is the check that
-        // the crossing is the right way round rather than merely different:
-        // its full nose-down travel is exactly the 2.000 the "up" dataref
-        // reports, so it reaches -1.00 and no further.
+        // Both ends of FlyByWire's own THS range (-2 to +10 degrees, 12
+        // degrees of travel) land where they should against this pairing,
+        // which is the check that the crossing is the right way round
+        // rather than merely different: its full nose-down travel is
+        // exactly the 2.000 the "up" dataref reports, so it reaches -1.00
+        // and no further.
         assert!(close(trim_ratio(-2., 2., 10.), -1.));
-        assert!(close(trim_ratio(12., 2., 10.), 1.));
+        assert!(close(trim_ratio(10., 2., 10.), 1.));
         // ... and taken uncrossed, that same nose-down limit would read a
         // fifth of its travel, and the nose-up side would saturate at a
         // third of the angle the aircraft actually trims to.
         assert!(close(trim_ratio(4., 2., 10.), 0.4));
+    }
+
+    #[test]
+    fn stabiliser_degrees_clamp_to_the_same_crossed_travel() {
+        // `trim_degrees` feeds `stabilizer_deflection_degrees` directly, in
+        // degrees rather than a ratio, but must clamp on the same crossed
+        // pair as `trim_ratio` -- see that test's comment for why up 2.000
+        // / dn 10.000 is this airframe's real reading.
+        assert!(close(trim_degrees(5.8, 2., 10.), 5.8));
+        // Full nose-down travel is exactly the 2.000 the "up" dataref
+        // reports -- same boundary as the ratio test, but in degrees.
+        assert!(close(trim_degrees(-2., 2., 10.), -2.));
+        // FlyByWire's own actuator range runs a little past the airframe's
+        // nose-up limit (12 vs 10 here); the dataref must saturate at the
+        // real travel, not the actuator's own range.
+        assert!(close(trim_degrees(12., 2., 10.), 10.));
+        assert!(close(trim_degrees(4., 2., 10.), 4.));
+        // A missing/zero travel reading must not send an unclamped angle
+        // into the aerodynamic model.
+        assert!(close(trim_degrees(5., 0., 10.), 0.));
     }
 
     #[test]

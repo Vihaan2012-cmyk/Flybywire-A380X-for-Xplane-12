@@ -18,6 +18,23 @@
 //! them by name (`Coherent.call('PLAY_INSTRUMENT_SOUND', event)`,
 //! LegacySoundManager.ts, FwsSoundManager.ts:374-376).
 //!
+//! `<AnimationSounds>` (cockpit switch/button clicks) have no trigger in
+//! sound.xml either, and unlike `<AvionicSounds>` almost none carry a
+//! `NodeName` to say which control: which animation fires which one is
+//! authored in MSFS's *model behaviour XML*, compiled through Asobo's own
+//! `ASOBO_GT_AnimTriggers_*` templates into `<AnimationTriggers>` blocks
+//! that never reach sound.xml at all. This reader still records every
+//! `<AnimationSounds>` event name (`animation_events`) for visibility, but
+//! the pairing this plugin actually plays from comes from the converter's
+//! `sound_triggers.txt` instead (see `sound::anim_triggers`), built by
+//! walking that XML. `<GroundSounds>` (wing/fuselage scrape, wheel
+//! touchdown) are not simvar-triggered at all — MSFS's own collision system
+//! fires them from wheel-contact telemetry (`WwiseRTPC Derived="true"`),
+//! which this plugin does not model; `<MiscellaneousSounds>`'s one entry
+//! (`AP_PREFLIGHT_CHECK_OVER`) has no trigger either, name-played like
+//! `<AvionicSounds>`. Both are recorded (`ground_events`, `misc_events`) but
+//! not wired to anything.
+//!
 //! A `<Sound>` may carry one or more `<Requires>` children: a second
 //! variable/range that gates the whole entry, independent of its own
 //! `LocalVar`/`SimVar` range (MSFS SDK, SimVarSounds/Requires). The package's
@@ -68,6 +85,9 @@ pub struct Trigger {
     /// Every `<Requires>` gate on this entry; all must hold, alongside this
     /// trigger's own range, for it to count as inside (empty: no gate).
     pub requires: Vec<Require>,
+    /// `ViewPoint="Outside"`: heard from outside the aircraft only (the
+    /// APU's exhaust). Every other sound is a flight-deck sound.
+    pub outside: bool,
 }
 
 impl Trigger {
@@ -87,6 +107,15 @@ pub struct SoundXml {
     pub triggers: Vec<Trigger>,
     pub skipped_rtpc: Vec<String>,
     pub avionic_events: Vec<String>,
+    /// `<AnimationSounds>` event names, recorded for visibility only: which
+    /// animation plays which is not in sound.xml (see the module doc).
+    pub animation_events: Vec<String>,
+    /// `<GroundSounds>` event names (wheel/wing/fuselage contact): recorded
+    /// only, MSFS's own collision system fires these, not a simvar.
+    pub ground_events: Vec<String>,
+    /// `<MiscellaneousSounds>` event names: name-triggered, same shape as
+    /// `avionic_events`.
+    pub misc_events: Vec<String>,
 }
 
 pub fn parse(text: &str) -> Result<SoundXml, String> {
@@ -130,11 +159,21 @@ pub fn parse(text: &str) -> Result<SoundXml, String> {
                             Some(Require { variable, is_local, lower: bound("LowerBound"), upper: bound("UpperBound") })
                         })
                         .collect();
-                    out.triggers.push(Trigger { event, variable, is_local, lower: bound("LowerBound"), upper: bound("UpperBound"), continuous, requires });
+                    let outside = sound.attr("ViewPoint").is_some_and(|v| v.trim().eq_ignore_ascii_case("Outside"));
+                    out.triggers.push(Trigger { event, variable, is_local, lower: bound("LowerBound"), upper: bound("UpperBound"), continuous, requires, outside });
                 }
             }
             "AvionicSounds" => {
                 out.avionic_events.extend(section.children.iter().filter(|c| c.name == "Sound").filter_map(|s| s.attr("WwiseEvent")));
+            }
+            "AnimationSounds" => {
+                out.animation_events.extend(section.children.iter().filter(|c| c.name == "Sound").filter_map(|s| s.attr("WwiseEvent")));
+            }
+            "GroundSounds" => {
+                out.ground_events.extend(section.children.iter().filter(|c| c.name == "Sound").filter_map(|s| s.attr("WwiseEvent")));
+            }
+            "MiscellaneousSounds" => {
+                out.misc_events.extend(section.children.iter().filter(|c| c.name == "Sound").filter_map(|s| s.attr("WwiseEvent")));
             }
             _ => {}
         }
@@ -155,6 +194,9 @@ pub enum Action {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TriggerState {
     was_inside: Option<bool>,
+    /// Whether the entry's own variable was inside its range last tick,
+    /// regardless of its gates: a one-shot fires on this edge only.
+    value_was_inside: Option<bool>,
 }
 
 impl TriggerState {
@@ -166,13 +208,24 @@ impl TriggerState {
     /// where the value is, so nothing already true at start-up fires a
     /// one-shot sound, but a continuous sound whose value starts inside
     /// starts.
+    ///
+    /// A one-shot (`Continuous="false"`) fires when its *own* variable enters
+    /// its range while every gate holds at that moment -- a `<Requires>` is an
+    /// extra condition on the trigger, not a trigger of its own. Firing on a
+    /// gate's edge as well replayed the touchdown thumps (`smoothtouch380`,
+    /// `cabtouchsmooth1`: `SIM ON GROUND`, gated on the radio vertical speed
+    /// being -150..-50 ft/min) every few seconds on a parked aircraft, each
+    /// time X-Plane's radio altimeter jitter flicked the filtered rate into
+    /// that band. A loop still runs exactly while value and gates both hold.
     pub fn step(&mut self, trigger: &Trigger, value: f64, requires_hold: bool) -> Action {
-        let inside = requires_hold && trigger.inside(value);
+        let value_inside = trigger.inside(value);
+        let inside = requires_hold && value_inside;
         let previous = self.was_inside.replace(inside);
+        let value_previous = self.value_was_inside.replace(value_inside);
         match (trigger.continuous, previous, inside) {
             (true, None | Some(false), true) => Action::StartLoop,
             (true, Some(true), false) => Action::StopLoop,
-            (false, Some(false), true) => Action::PlayOnce,
+            (false, _, true) if value_previous == Some(false) => Action::PlayOnce,
             _ => Action::None,
         }
     }
@@ -263,16 +316,42 @@ mod tests {
         assert_eq!(st.step(pa, 1., false), Action::None);
         assert_eq!(st.step(pa, 1., false), Action::None);
 
-        // Descent begins, flight phase reaches 6 while cabin is still ready:
-        // the gate now holds, so the combined condition has a fresh 0->1
-        // edge and fires exactly once.
+        // The phase reaching 6 on its own does not fire it: a `<Requires>` is
+        // a condition on the trigger, not a trigger (see `step`'s doc -- gate
+        // edges firing one-shots replayed the touchdown thump every few
+        // seconds on a parked aircraft).
+        assert_eq!(st.step(pa, 1., true), Action::None);
+
+        // The cabin reporting ready (CABIN_READY 0 -> 1) during descent, gate
+        // held: fires exactly once.
+        assert_eq!(st.step(pa, 0., true), Action::None);
         assert_eq!(st.step(pa, 1., true), Action::PlayOnce);
         assert_eq!(st.step(pa, 1., true), Action::None, "one-shot: must not re-fire while still held");
+    }
 
-        // Leaving the phase and coming back must not replay it either
-        // (Continuous="false" fires once per entry, not once per tick).
-        assert_eq!(st.step(pa, 1., false), Action::None);
-        assert_eq!(st.step(pa, 1., true), Action::PlayOnce);
+    #[test]
+    fn a_touchdown_thump_fires_on_touchdown_and_never_from_a_jittering_gate_while_parked() {
+        const XML: &str = r#"<SoundInfo Version="0.1">
+            <SimVarSounds>
+                <Sound WwiseEvent="smoothtouch380" WwiseData="true" Continuous="false" SimVar="SIM ON GROUND" Units="BOOLEAN" Index="0">
+                    <Range LowerBound="1.0" />
+                    <Requires LocalVar="A32NX_AUTOPILOT_H_DOT_RADIO" Units="FEET PER MINUTE" Index="0">
+                        <Range LowerBound="-150" UpperBound="-50" />
+                    </Requires>
+                </Sound>
+            </SimVarSounds>
+        </SoundInfo>"#;
+        let s = parse(XML).unwrap();
+        let t = &s.triggers[0];
+        let mut st = TriggerState::default();
+        // Airborne, descending gently: nothing yet.
+        assert_eq!(st.step(t, 0., true), Action::None);
+        // Touchdown with the rate inside the band: one thump.
+        assert_eq!(st.step(t, 1., true), Action::PlayOnce);
+        // Parked: the radio rate jitters in and out of the band for ever.
+        for i in 0..50 {
+            assert_eq!(st.step(t, 1., i % 3 == 0), Action::None, "tick {i}: a parked aircraft must not thump");
+        }
     }
 
     #[test]
@@ -283,8 +362,43 @@ mod tests {
             return;
         };
         let s = parse(&text).unwrap();
-        eprintln!("{} triggers, {} with RTPCs left out, {} avionic sounds", s.triggers.len(), s.skipped_rtpc.len(), s.avionic_events.len());
+        eprintln!(
+            "{} triggers, {} with RTPCs left out, {} avionic sounds, {} animation sounds, {} ground sounds, {} misc sounds",
+            s.triggers.len(),
+            s.skipped_rtpc.len(),
+            s.avionic_events.len(),
+            s.animation_events.len(),
+            s.ground_events.len(),
+            s.misc_events.len(),
+        );
         assert!(s.triggers.iter().any(|t| t.event == "CRC_380" && t.variable == "A32NX_FWC_CRC"));
         assert!(s.avionic_events.iter().any(|e| e == "new_retard"));
+        // <AnimationSounds> is 143 entries in the package as of this
+        // writing; a real regression (section renamed/moved) would drop
+        // this to 0, which is exactly the bug this fix addresses.
+        assert!(!s.animation_events.is_empty(), "no <AnimationSounds> events parsed");
+        assert!(s.animation_events.iter().any(|e| e == "battery_switch_on"));
+        assert!(s.ground_events.iter().any(|e| e == "FUSELAGE_SCRAPE"));
+        assert!(s.misc_events.iter().any(|e| e == "AP_PREFLIGHT_CHECK_OVER"));
+        // The V1 callout is a flight-deck sound. The package's four
+        // outside-only sounds (the APU's exhaust) all carry RTPCs, so none is
+        // played yet.
+        assert!(s.triggers.iter().any(|t| t.event == "V1" && !t.outside));
+        assert!(s.skipped_rtpc.iter().any(|e| e == "apuwhineext"));
+        assert!(s.triggers.iter().all(|t| !t.outside));
+    }
+
+    #[test]
+    fn a_sound_is_outside_only_when_its_viewpoint_says_so() {
+        let s = parse(
+            r#"<SoundInfo><SimVarSounds>
+                <Sound WwiseEvent="apuwhineext" ViewPoint="Outside" LocalVar="A32NX_APU_N_RAW"/>
+                <Sound WwiseEvent="yoke" ViewPoint="Inside" LocalVar="A"/>
+                <Sound WwiseEvent="V1" LocalVar="A32NX_AUDIO_V1_CALLOUT" Continuous="false"/>
+            </SimVarSounds></SoundInfo>"#,
+        )
+        .unwrap();
+        let outside: Vec<(&str, bool)> = s.triggers.iter().map(|t| (t.event.as_str(), t.outside)).collect();
+        assert_eq!(outside, [("apuwhineext", true), ("yoke", false), ("V1", false)]);
     }
 }

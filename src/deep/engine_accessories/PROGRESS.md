@@ -53,13 +53,16 @@
   `DEEP_PNEU_ENG_n_START_DUCT_PRESSURE_PA` (`deep::pneumatic_ducts`) drives the
   air turbine starter's supply; `THERMAL_ZONE_NACELLECOWLn_TEMPERATURE_C`
   (`deep::thermal_zones`) is what the fire detection loops sense.
-- Still inert, and why: the six reverser lock faults and the reverser actuator
-  jam need a *deploy command*, and nothing in `Truth`, `Controls` or any other
-  area's published set carries a reverse-thrust selection. The model is wired
-  and tested through `EngineAccessoryCommands::reverser_deploy_commanded`;
-  `Truth` needs a reverser lever. The 16 fire-loop "fails to detect" faults are
-  correctly invisible until a nacelle zone is actually above the loops' trip
-  temperature — that is what the redundant loop is for, not a gap.
+- [fixed, W165] Was inert: the six reverser lock faults and the reverser
+  actuator jam need a *deploy command*, and `tick()` built its per-frame
+  `EngineAccessoryCommands` from `self.commands` -- a field nothing in
+  production ever assigned. `Truth::controls.reverser_deploy_commanded` has
+  carried the real lever (the same TLA opening-authorisation angle
+  FlyByWire's own `A380ReverserController` uses) since commit e0cd0d5; `tick()`
+  now copies it into `commands.reverser_deploy_commanded` every frame. The 16
+  fire-loop "fails to detect" faults are correctly invisible until a nacelle
+  zone is actually above the loops' trip temperature — that is what the
+  redundant loop is for, not a gap.
 - Published-name strings are built once per engine at construction
   (`ChainNames`) rather than `format!`-ed every frame, as
   `deep::pneumatic_ducts::live` already does.
@@ -73,7 +76,10 @@
   `integration::failure_audit`'s whole profile set — **320 move something
   published, 30 do not**: the 16 fire-loop `fails_to_detect` (correctly
   invisible until a nacelle zone is above the loops' trip temperature) and
-  all 14 reverser faults (no reverse-thrust selection exists in `Truth`).
+  all 14 reverser faults, before W165's fix wired `Truth::controls.
+  reverser_deploy_commanded` (real since e0cd0d5) into this area's own
+  `tick()` -- previously read from `self.commands`, which production never
+  set.
   All 104 of this area's previously-unreachable ECAM alerts now read
   published variables; `ecam_triggers_that_read_a_variable_no_area_publishes`
   reports 0 alerts that can never fire across the whole registry.

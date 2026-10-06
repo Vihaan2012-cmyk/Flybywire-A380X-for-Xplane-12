@@ -3,7 +3,7 @@
 What FlyByWire's A380X displays draw from map data, where MSFS gets it, and
 what the plugin does in X-Plane. Code: `src/mapdata/`. Paths below are
 relative to D:\fbw-aircraft unless they start with `simbridge`
-(D:\fbw-build\simbridge-src, FlyByWire's SimBridge at f593232) or `src/`
+(D:\A380\fbw-build\simbridge-src, FlyByWire's SimBridge at f593232) or `src/`
 (this plugin).
 
 | Display data | Status |
@@ -131,7 +131,7 @@ confirm the vertical display direction against SimBridge itself.
 
 ### Tests and timings
 
-Run with `D:\fbw-build\mapdata-harness` (`cargo test --release`), which
+Run with `D:\A380\fbw-build\mapdata-harness` (`cargo test --release`), which
 compiles `src/mapdata` without the plugin glue. 16 tests pass, 2 ignored
 (they need X-Plane or terrain.map). Machine: this development PC.
 
@@ -146,7 +146,7 @@ compiles `src/mapdata` without the plugin glue. 16 tests pass, 2 ignored
   Map cycle 63 ms per side, slowest worker step 132 ms. Thresholds written:
   min 7000 ft peaks, max 11100 ft caution. The image
   (the test writes `terrain-nd-left.ppm`; a PNG copy is
-  `D:\fbw-build\terrain-nd-left.png`) shows the Tyrol ridges south of track
+  `D:\A380\fbw-build\terrain-nd-left.png`) shows the Tyrol ridges south of track
   and the lowlands north of it, and the vertical display profile below.
   From the cache: all 662 tiles in 0.9 s; map cycle 85 to 122 ms per side;
   slowest worker step 553 ms (the whole map stitched at once).

@@ -92,10 +92,10 @@ fn module_containing(address: usize) -> String {
 }
 
 /// The newest dump file in the newest session folder under
-/// `D:\fbw-build\state-dumps` (the same root `src/state_dump.rs` writes to;
+/// `D:\A380\fbw-build\state-dumps` (the same root `src/state_dump.rs` writes to;
 /// not exported from there, so kept in sync with that literal here).
 fn newest_state_dump() -> Option<(PathBuf, Vec<u8>)> {
-    let root = Path::new(r"D:\fbw-build\state-dumps");
+    let root = Path::new(r"D:\A380\fbw-build\state-dumps");
     let newest_dir = std::fs::read_dir(root)
         .ok()?
         .flatten()
@@ -155,7 +155,7 @@ fn write_report(kind: &str, detail: &str) {
          \n\
          Included, when found: app-log-tail.txt (this app's own log, last 500 lines),\n\
          Log.txt (X-Plane's, copied from --xp-root), and the newest state dump\n\
-         (dump-*.tsv, from the newest session under D:\\fbw-build\\state-dumps).\n",
+         (dump-*.tsv, from the newest session under D:\\A380\\fbw-build\\state-dumps).\n",
         shared.xplane_root.display(),
     );
     let _ = std::fs::write(dir.join("summary.txt"), summary);

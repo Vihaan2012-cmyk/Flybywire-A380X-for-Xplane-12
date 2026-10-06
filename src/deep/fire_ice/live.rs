@@ -63,12 +63,13 @@
 //!   detector is registered, so `CARGO_BULK_SMOKE_DETECTED` is not
 //!   published here. That alert still reaches its trigger through
 //!   `thermal_zones`' contribution on the bulk hold's own smoke
-//!   concentration. No cargo-bay fire/agent pushbutton exists in this port
-//!   either (`Controls`'s own doc), so cargo bottles still only leak, they
-//!   are never commanded to fire -- `Self::NO_CARGO_FIRE_COMMAND`'s own doc
-//!   comment is the honest account of that decision and what `Truth` would
-//!   need for it to change; the bottle's own low-pressure switch is
-//!   published regardless, since the leak that drives it needs no command.
+//!   concentration. The cargo FWD/AFT agent-discharge pushbuttons now have
+//!   a real command (`truth.controls.cargo_agent_pb_pressed`, W194 --
+//!   FlyByWire's own tooltip for them says "(Inop.)", but a real cockpit
+//!   control writes the name and this area's bottle model already
+//!   existed), so cargo bottles fire and leak alike; the bottle's own
+//!   low-pressure switch is published either way, since the leak that
+//!   drives it needs no command.
 //! - **A single shorted (or open) fire loop used to be invisible.** Zone
 //!   detection is correctly AND (`fire_loops::ZoneDetector`), and a short is
 //!   correctly not classed as a `loop_x_fault` (indistinguishable from real
@@ -83,7 +84,7 @@
 
 use super::anti_ice::{BleedAntiIceFaults, BleedAntiIceSurface, ProbeHeater, ProbeHeaterFaults, RainRemoval, RainRemovalFaults, WindowHeat, WindowHeatFaults, NACELLE_ANTI_ICE, WINDOW_TARGET_C, WING_ANTI_ICE};
 use super::combustion::{Fluid, ZoneCombustion, ZoneSupply, HYDRAULIC_FLUID, JET_FUEL};
-use super::extinguishing::{Bottle, BottleFaults, CargoSuppressionSystem, LavatoryFaults, LavatoryProtection, OpticalSmokeDetector, SmokeDetectorFaults, ZoneConcentration};
+use super::extinguishing::{Bottle, BottleFaults, CargoSuppressionFaults, CargoSuppressionSystem, LavatoryFaults, LavatoryProtection, OpticalSmokeDetector, SmokeDetectorFaults, ZoneConcentration};
 use super::fire_loops::{LoopFaults, LoopLogic, ZoneDetector};
 use super::icing::{IcingEnvironment, IcingOutputs, IcingSurface, NACELLE_INLET, WINDSHIELD, WING_LEADING_EDGE};
 use super::util::{air_dynamic_viscosity_pa_s, collection_efficiency_beta0, droplet_inertia_parameter, recovery_temperature_c};
@@ -261,6 +262,19 @@ pub struct FireIceLive {
     cargo_suppression: Vec<CargoSuppressionSystem>,
     cargo_smoke: Vec<OpticalSmokeDetector>,
     cargo_smoke_alarm: [bool; 2],
+    /// ECAM completeness pass (E-FIRE §F): this frame's cargo suppression
+    /// discretes, `[FWD, AFT]`, cached from `step_bottles` because
+    /// `publish` takes `&self`. None of these are physics -- each is a
+    /// direct pass-through of its own registered failure's armed state.
+    cargo_distribution_fault: [bool; 2],
+    cargo_knockdown_squib_fault: [bool; 2],
+    cargo_extended_squib_fault: [bool; 2],
+    /// ECAM completeness pass (E-FIRE §E): the FWD Lower Crew Rest (LDCR)
+    /// module's own two-bottle squib-circuit discretes, `[bottle 1, bottle
+    /// 2]` -- pure pass-throughs of `registry.rs`'s own `26_fire.ldcr_
+    /// bottle_{1,2}` failures (`fire(230)`/`fire(231)`), cached from `tick`
+    /// because `publish` takes `&self`.
+    ldcr_bottle_squib_fault: [bool; 2],
     lavatory: LavatoryProtection,
 
     wing_anti_ice: Vec<BleedAntiIceSurface>,
@@ -318,15 +332,23 @@ impl VarNames {
     fn new() -> Self {
         let zone_name = |z: usize| {
             // The four engine zones are addressed the way this crate
-            // already addresses per-engine variables (`FIRE_DETECTED_ENG:n`,
-            // the name `registry.rs`'s own trigger uses).
+            // already addresses per-engine variables (`DEEP_FIRE_DETECTED_
+            // ENG:n`, the name `registry.rs`'s own trigger uses).
             match z {
                 0..=3 => format!("ENG:{}", z + 1),
                 _ => ZONE_KEYS[z].to_string(),
             }
         };
         Self {
-            fire_detected: std::array::from_fn(|z| format!("FIRE_DETECTED_{}", zone_name(z))),
+            // W162: `DEEP_` prefixed. `ZONE_KEYS[4]`/`[5]` are "APU"/"MLG",
+            // and FlyByWire's own `fire_and_smoke_protection.rs` publishes
+            // `FIRE_DETECTED_APU`/`FIRE_DETECTED_MLG` for its own live
+            // dual-loop-AND detection -- an exact, unintended collision
+            // with this area's own zone-temperature-driven verdict (the
+            // other 7 zones never collided, but are renamed too so this
+            // stays one array built from one format! call, not a
+            // per-index special case that could leave one unrenamed).
+            fire_detected: std::array::from_fn(|z| format!("DEEP_FIRE_DETECTED_{}", zone_name(z))),
             zone_temp_c: std::array::from_fn(|z| format!("FIRE_ZONE_{}_TEMPERATURE_C", ZONE_KEYS[z])),
             zone_burning: std::array::from_fn(|z| format!("FIRE_ZONE_{}_BURNING", ZONE_KEYS[z])),
             zone_agent: std::array::from_fn(|z| format!("FIRE_ZONE_{}_AGENT_FRACTION", ZONE_KEYS[z])),
@@ -336,7 +358,11 @@ impl VarNames {
             loop_b_fire: std::array::from_fn(|z| format!("FIRE_LOOP_B_{}_FIRE", ZONE_KEYS[z])),
             loop_disagree: std::array::from_fn(|z| format!("FIRE_LOOP_{}_DISAGREE", ZONE_KEYS[z])),
             bottle_low: std::array::from_fn(|e| std::array::from_fn(|b| format!("FIRE_BOTTLE_ENG{}_{}_LOW_PRESSURE", e + 1, b + 1))),
-            squib: std::array::from_fn(|e| std::array::from_fn(|b| format!("FIRE_SQUIB_{}_ENG_{}_IS_DISCHARGED", b + 1, e + 1))),
+            // W162: `DEEP_` prefixed -- FlyByWire's own `fire_and_smoke_
+            // protection.rs` publishes `FIRE_SQUIB_{bottle}_ENG_{engine}_
+            // IS_DISCHARGED` for its own squib-timer model, an exact
+            // collision with this area's bottle-pressure-drain model.
+            squib: std::array::from_fn(|e| std::array::from_fn(|b| format!("DEEP_FIRE_SQUIB_{}_ENG_{}_IS_DISCHARGED", b + 1, e + 1))),
             probe_fault: std::array::from_fn(|p| format!("PROBE_HEAT_{}_FAULT", PROBE_KEYS[p])),
             probe_temp_c: std::array::from_fn(|p| format!("PROBE_HEAT_{}_TEMPERATURE_C", PROBE_KEYS[p])),
             window_fault: std::array::from_fn(|w| format!("WINDOW_HEAT_{}_FAULT", WINDOW_KEYS[w])),
@@ -392,39 +418,23 @@ impl FireIceLive {
     /// A lavatory's own free volume, m^3. **GENERIC**.
     const LAVATORY_VOLUME_M3: f64 = 2.0;
 
-    /// The cargo suppression systems' own fire-command input, permanently
-    /// held off.
-    ///
-    /// This used to be a bare literal `false` passed straight into
-    /// `CargoSuppressionSystem::step`, standing in for a cockpit control
-    /// that does not exist. It is named and documented here instead,
-    /// because the two facts about it matter and a bare `false` hides both:
-    ///
-    /// 1. It is not a stand-in for "the crew hasn't pressed the button
-    ///    yet" the way `rain_removal_selected` above is (that field is real
-    ///    and wired, just never actuated in this port). No cargo fire
-    ///    pushbutton or agent pushbutton exists anywhere in `Truth` at all
-    ///    -- `Controls`'s own doc comment is explicit that this port models
-    ///    8 engine bottles and 1 APU bottle and *no* cargo ones, and
-    ///    `docs/deep/truth-requests.md` records the same gap. `Truth`/
-    ///    `Controls` live in `src/deep/live.rs`, outside this directory, so
-    ///    adding the field is not this pass's call to make even if it were
-    ///    warranted.
-    /// 2. Because of (1), the two cargo squib failures (`cargo_fwd_bottle`/
-    ///    `cargo_aft_bottle`'s `squib_failure`) are genuinely inert: with no
-    ///    command that could ever discharge the bottle, whether the squib
-    ///    *would* fail to fire is unobservable. That is not a bug in this
-    ///    file to silently paper over with a fake control -- `registry.rs`'s
-    ///    own `FailureDef.effect` text for those two ids now says so
-    ///    explicitly, and what `Truth::controls` would need to add
-    ///    (`cargo_fire_pb_released`/`cargo_agent_pb_pressed`, one pair per
-    ///    hold, mirroring the engine/APU fields this same pass already
-    ///    wired) is recorded there and in `PROGRESS.md` for whoever owns
-    ///    `live.rs`/`truth-requests.md` next. The bottle's *leak* failure is
-    ///    unaffected by any of this -- it drains independently of
-    ///    `fire_command`, and its own low-pressure switch is now published
-    ///    below.
-    const NO_CARGO_FIRE_COMMAND: bool = false;
+    /// (W194) `Truth::controls.cargo_agent_pb_pressed` now exists
+    /// (`src/deep/live.rs`), sourced from the real
+    /// `A32NX_CARGOSMOKE_{FWD,AFT}_DISCHARGED` overhead pushbuttons
+    /// (`deep/plugin.rs`'s own sourcing table). FlyByWire's own tooltip
+    /// for that button says "(Inop.)" and no FBW system reads the name --
+    /// but a real cockpit control exists and this module's own cargo
+    /// bottle physics (leak, low-pressure switch, agent metering) were
+    /// already real, so the command is wired for real (`step_bottles`
+    /// below) rather than held at a permanent `false` as it used to be
+    /// here (that used to be a named `NO_CARGO_FIRE_COMMAND` constant, for
+    /// exactly the reasons this comment used to give). The cargo squib
+    /// failures (`cargo_fwd_bottle`/`cargo_aft_bottle`'s, since E-FIRE's
+    /// ECAM completeness pass split into `knockdown_squib_fault`/
+    /// `extended_squib_fault`) are therefore observable now too --
+    /// `registry.rs`'s `FailureDef.effect` text describing them as inert
+    /// has been updated to match (W194). The bottle's *leak* failure is
+    /// unaffected either way -- it drains independently of `fire_command`.
 
     pub fn new() -> Self {
         let start_c = 15.0;
@@ -449,6 +459,10 @@ impl FireIceLive {
             cargo_suppression: (0..2).map(|_| CargoSuppressionSystem::new(Self::CARGO_BOTTLE_CHARGE_KG, Self::CARGO_BOTTLE_VOLUME_M3)).collect(),
             cargo_smoke: (0..2).map(|b| OpticalSmokeDetector::new(Self::SMOKE_DETECTOR_PATH_M, ZONE_VOLUME_M3[6 + b])).collect(),
             cargo_smoke_alarm: [false; 2],
+            cargo_distribution_fault: [false; 2],
+            cargo_knockdown_squib_fault: [false; 2],
+            cargo_extended_squib_fault: [false; 2],
+            ldcr_bottle_squib_fault: [false; 2],
             lavatory: LavatoryProtection::new(Self::LAVATORY_VOLUME_M3),
 
             wing_anti_ice: (0..2).map(|_| BleedAntiIceSurface::new(WING_ANTI_ICE, start_c)).collect(),
@@ -545,9 +559,17 @@ impl FireIceLive {
         }
 
         // Cargo optical smoke detection, off the same burn rate.
+        //
+        // (E-FIRE §F) IDs shifted from 223/224 to 227/228: the two cargo
+        // bottles below now register 4 failures each (leak, knockdown
+        // squib, extended squib, distribution) instead of 2, so every id
+        // after them in this function's own sequential counter moved by
+        // +4. There is no numbering scheme other than this function's own
+        // `n` counter in `registry.rs::register_extinguishing` to drift
+        // against; this comment is the cross-check.
         for b in 0..2 {
             let zone = 6 + b;
-            let faults_det = SmokeDetectorFaults { lens_obscured: faults.get(fire(223 + b as u16)) };
+            let faults_det = SmokeDetectorFaults { lens_obscured: faults.get(fire(227 + b as u16)) };
             let vent_m3_s = ZONE_VENTILATION_KG_S[zone] / AIR_DENSITY_KG_M3;
             self.cargo_smoke_alarm[b] = self.cargo_smoke[b].step(self.zones[zone].burn_rate_kg_s, vent_m3_s, &faults_det, dt);
         }
@@ -557,7 +579,7 @@ impl FireIceLive {
         // (`truth.cabin_temp_k`), which is a far better local reading than
         // the outside static air this used to fall back to.
         let lav_smoke = SmokeDetectorFaults::default();
-        let lav_link = LavatoryFaults { link_degraded: faults.get(fire(225)) };
+        let lav_link = LavatoryFaults { link_degraded: faults.get(fire(229)) };
         self.lavatory.step(truth.cabin_temp_k - 273.15, 0.0, 0.01, &lav_smoke, &lav_link, dt);
     }
 
@@ -568,6 +590,11 @@ impl FireIceLive {
         let ambient_c = cond.static_air_c;
         let zone_pa = cond.ambient_pressure_pa;
         let mut agent = [0.0_f64; 9];
+
+        // ECAM completeness pass (E-FIRE §E): the LDCR module's own two
+        // bottles' squib-circuit discretes, pure pass-throughs (struct doc
+        // on `ldcr_bottle_squib_fault`).
+        self.ldcr_bottle_squib_fault = [fire(230), fire(231)].map(|id| faults.get(id) > 0.0);
 
         for e in 0..4usize {
             for b in 0..2usize {
@@ -596,11 +623,34 @@ impl FireIceLive {
 
         for b in 0..2usize {
             let zone = 6 + b;
-            let leak_id = fire(219 + (b as u16) * 2);
-            let cargo_faults = BottleFaults { leak: faults.get(leak_id), squib_failure: faults.get(leak_id + 1) };
+            // (E-FIRE §F) Each hold now registers 4 sequential ids: leak,
+            // knockdown squib, extended squib, distribution -- replacing
+            // the old 2 (leak, squib_failure). Base 219 for FWD, 223 for
+            // AFT (`registry.rs::register_extinguishing`'s own sequence).
+            let base = fire(219 + (b as u16) * 4);
+            let cargo_faults = CargoSuppressionFaults {
+                leak: faults.get(base),
+                knockdown_squib_fault: faults.get(base + 1),
+                extended_squib_fault: faults.get(base + 2),
+                distribution_fault: faults.get(base + 3),
+            };
+            // ECAM completeness pass (E-FIRE §F): cache this frame's
+            // discretes for `publish` (module doc on the struct fields).
+            self.cargo_knockdown_squib_fault[b] = cargo_faults.knockdown_squib_fault > 0.0;
+            self.cargo_extended_squib_fault[b] = cargo_faults.extended_squib_fault > 0.0;
+            self.cargo_distribution_fault[b] = cargo_faults.distribution_fault > 0.0;
             let delivered = {
                 let (system, concentration) = (&mut self.cargo_suppression[b], &self.concentration[zone]);
-                system.step(ambient_c, Self::NO_CARGO_FIRE_COMMAND, zone_pa, concentration, &cargo_faults, dt)
+                // (W194) `cargo_agent_pb_pressed[b]`: `b=0` is FWD, `b=1` is
+                // AFT, matching this same loop's `zone = 6 + b` and the
+                // `["FWD","AFT"][b]` used a few lines below for the
+                // published `CARGO_*_AGENT_METERING` name. No separate
+                // "fire handle" gate exists for cargo the way the engine/
+                // APU bottles have (`fire_pb_released[e] &&
+                // fire_agent_pb_pressed[e][b]`) -- FlyByWire's own overhead
+                // panel has only the one discharge pushbutton per bay, so
+                // the pushbutton alone is the command.
+                system.step(ambient_c, truth.controls.cargo_agent_pb_pressed[b], zone_pa, concentration, &cargo_faults, dt)
             };
             agent[zone] += delivered;
         }
@@ -740,7 +790,9 @@ impl crate::deep::live::Area for FireIceLive {
                 out(&n.squib[e][b], on(self.engine_squib_discharged[e][b]));
             }
         }
-        out("FIRE_SQUIB_1_APU_1_IS_DISCHARGED", on(self.apu_squib_discharged));
+        // W162: `DEEP_` prefixed -- collided with FlyByWire's own bottle
+        // id "1_APU_1" (`fire_and_smoke_protection.rs`).
+        out("DEEP_FIRE_SQUIB_1_APU_1_IS_DISCHARGED", on(self.apu_squib_discharged));
         out("FIRE_BOTTLE_APU_LOW_PRESSURE", on(self.apu_bottle.is_low_pressure()));
         out("LAVATORY_EXTINGUISHER_DISCHARGED", on(self.lavatory.is_discharged()));
 
@@ -749,10 +801,24 @@ impl crate::deep::live::Area for FireIceLive {
             out(&n.cargo_smoke_density[b], self.cargo_smoke[b].smoke_density_kg_m3());
             out(&format!("CARGO_{}_AGENT_METERING", ["FWD", "AFT"][b]), on(self.cargo_suppression[b].is_metering()));
             // The cargo bottle's leak failure drains it independently of
-            // `fire_command` (see `NO_CARGO_FIRE_COMMAND`'s own doc), so its
-            // low-pressure switch is a real, observable consequence even
-            // though the bottle can never actually be fired in this port.
+            // `fire_command`, so its low-pressure switch is a real,
+            // observable consequence of a leak alone; since W194 it is
+            // also a real consequence of an actual discharge (the
+            // pushbutton is a real command now, not a permanent `false`).
             out(&n.cargo_bottle_low_pressure[b], on(self.cargo_suppression[b].bottle.is_low_pressure()));
+            // ECAM completeness pass (E-FIRE §F): `260800043`/`044` FWD/AFT
+            // CARGO BOTTLES FAULT (distribution path), `260800052`/`053`
+            // FWD+AFT CARGO BTL 1/2 FAULT (the OR of both holds' own
+            // knockdown/extended squib fault is composed in the FWC bridge,
+            // `deep::ecam::fbw::ata26`, off these two per-hold discretes).
+            out(&format!("FIRE_CARGO_{}_DISTRIBUTION_FAULT", ["FWD", "AFT"][b]), on(self.cargo_distribution_fault[b]));
+            out(&format!("FIRE_CARGO_{}_KNOCKDOWN_SQUIB_FAULT", ["FWD", "AFT"][b]), on(self.cargo_knockdown_squib_fault[b]));
+            out(&format!("FIRE_CARGO_{}_EXTENDED_SQUIB_FAULT", ["FWD", "AFT"][b]), on(self.cargo_extended_squib_fault[b]));
+        }
+        // ECAM completeness pass (E-FIRE §E): `260800054`/`055` SMOKE FWD
+        // LWR CAB REST BTL 1/2 FAULT.
+        for (i, bottle) in ["1", "2"].iter().enumerate() {
+            out(&format!("FIRE_LDCR_BTL_{bottle}_SQUIB_FAULT"), on(self.ldcr_bottle_squib_fault[i]));
         }
 
         for s in 0..2 {
@@ -839,15 +905,15 @@ mod tests {
     fn every_variable_the_registry_triggers_on_is_actually_published() {
         let area = live_system();
         let map = published(area.as_ref());
-        let mut required: Vec<String> = vec!["FIRE_DETECTED_APU".into(), "FIRE_DETECTED_MLG".into(), "FIRE_SQUIB_1_APU_1_IS_DISCHARGED".into(), "WINDOW_HEAT_L_FAULT".into(), "WINDOW_HEAT_R_FAULT".into(), "ANTI_ICE_WING_L_OVERHEAT".into(), "ANTI_ICE_WING_R_OVERHEAT".into(), "ANTI_ICE_WING_L_VALVE_OPEN".into(), "ANTI_ICE_WING_R_VALVE_OPEN".into(), "CARGO_FWD_SMOKE_DETECTED".into(), "CARGO_AFT_SMOKE_DETECTED".into()];
+        let mut required: Vec<String> = vec!["DEEP_FIRE_DETECTED_APU".into(), "DEEP_FIRE_DETECTED_MLG".into(), "DEEP_FIRE_SQUIB_1_APU_1_IS_DISCHARGED".into(), "WINDOW_HEAT_L_FAULT".into(), "WINDOW_HEAT_R_FAULT".into(), "ANTI_ICE_WING_L_OVERHEAT".into(), "ANTI_ICE_WING_R_OVERHEAT".into(), "ANTI_ICE_WING_L_VALVE_OPEN".into(), "ANTI_ICE_WING_R_VALVE_OPEN".into(), "CARGO_FWD_SMOKE_DETECTED".into(), "CARGO_AFT_SMOKE_DETECTED".into()];
         for e in 1..=4 {
-            required.push(format!("FIRE_DETECTED_ENG:{e}"));
+            required.push(format!("DEEP_FIRE_DETECTED_ENG:{e}"));
             required.push(format!("ANTI_ICE_NACELLE{e}_OVERHEAT"));
             required.push(format!("ANTI_ICE_NACELLE{e}_VALVE_OPEN"));
             required.push(format!("FIRE_BOTTLE_ENG{e}_1_LOW_PRESSURE"));
             required.push(format!("FIRE_BOTTLE_ENG{e}_2_LOW_PRESSURE"));
-            required.push(format!("FIRE_SQUIB_1_ENG_{e}_IS_DISCHARGED"));
-            required.push(format!("FIRE_SQUIB_2_ENG_{e}_IS_DISCHARGED"));
+            required.push(format!("DEEP_FIRE_SQUIB_1_ENG_{e}_IS_DISCHARGED"));
+            required.push(format!("DEEP_FIRE_SQUIB_2_ENG_{e}_IS_DISCHARGED"));
         }
         for zone in ZONE_KEYS {
             required.push(format!("FIRE_LOOP_A_{zone}_FAULT"));
@@ -875,8 +941,8 @@ mod tests {
         let map = published(area.as_ref());
         assert_eq!(map["FIRE_ZONE_ENG1_BURNING"], 1.0, "a leak with air and a hot turbine case must light");
         assert!(map["FIRE_ZONE_ENG1_TEMPERATURE_C"] > 200.0, "the zone must heat past the loops' trip temperature, got {}", map["FIRE_ZONE_ENG1_TEMPERATURE_C"]);
-        assert_eq!(map["FIRE_DETECTED_ENG:1"], 1.0, "and both loops must declare it");
-        assert_eq!(map["FIRE_DETECTED_ENG:2"], 0.0, "engine 2 has no leak");
+        assert_eq!(map["DEEP_FIRE_DETECTED_ENG:1"], 1.0, "and both loops must declare it");
+        assert_eq!(map["DEEP_FIRE_DETECTED_ENG:2"], 0.0, "engine 2 has no leak");
     }
 
     #[test]
@@ -888,7 +954,7 @@ mod tests {
         run(area.as_mut(), &truth, &Faults::from_pairs([(fire(100), 1.0)]), 300);
         let map = published(area.as_ref());
         assert_eq!(map["FIRE_ZONE_ENG1_BURNING"], 0.0, "with no ignition source the fuel just pools");
-        assert_eq!(map["FIRE_DETECTED_ENG:1"], 0.0);
+        assert_eq!(map["DEEP_FIRE_DETECTED_ENG:1"], 0.0);
     }
 
     #[test]
@@ -897,8 +963,8 @@ mod tests {
         let mut area = live_system();
         run(area.as_mut(), &truth, &Faults::from_pairs([(fire(104), 1.0)]), 600);
         let map = published(area.as_ref());
-        assert_eq!(map["FIRE_DETECTED_APU"], 1.0);
-        assert_eq!(map["FIRE_SQUIB_1_APU_1_IS_DISCHARGED"], 1.0, "the APU's ground discharge is automatic");
+        assert_eq!(map["DEEP_FIRE_DETECTED_APU"], 1.0);
+        assert_eq!(map["DEEP_FIRE_SQUIB_1_APU_1_IS_DISCHARGED"], 1.0, "the APU's ground discharge is automatic");
         assert!(map["FIRE_ZONE_APU_AGENT_FRACTION"] > 0.0, "agent must actually reach the bay");
     }
 
@@ -914,14 +980,14 @@ mod tests {
         truth.apu_running = false;
         let mut only_short = live_system();
         run(only_short.as_mut(), &truth, &Faults::from_pairs([(fire(2), 1.0)]), 10);
-        assert_eq!(published(only_short.as_ref())["FIRE_DETECTED_ENG:1"], 0.0, "AND logic must reject a single disagreeing loop");
+        assert_eq!(published(only_short.as_ref())["DEEP_FIRE_DETECTED_ENG:1"], 0.0, "AND logic must reject a single disagreeing loop");
 
         let mut short_and_open = live_system();
         run(short_and_open.as_mut(), &truth, &Faults::from_pairs([(fire(2), 1.0), (fire(3), 1.0)]), 10);
         let map = published(short_and_open.as_ref());
         assert_eq!(map["FIRE_LOOP_B_ENG1_FAULT"], 1.0, "loop B open must read as a loop fault");
         assert_eq!(map["FIRE_LOOP_A_ENG1_FAULT"], 0.0, "a short is not distinguishable from heat, so it is not a fault");
-        assert_eq!(map["FIRE_DETECTED_ENG:1"], 1.0, "with B faulted the unit trusts A alone, and A says fire");
+        assert_eq!(map["DEEP_FIRE_DETECTED_ENG:1"], 1.0, "with B faulted the unit trusts A alone, and A says fire");
     }
 
     #[test]
@@ -937,7 +1003,7 @@ mod tests {
         let mut area = live_system();
         run(area.as_mut(), &truth, &Faults::from_pairs([(fire(2), 1.0)]), 10);
         let map = published(area.as_ref());
-        assert_eq!(map["FIRE_DETECTED_ENG:1"], 0.0, "AND logic must still withhold the zone-level warning");
+        assert_eq!(map["DEEP_FIRE_DETECTED_ENG:1"], 0.0, "AND logic must still withhold the zone-level warning");
         assert_eq!(map["FIRE_LOOP_A_ENG1_FAULT"], 0.0, "a short is not a loop fault");
         assert_eq!(map["FIRE_LOOP_A_ENG1_FIRE"], 1.0, "the shorted loop's own raw reading must say fire");
         assert_eq!(map["FIRE_LOOP_B_ENG1_FIRE"], 0.0, "the healthy loop's own raw reading must say no fire");
@@ -946,11 +1012,11 @@ mod tests {
     }
 
     #[test]
-    fn a_leaking_cargo_bottle_shows_low_pressure_even_though_it_can_never_be_fired() {
-        // `NO_CARGO_FIRE_COMMAND` keeps the cargo bottles' `fire_command`
-        // permanently false (no real cargo pushbutton exists in this port),
-        // but the leak failure drains the bottle independently of that
-        // command, so its low-pressure switch must still move.
+    fn a_leaking_cargo_bottle_shows_low_pressure_when_not_pressed() {
+        // The leak failure drains the bottle independently of
+        // `fire_command` (unaffected by W194's real command), so its low-
+        // pressure switch must still move on a leak alone, with the
+        // pushbutton never pressed.
         // The cargo bottle's design charge (30 kg, `Self::CARGO_BOTTLE_
         // CHARGE_KG`) is 6x the engine bottles' (5 kg), but the leak orifice
         // is the same absolute `extinguishing::LEAK_AREA_MAX_M2` regardless
@@ -967,6 +1033,84 @@ mod tests {
         let map = published(area.as_ref());
         assert_eq!(map["FIRE_BOTTLE_CARGO_FWD_LOW_PRESSURE"], 1.0, "a full-severity leak must empty the cargo FWD bottle over hours");
         assert_eq!(map["FIRE_BOTTLE_CARGO_AFT_LOW_PRESSURE"], 0.0, "the AFT bottle is healthy");
+    }
+
+    /// E-FIRE §F: the three new per-hold cargo suppression discretes
+    /// (`260800043`/`044` distribution, `260800052`/`053` knockdown/
+    /// extended squib) each publish independently, off the exact ids
+    /// `registry.rs::register_extinguishing` assigns (leak, knockdown,
+    /// extended, distribution, base 219 FWD / 223 AFT).
+    #[test]
+    fn cargo_distribution_and_squib_stage_faults_publish_independently_per_hold() {
+        let mut healthy = live_system();
+        run(healthy.as_mut(), &ground_running_truth(), &Faults::default(), 5);
+        let map = published(healthy.as_ref());
+        for b in ["FWD", "AFT"] {
+            assert_eq!(map[&format!("FIRE_CARGO_{b}_DISTRIBUTION_FAULT")], 0.0, "healthy must be silent");
+            assert_eq!(map[&format!("FIRE_CARGO_{b}_KNOCKDOWN_SQUIB_FAULT")], 0.0);
+            assert_eq!(map[&format!("FIRE_CARGO_{b}_EXTENDED_SQUIB_FAULT")], 0.0);
+        }
+
+        // FWD distribution fault (id 222) raises only its own discrete.
+        let mut faulted = live_system();
+        run(faulted.as_mut(), &ground_running_truth(), &Faults::from_pairs([(fire(222), 1.0)]), 5);
+        let map = published(faulted.as_ref());
+        assert_eq!(map["FIRE_CARGO_FWD_DISTRIBUTION_FAULT"], 1.0);
+        assert_eq!(map["FIRE_CARGO_FWD_KNOCKDOWN_SQUIB_FAULT"], 0.0, "the distribution fault must not raise the squib discretes");
+        assert_eq!(map["FIRE_CARGO_AFT_DISTRIBUTION_FAULT"], 0.0, "the AFT hold is unaffected");
+
+        // AFT extended-squib fault (id 225) raises only its own discrete.
+        let mut faulted2 = live_system();
+        run(faulted2.as_mut(), &ground_running_truth(), &Faults::from_pairs([(fire(225), 1.0)]), 5);
+        let map2 = published(faulted2.as_ref());
+        assert_eq!(map2["FIRE_CARGO_AFT_EXTENDED_SQUIB_FAULT"], 1.0);
+        assert_eq!(map2["FIRE_CARGO_AFT_KNOCKDOWN_SQUIB_FAULT"], 0.0);
+        assert_eq!(map2["FIRE_CARGO_FWD_EXTENDED_SQUIB_FAULT"], 0.0, "the FWD hold is unaffected");
+    }
+
+    /// W194: before this pass `Self::NO_CARGO_FIRE_COMMAND` held both cargo
+    /// bottles' fire command permanently false (module doc's old "no cargo
+    /// fire/agent pushbutton in `Truth`"), so pressing PUSH_OVHD_CARGOSMOKE_
+    /// FWD/_AFT could never discharge a bottle. With `truth.controls.
+    /// cargo_agent_pb_pressed` wired to those real overhead pushbuttons,
+    /// pressing FWD's must actually deliver agent to the FWD cargo zone,
+    /// with the AFT bottle -- not pressed -- untouched. Unlike the engine/
+    /// APU bottles there is no separate "fire handle" gate for cargo
+    /// (FlyByWire's own overhead panel has only the one agent-discharge
+    /// pushbutton per bay, `A380_Cockpit_Behavior.xml`'s `PUSH_OVHD_
+    /// CARGOSMOKE_{FWD,AFT}`), so the pushbutton alone commands it, matching
+    /// `step_bottles`'s own unconditional `cargo_agent_pb_pressed[b]` (no
+    /// `&&` with a handle-released field, unlike the engine bottles' own
+    /// `fire_pb_released[e] && fire_agent_pb_pressed[e][b]`).
+    ///
+    /// `FIRE_ZONE_CARGO_*_AGENT_FRACTION`, not `CARGO_*_AGENT_METERING`, is
+    /// the right signal here: `CargoSuppressionSystem::is_metering` only
+    /// turns true *after* the knockdown stage switches to the metered one
+    /// (`extinguishing.rs`'s own `step`, once `zone_concentration.
+    /// suppression_fraction() >= 1.0`), so a fresh press stays in the
+    /// (faster-flowing) knockdown stage and would wrongly read as "not
+    /// metering, so nothing happened" if that name were used instead.
+    #[test]
+    fn pressing_the_cargo_smoke_discharge_pushbutton_actually_fires_a_healthy_bottle() {
+        let mut truth = ground_running_truth();
+        truth.engine_running = [false; 4];
+        truth.apu_running = false;
+        truth.controls.cargo_agent_pb_pressed = [true, false];
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::default(), 5);
+        let map = published(area.as_ref());
+        assert!(map["FIRE_ZONE_CARGO_FWD_AGENT_FRACTION"] > 0.0, "agent must actually reach the pressed FWD cargo zone");
+        assert_eq!(map["FIRE_ZONE_CARGO_AFT_AGENT_FRACTION"], 0.0, "the AFT bottle was not pressed and must not discharge");
+    }
+
+    #[test]
+    fn pressing_neither_cargo_smoke_pushbutton_fires_nothing() {
+        let truth = ground_running_truth();
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::default(), 5);
+        let map = published(area.as_ref());
+        assert_eq!(map["FIRE_ZONE_CARGO_FWD_AGENT_FRACTION"], 0.0);
+        assert_eq!(map["FIRE_ZONE_CARGO_AFT_AGENT_FRACTION"], 0.0);
     }
 
     #[test]
@@ -1034,7 +1178,7 @@ mod tests {
         let map = published(area.as_ref());
         assert_eq!(map["FIRE_BOTTLE_ENG1_1_LOW_PRESSURE"], 1.0, "a full-severity leak must empty the bottle over hours");
         assert_eq!(map["FIRE_BOTTLE_ENG1_2_LOW_PRESSURE"], 0.0, "the second bottle is healthy");
-        assert_eq!(map["FIRE_DETECTED_ENG:1"], 0.0, "a leaking bottle is not a fire");
+        assert_eq!(map["DEEP_FIRE_DETECTED_ENG:1"], 0.0, "a leaking bottle is not a fire");
     }
 
     #[test]
@@ -1055,8 +1199,8 @@ mod tests {
         let mut area = live_system();
         run(area.as_mut(), &truth, &Faults::default(), 5);
         let map = published(area.as_ref());
-        assert_eq!(map["FIRE_SQUIB_1_ENG_1_IS_DISCHARGED"], 1.0, "the fire and agent pushbuttons together must fire bottle 1's squib");
-        assert_eq!(map["FIRE_SQUIB_2_ENG_1_IS_DISCHARGED"], 0.0, "only the pressed bottle's squib fires");
+        assert_eq!(map["DEEP_FIRE_SQUIB_1_ENG_1_IS_DISCHARGED"], 1.0, "the fire and agent pushbuttons together must fire bottle 1's squib");
+        assert_eq!(map["DEEP_FIRE_SQUIB_2_ENG_1_IS_DISCHARGED"], 0.0, "only the pressed bottle's squib fires");
         assert!(map["FIRE_ZONE_ENG1_AGENT_FRACTION"] > 0.0, "agent must actually reach the zone");
     }
 
@@ -1069,8 +1213,8 @@ mod tests {
         let mut area = live_system();
         run(area.as_mut(), &truth, &Faults::default(), 5);
         let map = published(area.as_ref());
-        assert_eq!(map["FIRE_SQUIB_1_ENG_1_IS_DISCHARGED"], 0.0);
-        assert_eq!(map["FIRE_SQUIB_2_ENG_1_IS_DISCHARGED"], 0.0);
+        assert_eq!(map["DEEP_FIRE_SQUIB_1_ENG_1_IS_DISCHARGED"], 0.0);
+        assert_eq!(map["DEEP_FIRE_SQUIB_2_ENG_1_IS_DISCHARGED"], 0.0);
     }
 
     #[test]
@@ -1085,7 +1229,7 @@ mod tests {
         truth.controls.fire_agent_pb_apu_pressed = true;
         let mut area = live_system();
         run(area.as_mut(), &truth, &Faults::default(), 5);
-        assert_eq!(published(area.as_ref())["FIRE_SQUIB_1_APU_1_IS_DISCHARGED"], 1.0);
+        assert_eq!(published(area.as_ref())["DEEP_FIRE_SQUIB_1_APU_1_IS_DISCHARGED"], 1.0);
     }
 
     #[test]

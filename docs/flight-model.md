@@ -1,6 +1,6 @@
 # Flight model calibration (XP-003)
 
-How the converter (`D:\msfs2xp-aircraft\src\acf.rs`) carries FlyByWire's
+How the converter (`D:\A380\msfs2xp-aircraft\src\acf.rs`) carries FlyByWire's
 `flight_model.cfg` aerodynamic data into the .acf, and where X-Plane's
 blade-element model cannot take an MSFS table directly and has to be
 calibrated instead. Companion to the FADEC/thrust write-up in `fadec.rs`'s

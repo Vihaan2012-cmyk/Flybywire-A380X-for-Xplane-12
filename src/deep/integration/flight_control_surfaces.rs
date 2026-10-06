@@ -74,6 +74,40 @@
 //! closure into `a380_systems`' own internals, which would need a change
 //! to that read-only reference tree; see `PROGRESS.md` for what a fuller
 //! closure would require.
+//!
+//! ## A distinct override namespace, not FlyByWire's own `Var`s (2026-09-25
+//! revision)
+//!
+//! An earlier version of this file wrote straight into the shared `Var`s
+//! named above, unconditionally, once `deep::flight_controls` had a live
+//! instance for a surface -- which is what the "Feedback into FlyByWire's
+//! own PRIM/SEC" section above still describes as the mechanism's whole
+//! point. Review (W125, `E:/fbw-debug/fixes/W124.md`) caught the flaw:
+//! `deep.tick()` runs strictly after FlyByWire's own `simulation.tick()`
+//! has already written a healthy commanded position into the same `Var`,
+//! so an *unconditional* override replaces FlyByWire's own validated
+//! actuator output with this crate's independent physics model's output on
+//! every healthy frame too, not only a faulted one -- two simulations
+//! racing to own one `Var`, agreeing only by luck.
+//!
+//! [`SurfaceOverrideWriter`] therefore targets a **separate,
+//! `DEEP_`-prefixed namespace** ([`aileron_deflection_var_name`] and
+//! siblings, e.g. `DEEP_HYD_AIL_LEFT_INWARD_OVERRIDE_DEFLECTION`) and
+//! writes an explicit **active flag** beside every value, every tick
+//! ([`aileron_active_var_name`] and siblings), true only while
+//! `SurfaceIds`/`ThsIds::position_fault_active` says a fault that actually
+//! moves that surface off command is armed (`deep::flight_controls::live`'s
+//! own doc for the full list -- jam, runaway, supply loss, disconnect,
+//! flutter-damper loss, valve leakage, piston-seal wear; deliberately not
+//! the transducer-* faults, which corrupt only the monitoring channel).
+//! FlyByWire's own `HYD_*`/`HYD_FINAL_THS_DEFLECTION` `Var`s are never
+//! written by this crate. The consumer (`flight_controls.rs::FlightControls
+//! ::read`) is the one taught to prefer the override, and only while the
+//! paired active flag is set -- see that file's own doc for the read side
+//! of this same mechanism. The feedback-into-PRIM/SEC property the section
+//! above describes still holds while a fault is active (that is exactly
+//! when the override is live); it simply no longer holds *unconditionally*,
+//! which was the bug.
 
 use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
@@ -136,24 +170,48 @@ impl RudderPanel {
 }
 
 // ---------------------------------------------------------------------------
-// Var names, reproducing `flight_controls.rs`'s own construction exactly
-// (`flight_controls.rs:260-269`) so `vars.get(...)` resolves to the same
-// slot FlyByWire's actuators and `FlightControls::read` already use.
+// Var names. NOT FlyByWire's own `HYD_*_DEFLECTION` names (see this file's
+// module doc, "A distinct override namespace") -- these are a new,
+// `DEEP_`-prefixed pair per surface (value + active flag), read only by
+// `flight_controls.rs::FlightControls::read`, which builds the identical
+// strings from its own side/part loops (its own doc comment on `Ids`, kept
+// in step with this file's naming on purpose: reproducing a handful of
+// `format!` patterns twice is cheaper and safer here than giving
+// `flight_controls.rs` -- otherwise entirely independent of `deep::` -- a
+// dependency on this module just to share four functions).
 // ---------------------------------------------------------------------------
 
-pub fn aileron_var_name(side: Side, panel: AileronPanel) -> String {
-    format!("HYD_AIL_{}_{}_DEFLECTION", side.name(), panel.name())
+pub fn aileron_deflection_var_name(side: Side, panel: AileronPanel) -> String {
+    format!("DEEP_HYD_AIL_{}_{}_OVERRIDE_DEFLECTION", side.name(), panel.name())
 }
-pub fn elevator_var_name(side: Side, panel: ElevatorPanel) -> String {
-    format!("HYD_ELEV_{}_{}_DEFLECTION", side.name(), panel.name())
+pub fn aileron_active_var_name(side: Side, panel: AileronPanel) -> String {
+    format!("DEEP_HYD_AIL_{}_{}_OVERRIDE_ACTIVE", side.name(), panel.name())
 }
-pub fn rudder_var_name(panel: RudderPanel) -> String {
-    format!("HYD_{}_RUD_DEFLECTION", panel.name())
+pub fn elevator_deflection_var_name(side: Side, panel: ElevatorPanel) -> String {
+    format!("DEEP_HYD_ELEV_{}_{}_OVERRIDE_DEFLECTION", side.name(), panel.name())
 }
-pub fn spoiler_var_name(side: Side, k: u8) -> String {
-    format!("HYD_SPOILER_{}_{}_DEFLECTION", k, side.name())
+pub fn elevator_active_var_name(side: Side, panel: ElevatorPanel) -> String {
+    format!("DEEP_HYD_ELEV_{}_{}_OVERRIDE_ACTIVE", side.name(), panel.name())
 }
-pub const THS_VAR_NAME: &str = "HYD_FINAL_THS_DEFLECTION";
+pub fn rudder_deflection_var_name(panel: RudderPanel) -> String {
+    format!("DEEP_HYD_{}_RUD_OVERRIDE_DEFLECTION", panel.name())
+}
+pub fn rudder_active_var_name(panel: RudderPanel) -> String {
+    format!("DEEP_HYD_{}_RUD_OVERRIDE_ACTIVE", panel.name())
+}
+pub fn spoiler_deflection_var_name(side: Side, k: u8) -> String {
+    format!("DEEP_HYD_SPOILER_{}_{}_OVERRIDE_DEFLECTION", k, side.name())
+}
+pub fn spoiler_active_var_name(side: Side, k: u8) -> String {
+    format!("DEEP_HYD_SPOILER_{}_{}_OVERRIDE_ACTIVE", k, side.name())
+}
+pub const THS_DEFLECTION_VAR_NAME: &str = "DEEP_HYD_FINAL_THS_OVERRIDE_DEFLECTION";
+pub const THS_ACTIVE_VAR_NAME: &str = "DEEP_HYD_FINAL_THS_OVERRIDE_ACTIVE";
+/// Unchanged, still FlyByWire's own name: `PhysicalSurfaces::flap_deg` is
+/// always `None` today (uncalibrated, see this file's own doc), so this is
+/// never written by [`SurfaceOverrideWriter::apply`] either way. Move this
+/// to the same `DEEP_` scheme as the surfaces above when that stops being
+/// true, for the same reason W125 flagged for the others.
 pub fn flap_var_name(side: Side) -> String {
     format!("{}_FLAPS_ANGLE", side.name())
 }
@@ -217,14 +275,21 @@ pub struct PhysicalSurfaces {
 }
 
 /// Caches every surface's `VariableIdentifier` at construction (like
-/// `flight_controls.rs::FlightControls`'s own `Ids`), then overrides all of
-/// them from a [`PhysicalSurfaces`] snapshot every tick.
+/// `flight_controls.rs::FlightControls`'s own `Ids`) -- both the override
+/// value and its paired active flag (this file's module doc, "A distinct
+/// override namespace") -- then overrides all of them from a
+/// [`PhysicalSurfaces`] snapshot every tick.
 pub struct SurfaceOverrideWriter {
     ailerons: [[VariableIdentifier; 3]; 2],
+    ailerons_active: [[VariableIdentifier; 3]; 2],
     elevators: [[VariableIdentifier; 2]; 2],
+    elevators_active: [[VariableIdentifier; 2]; 2],
     rudders: [VariableIdentifier; 2],
+    rudders_active: [VariableIdentifier; 2],
     spoilers: [[VariableIdentifier; 8]; 2],
+    spoilers_active: [[VariableIdentifier; 8]; 2],
     ths: VariableIdentifier,
+    ths_active: VariableIdentifier,
     flaps: [VariableIdentifier; 2],
     slats: [VariableIdentifier; 2],
 }
@@ -233,36 +298,50 @@ const SIDES: [Side; 2] = [Side::Left, Side::Right];
 
 impl SurfaceOverrideWriter {
     pub fn new<V: VariableRegistry>(vars: &mut V) -> Self {
-        let ailerons = SIDES.map(|s| [AileronPanel::Inward, AileronPanel::Middle, AileronPanel::Outward].map(|p| vars.get(aileron_var_name(s, p))));
-        let elevators = SIDES.map(|s| [ElevatorPanel::Inward, ElevatorPanel::Outward].map(|p| vars.get(elevator_var_name(s, p))));
-        let rudders = [RudderPanel::Upper, RudderPanel::Lower].map(|p| vars.get(rudder_var_name(p)));
-        let spoilers = SIDES.map(|s| std::array::from_fn(|i| vars.get(spoiler_var_name(s, i as u8 + 1))));
-        let ths = vars.get(THS_VAR_NAME.to_owned());
+        let ailerons = SIDES.map(|s| [AileronPanel::Inward, AileronPanel::Middle, AileronPanel::Outward].map(|p| vars.get(aileron_deflection_var_name(s, p))));
+        let ailerons_active = SIDES.map(|s| [AileronPanel::Inward, AileronPanel::Middle, AileronPanel::Outward].map(|p| vars.get(aileron_active_var_name(s, p))));
+        let elevators = SIDES.map(|s| [ElevatorPanel::Inward, ElevatorPanel::Outward].map(|p| vars.get(elevator_deflection_var_name(s, p))));
+        let elevators_active = SIDES.map(|s| [ElevatorPanel::Inward, ElevatorPanel::Outward].map(|p| vars.get(elevator_active_var_name(s, p))));
+        let rudders = [RudderPanel::Upper, RudderPanel::Lower].map(|p| vars.get(rudder_deflection_var_name(p)));
+        let rudders_active = [RudderPanel::Upper, RudderPanel::Lower].map(|p| vars.get(rudder_active_var_name(p)));
+        let spoilers = SIDES.map(|s| std::array::from_fn(|i| vars.get(spoiler_deflection_var_name(s, i as u8 + 1))));
+        let spoilers_active = SIDES.map(|s| std::array::from_fn(|i| vars.get(spoiler_active_var_name(s, i as u8 + 1))));
+        let ths = vars.get(THS_DEFLECTION_VAR_NAME.to_owned());
+        let ths_active = vars.get(THS_ACTIVE_VAR_NAME.to_owned());
         let flaps = SIDES.map(|s| vars.get(flap_var_name(s)));
         let slats = SIDES.map(|s| vars.get(slat_var_name(s)));
-        Self { ailerons, elevators, rudders, spoilers, ths, flaps, slats }
+        Self { ailerons, ailerons_active, elevators, elevators_active, rudders, rudders_active, spoilers, spoilers_active, ths, ths_active, flaps, slats }
     }
 
-    /// Overrides only the surfaces `s` gives a value for (see
-    /// [`PhysicalSurfaces`]'s own doc for why `None` must mean "leave
-    /// FlyByWire's value alone", not "override with zero"). Must run after
-    /// FlyByWire's own systems have written this tick's (undamaged)
-    /// actuator positions and before `flight_controls.rs`/`handling.rs`
-    /// publish to X-Plane (`docs/deep/integration.md`'s lib.rs ordering
-    /// patch).
+    /// Writes every surface's active flag unconditionally (`1.0`/`0.0`, so a
+    /// fault that just cleared reads `0.0` this same tick rather than
+    /// holding a stale `1.0`), and the override value itself only while `s`
+    /// gives one (see [`PhysicalSurfaces`]'s own doc for why `None` must
+    /// mean "no override", not "override with zero"; harmless either way,
+    /// since the consumer only reads the value while the active flag beside
+    /// it is `1.0`). Must run after FlyByWire's own systems have written
+    /// this tick's (undamaged) actuator positions -- so this tick's fault
+    /// state is what decides the flag -- and before
+    /// `flight_controls.rs::FlightControls::update` reads both
+    /// (`docs/deep/integration.md`'s lib.rs ordering patch;
+    /// `flight_controls.rs`'s own doc for the read side).
     pub fn apply<V: SimulatorReaderWriter>(&self, vars: &mut V, s: &PhysicalSurfaces) {
+        let flag = |active: bool| if active { 1.0 } else { 0.0 };
         for side in 0..2 {
             for i in 0..3 {
+                vars.write(&self.ailerons_active[side][i], flag(s.ailerons_deg[side][i].is_some()));
                 if let Some(deg) = s.ailerons_deg[side][i] {
                     vars.write(&self.ailerons[side][i], normalized_aileron_or_elevator(deg));
                 }
             }
             for i in 0..2 {
+                vars.write(&self.elevators_active[side][i], flag(s.elevators_deg[side][i].is_some()));
                 if let Some(deg) = s.elevators_deg[side][i] {
                     vars.write(&self.elevators[side][i], normalized_aileron_or_elevator(deg));
                 }
             }
             for i in 0..8 {
+                vars.write(&self.spoilers_active[side][i], flag(s.spoilers_deg[side][i].is_some()));
                 if let Some(deg) = s.spoilers_deg[side][i] {
                     vars.write(&self.spoilers[side][i], normalized_spoiler(deg));
                 }
@@ -275,10 +354,12 @@ impl SurfaceOverrideWriter {
             }
         }
         for i in 0..2 {
+            vars.write(&self.rudders_active[i], flag(s.rudders_deg[i].is_some()));
             if let Some(deg) = s.rudders_deg[i] {
                 vars.write(&self.rudders[i], normalized_rudder(deg));
             }
         }
+        vars.write(&self.ths_active, flag(s.ths_deg.is_some()));
         if let Some(deg) = s.ths_deg {
             vars.write(&self.ths, deg);
         }
@@ -291,11 +372,19 @@ mod tests {
     use crate::flight_controls::{aileron_or_elevator_down_deg, rudder_right_deg, spoiler_up_deg};
 
     #[test]
-    fn var_names_match_flight_controls_rs_construction() {
-        assert_eq!(aileron_var_name(Side::Left, AileronPanel::Inward), "HYD_AIL_LEFT_INWARD_DEFLECTION");
-        assert_eq!(elevator_var_name(Side::Right, ElevatorPanel::Outward), "HYD_ELEV_RIGHT_OUTWARD_DEFLECTION");
-        assert_eq!(rudder_var_name(RudderPanel::Upper), "HYD_UPPER_RUD_DEFLECTION");
-        assert_eq!(spoiler_var_name(Side::Right, 8), "HYD_SPOILER_8_RIGHT_DEFLECTION");
+    fn var_names_are_a_distinct_deep_prefixed_namespace_with_active_flags() {
+        assert_eq!(aileron_deflection_var_name(Side::Left, AileronPanel::Inward), "DEEP_HYD_AIL_LEFT_INWARD_OVERRIDE_DEFLECTION");
+        assert_eq!(aileron_active_var_name(Side::Left, AileronPanel::Inward), "DEEP_HYD_AIL_LEFT_INWARD_OVERRIDE_ACTIVE");
+        assert_eq!(elevator_deflection_var_name(Side::Right, ElevatorPanel::Outward), "DEEP_HYD_ELEV_RIGHT_OUTWARD_OVERRIDE_DEFLECTION");
+        assert_eq!(rudder_deflection_var_name(RudderPanel::Upper), "DEEP_HYD_UPPER_RUD_OVERRIDE_DEFLECTION");
+        assert_eq!(rudder_active_var_name(RudderPanel::Upper), "DEEP_HYD_UPPER_RUD_OVERRIDE_ACTIVE");
+        assert_eq!(spoiler_deflection_var_name(Side::Right, 8), "DEEP_HYD_SPOILER_8_RIGHT_OVERRIDE_DEFLECTION");
+        assert_eq!(THS_DEFLECTION_VAR_NAME, "DEEP_HYD_FINAL_THS_OVERRIDE_DEFLECTION");
+        assert_eq!(THS_ACTIVE_VAR_NAME, "DEEP_HYD_FINAL_THS_OVERRIDE_ACTIVE");
+        // None of these collide with FlyByWire's own names, on purpose
+        // (this file's module doc, "A distinct override namespace").
+        assert_ne!(aileron_deflection_var_name(Side::Left, AileronPanel::Inward), "HYD_AIL_LEFT_INWARD_DEFLECTION");
+        // Flap/slat are unchanged (still `None` always, see their own doc).
         assert_eq!(flap_var_name(Side::Left), "LEFT_FLAPS_ANGLE");
         assert_eq!(slat_var_name(Side::Right), "RIGHT_SLATS_ANGLE");
     }
@@ -355,31 +444,44 @@ mod tests {
     }
 
     #[test]
-    fn a_jammed_aileron_overrides_the_shared_var_with_its_physical_angle() {
+    fn a_jammed_aileron_sets_the_active_flag_and_the_override_value_to_its_physical_angle() {
         // End-to-end through the crate's own `aspects::test_vars::TestVars`
         // (the same `VariableRegistry`/`SimulatorReaderWriter` test double
-        // `physics/xp_effects.rs`'s own tests use): construct the writer,
-        // pretend FlyByWire's systems just wrote a healthy commanded
-        // position, then confirm `apply` overrides it with the physically
-        // jammed one.
-        // `vars.get(name)` is used (not `TestVars`'s own `set`/`value`
-        // convenience helpers, which bypass `VariableRegistry` and would
-        // resolve to a different slot than the writer's -- see
-        // `physics/xp_effects.rs`'s own test comment on exactly this trap),
-        // so this interoperates with `flight_controls.rs`'s real `get` the
-        // same way production code would, regardless of prefixing scheme.
+        // `physics/xp_effects.rs`'s own tests use). Unlike the pre-W125
+        // version of this test, this never touches FlyByWire's own `HYD_*`
+        // var at all -- see this file's module doc, "A distinct override
+        // namespace" -- so there is nothing here for it to "overwrite";
+        // what is asserted is the new namespace's own two Vars.
         use crate::aspects::test_vars::TestVars;
         let mut vars = TestVars::default();
         let writer = SurfaceOverrideWriter::new(&mut vars);
-        let id = vars.get(aileron_var_name(Side::Left, AileronPanel::Inward));
-        vars.write(&id, normalized_aileron_or_elevator(20.0)); // FBW's healthy command
-        let jammed_body_deg = -14.0; // physically stuck well off that command
+        let active_id = vars.get(aileron_active_var_name(Side::Left, AileronPanel::Inward));
+        let value_id = vars.get(aileron_deflection_var_name(Side::Left, AileronPanel::Inward));
+        let jammed_body_deg = -14.0;
         let mut s = PhysicalSurfaces::default();
         s.ailerons_deg[0][0] = Some(jammed_body_deg);
         writer.apply(&mut vars, &s);
-        let n = vars.read(&id);
+        assert_eq!(vars.read(&active_id), 1.0, "a jam must set the active flag");
+        let n = vars.read(&value_id);
         assert!((aileron_or_elevator_down_deg(n) - jammed_body_deg).abs() < 1e-9);
-        assert_ne!(n, normalized_aileron_or_elevator(20.0), "must differ from the healthy commanded position it replaced");
+    }
+
+    #[test]
+    fn a_healthy_aileron_clears_the_active_flag_and_does_not_touch_the_value() {
+        // The correctness point W125 raised: `None` (this area either has
+        // no live instance for the surface, or has one and it is healthy)
+        // must write the active flag `0.0` -- deterministically, every
+        // tick, so a fault that just cleared cannot leave a stale `1.0`
+        // behind -- and must not touch the value var, which the consumer is
+        // never supposed to read while inactive anyway.
+        use crate::aspects::test_vars::TestVars;
+        let mut vars = TestVars::default();
+        let writer = SurfaceOverrideWriter::new(&mut vars);
+        let active_id = vars.get(rudder_active_var_name(RudderPanel::Upper));
+        let value_id = vars.get(rudder_deflection_var_name(RudderPanel::Upper));
+        writer.apply(&mut vars, &PhysicalSurfaces::default()); // every field None
+        assert_eq!(vars.read(&active_id), 0.0, "a healthy/unmodelled surface must clear the active flag");
+        assert_eq!(vars.read(&value_id), 0.0, "and never write a fabricated value for it");
     }
 
     #[test]
@@ -387,7 +489,8 @@ mod tests {
         use crate::aspects::test_vars::TestVars;
         let mut vars = TestVars::default();
         let writer = SurfaceOverrideWriter::new(&mut vars);
-        let ths_id = vars.get(THS_VAR_NAME.to_owned());
+        let ths_active_id = vars.get(THS_ACTIVE_VAR_NAME.to_owned());
+        let ths_id = vars.get(THS_DEFLECTION_VAR_NAME.to_owned());
         let left_flap_id = vars.get(flap_var_name(Side::Left));
         let right_flap_id = vars.get(flap_var_name(Side::Right));
         let right_slat_id = vars.get(slat_var_name(Side::Right));
@@ -395,27 +498,11 @@ mod tests {
         s.flap_deg[0] = Some(12.0);
         s.slat_deg[1] = Some(20.0);
         writer.apply(&mut vars, &s);
+        assert_eq!(vars.read(&ths_active_id), 1.0);
         assert_eq!(vars.read(&ths_id), 6.5);
         assert_eq!(vars.read(&left_flap_id), 12.0);
         assert_eq!(vars.read(&right_slat_id), 20.0);
         // A side with no override (`None`) must not be written at all.
         assert_eq!(vars.read(&right_flap_id), 0.0);
-    }
-
-    #[test]
-    fn a_surface_with_no_live_deep_model_instance_keeps_flybywires_own_command() {
-        // The correctness point `PhysicalSurfaces`'s own doc makes: `None`
-        // must leave whatever FlyByWire already wrote alone, never force it
-        // to a fabricated default (e.g. 0.0 body degrees), since most
-        // surfaces will have no live `ControlSurface` instance for a long
-        // time yet.
-        use crate::aspects::test_vars::TestVars;
-        let mut vars = TestVars::default();
-        let writer = SurfaceOverrideWriter::new(&mut vars);
-        let rudder_id = vars.get(rudder_var_name(RudderPanel::Upper));
-        let flybywires_healthy_command = normalized_rudder(5.0);
-        vars.write(&rudder_id, flybywires_healthy_command);
-        writer.apply(&mut vars, &PhysicalSurfaces::default()); // every field None
-        assert_eq!(vars.read(&rudder_id), flybywires_healthy_command, "an unmodelled surface must be left exactly as FlyByWire wrote it");
     }
 }

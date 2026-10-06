@@ -592,4 +592,90 @@ mod tests {
         assert!(out.ecb_any_trip);
         assert!(!out.available, "must not silently keep running with no speed signal at all");
     }
+
+    /// Master on, door open, START, run until available.
+    fn started(apu: &mut Apu, inputs: &Inputs, faults: &ApuFaults) -> Outputs {
+        let mut out = Outputs::default();
+        let mut idle = *inputs;
+        idle.start_selected = false;
+        for _ in 0..200 {
+            out = apu.step(&idle, faults);
+        }
+        for _ in 0..4000 {
+            out = apu.step(inputs, faults);
+            if out.available {
+                break;
+            }
+        }
+        assert!(out.available, "did not start (n={:.1}%)", out.n_percent);
+        out
+    }
+
+    /// The ECB's protective trip now shuts FlyByWire's own APU down
+    /// (`APU_ECB_TRIP`, read by its ElectronicControlBox), so a healthy APU
+    /// must never trip in normal service: an hour at the model's own design
+    /// bleed flow with both generators at their rated real power, on a
+    /// standard and a hot day.
+    #[test]
+    fn a_healthy_apu_at_design_load_runs_an_hour_without_a_protective_trip() {
+        for ambient_k in [288.15, 318.15] {
+            let mut apu = Apu::new(ambient_k);
+            let faults = ApuFaults::default();
+            let mut inputs = base_inputs();
+            inputs.ambient_temperature_k = ambient_k;
+            inputs.start_selected = true;
+            started(&mut apu, &inputs, &faults);
+            inputs.bleed_demand_kg_s = params::LOAD_MDOT_DESIGN_KG_S;
+            inputs.gen1_used = true;
+            inputs.gen2_used = true;
+            let rated_w = params::GENERATOR_RATED_APPARENT_VA * params::GENERATOR_RATED_POWER_FACTOR;
+            inputs.gen1_electrical_load_w = rated_w;
+            inputs.gen2_electrical_load_w = rated_w;
+            for tick in 0..(3600.0 / inputs.dt_s) as usize {
+                let out = apu.step(&inputs, &faults);
+                assert!(
+                    !out.ecb_any_trip && out.available,
+                    "{ambient_k} K, t={:.0} s: tripped (oil {}, overspeed {}, EGT {}) at N {:.1}%, EGT {:.0} C, oil {:.1} psi",
+                    tick as f64 * inputs.dt_s,
+                    out.oil_low_pressure_tripped,
+                    out.overspeed_tripped,
+                    out.egt_hard_tripped,
+                    out.n_percent,
+                    out.egt_true_c,
+                    out.oil_pressure_psi
+                );
+            }
+        }
+    }
+
+    /// 49_004 "APU oil leak" lands here (`live.rs` folds it into this
+    /// leak): the running APU loses its oil and the ECB trips it on low oil
+    /// pressure -- a protective shutdown, not a seized core.
+    #[test]
+    fn an_oil_leak_trips_the_running_apu_on_low_oil_pressure() {
+        let mut apu = Apu::new(288.15);
+        let mut inputs = base_inputs();
+        inputs.start_selected = true;
+        started(&mut apu, &inputs, &ApuFaults::default());
+        let leaking = ApuFaults { oil: super::super::oil::OilFaults { leak: 1.0 }, ..ApuFaults::default() };
+        let mut tripped_at = None;
+        for tick in 0..(3600.0 / inputs.dt_s) as usize {
+            let out = apu.step(&inputs, &leaking);
+            if out.ecb_any_trip {
+                // The ECB's own oil trip only surfaces through
+                // `ecb_any_trip`; that it was the oil one is the physics: no
+                // overspeed or EGT trip, and pressure below its trip level.
+                assert!(
+                    !out.overspeed_tripped && !out.egt_hard_tripped && out.oil_pressure_psi < params::OIL_PRESSURE_TRIP_PSI,
+                    "it must be the oil trip: overspeed {}, EGT {}, oil {:.1} psi",
+                    out.overspeed_tripped,
+                    out.egt_hard_tripped,
+                    out.oil_pressure_psi
+                );
+                tripped_at = Some(tick as f64 * inputs.dt_s);
+                break;
+            }
+        }
+        assert!(tripped_at.is_some(), "a full leak never tripped the APU within an hour");
+    }
 }

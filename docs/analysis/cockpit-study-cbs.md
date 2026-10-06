@@ -4,7 +4,7 @@ Read-only analysis. No source files were changed. Scope: cockpit_bindings.txt (t
 behaviour-resolution report for the whole A380X cockpit), the converter's `src/behaviour/`
 resolver, the MSFS model behaviour XML, and the plugin's `src/study/` module.
 
-`docs/cl650-reference.md` does not exist yet (checked: `D:\fbw-xp-systems\docs\` has no such
+`docs/cl650-reference.md` does not exist yet (checked: `D:\A380\fbw-xp-systems\docs\` has no such
 file), so the CL650 comparison in part 2 uses general, well-known Hot Start CL650 study-level
 features (CB panel, failures page, ground services page, aircraft-state persistence) rather than
 citing a document. Nothing about the real A380 or CL650 below is invented: where I could not
@@ -159,7 +159,7 @@ SWITCH_OVHD_EXTLT_LANDL / _NOSE: ... ASOBO_LIGHTING_Switch_Light_Landing_Templat
 SWITCH_OVHD_EXTLT_LOGO / _NAVLOGO / _RWY / _STROBE / _WING: same pattern, one line each
 ```
 And in the plugin itself, a test that documents the same gap on the handling side:
-`D:\fbw-xp-systems\src\handling\aspects.rs:783`:
+`D:\A380\fbw-xp-systems\src\handling\aspects.rs:783`:
 ```rust
 assert!(!a.handle(&mut v, "TOGGLE_BEACON_LIGHTS", 0, 0.));
 ```
@@ -338,7 +338,7 @@ Contrast with the panel's third switch, which does resolve cleanly:
 ```
 SWITCH_OVHD_INTLT_ANNLT: steps fbw/A32NX_OVHD_INTLT_ANN from 0 to 2 by 1
 ```
-and is confirmed consumed on the FBW side (`D:\fbw-xp-systems\src\prim.rs:716`:
+and is confirmed consumed on the FBW side (`D:\A380\fbw-xp-systems\src\prim.rs:716`:
 `d.lights_test = b(self.names.get(vars, "A32NX_OVHD_INTLT_ANN"));`) — so the annunciator-test
 switch (part of the brief's "annunciator test" scope item) works; its two neighbours on the same
 panel (emergency-exit signs, no-smoking signs) do not drive anything.
@@ -383,7 +383,7 @@ frames the CL650 comparison.
 | ID | Missing page | Evidence it's missing | CL650-style study aircraft equivalent |
 |---|---|---|---|
 | STUDY-001 | Circuit Breakers | `PageKind` enum (`mod.rs:27-42`) and `ITEMS` (`mod.rs:45-63`) have no CB entry; no CB drawing code anywhere in `src/study/` | A clickable overhead/avionics CB panel; pulling a breaker removes power from exactly the system it feeds |
-| STUDY-002 | Failures | Same: no `PageKind::Failures`. But the capability exists and is substantial: `D:\fbw-xp-systems\src\failures.rs` (776 lines) implements a full `FailureType`-mapped failure system tied to X-Plane's own failure datarefs (`XplaneFailures`, `failures.rs:525-620`), with real ATA-numbered ids (e.g. `24_106` electrical bus, `26_018` fire-detection loop, `29_017` engine pump overheat, `32_015`/`32_025` gear sensor/actuator) — it is simply never surfaced or made injectable from the Study UI | A failures page to arm/clear failures and see which are active, with search/filter by ATA chapter |
+| STUDY-002 | Failures | Same: no `PageKind::Failures`. But the capability exists and is substantial: `D:\A380\fbw-xp-systems\src\failures.rs` (776 lines) implements a full `FailureType`-mapped failure system tied to X-Plane's own failure datarefs (`XplaneFailures`, `failures.rs:525-620`), with real ATA-numbered ids (e.g. `24_106` electrical bus, `26_018` fire-detection loop, `29_017` engine pump overheat, `32_015`/`32_025` gear sensor/actuator) — it is simply never surfaced or made injectable from the Study UI | A failures page to arm/clear failures and see which are active, with search/filter by ATA chapter |
 | STUDY-003 | Ground services | No `PageKind` entry; the only related plugin code found is `rig.rs`'s ground-equipment visibility clip (`fbw/anim/ground_equipment`, gated on `GND > 0.5 and PBRK > 0.5 and all N1 < 5`, `rig.rs:396-412`), which is a converter-side visual, not something the Study panel shows or lets you command | GPU connect/disconnect, pushback start/stop and direction, chocks, external air/fuel, jetway/stairs, all inspectable and some controllable from one page |
 | STUDY-004 | Aircraft state / persistence | `start_state.rs` (403 lines) classifies the spawn situation (cold-and-dark, ready-to-fly, etc., `classify`, line 74) but has no save/load functions at all (grepped for `persist|save|load` — no hits beyond `override_path`, which reads a one-shot override file, not aircraft state) and nothing in `src/study/` exposes any of it | A page showing/saving aircraft configuration (fuel, payload, doors, CB pulls, active failures, wear) across sessions |
 | STUDY-006 | Maintenance | No page, and no wear/degradation model found under this search either | Deferred-defects style maintenance log; component wear affecting performance over time |
@@ -442,7 +442,7 @@ instantiated in `A380_COCKPIT.xml`'s `Overhead_Reset_Panel` component (around li
 (`CB_AESU1: toggles fbw/A32NX_RESET_PANEL_AESU1 between 1 and 0`, etc.).
 
 **CB-001 — these 10 buttons currently do nothing.** `grep -rn "RESET_PANEL"` across both
-`D:\fbw-aircraft\fbw-a380x\src\wasm\systems` and `D:\fbw-xp-systems\src` returns zero hits: no
+`D:\fbw-aircraft\fbw-a380x\src\wasm\systems` and `D:\A380\fbw-xp-systems\src` returns zero hits: no
 Rust code, on either the FBW systems side or the plugin side, reads any `A32NX_RESET_PANEL_*`
 variable. They are wired end-to-end (model → bound `fbw/` var) but the var is a dead end.
 

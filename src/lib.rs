@@ -44,6 +44,7 @@ mod live_log;
 // across workstreams; each adds its own `physics::<area>` submodule.
 pub mod invariants;
 pub mod physics;
+pub mod spawn;
 pub mod deep;
 mod fbw_computers;
 mod fbw_types;
@@ -66,6 +67,7 @@ mod lights;
 // [slot modules: oxygen] Crew and passenger oxygen quantity, consumption,
 // low-pressure caution and mask deployment.
 mod oxygen;
+mod cabin_option;
 mod panel;
 mod study;
 mod throttle;
@@ -123,7 +125,11 @@ mod radios;
 pub(crate) mod surveillance;
 // [slot modules: doors] The interactive points and X-Plane's doors.
 mod doors;
+// [slot modules: walkaround] The exterior preflight walkaround: pitot/
+// static/AoA covers, engine inlet/exhaust covers, gear pins and chocks.
+mod walkaround;
 // [slot modules: weight_balance] Payload mass and MSFS's centre of gravity on X-Plane.
+mod mass_balance;
 mod weight_balance;
 // [slot modules: efb] The fbw/efb/ interface for a third-party EFB.
 mod efb;
@@ -166,19 +172,53 @@ mod oans;
 // The one place this plugin talks to the internet, for the scripts' fetch.
 #[cfg(feature = "js")]
 mod net;
-// [slot modules: wxr] Weather radar on the ND, from X-Plane's real weather.
-#[allow(dead_code)]
-mod wxr;
 // [slot modules: ecam_patches] ECAM/FWS and instrument SourcePatches (D:
 // ECAM/instruments) not owned by another module's own source_patches().
-#[cfg(feature = "js")]
+// Not `feature = "js"`-gated: its only cross-feature dependency was
+// `SourcePatch`, moved to `source_patch` below.
 mod ecam_patches;
+// The plain-data half of `SourcePatch` (struct + find/replace/log), with no
+// `rquickjs`/`oxc` dependency: unconditionally compiled so both the
+// plugin's QuickJS `Cockpit` (feature `js`, `js/msfs/mod.rs`) and XPHFBW's
+// separate `coui://` handler (`app/src/scheme.rs`, built without `js`) can
+// apply the same patches to FlyByWire's compiled JS.
+pub mod source_patch;
 mod xplane_mirror; // FBW's own state onto X-Plane's standard datarefs, for third-party add-ons.
 
 use xp::{DataRef, Xplm};
 
+/// Every `SourcePatch` that does not need live simulation state --
+/// `deep::registry()` is a pure function of this crate's own registration
+/// code (`deep/mod.rs`), and `ecam_patches`'s patches are constant
+/// data -- so it is safe to compute in whichever process serves the JS.
+/// The plugin's own QuickJS `Cockpit` gets these plus `oans`'s two (feature
+/// `js` only, `js_bridge.rs::native_ports`); XPHFBW's `coui://` handler
+/// (`app/src/scheme.rs`) links this crate without `feature = "js"` and
+/// calls this instead, so its two static patches are kept in sync with
+/// `js_bridge.rs::native_ports`'s own copies by hand (both are literal,
+/// unchanging text -- W142's report flags sharing them as a follow-up).
+pub fn static_source_patches() -> Vec<source_patch::SourcePatch> {
+    let mut patches = vec![
+        source_patch::SourcePatch {
+            path: "/Pages/VCockpit/Instruments/A380X/SystemsHost/SystemsHost.js".to_string(),
+            find: "this.backplane.addInstrument(\"LegacyFuel\", this.legacyFuel);".to_string(),
+            replace: "/* LegacyFuel: fuel_transfer.rs does its work */".to_string(),
+            reason: "LegacyFuel is left out: fuel_transfer.rs does its work".to_string(),
+        },
+        source_patch::SourcePatch {
+            path: "/Pages/VCockpit/Instruments/A380X/ExtrasHost/index.js".to_string(),
+            find: "this.backplane.addInstrument(\"GPUManagement\", this.gpuManagement);".to_string(),
+            replace: "/* GPUManagement: efb.rs does its work */".to_string(),
+            reason: "GPUManagement is left out: efb.rs does its work".to_string(),
+        },
+    ];
+    patches.extend(ecam_patches::source_patches());
+    patches.extend(deep::ecam::patches::source_patches(&deep::registry().alerts));
+    patches
+}
+
 /// Minimal, cfg-gated pub surface for the offline `emulator` crate
-/// (D:\fbw-xp-systems\emulator, a separate crate, not a dependent of this
+/// (D:\A380\fbw-xp-systems\emulator, a separate crate, not a dependent of this
 /// one): re-exports of otherwise crate-private modules that were already
 /// written to run against `VariableRegistry + SimulatorReaderWriter`
 /// generically, or directly against no `Vars`/`Xplm` at all, or (breakers,
@@ -500,6 +540,8 @@ impl Vars {
             None => return,
         };
         if let Some(slot) = self.slots.get_mut(kind).and_then(|s| s.get_mut(index)) {
+            let name = self.names.get(kind).and_then(|n| n.get(index)).map_or("<unknown>", String::as_str);
+            trace_var(name, slot.value, checked, "write_from_xplane");
             slot.value = checked;
             slot.from_xplane = true;
         }
@@ -531,11 +573,13 @@ impl Vars {
                     Kind::Int => self.xplm.get_i(input.dataref) as f64,
                 };
                 let converted = (input.convert)(raw);
-                slot.value = if invariants::is_arinc_sentinel(converted) {
+                let value = if invariants::is_arinc_sentinel(converted) {
                     converted
                 } else {
                     invariants::check(name, converted, slot.bound, "Vars::read_inputs")
                 };
+                trace_var(name, slot.value, value, "a mapped X-Plane dataref");
+                slot.value = value;
             }
         }
     }
@@ -579,6 +623,8 @@ impl SimulatorReaderWriter for Vars {
             None => return,
         };
         if let Some(slot) = self.slots.get_mut(kind).and_then(|s| s.get_mut(index)) {
+            let name = self.names.get(kind).and_then(|n| n.get(index)).map_or("<unknown>", String::as_str);
+            trace_var(name, slot.value, checked, "Vars::write");
             slot.value = checked;
             slot.written = true;
         }
@@ -606,6 +652,48 @@ pub fn xp_effects_disabled() -> bool {
     })
 }
 
+impl Plugin {
+    /// Ice/gear-damage/bird-strike force consequences the deep areas
+    /// already computed and published this tick (`docs/deep/
+    /// integration.md` section 3, `deep::integration::xp_consequences`),
+    /// turned into X-Plane's plug-force axes and a collapsed leg's
+    /// `deploy_ratio` (`XpForceSink`, `src/xp.rs`). Reads back from
+    /// `self.vars` because `self.deep.tick` (called just before this, at
+    /// the call site) already wrote this tick's published values there
+    /// (`deep::plugin::DeepLayer::tick`'s own `Publisher`) -- not through
+    /// `Truth::published`, which would be last tick's.
+    ///
+    /// Icing drag (`fire_ice::icing::IcingOutputs.cd_increase_fraction`)
+    /// and a collapsed leg's own drag force (as opposed to its
+    /// `deploy_ratio`) are deliberately not covered: neither has a
+    /// published `Var` to read back today (`fire_ice::live::publish`
+    /// does not emit `cd_increase_fraction`; `collapsed_leg_drag_force_n`
+    /// needs a `static_load_share_n` nothing publishes) -- see
+    /// `E:/fbw-debug/fixes/W124.md` for the full reasoning; left as a
+    /// follow-up rather than invented.
+    fn apply_deep_xp_consequences(&mut self) {
+        use crate::deep::integration::xp_consequences::{
+            dynamic_pressure_pa, extra_drag_force_n, gear_deploy_override, ForceSink, PlugForceAxis, A380_WING_REFERENCE_AREA_M2,
+        };
+        for (i, id) in self.xp_consequence_ids.gear_collapsed.iter().enumerate() {
+            if self.vars.read(id) != 0.0 {
+                gear_deploy_override(
+                    &self.xp_force_sink,
+                    i,
+                    &crate::deep::gear_structure::LegOutput { collapsed: true, ..Default::default() },
+                );
+            }
+        }
+        let delta_cd = self.vars.read(&self.xp_consequence_ids.bird_wing_le_drag_cd);
+        if delta_cd > 0.0 {
+            let env = self.deep.environment();
+            let q = dynamic_pressure_pa(env.ambient_pressure_pa, env.sat_c, env.tas_ms);
+            let drag_n = extra_drag_force_n(delta_cd, q, A380_WING_REFERENCE_AREA_M2);
+            self.xp_force_sink.add_plug_force(PlugForceAxis::Faxil, drag_n);
+        }
+    }
+}
+
 /// Whether `FBW_DEEP=off` asked this run to skip the deep-systems areas.
 pub fn deep_disabled() -> bool {
     use std::sync::OnceLock;
@@ -621,10 +709,33 @@ pub fn deep_disabled() -> bool {
 
 /// Which of the plugin's writes into X-Plane's own physics this run skips.
 ///
-/// `FBW_XP_WRITES=off` skips all three; a comma list of `surfaces`,
-/// `handling` or `weight` skips just those. A bisecting tool: the converted
-/// A380 crashes 35-60 s after every load, and with all three off it sat
-/// clean for ten minutes, so the fault is in one of them.
+/// `FBW_XP_WRITES=off` skips all four; a comma list of `surfaces`,
+/// `handling`, `weight` or `forces` skips just those. `surfaces` gates both
+/// `flight_controls.rs::FlightControls::update` and (since W124/W125,
+/// `E:/fbw-debug/fixes/W124.md`) `deep::plugin::DeepLayer`'s
+/// `SurfaceOverrideWriter` application, since both ultimately drive the
+/// same X-Plane surface positions. `forces`, added in the same pass, gates
+/// `Plugin::apply_deep_xp_consequences`'s `XpForceSink` writes (plug-force
+/// axes and a collapsed gear leg's `deploy_ratio`) -- kept distinct from
+/// `surfaces` since it is a different mechanism (ice/gear-damage/bird-
+/// strike forces, not actuator positions). A bisecting tool: the converted
+/// A380 crashes 35-60 s after every load, and with all three (now four)
+/// off it sat clean for ten minutes, so the fault is in one of them.
+/// `FBW_TRACE_VAR=<name>`: log each change of that one variable with the
+/// route it came by and the plugin section running at the time, to find
+/// which of many writers set it (the first 60 changes).
+fn trace_var(name: &str, old: f64, new: f64, route: &str) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::OnceLock;
+    static TRACED: OnceLock<Option<String>> = OnceLock::new();
+    static COUNT: AtomicU32 = AtomicU32::new(0);
+    let Some(traced) = TRACED.get_or_init(|| std::env::var("FBW_TRACE_VAR").ok().filter(|v| !v.trim().is_empty())) else { return };
+    if name != traced.as_str() || old == new || COUNT.fetch_add(1, Ordering::Relaxed) >= 60 {
+        return;
+    }
+    log(&format!("trace {name}: {old} -> {new} via {route} during {}", perf::current_section()));
+}
+
 pub fn xp_writes_skip(part: &str) -> bool {
     use std::sync::OnceLock;
     static V: OnceLock<String> = OnceLock::new();
@@ -806,6 +917,47 @@ fn mapping(name: &str) -> Option<(&'static str, Kind, fn(f64) -> f64)> {
             Float,
             |v| v * PA_TO_MB,
         ),
+        // The captain's and first officer's altimeter settings in
+        // millibars/hPa, the unit the OIT baro page and the PFD's QFE/QNH
+        // readout ask for -- the same knob KOHLSMAN SETTING HG above
+        // already follows, converted with the identical factor sensors.rs's
+        // standby-altimeter feed (KOHLSMAN SETTING MB:3) already uses.
+        "KOHLSMAN SETTING MB" => (
+            "sim/cockpit2/gauges/actuators/barometer_setting_in_hg_pilot",
+            Float,
+            crate::sensors::kohlsman_mb_from_inhg,
+        ),
+        "KOHLSMAN SETTING MB:1" => (
+            "sim/cockpit2/gauges/actuators/barometer_setting_in_hg_pilot",
+            Float,
+            crate::sensors::kohlsman_mb_from_inhg,
+        ),
+        "KOHLSMAN SETTING MB:2" => (
+            "sim/cockpit2/gauges/actuators/barometer_setting_in_hg_copilot",
+            Float,
+            crate::sensors::kohlsman_mb_from_inhg,
+        ),
+        // The radio altimeter the EWD/PFD/ND read for DH/MDA callouts and
+        // RA-gated ECAM/flare logic. radios.rs already finds this exact
+        // dataref (its own `radio_height` field) but only to gate MMR
+        // tuning -- nothing ever published the simulator variable itself,
+        // so every reader of RADIO HEIGHT stuck at 0.
+        "RADIO HEIGHT" => (
+            "sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot",
+            Float,
+            identity,
+        ),
+        // The vertical speed tape / VS-mode target read this MSFS simvar
+        // directly; X-Plane's own fpm dataref needs no conversion.
+        "VERTICAL SPEED" => ("sim/flightmodel/position/vh_ind_fpm", Float, identity),
+        // The ND's raw-GPS map provider (`@microsoft/msfs-sdk`) reads GPS
+        // POSITION LAT/LON instead of PLANE LATITUDE/LONGITUDE for its own
+        // position source. In this sim the GPS position and the aircraft's
+        // true position are the same simulated point, so these alias the
+        // same datarefs PLANE LATITUDE uses and sensors.rs's own
+        // PLANE LONGITUDE feed uses.
+        "GPS POSITION LAT" => ("sim/flightmodel/position/latitude", Double, identity),
+        "GPS POSITION LON" => ("sim/flightmodel/position/longitude", Double, identity),
         _ => return None,
     })
 }
@@ -825,6 +977,12 @@ struct Plugin {
     state_dump: state_dump::StateDump,
     /// `FBW_LOG_ALL` only (`live_log.rs`).
     live_log: Option<live_log::LiveLog>,
+    /// `FBW_LOG_KEY` only (`live_log.rs`): a bounded, fixed-clock snapshot
+    /// of about 40 key variables, independent of `live_log`'s "changed
+    /// only" filter -- so a state that holds for a long time (DC ESS
+    /// staying unpowered for tens of seconds, W222) still shows up between
+    /// samples, not only at its edges.
+    key_snapshot: Option<live_log::KeySnapshot>,
     computed: Computed,
     /// FlyByWire's engine control, ported from their C++.
     fadec: fadec::Fadec,
@@ -835,6 +993,16 @@ struct Plugin {
     engine_commands: engine_commands::EngineCommands,
     /// FlyByWire's FCUs, PRIMs and SECs, compiled from their C++.
     prims: prim::Prims,
+    /// The start state everything was built with in `Plugin::new`, which
+    /// runs while X-Plane is still loading the aircraft -- before it has
+    /// placed it or started its engines -- so it always reads a cold,
+    /// unplaced aircraft. `confirm_start_state` decides again once X-Plane
+    /// has placed it, before anything that initialises from the start state
+    /// on its first tick (FADEC, fuel, EFB, the systems) has run.
+    start_state_built: StartState,
+    start_state_confirmed: bool,
+    spawn_epoch_at_build: u64,
+    start_state_wait_s: f64,
     /// The FCU and autothrust key events, as X-Plane commands.
     commands: afs_events::Commands,
     priority_takeover_commands: afs_events::PriorityTakeoverCommands,
@@ -915,6 +1083,8 @@ struct Plugin {
     lights: lights::Lights,
     // [slot fields: oxygen] Crew/passenger oxygen quantity and pressure.
     oxygen: oxygen::Oxygen,
+    // [slot fields: cabin option] The EFB's "Passenger cabin" switch.
+    cabin_option: cabin_option::CabinOption,
     // [slot fields: flight_controls] X-Plane's control surfaces, driven by
     // FlyByWire's hydraulic actuators.
     flight_controls: flight_controls::FlightControls,
@@ -932,6 +1102,8 @@ struct Plugin {
     surveillance: surveillance::Surveillance,
     // [slot fields: doors] The interactive points, opened and closed at their rates.
     doors: doors::Doors,
+    // [slot fields: walkaround] The exterior preflight walkaround items.
+    walkaround: walkaround::Walkaround,
     // [slot fields: weight_balance] Payload and CG onto X-Plane's flight model.
     weight_balance: weight_balance::WeightBalance,
     // [slot fields: mapdata] The terrain worker's inputs and outputs, and TCAS targets.
@@ -974,13 +1146,54 @@ struct Plugin {
     /// ECAM triggers and the Study pages read. See `deep::plugin`'s module
     /// doc for where every `Truth` field comes from.
     deep: deep::plugin::DeepLayer,
+    /// `deep::integration::xp_consequences::XpForceSink`, constructed once
+    /// against the `'static Xplm` this struct is built with (W64's own
+    /// reasoning for caching `XPLMFindDataRef` results applies here too --
+    /// `xp.rs::Xplm::find` has no internal cache). W51/W124,
+    /// `E:/fbw-debug/fixes/W124.md`.
+    xp_force_sink: xp::XpForceSink<'static>,
+    /// Cached ids for the deep-area outputs `apply_deep_xp_consequences`
+    /// reads back every tick -- already published by `deep::gear_structure`/
+    /// `deep::environment`'s own `publish` (`deep::plugin::DeepLayer::tick`
+    /// writes them into `vars` before this struct's own `tick` reaches the
+    /// call site that reads them back).
+    xp_consequence_ids: XpConsequenceIds,
+}
+
+/// See `Plugin::xp_consequence_ids`.
+struct XpConsequenceIds {
+    /// `deep::gear_structure`'s own `GEAR_STRUT_COLLAPSED:{1..5}`, nose then
+    /// the four mains in the `.acf`'s own gear order (that file's own
+    /// `publish`; matches `xp_consequences::gear_deploy_override`'s
+    /// documented `index` convention once shifted to 0-based).
+    gear_collapsed: [VariableIdentifier; 5],
+    /// `deep::environment`'s own `ENV_BIRD_WING_LE_DRAG`: the worst of the
+    /// three wing-leading-edge segments' bird-strike dent drag this tick.
+    bird_wing_le_drag_cd: VariableIdentifier,
 }
 
 /// The datarefs behind [`prim::SimReadings`].
+/// `sim/joystick/joystick_axis_assignments`'s enum value for Yaw, indexing
+/// `sim/joystick/joy_mapped_axis_avail`/`_value` (`handling.rs`'s `AXIS_YAW`
+/// is the same numbering, for its own toe-brake/flap/tiller axes).
+const YAW_AXIS: usize = 3;
+
+/// A hardware axis reading, or `None` with nothing providing it: X-Plane's
+/// `joy_mapped_axis_avail`/`_value` pattern (`handling.rs`'s `read_axes` uses
+/// it for toe brakes/flaps/tiller; [`PrimRefs::read`] below uses it for the
+/// rudder pedal axis in place of the auto-coordination-contaminated
+/// `sim/joystick/yoke_heading_ratio` -- see that function's comment, W99).
+pub(crate) fn hardware_axis(avail: c_int, value: f32) -> Option<f64> {
+    (avail != 0).then_some(value as f64)
+}
+
 struct PrimRefs {
     yoke_pitch: Option<DataRef>,
     yoke_roll: Option<DataRef>,
-    yoke_heading: Option<DataRef>,
+    /// The rudder pedal axis: `joy_mapped_axis_avail`/`_value`, not
+    /// `sim/joystick/yoke_heading_ratio` (`read()`'s comment says why).
+    yaw_axis_avail: Option<DataRef>,
+    yaw_axis_value: Option<DataRef>,
     mag_psi: Option<DataRef>,
     altitude_ind: Option<DataRef>,
     radio_height: Option<DataRef>,
@@ -1008,7 +1221,8 @@ impl PrimRefs {
         Self {
             yoke_pitch: xplm.find("sim/joystick/yoke_pitch_ratio"),
             yoke_roll: xplm.find("sim/joystick/yoke_roll_ratio"),
-            yoke_heading: xplm.find("sim/joystick/yoke_heading_ratio"),
+            yaw_axis_avail: xplm.find("sim/joystick/joy_mapped_axis_avail"),
+            yaw_axis_value: xplm.find("sim/joystick/joy_mapped_axis_value"),
             mag_psi: xplm.find("sim/flightmodel/position/mag_psi"),
             altitude_ind: xplm.find("sim/cockpit2/gauges/indicators/altitude_ft_pilot"),
             radio_height: xplm.find("sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot"),
@@ -1029,9 +1243,32 @@ impl PrimRefs {
     fn read(&self, xplm: &Xplm) -> prim::SimReadings {
         let get = |d: Option<DataRef>| d.map_or(0., |d| xplm.get_f(d) as f64);
         let get_i = |d: Option<DataRef>| d.is_some_and(|d| xplm.get_i(d) != 0);
+        // `sim/joystick/yoke_heading_ratio` is NOT read for the rudder
+        // pedals: X-Plane's own DataRefs.txt documents
+        // `override_joystick_heading` as uniquely "disabl[ing]
+        // auto-coordination" on that channel (`override_joystick_pitch`/
+        // `_roll` say nothing of the kind), so without real rudder-pedal
+        // hardware it silently carries X-Plane's synthesised
+        // turn-coordination rudder, not the pilot's pedal -- which
+        // FlyByWire's own yaw damper (prim.rs) then doubles on top of
+        // (W84/W99: a repeatable, log-confirmed 13.6054% at cold-parked with
+        // zero pilot input, and +/-100% swings in flight). `joy_mapped_axis_
+        // value[YAW_AXIS]` is the raw hardware axis instead, 0. with no
+        // rudder pedal peripheral -- the same way MSFS sends no rudder axis
+        // event without one.
+        let rudder_axis = match (self.yaw_axis_avail, self.yaw_axis_value) {
+            (Some(a), Some(v)) => {
+                let mut avail = [0 as c_int; YAW_AXIS + 1];
+                let mut value = [0f32; YAW_AXIS + 1];
+                xplm.get_vi(a, &mut avail);
+                xplm.get_vf(v, &mut value);
+                hardware_axis(avail[YAW_AXIS], value[YAW_AXIS]).unwrap_or(0.)
+            }
+            _ => 0.,
+        };
         let (spoilers_armed, spoilers_handle_position) = prim::SimReadings::spoilers_from_xplane(get(self.speedbrake));
         prim::SimReadings {
-            inputs: prim::SimReadings::from_xplane_axes(get(self.yoke_pitch), get(self.yoke_roll), get(self.yoke_heading)),
+            inputs: prim::SimReadings::from_xplane_axes(get(self.yoke_pitch), get(self.yoke_roll), rudder_axis),
             psi_magnetic_deg: get(self.mag_psi),
             h_ind_ft: get(self.altitude_ind),
             h_radio_ft: get(self.radio_height),
@@ -1202,7 +1439,11 @@ impl Plugin {
         for reason in &engine_wear_rejections {
             log(&format!("persisted engine wear: {reason}"));
         }
-        wear::publish(persistence.state.wear.clone());
+        let (checked_wear, wear_rejections) = wear::load_checked(persistence.state.wear.clone());
+        for reason in &wear_rejections {
+            log(&format!("persisted component wear: {reason}"));
+        }
+        wear::publish(checked_wear);
         // Physics workstream 6: per-wheel tyre model, built alongside
         // damage (it re-arms damage.rs's own per-leg tyre-burst ids at
         // fuse-plug melt).
@@ -1276,6 +1517,10 @@ impl Plugin {
         let surveillance = surveillance::Surveillance::new(&mut vars);
         // [slot new: doors]
         let doors = doors::Doors::new(&mut vars, xplm);
+        // [slot new: walkaround] After `persistence` (loaded above), whose
+        // `walkaround_installed` this reads to restore last session's
+        // installed/removed state on a cold-and-dark start.
+        let walkaround = walkaround::Walkaround::new(&mut vars, xplm, &persistence.state.walkaround_installed);
         // [slot new: weight_balance]
         let weight_balance = weight_balance::WeightBalance::new(&mut vars, xplm);
         // [slot new: mapdata]
@@ -1333,6 +1578,15 @@ impl Plugin {
             deep.area_names().len(),
             if deep.area_names().is_empty() { "none yet".to_owned() } else { deep.area_names().join(", ") }
         ));
+        // [slot new: xp_force_sink] W51/W124 (`E:/fbw-debug/fixes/W124.md`):
+        // `XpForceSink` was never constructed anywhere despite `deep/
+        // plugin.rs:41`'s doc claiming it ran live. Built once, like `deep`
+        // just above.
+        let xp_force_sink = xp::XpForceSink::new(xplm);
+        let xp_consequence_ids = XpConsequenceIds {
+            gear_collapsed: std::array::from_fn(|i| vars.get(format!("GEAR_STRUT_COLLAPSED:{}", i + 1))),
+            bird_wing_le_drag_cd: vars.get("ENV_BIRD_WING_LE_DRAG".to_owned()),
+        };
         let computed = Computed {
             yaw_moi: vars.get("TOTAL WEIGHT YAW MOI".to_owned()),
             pitch_moi: vars.get("TOTAL WEIGHT PITCH MOI".to_owned()),
@@ -1360,11 +1614,16 @@ impl Plugin {
             ticks: 0,
             state_dump: state_dump::StateDump::start(),
             live_log: live_log::LiveLog::from_env(),
+            key_snapshot: live_log::KeySnapshot::from_env(),
             computed,
             fadec,
             throttles,
             engine_commands,
             prims,
+            start_state_built: start_state,
+            start_state_confirmed: false,
+            spawn_epoch_at_build: crate::spawn::epoch(),
+            start_state_wait_s: 0.,
             commands,
             priority_takeover_commands,
             crossfeed_commands,
@@ -1393,6 +1652,7 @@ impl Plugin {
             lights,
             // [slot init: oxygen]
             oxygen,
+            cabin_option: cabin_option::CabinOption::default(),
             // [slot init: flight_controls]
             flight_controls,
             handling,
@@ -1405,6 +1665,8 @@ impl Plugin {
             surveillance,
             // [slot init: doors]
             doors,
+            // [slot init: walkaround]
+            walkaround,
             // [slot init: weight_balance]
             weight_balance,
             // [slot init: mapdata]
@@ -1431,6 +1693,9 @@ impl Plugin {
             xphfbw_datarefs: xphfbw_datarefs::XphfbwDatarefs::new(),
             // [slot init: deep]
             deep,
+            // [slot init: xp_force_sink]
+            xp_force_sink,
+            xp_consequence_ids,
         }
     }
 
@@ -1440,11 +1705,78 @@ impl Plugin {
             .is_some_and(|d| self.vars.xplm.get_i(d) != 0)
     }
 
+    /// Decide the start state again once X-Plane has placed the aircraft,
+    /// and apply what a spawn in that state has in MSFS. Returns false while
+    /// still waiting, and the tick is skipped: nothing that initialises from
+    /// the start state may run before it is known.
+    ///
+    /// "Placed" is X-Plane's own signal -- a plane/airport loaded message
+    /// since `Plugin::new` (`spawn::epoch`) -- with a real position; a few
+    /// seconds without one proceed anyway rather than hold the aircraft.
+    fn confirm_start_state(&mut self, delta: f64) -> bool {
+        const MAX_WAIT_S: f64 = 3.;
+        let xplm = self.vars.xplm;
+        self.start_state_wait_s += delta.max(0.);
+        let placed = crate::spawn::epoch() != self.spawn_epoch_at_build && start_state::aircraft_placed(xplm);
+        if !placed && self.start_state_wait_s < MAX_WAIT_S {
+            return false;
+        }
+        self.start_state_confirmed = true;
+        let state = start_state::detect(xplm, &mut self.vars);
+        // The walkaround decides here, not at load: see `Walkaround::new`.
+        self.walkaround.confirm_start(!start_state::engines_running_state(state), &self.persistence.state.walkaround_installed);
+        let built = self.start_state_built;
+        if state != built {
+            log(&format!(
+                "start state revised now X-Plane has placed the aircraft: {} ({}) instead of {} ({})",
+                f64::from(state),
+                start_state::name(state),
+                f64::from(built),
+                start_state::name(built)
+            ));
+            self.prims.set_start_state(state.into());
+            if start_state::engines_running_state(state) && !start_state::engines_running_state(built) {
+                self.engine_commands.spawn_at_idle();
+            }
+        }
+        // Every start, cold or hot: the gear lever the flight file selects
+        // (down on the ground). It is an input only gear commands move, so
+        // without this it starts at 0, selected up, and the gear retracts
+        // on the ground as soon as the hydraulics pressurise.
+        if let Some(lever) = fuel::flt_for_start_state(state.into()).and_then(start_state::gear_lever_from_flight_file) {
+            let id = extra_backend::calculator_variable(&mut self.vars, "L", start_state::GEAR_LEVER_VAR);
+            self.vars.write(&id, lever);
+            log(&format!("start state {}: gear lever {} from FlyByWire's flight file", start_state::name(state), if lever > 0.5 { "down" } else { "up" }));
+        }
+        // Every display at full brightness, whatever the start.
+        for p in start_state::display_potentiometers() {
+            let id = self.vars.get(format!("LIGHT POTENTIOMETER:{p}"));
+            self.vars.write(&id, start_state::DISPLAY_START_BRIGHTNESS);
+        }
+        if start_state::engines_running_state(state) {
+            // The cockpit a spawn in this state has in MSFS: FlyByWire's own
+            // flight file's cockpit controls (IRs in NAV, batteries, packs,
+            // bleeds, pumps), which is what makes it ready to fly.
+            if let Some(flt) = fuel::flt_for_start_state(state.into()) {
+                let controls = start_state::cockpit_controls_from_flight_file(flt);
+                for (name, value) in &controls {
+                    let id = extra_backend::calculator_variable(&mut self.vars, "L", name);
+                    self.vars.write(&id, *value);
+                }
+                log(&format!("start state {}: set {} cockpit controls from FlyByWire's flight file", start_state::name(state), controls.len()));
+            }
+        }
+        true
+    }
+
     fn tick(&mut self, delta: f64) {
         crate::perf::lap("tick start");
         invariants::advance_tick(delta);
         flush_log_queue();
         xp::run_queued_commands();
+        if !self.start_state_confirmed && !self.confirm_start_state(delta) {
+            return;
+        }
         for (name, value) in study::web::take_writes() {
             let id = self.vars.get(name.to_owned());
             self.vars.write(&id, value);
@@ -1673,10 +2005,14 @@ impl Plugin {
             log(&format!("scripted failure: {id} ({}) activated", failures::any_failure_name(id)));
         }
         self.persistence.tick(real_delta);
-        self.persistence.state.active_failure_ids = failures::active_ids();
+        // The crew's own arming only: a derived verdict (deep areas, the
+        // components system) re-derives itself live and must never come back
+        // from disk as though a pilot had armed it (`failures::armed_ids`).
+        self.persistence.state.active_failure_ids = failures::armed_ids();
         self.persistence.state.active_failure_magnitudes = failures::active_magnitudes();
         self.persistence.state.wear = wear::snapshot();
         self.persistence.state.components = components::snapshot_direct();
+        self.persistence.state.walkaround_installed = self.walkaround.snapshot();
         self.persistence.state.deferred = self.mel.snapshot();
         self.persistence.state.tech_log = self.mel.tech_log();
         let (rf_config, rf_seed) = self.random_failures.snapshot();
@@ -1707,6 +2043,14 @@ impl Plugin {
         // healthy at the moment X-Plane flags it.
         if !crate::deep_disabled() {
             self.deep.tick(&mut self.vars, Some(xplm), delta);
+            // [deep/integration/xp_consequences] Ice/gear-damage/bird-strike
+            // force consequences the deep areas already computed and
+            // published this tick (W51/W124, `E:/fbw-debug/fixes/
+            // W124.md`) are applied later in this function, after
+            // `handling.after_systems` rather than here -- see the call
+            // site there for why (W215, `E:/fbw-debug/fixes/W215.md`: a
+            // collapsed leg's `deploy_ratio` override must not race
+            // handling's own unconditional full-array gear write).
         }
         crate::perf::lap("tick-after-systems: lights");
         // [slot tick-after-systems: lights] After the systems, so the buses'
@@ -1716,6 +2060,9 @@ impl Plugin {
         // [slot tick-after-systems: oxygen] After the systems, so the cabin
         // altitude/pressure this tick are theirs.
         self.oxygen.update(&mut self.vars, xplm, delta);
+        // [slot tick-after-systems: cabin option] The EFB's "Passenger
+        // cabin" switch, into the dataref the cabin objects show by.
+        self.cabin_option.update(xplm, delta);
         crate::perf::lap("tick-after-systems: flight_controls");
         // [slot tick-after-systems: flight_controls] The actuators have moved
         // this tick; X-Plane's surfaces follow.
@@ -1729,8 +2076,51 @@ impl Plugin {
         if !crate::xp_writes_skip("surfaces") {
             self.flight_controls.update(&mut self.vars, xplm);
         }
+        crate::perf::lap("tick-after-systems: walkaround");
+        // [slot tick-after-systems: walkaround] After the systems tick, so
+        // this frame's engine N2 is current; before `handling.
+        // after_systems`, which needs this frame's gear-pin state to hold a
+        // pinned leg down through its own gear-deploy write below.
+        self.walkaround.update(&mut self.vars, xplm);
+        for line in self.walkaround.events.drain(..) {
+            log(&line);
+        }
+        for e in self.walkaround.take_fod_events() {
+            let description = format!("engine {} FOD from an ingested walkaround inlet cover", e + 1);
+            self.damage.arm_fod(e, &description);
+            log(&format!("walkaround: {description}"));
+        }
         if !crate::xp_writes_skip("handling") {
             self.handling.after_systems(&mut self.vars, xplm);
+        }
+        // [deep/integration/xp_consequences] Ice/gear-damage/bird-strike
+        // force consequences the deep areas already computed and
+        // published this tick (W51/W124, `E:/fbw-debug/fixes/W124.md`),
+        // turned into X-Plane's plug-force axes and a collapsed leg's
+        // `deploy_ratio`. Deliberately placed here, after
+        // `handling.after_systems`, not right after `self.deep.tick(...)`
+        // above (W215, `E:/fbw-debug/fixes/W215.md`): `handling.
+        // after_systems` just wrote X-Plane's whole `sim/aircraft/parts/
+        // acf_gear_deploy` array from FlyByWire's own (undamaged) gear
+        // position (handling.rs, `physics::gear_deploy`); calling this
+        // *before* that write, as originally wired, meant handling's own
+        // unconditional per-tick write of all five gear-array elements
+        // silently clobbered `XpForceSink::set_gear_deploy_ratio`'s
+        // single-index write for a collapsed leg on the very same tick --
+        // two writers racing for the same X-Plane dataref, the exact
+        // hazard W125's review already flagged for FlyByWire's own
+        // `Var`s (`deep/integration/flight_control_surfaces.rs`'s module
+        // doc), just on the X-Plane side of the boundary instead. Running
+        // this strictly after `handling.after_systems` makes it a genuine
+        // override: handling writes this tick's baseline gear position
+        // for every leg first, then this patches only the leg(s)
+        // `deep::gear_structure` says are actually collapsed. Evaluated
+        // again here (this is no longer textually inside the
+        // `deep_disabled()` block above): no `deep` tick this frame means
+        // nothing published to read back, so this is a no-op exactly when
+        // it should be.
+        if !crate::deep_disabled() && !crate::xp_writes_skip("forces") {
+            self.apply_deep_xp_consequences();
         }
         crate::perf::lap("tick-after-systems: correctness");
         // [slot tick-after-systems: correctness] FlyByWire's post-tick aspects.
@@ -1843,14 +2233,19 @@ impl Plugin {
             let vars = &mut self.vars;
             display::update_brightness(|name| vars.ids.get(name).copied().map(|id| vars.read(&id)));
         }
-        crate::perf::lap("tick-after-systems: wxr");
-        // [slot tick-after-systems: wxr] After the scripts, so this tick's
-        // ND mode/range/overlay selector L:vars (just written) are current.
-        #[cfg(feature = "js")]
-        wxr::tick(&self.vars, xplm, self.time);
+        crate::perf::lap("tick-after-systems: xplane_mirror");
         xplane_mirror::update(&mut self.vars, xplm); // [slot tick-after-systems: xplane_mirror]
         self.vars.publish();
         self.msfs_derived(xplm);
+        crate::perf::lap("tick-after-systems: live_log");
+        // [slot tick-after-systems: live_log] `take_snapshot` (the panel
+        // thread's copy) and the two dev diagnostics that read it back,
+        // `FBW_LOG_ALL` and `xphfbw.stateDumpFrames`, used to be charged to
+        // the lap above, along with everything down to `msfs_derived`: a
+        // fixed, spiky cost this large (`live_log`'s first-sample/
+        // generation-bump dump alone was measured at ~1.6 s for one frame)
+        // made that lap look expensive when it was mostly this. Its own lap
+        // now, so the perf report's top-12 names the actual cost.
         self.take_snapshot();
         if !self.unfed_logged && self.time >= 30. {
             self.unfed_logged = true;
@@ -1872,6 +2267,9 @@ impl Plugin {
         // snapshot lock is only taken on a tick that could actually dump.
         if let Some(live) = self.live_log.as_mut() {
             live.tick();
+        }
+        if let Some(key) = self.key_snapshot.as_mut() {
+            key.tick();
         }
         if self.ticks % state_dump::EVERY_TICKS == 0 && self.state_dump.enabled() {
             if let Ok(s) = snapshot().lock() {
@@ -2382,11 +2780,12 @@ fn set_value(refcon: *mut c_void, value: f64) {
     let (kind, index) = slot_of(refcon);
     unsafe {
         let plugin = &raw mut PLUGIN;
-        if let Some(slot) = (*plugin)
-            .as_mut()
-            .and_then(|p| p.vars.slots.get_mut(kind)?.get_mut(index))
-        {
-            slot.value = value;
+        if let Some(p) = (*plugin).as_mut() {
+            let name = p.vars.names.get(kind).and_then(|n| n.get(index)).cloned().unwrap_or_default();
+            if let Some(slot) = p.vars.slots.get_mut(kind).and_then(|s| s.get_mut(index)) {
+                trace_var(&name, slot.value, value, "its dataref, written by X-Plane or another plugin (SASL Lua)");
+                slot.value = value;
+            }
         }
     }
 }
@@ -2540,6 +2939,12 @@ pub unsafe extern "C" fn XPluginDisable() {
             // [slot release: flight_controls] Surfaces back to X-Plane.
             plugin.flight_controls.release(xplm);
             plugin.handling.release(xplm);
+            // W209: hands X-Plane's own hypoxia/oxygen system back
+            // (`oxygen::Oxygen::release`, `override_oxygen_system`).
+            plugin.oxygen.release(xplm);
+            // W152: hands X-Plane's own radio auto-tune preference back
+            // (`radios::Radios::release`, `override_autotune`).
+            plugin.radios.release(xplm);
             // [slot release: extra_backend]
             plugin.extra_backend.release();
             // [slot release: sound] Stops whatever is still looping.
@@ -2552,6 +2957,11 @@ pub unsafe extern "C" fn XPluginDisable() {
             plugin.commands.release(xplm);
             plugin.priority_takeover_commands.release(xplm);
             plugin.crossfeed_commands.release(xplm);
+            // W89: hands X-Plane's stock fuel system back
+            // (`fuel::Fuel::release`, `override_fuel_system`).
+            if let Some(fuel) = plugin.fuel.as_mut() {
+                fuel.release(xplm);
+            }
             // Physics workstream 6: save the airframe state on exit, so
             // wear/damage/MEL/failure history survives to the next start.
             if let Err(e) = plugin.persistence.save() {
@@ -2571,7 +2981,22 @@ pub unsafe extern "C" fn XPluginStop() {}
 /// # Safety
 /// Called by X-Plane on the main thread.
 #[no_mangle]
-pub unsafe extern "C" fn XPluginReceiveMessage(_from: c_int, _message: c_int, _param: *mut c_void) {}
+pub unsafe extern "C" fn XPluginReceiveMessage(_from: c_int, message: c_int, param: *mut c_void) {
+    // A fresh spawn: a new aircraft load (`XPLM_MSG_PLANE_LOADED`, `param`
+    // 0 is the user's own aircraft) or a reposition/restart-flight, which
+    // reloads the local airport (`XPLM_MSG_AIRPORT_LOADED`) even when the
+    // aircraft itself is not reloaded. Every construction-time settle
+    // guard in this crate (`efb.rs`'s `SPAWN_SETTLE_S`, and any future
+    // one) resets its own `age_s` against `spawn::epoch` instead of
+    // counting only from its own `new()`, because `XPluginEnable` builds
+    // this plugin once per X-Plane session and does not call it again for
+    // either of these -- see `spawn.rs`'s module doc.
+    if message == spawn::XPLM_MSG_PLANE_LOADED && param as isize == 0 {
+        spawn::mark_new_spawn();
+    } else if message == spawn::XPLM_MSG_AIRPORT_LOADED {
+        spawn::mark_new_spawn();
+    }
+}
 
 /// Copy a string into one of X-Plane's 256 byte buffers.
 unsafe fn write_into(buffer: *mut c_char, text: &str) {
@@ -2584,6 +3009,28 @@ unsafe fn write_into(buffer: *mut c_char, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W99: `A32NX_RUDDER_PEDAL_POSITION` read a constant 13.6054% at cold
+    /// parked start with zero pilot input, and swung +/-100% between ~1s
+    /// samples in flight -- traced to `sim/joystick/yoke_heading_ratio`,
+    /// which X-Plane's own DataRefs.txt documents as carrying its own
+    /// turn-coordination synthesis unless `override_joystick_heading` is
+    /// set (unlike the pitch/roll axes' overrides). `hardware_axis` is the
+    /// replacement: the raw `joy_mapped_axis_avail`/`_value` reading, `None`
+    /// with nothing providing it.
+    #[test]
+    fn hardware_axis_is_none_with_no_peripheral_providing_it() {
+        // (build fix, INT-P4) `assert_eq!` -> a tolerance for the `Some`
+        // case: `hardware_axis` reads through an f32-precision path (real
+        // joystick hardware reports f32), so an exact 0.42 in can come back
+        // as 0.41999998688697815 -- an f32 round-trip artifact, not this
+        // function's own "is a peripheral providing it" logic.
+        assert_eq!(hardware_axis(0, 0.7), None);
+        match hardware_axis(1, 0.42) {
+            Some(v) => assert!((v - 0.42).abs() < 1e-6, "expected ~0.42, got {v}"),
+            None => panic!("expected Some(~0.42), got None"),
+        }
+    }
 
     #[test]
     fn simulator_variables_keep_their_plain_names() {
@@ -2645,6 +3092,37 @@ mod tests {
         assert_eq!(dataref, "sim/weather/region/sealevel_pressure_pas");
         // Standard sea level pressure, 101 325 Pa, is 1013.25 mb (QNH 1013).
         assert!((convert(101_325.) - 1_013.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn kohlsman_setting_mb_follows_the_same_knob_as_the_hg_variant() {
+        let (dataref_hg, _, _) = mapping("KOHLSMAN SETTING HG:1").unwrap();
+        let (dataref_mb, _, convert) = mapping("KOHLSMAN SETTING MB:1").unwrap();
+        assert_eq!(dataref_hg, dataref_mb);
+        // 29.92 inHg standard is ~1013.25 mbar, matching sensors.rs's
+        // standby conversion for the same knob family.
+        assert!((convert(29.92) - 1_013.25).abs() < 0.1);
+        assert_eq!(
+            mapping("KOHLSMAN SETTING MB:2").unwrap().0,
+            "sim/cockpit2/gauges/actuators/barometer_setting_in_hg_copilot"
+        );
+    }
+
+    #[test]
+    fn radio_height_vertical_speed_and_gps_position_are_fed() {
+        let (dataref, kind, convert) = mapping("RADIO HEIGHT").unwrap();
+        assert_eq!(dataref, "sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot");
+        assert!(matches!(kind, Kind::Float));
+        assert_eq!(convert(50.), 50.);
+
+        let (dataref, _, convert) = mapping("VERTICAL SPEED").unwrap();
+        assert_eq!(dataref, "sim/flightmodel/position/vh_ind_fpm");
+        assert_eq!(convert(-700.), -700.);
+
+        let (dataref, kind, _) = mapping("GPS POSITION LAT").unwrap();
+        assert_eq!(dataref, "sim/flightmodel/position/latitude");
+        assert!(matches!(kind, Kind::Double));
+        assert_eq!(mapping("GPS POSITION LON").unwrap().0, "sim/flightmodel/position/longitude");
     }
 
     #[test]

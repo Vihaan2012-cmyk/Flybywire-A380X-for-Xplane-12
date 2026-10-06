@@ -377,7 +377,11 @@ pub fn register(r: &mut Registry) {
     // ---- ECAM alerts -----------------------------------------------------
 
     r.alert(
-        EcamAlert::new("APU_EGT_OVER_LIMIT", ATA, "APU EGT OVER LIMIT", Level::Warning, var("APU_EGT").gt(crate::deep::apu::params::EGT_TRIP_C))
+        // W162: `DEEP_APU_EGT`, not FlyByWire's own `APU_EGT` -- this
+        // trigger evaluates *this area's own* model output, and the two
+        // used to collide (deep silently overwrote FlyByWire's `APU_EGT`
+        // every frame, since `deep.tick` runs after `simulation.tick`).
+        EcamAlert::new("APU_EGT_OVER_LIMIT", ATA, "APU EGT OVER LIMIT", Level::Warning, var("DEEP_APU_EGT").gt(crate::deep::apu::params::EGT_TRIP_C))
             .confirm(1.0)
             .inhibit(&[Phase::LiftOff, Phase::Above80Kt])
             .step(line("APU MASTER SW", "OFF").done(var("OVHD_APU_MASTER_SW_PB_IS_ON").off()))
@@ -387,7 +391,8 @@ pub fn register(r: &mut Registry) {
     );
 
     r.alert(
-        EcamAlert::new("APU_OVERSPEED", ATA, "APU OVERSPEED", Level::Warning, var("APU_N").gt(105.0))
+        // W162: `DEEP_APU_N`, not FlyByWire's own `APU_N` -- same reason.
+        EcamAlert::new("APU_OVERSPEED", ATA, "APU OVERSPEED", Level::Warning, var("DEEP_APU_N").gt(105.0))
             .confirm(0.5)
             .step(line("APU MASTER SW", "OFF").done(var("OVHD_APU_MASTER_SW_PB_IS_ON").off()))
             .status_line("APU INOP")
@@ -396,7 +401,9 @@ pub fn register(r: &mut Registry) {
     );
 
     r.alert(
-        EcamAlert::new("APU_OIL_LO_PR", ATA, "APU OIL LO PR", Level::Caution, var("APU_OIL_PRESSURE_PSI").lt(15.0))
+        // W162: `DEEP_APU_OIL_PRESSURE_PSI`, not FlyByWire's own
+        // `APU_OIL_PRESSURE_PSI` -- same reason.
+        EcamAlert::new("APU_OIL_LO_PR", ATA, "APU OIL LO PR", Level::Caution, var("DEEP_APU_OIL_PRESSURE_PSI").lt(15.0))
             .confirm(5.0)
             .step(line("APU MASTER SW", "OFF").done(var("OVHD_APU_MASTER_SW_PB_IS_ON").off()))
             .status_line("APU INOP")
@@ -439,7 +446,9 @@ pub fn register(r: &mut Registry) {
     );
 
     r.alert(
-        EcamAlert::new("APU_START_FAULT", ATA, "APU START FAULT", Level::Caution, all(vec![var("OVHD_APU_START_PB_IS_ON").on(), var("APU_N").lt(55.0)]))
+        // W162: `DEEP_APU_N`, not FlyByWire's own `APU_N` -- same reason
+        // as the other three triggers above.
+        EcamAlert::new("APU_START_FAULT", ATA, "APU START FAULT", Level::Caution, all(vec![var("OVHD_APU_START_PB_IS_ON").on(), var("DEEP_APU_N").lt(55.0)]))
             .confirm(60.0)
             .step(line("APU START", "OFF").done(var("OVHD_APU_START_PB_IS_ON").off()))
             .status_line("APU START FAULT")

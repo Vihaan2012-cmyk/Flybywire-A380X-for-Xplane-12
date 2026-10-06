@@ -140,6 +140,7 @@ pub fn register(r: &mut Registry) {
     let mut c36 = Counter(0);
     let mut c35 = Counter(0);
     let mut c21 = Counter(0);
+    let mut c31 = Counter(0);
 
     let pitot_heater_ids = register_pitot(r, &mut c34);
     let static_blocked_ids = register_static_port(r, &mut c34);
@@ -169,6 +170,13 @@ pub fn register(r: &mut Registry) {
     register_cabin_pressure_sensors(r, &mut c21);
     register_oat_probe(r, &mut c34);
     register_static_averaging_lines(r, &mut c34);
+    // ---- E-ELEC Phase 2 (2026-09-27): the remaining ata34 MODEL entries.
+    register_oat_probe_1_2(r, &mut c34);
+    register_sideslip_vane(r, &mut c34);
+    register_tat_probe_3(r, &mut c34);
+    register_inertial_reference(r, &mut c34);
+    register_kccu_parts(r, &mut c31);
+    register_cds_display_monitors(r, &mut c31);
 
     register_ecam(r, &pitot_heater_ids, &static_blocked_ids, &aoa_jam_ids, &tat_heater_ids, &ra_transceiver_ids, &gps_receiver_ids, &gps_antenna_ids);
 }
@@ -247,6 +255,142 @@ fn register_tat_probe(r: &mut Registry, c: &mut Counter) -> Vec<u64> {
         heater_ids.push(ids[0]);
     }
     heater_ids
+}
+
+/// `340800050`/`051 NAV OAT PROBE 1(2) FAULT` (E-ELEC Phase 2,
+/// `E:/fbw-debug/ecam/E-ELEC-DESIGN.md`): a real, physically separate probe
+/// from the TAT probes above (Outside/static, not Total, Air Temperature --
+/// no ram-recovery correction, so no `recovery_degradation` fault makes
+/// physical sense for it, unlike TAT). The alert only needs the probe's own
+/// heater-health boolean, not a simulated reading, so this registers just
+/// that one failure per unit rather than the full `TatProbe` thermal engine
+/// -- the same boolean-fault convention `E-ELEC-DESIGN.md` already applies
+/// throughout ata24 for a component whose alert needs "is this unit healthy
+/// or not," not a physical quantity.
+fn register_oat_probe_1_2(r: &mut Registry, c: &mut Counter) -> Vec<u64> {
+    let faults = [FaultSpec { field: "heater_failure", name: "heater failure", magnitude: "0 healthy .. 1 no heat", effect: "probe ices over and its reading is no longer trustworthy", healthy: 0.0, meaning: "Heater power loss fraction" }];
+    let names = ["1", "2"];
+    let mut ids = Vec::new();
+    for n in names {
+        let id = format!("34_nav.oat_{n}");
+        let name = format!("OAT probe {n}");
+        ids.push(register_instance(r, c, 34, &id, &name, "oat_probe.heater_failure", &faults, &[])[0]);
+    }
+    ids
+}
+
+/// `340800064`-`066 NAV SIDESLIP PROBE 1(2)(3) FAULT` (E-ELEC Phase 2): the
+/// A380 carries three sideslip vanes, one more than the two AoA vanes
+/// (`ata34.rs`'s own `aoa_fault` pattern) -- same probe hardware class
+/// (external vane, heater + mechanical jam failure modes), a third named
+/// instance. Registered as the same two boolean faults `aoa_fault` reads
+/// (`JAMMED`/`HEATER_FAILED`) rather than the full `AoaVane` aerodynamic
+/// model: the alert needs only "has this probe failed," and `AoaVane::step`
+/// needs a *true sideslip angle* input this codebase's `Truth` does not
+/// carry (only `angle_of_attack_deg` exists, no sideslip/beta) -- reusing
+/// the aerodynamic engine without a real input to drive it would be
+/// inventing the missing quantity, not modelling the probe's own fault.
+fn register_sideslip_vane(r: &mut Registry, c: &mut Counter) -> Vec<u64> {
+    let faults = [
+        FaultSpec { field: "heater_failure", name: "heater failure", magnitude: "0 healthy .. 1 no heat", effect: "vane ices and jams in icing conditions", healthy: 0.0, meaning: "Heater power loss fraction" },
+        FaultSpec { field: "mechanically_stuck", name: "mechanically stuck", magnitude: "0 free .. 1 seized", effect: "reported sideslip frozen at last free angle", healthy: 0.0, meaning: "Hinge/bearing seizure fraction" },
+    ];
+    let mut ids = Vec::new();
+    for n in 1..=3 {
+        let id = format!("34_nav.sideslip_{n}");
+        let name = format!("Sideslip vane {n}");
+        let unit_ids = register_instance(r, c, 34, &id, &name, "sideslip_vane.jam_or_heater", &faults, &[]);
+        ids.push(unit_ids[0]); // heater_failure
+        ids.push(unit_ids[1]); // mechanically_stuck
+    }
+    ids
+}
+
+/// `340800070 NAV TAT PROBE 3 FAULT` (E-ELEC Phase 2): a third instance of
+/// the same probe class as `340800068`/`069` (already duplicate-of the
+/// combined `NAV TAT PROBE FAULT` and not wired under their own ids), for
+/// the third ADR this port's `LiveSensors::tick` currently feeds by sharing
+/// the captain's own TAT probe (`tat_for_adr`'s own `[snap.tat_c[0],
+/// snap.tat_c[1], snap.tat_c[0]]`, `live.rs`). Registered with the same two
+/// fault fields as probes 1/2 for a consistent component shape; only
+/// `heater_failure` feeds this alert's own boolean, matching `340800068`/
+/// `069`'s own combined-alert convention. Re-routing ADR 3's own physics
+/// onto a genuinely independent third `TatProbe` instance (rather than the
+/// existing probe-1 share) is a larger change to the ADR voter's own
+/// wiring than this one alert's cause, so it is out of scope here; the
+/// alert's own trigger (this probe's own health) is real and independently
+/// armable regardless.
+fn register_tat_probe_3(r: &mut Registry, c: &mut Counter) -> u64 {
+    let faults = [
+        FaultSpec { field: "heater_failure", name: "heater failure", magnitude: "0 healthy .. 1 no heat", effect: "icing grows the element's thermal time constant, slowing/biasing the reading", healthy: 0.0, meaning: "Heater power loss fraction" },
+        FaultSpec { field: "recovery_degradation", name: "recovery factor degradation", magnitude: "0 (r=0.99) .. 1 (r=0)", effect: "reported TAT reads low relative to true recovery temperature", healthy: 0.0, meaning: "Recovery-factor loss fraction" },
+    ];
+    let ids = register_instance(r, c, 34, "34_nav.tat_3", "TAT probe 3", "tat_probe::TatProbe.step", &faults, &[]);
+    ids[0]
+}
+
+/// `340800017`/`020 NAV CAPT AND F/O ATT/HDG DISAGREE` and `316800002 NAV
+/// HUD FPV DISAGREE`: a gyro drift on one of the three ADIRUs' inertial
+/// references. `LiveSensors` publishes it as `DEEP_IR_<n>_GYRO_DRIFT_DEG_HR`
+/// and `physics::adirs` adds it to that unit's strapdown gyros, so the
+/// alerts fire only once that IR's own solution has actually drifted.
+fn register_inertial_reference(r: &mut Registry, c: &mut Counter) -> Vec<u64> {
+    let faults = [FaultSpec {
+        field: "alignment_drift",
+        name: "gyro drift",
+        magnitude: "0 healthy .. 1 = 100 deg/hr added to all three of this IR's gyros (GENERIC, see sensors::live::IR_GYRO_DRIFT_AT_FULL_FAULT_DEG_HR)",
+        effect: "this IR's strapdown attitude, heading and flight path angle drift away from the other two; past the FCOM thresholds the CAPT/F.O ATT, HDG or HUD FPV disagree alerts fire",
+        healthy: 0.0,
+        meaning: "Gyro drift severity",
+    }];
+    let names = ["1 (CAPT)", "2 (F.O)", "3 (standby)"];
+    let mut ids = Vec::new();
+    for (i, n) in names.iter().enumerate() {
+        let id = format!("34_nav.ir_{}", i + 1);
+        let name = format!("Inertial Reference {n}");
+        ids.push(register_instance(r, c, 34, &id, &name, "inertial_reference.alignment_drift", &faults, &[])[0]);
+    }
+    ids
+}
+
+/// `313800001`/`002`/`005`/`006` CDS CAPT (F/O) CURSOR CTL / KEYBOARD
+/// FAULT: the KCCU's cursor control device and keyboard, which FCOM
+/// DSC-31-30-10 says fail independently of each other. `deep::electrical`
+/// owns the KCCU (`31_elec.kccu-<side>`, whose power loss is the whole-unit
+/// `313800003`/`004`); these extend it with each part's own BITE failure.
+fn register_kccu_parts(r: &mut Registry, c: &mut Counter) {
+    let faults = [
+        FaultSpec { field: "ccd_failed", name: "cursor control device failed", magnitude: "0 healthy .. >0 failed (BITE)", effect: "the KCCU reports its trackball/validation part failed: CDS CURSOR CTL FAULT", healthy: 0.0, meaning: "Cursor control device failure" },
+        FaultSpec { field: "keyboard_failed", name: "keyboard failed", magnitude: "0 healthy .. >0 failed (BITE)", effect: "the KCCU reports its keyboard failed: CDS KEYBOARD FAULT", healthy: 0.0, meaning: "Keyboard failure" },
+    ];
+    for (side, name) in [("capt", "CAPT KCCU"), ("fo", "F/O KCCU")] {
+        let id = format!("31_elec.kccu-{side}");
+        let ids = register_failures_only(r, c, 31, &id, name, "sensors::live::LiveSensors (KCCU BITE)", &faults);
+        let params: Vec<ParamDef> = faults.iter().map(|f| ParamDef { name: f.field.to_string(), meaning: f.meaning.to_string(), healthy: f.healthy }).collect();
+        r.extend_component(&id).params(&params).failures(&ids);
+    }
+}
+
+/// `311800012` CDS DISPLAY DISAGREE: FCOM p.5393, a display unit's image
+/// disagrees with the copy the CDS sends a second unit to monitor. One
+/// failure per display unit `deep::electrical` models
+/// (`sensors::live::CDS_MONITORED_DUS`).
+fn register_cds_display_monitors(r: &mut Registry, c: &mut Counter) {
+    let faults = [FaultSpec {
+        field: "display_monitor_disagree",
+        name: "displayed image disagrees with its monitor",
+        magnitude: "0 healthy .. >0 failed",
+        effect: "the CDS's display/monitor comparison fails for this unit: CDS DISPLAY DISAGREE",
+        healthy: 0.0,
+        meaning: "Display/monitor discrepancy",
+    }];
+    for du in super::live::CDS_MONITORED_DUS {
+        let id = format!("31_elec.{du}");
+        let name = du.to_ascii_uppercase().replace('-', " ");
+        let ids = register_failures_only(r, c, 31, &id, &name, "sensors::live::LiveSensors (CDS display monitor)", &faults);
+        let params: Vec<ParamDef> = faults.iter().map(|f| ParamDef { name: f.field.to_string(), meaning: f.meaning.to_string(), healthy: f.healthy }).collect();
+        r.extend_component(&id).params(&params).failures(&ids);
+    }
 }
 
 fn register_radio_altimeter(r: &mut Registry, c: &mut Counter) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
@@ -656,6 +800,14 @@ fn register_smoke_detectors(r: &mut Registry, c: &mut Counter) {
         FaultSpec { field: "sensitivity_loss", name: "desensitised optics", magnitude: "0 clean .. 1 fully desensitised", effect: "delayed or missed detection of real smoke", healthy: 0.0, meaning: "Optics contamination reducing sensitivity" },
         FaultSpec { field: "false_bias_pct_per_ft", name: "spurious signal", magnitude: "percent/ft added, not 0..1", effect: "can alarm with no smoke present", healthy: 0.0, meaning: "Spurious added obscuration signal" },
         FaultSpec { field: "stuck", name: "stuck output", magnitude: "0 healthy .. 1 fully frozen", effect: "reading stops responding to true smoke density", healthy: 0.0, meaning: "Stuck fraction" },
+        // ECAM completeness pass (E-FIRE design sheet §A): a fourth,
+        // independent fault on every smoke detector instance -- the
+        // detector's own monitored circuit/self-test, orthogonal to the
+        // three sensing faults above. Added to the shared `faults` array so
+        // every instance below (the pre-existing cargo/lavatory ones and
+        // every new one this pass adds) gets its own `* DET FAULT` failure
+        // id alongside its existing three.
+        FaultSpec { field: "circuit_fault", name: "circuit/self-test fault", magnitude: "0 healthy .. 1 fully faulted", effect: "the detector's own monitored circuit reports faulted, independent of whether smoke is present", healthy: 0.0, meaning: "Detector circuit/self-test health" },
     ];
     // Cargo compartments: 2 (fwd/aft), each with a redundant pair of
     // detectors -- a commonly published transport-category cargo
@@ -674,6 +826,69 @@ fn register_smoke_detectors(r: &mut Registry, c: &mut Counter) {
         let name = format!("Lavatory smoke detector ({n}) [GENERIC count, configuration-dependent]");
         register_instance(r, c, 26, &id, &name, "smoke_detector::SmokeDetector.step", &faults, &[]);
     }
+
+    // ECAM completeness pass (E-FIRE design sheet §B): new detector
+    // instances reusing existing (or newly modelled, §D/§E) zone-smoke
+    // sources, following the exact same pattern the lavatory loop above
+    // already established -- a `LiveSmoke` sampling a zone's own published
+    // `THERMAL_ZONE_<Z>_SMOKE_CONCENTRATION`. Each entry: (id slug, display
+    // name).
+    let new_instances = [
+        ("bulk_cargo", "Bulk cargo smoke detector"),
+        ("avncs_main_l", "L Main avionics bay smoke detector"),
+        ("avncs_main_r", "R Main avionics bay smoke detector"),
+        ("avncs_upper_l", "L Upper avionics bay smoke detector"),
+        ("avncs_upper_r", "R Upper avionics bay smoke detector"),
+        ("avncs_aft", "Aft avionics bay smoke detector"),
+        ("main5l_fltrest", "MAIN 5L Flight Rest smoke detector"),
+        ("main5l_cabrest", "MAIN 5L Cabin Rest smoke detector"),
+        ("main_1l_cws", "MAIN 1L CWS smoke detector"),
+        ("main_1l_rcc", "MAIN 1L RCC smoke detector"),
+        ("upper_1l_cws", "UPPER 1L CWS smoke detector"),
+        ("upper_1l_rcc", "UPPER 1L RCC smoke detector"),
+        ("main_2l_cws", "MAIN 2L CWS smoke detector"),
+        ("main_2l_rcc", "MAIN 2L RCC smoke detector"),
+        ("upper_2l_cws", "UPPER 2L CWS smoke detector"),
+        ("upper_2l_rcc", "UPPER 2L RCC smoke detector"),
+        ("main_3r_cws", "MAIN 3R CWS smoke detector"),
+        ("main_3r_rcc", "MAIN 3R RCC smoke detector"),
+        ("upper_3r_cws", "UPPER 3R CWS smoke detector"),
+        ("upper_3r_rcc", "UPPER 3R RCC smoke detector"),
+        ("upper_1l_shower", "UPPER 1L Shower smoke detector"),
+        ("upper_1r_shower", "UPPER 1R Shower smoke detector"),
+        ("fwdlowercrewrest", "FWD Lower Crew Rest (LDCR) smoke detector"),
+    ];
+    for (slug, name) in new_instances {
+        let id = format!("26_fire.smoke_{slug}");
+        register_instance(r, c, 26, &id, name, "smoke_detector::SmokeDetector.step", &faults, &[]);
+    }
+
+    // ECAM completeness pass (un-UNSOURCED per `BRIEF-phase2-FCOM.md`,
+    // FCOM PRO-ABN-ECAM p.4997/p.5012): the Smoke Detection Function's own
+    // two aggregate, system-level BITE discretes -- not a per-detector
+    // sensing fault (those are `circuit_fault` above), but the SDF
+    // computer's own two monitored self-checks. Both are direct pass-
+    // throughs of their own registered failure's armed state (module doc
+    // on `live_discrete::DiscreteSensors::sdf_ids`).
+    let sdf_faults = [
+        FaultSpec {
+            field: "configuration_fault",
+            name: "cabin-configuration mismatch",
+            magnitude: "0 healthy .. 1 (any nonzero) the SDF reports a mismatch",
+            effect: "the SDF fails to reconcile its fitted smoke detectors against the aircraft's own cabin configuration (FCOM PRO-ABN-ECAM p.4997, `260800042` SMOKE FACILITIES DET FAULT)",
+            healthy: 0.0,
+            meaning: "SDF cabin-configuration mismatch, a pass-through discrete",
+        },
+        FaultSpec {
+            field: "safety_test_overdue",
+            name: "automatic safety test overdue",
+            magnitude: "0 healthy (tested) .. 1 (any nonzero) overdue",
+            effect: "the SDF's own automatic safety test (run every 10 h on ground) has not completed successfully within the last 50 h (FCOM PRO-ABN-ECAM p.5012, `260800092` SMOKE SAFETY TEST REQUIRED); this failure arms the BITE 'overdue' state directly rather than driving a literal elapsed-hours clock -- this area has no persisted operating-hours counter to drive one from, the same class of simplification `hydraulics::thermal`'s own monitored-switch discretes already use",
+            healthy: 0.0,
+            meaning: "SDF automatic safety-test-overdue BITE flag",
+        },
+    ];
+    register_instance(r, c, 26, "26_fire.smoke_detection_function", "Smoke Detection Function (SDF)", "live_discrete::DiscreteSensors.tick (aggregate SDF discretes)", &sdf_faults, &[]);
 }
 
 // ---------------------------------------------------------------------

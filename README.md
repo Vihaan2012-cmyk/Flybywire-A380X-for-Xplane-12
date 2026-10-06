@@ -188,7 +188,7 @@ of them set, so a run with and a run without is a measurement rather than an arg
 | `FBW_SCREENS=off` | Draws no cockpit display: no upload, no quad, no underlay. The browser views keep running, so the difference in frame time is what the twenty screens cost — which no timer inside the plugin can see. |
 | `FBW_XP_EFFECTS=off` | Stops mirroring the plugin's own failure state onto X-Plane's (`sim/operation/failures/rel_*`: fires, seizures, flameouts, hydraulic leaks, tyres, brakes). |
 | `FBW_DEEP=off` | Skips the deep-systems areas for the frame. |
-| `FBW_XP_WRITES=…` | Stops the plugin driving X-Plane's own physics. `off` for all of it, or a comma list of `surfaces`, `handling`, `weight`, `weight-stations`, `weight-cg`. |
+| `FBW_XP_WRITES=…` | Stops the plugin driving X-Plane's own physics. `off` for all of it, or a comma list of `surfaces`, `handling`, `weight`, `weight-stations`, `weight-cg`, `weight-fuel`. |
 
 Each one logs that it is active on its first tick, so a run can be checked rather than
 assumed. Two cautions learned the hard way: confirm from `Log.txt` that the switch

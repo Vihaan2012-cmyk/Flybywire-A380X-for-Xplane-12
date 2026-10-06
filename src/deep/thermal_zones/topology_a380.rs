@@ -32,6 +32,17 @@ use super::network::{ThermalNetwork, Zone, ZoneId, ZoneRef};
 pub struct A380Zones {
     pub main_avionics: ZoneId,
     pub upper_avionics: ZoneId,
+    /// ECAM completeness pass (E-FIRE §D): the A380's third avionics bay.
+    /// Sourced: Airbus has **three** avionics bays -- main, upper, aft
+    /// (Aviationtechnic technical note, "The A380 has three avionics bays:
+    /// the main avionics bay, the upper avionics bay, the aft avionics
+    /// bay"; cross-confirmed by a second independent aviation-knowledge
+    /// source with the same three-bay list). `main_avionics`/
+    /// `upper_avionics` above already model two of the three; this is the
+    /// third, sized by the same generic method this file's own comment for
+    /// the other two uses (no distinct certification figure exists for any
+    /// of these bays either).
+    pub aft_avionics: ZoneId,
     pub nose_gear_well: ZoneId,
     pub wing_gear_well: ZoneId,
     pub body_gear_well: ZoneId,
@@ -50,6 +61,18 @@ pub struct A380Zones {
     pub cabin_upper_deck: ZoneId,
     pub tail_cone: ZoneId,
     pub belly_fairing_packs: ZoneId,
+    /// ECAM completeness pass (E-FIRE §E): the FWD Lower Crew Rest (LDCR)
+    /// module. Sourced as a real A380 feature -- a below-main-deck crew
+    /// rest compartment built into the lower fuselage between the cabin
+    /// floor and the forward cargo hold (SimpleFlying's "Inside The Airbus
+    /// A380's Secret Crew Rest Areas" and "How Cabin Crew Rest & Sleep On
+    /// The Airbus A380"; Executive Traveller's pilot/cabin-crew-rest-areas
+    /// piece -- consistent on "a compartment built into the lower
+    /// fuselage... below the main passenger deck"). This is the "lower
+    /// deck" `260800064`/`260800067` LOWER DECK LAVATORY name --
+    /// `thermal_zones` had no lower-deck compartment of any kind before
+    /// this addition.
+    pub fwd_lower_crew_rest: ZoneId,
 }
 
 /// Ventilation link indices a fault/system model needs to drive
@@ -69,6 +92,8 @@ pub struct A380VentLinks {
     pub apu_compartment_vent: usize,
     pub belly_pack_bay_vent: usize,
     pub tail_cone_vent: usize,
+    pub aft_avionics_fan: usize,
+    pub fwd_lower_crew_rest_fan: usize,
 }
 
 pub struct A380Thermal {
@@ -146,6 +171,14 @@ pub fn build() -> A380Thermal {
     // own running heat is injected externally by the APU model.
     let apu_compartment = net.add_zone(Zone::new("ApuCompartment", 6.0, 2.0e5, 70.0, 8.0, 0.1, 0.0, INITIAL_TEMP_C));
 
+    // -- Aft avionics bay (E-FIRE §D, module doc): same order-of-magnitude
+    // baseline heat/volume method as `main_avionics`/`upper_avionics`
+    // above; its real-world neighbours are the tail cone and the APU
+    // compartment (the aft equipment centre sits in the same aft-fuselage
+    // region as both), mirrored the same way `main_avionics`/
+    // `upper_avionics` link to `cargo_fwd` etc. below.
+    let aft_avionics = net.add_zone(Zone::new("AftAvionics", 6.0, 3.0e5, 100.0, 3.0, 0.0, 2000.0, INITIAL_TEMP_C));
+
     // -- Cargo holds (forward/aft/bulk). Volumes GENERIC, split from
     // Airbus's own public ~184 m^3 total lower-deck cargo volume figure
     // roughly by the fwd/aft/bulk proportions typical of a widebody
@@ -155,6 +188,17 @@ pub fn build() -> A380Thermal {
     let cargo_fwd = net.add_zone(Zone::new("CargoFwd", 110.0, 5.0e5, 120.0, 30.0, 0.0, 50.0, INITIAL_TEMP_C));
     let cargo_aft = net.add_zone(Zone::new("CargoAft", 60.0, 3.0e5, 80.0, 20.0, 0.0, 50.0, INITIAL_TEMP_C));
     let cargo_bulk = net.add_zone(Zone::new("CargoBulk", 14.0, 1.0e5, 30.0, 8.0, 0.0, 20.0, INITIAL_TEMP_C));
+
+    // -- FWD Lower Crew Rest (LDCR) module (E-FIRE §E, module doc): a
+    // below-main-deck crew-rest compartment carrying bunks and a small
+    // lavatory. GENERIC volume/area, sized as a walk-in module (a few bunk
+    // berths plus an aisle), well below a cargo hold; its real structural
+    // neighbour is the forward cargo hold, immediately aft/below it.
+    // No exterior skin of its own -- below the main deck, forward of the
+    // cargo hold, reachable only via its conduction link to `cargo_fwd`
+    // (the same "no exterior boundary of its own" convention the cabin
+    // decks below already use for the identical reason).
+    let fwd_lower_crew_rest = net.add_zone(Zone::new("FwdLowerCrewRest", 20.0, 1.5e5, 40.0, 0.0, 0.0, 100.0, INITIAL_TEMP_C));
 
     // -- Crown area: the long void between the upper-deck ceiling and the
     // upper fuselage skin, running most of the fuselage length. GENERIC
@@ -218,6 +262,15 @@ pub fn build() -> A380Thermal {
     net.add_conduction_link(cabin_main_deck, cargo_bulk, 40.0);
     net.add_conduction_link(tail_cone, apu_compartment, 50.0);
     net.add_conduction_link(tail_cone, cargo_aft, 20.0);
+    // Aft avionics bay (E-FIRE §D): its real-world neighbours, the same
+    // conductance order of magnitude the other avionics<->structure links
+    // above use.
+    net.add_conduction_link(aft_avionics, tail_cone, 20.0);
+    net.add_conduction_link(aft_avionics, apu_compartment, 20.0);
+    // FWD Lower Crew Rest module (E-FIRE §E): its real structural
+    // neighbour, mirroring the existing `cargo_fwd<->main_avionics` link
+    // already in this network.
+    net.add_conduction_link(fwd_lower_crew_rest, cargo_fwd, 20.0);
 
     // -----------------------------------------------------------------
     // Ventilation links: extract/supply flow-through, generalising
@@ -265,6 +318,13 @@ pub fn build() -> A380Thermal {
     let apu_compartment_vent = net.add_ventilation_link(apu_compartment, ZoneRef::OutsideAir, 1.5);
     let belly_pack_bay_vent = net.add_ventilation_link(belly_fairing_packs, ZoneRef::OutsideAir, 4.0);
     let tail_cone_vent = net.add_ventilation_link(tail_cone, ZoneRef::OutsideAir, 0.3);
+    // Aft avionics bay: extract to outside, same GENERIC flow order of
+    // magnitude as `main_avionics_fan`/`upper_avionics_fan` above (E-FIRE
+    // §D).
+    let aft_avionics_fan = net.add_ventilation_link(aft_avionics, ZoneRef::OutsideAir, 0.35);
+    // FWD Lower Crew Rest module: cabin-conditioned space, extract to the
+    // main deck's own air exactly as the cargo bays' fans do (E-FIRE §E).
+    let fwd_lower_crew_rest_fan = net.add_ventilation_link(fwd_lower_crew_rest, ZoneRef::Zone(cabin_main_deck), 0.10);
 
     // -----------------------------------------------------------------
     // Damage interface (task step 3): a handful of representative
@@ -299,6 +359,7 @@ pub fn build() -> A380Thermal {
         zones: A380Zones {
             main_avionics,
             upper_avionics,
+            aft_avionics,
             nose_gear_well,
             wing_gear_well,
             body_gear_well,
@@ -317,6 +378,7 @@ pub fn build() -> A380Thermal {
             cabin_upper_deck,
             tail_cone,
             belly_fairing_packs,
+            fwd_lower_crew_rest,
         },
         vents: A380VentLinks {
             main_avionics_fan,
@@ -332,6 +394,8 @@ pub fn build() -> A380Thermal {
             apu_compartment_vent,
             belly_pack_bay_vent,
             tail_cone_vent,
+            aft_avionics_fan,
+            fwd_lower_crew_rest_fan,
         },
         damage,
     }
@@ -361,8 +425,9 @@ mod tests {
         let a380 = build();
         // 2 avionics + 3 gear wells + 4 wing LE/TE + 4 pylons + 4 nacelles
         // + 1 APU + 3 cargo + 1 crown + 2 cabin decks + 1 tail cone + 1
-        // belly = 26.
-        assert_eq!(a380.network.zones.len(), 26);
+        // belly = 26, plus the E-FIRE pass's two new zones (aft avionics,
+        // FWD Lower Crew Rest) = 28.
+        assert_eq!(a380.network.zones.len(), 28);
     }
 
     #[test]

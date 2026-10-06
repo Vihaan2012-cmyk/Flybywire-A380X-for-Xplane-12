@@ -1,7 +1,7 @@
 //! Deep hydraulics: a generic line/volume hydraulic network solver
 //! (`network.rs`) plus the A380 green/yellow circuit built from it
 //! (`topology.rs`, `pump.rs`, `reservoir.rs`, `accumulator.rs`, `thermal.rs`,
-//! `fluid.rs`). See `D:\fbw-xp-systems\docs\deep\BRIEF.md` for the shared
+//! `fluid.rs`). See `D:\A380\fbw-xp-systems\docs\deep\BRIEF.md` for the shared
 //! rules this directory follows; see this directory's own `PROGRESS.md` and
 //! `FAILURES.md` for what has been built and every failure it supports.
 //!

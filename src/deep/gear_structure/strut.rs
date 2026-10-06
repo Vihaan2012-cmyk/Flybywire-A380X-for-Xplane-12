@@ -305,7 +305,29 @@ pub struct StrutFaults {
     pub gas_leak: f64,
     /// Hydraulic oil leak rate (damping fluid).
     pub oil_leak: f64,
+    /// `E-IND-DESIGN.md` 320800043 L/G OLEO PRESS MONITORING FAULT: the
+    /// strut's own pressure-*sensing* function has failed, independent of
+    /// the real `gas_charge_fraction` above -- a BITE-reported boolean
+    /// (>= `BITE_THRESHOLD`), mirroring `retraction::RetractionFaults`'s
+    /// own boolean-above-threshold convention.
+    pub gas_charge_sensor_fail: f64,
+    /// `E-IND-DESIGN.md` 320800046 L/G WEIGHT ON WHEELS FAULT: this leg's
+    /// weight-on-wheels sensing disagrees with its true ground-contact
+    /// state above `SENSOR_LIE_THRESHOLD`, the identical pattern
+    /// `retraction::RetractionFaults::sensor_lies` already uses for
+    /// lock-position sensing, applied to ground-contact sensing instead.
+    pub wow_sensing_fail: f64,
 }
+
+/// A BITE-reported boolean fault (a self-test either passes or fails) is
+/// considered failed at or above this fraction -- this crate's own
+/// established convention (`retraction::SENSOR_LIE_THRESHOLD`,
+/// `gear_structure::live::ANTISKID_BITE_THRESHOLD`), reused rather than a
+/// second GENERIC number invented for the same idea.
+const BITE_THRESHOLD: f64 = 0.5;
+/// As `retraction::SENSOR_LIE_THRESHOLD`: above this severity the *sensed*
+/// state reads the opposite of the true one.
+const SENSOR_LIE_THRESHOLD: f64 = 0.5;
 
 /// One tick's inputs.
 #[derive(Clone, Copy, Debug)]
@@ -343,6 +365,15 @@ pub struct StrutOutputs {
     pub cycle_completed: bool,
     pub peak_force_last_cycle_n: f64,
     pub life_fraction_consumed: f64,
+    /// `E-IND-DESIGN.md` 320800043: the strut's own pressure-monitoring BITE
+    /// has failed (independent of the real `gas_charge_fraction`).
+    pub gas_charge_sensor_fault: bool,
+    /// `E-IND-DESIGN.md` 320800046: what weight-on-wheels sensing *reports*
+    /// for this leg, which `wow_sensing_fail` can detach from the true
+    /// ground-contact state (`inputs.on_ground`) above `SENSOR_LIE_
+    /// THRESHOLD` -- the same true/sensed split `retraction::
+    /// RetractionOutputs::sensed_downlocked` already carries for lock state.
+    pub sensed_on_ground: bool,
 }
 
 pub struct Strut {
@@ -454,6 +485,13 @@ impl Strut {
     pub fn step(&mut self, inputs: &StrutInputs, faults: &StrutFaults) -> StrutOutputs {
         let dt = inputs.dt_s.max(0.0);
 
+        // Two independent BITE-style side channels, computed once up front
+        // since both apply identically whether or not the leg is on the
+        // ground this tick (module doc on each field).
+        let gas_charge_sensor_fault = faults.gas_charge_sensor_fail >= BITE_THRESHOLD;
+        let wow_lie = faults.wow_sensing_fail >= SENSOR_LIE_THRESHOLD;
+        let sensed_on_ground = inputs.on_ground != wow_lie;
+
         // Servicing: gas/oil depletion from active leak faults, plus this
         // strut's own accumulated seal damage from past overload events --
         // an emergent, not scripted, escalation.
@@ -484,6 +522,8 @@ impl Strut {
                 cycle_completed,
                 peak_force_last_cycle_n,
                 life_fraction_consumed: self.life_fraction_consumed,
+                gas_charge_sensor_fault,
+                sensed_on_ground,
             };
         }
 
@@ -576,6 +616,8 @@ impl Strut {
             cycle_completed,
             peak_force_last_cycle_n,
             life_fraction_consumed: self.life_fraction_consumed,
+            gas_charge_sensor_fault,
+            sensed_on_ground,
         }
     }
 }
@@ -740,7 +782,7 @@ mod tests {
     #[test]
     fn a_gas_leak_sags_the_leg_to_a_higher_static_compression() {
         let mut s = Strut::new(LegKind::Body);
-        let faults = StrutFaults { gas_leak: 1.0, oil_leak: 0.0 };
+        let faults = StrutFaults { gas_leak: 1.0, ..StrutFaults::default() };
         let inputs = StrutInputs { on_ground: true, sink_speed_ms: 0.0, load_n: s.f_ref_n, side_load_n: 0.0, locked_down: true, dt_s: 3600.0 };
         let before = s.x_m / s.stroke_m;
         let out = s.step(&inputs, &faults);
@@ -796,6 +838,36 @@ mod tests {
         assert!(out.force_n.is_finite());
         assert!(out.compression_frac.is_finite());
         assert!(!out.force_n.is_nan());
+    }
+
+    /// `E-IND-DESIGN.md` 320800043 L/G OLEO PRESS MONITORING FAULT and
+    /// 320800046 L/G WEIGHT ON WHEELS FAULT: both are independent BITE-
+    /// style side channels, unrelated to each other and to the strut's own
+    /// real `gas_leak`/`oil_leak` faults.
+    #[test]
+    fn gas_charge_sensor_and_wow_sensing_faults_are_independent_bite_flags() {
+        let mut s = Strut::new(LegKind::Wing);
+        let grounded = StrutInputs { on_ground: true, sink_speed_ms: 0.0, load_n: s.f_ref_n, side_load_n: 0.0, locked_down: true, dt_s: 1.0 };
+
+        let healthy_out = s.step(&grounded, &healthy());
+        assert!(!healthy_out.gas_charge_sensor_fault);
+        assert!(healthy_out.sensed_on_ground, "on the ground, healthy sensing must report on_ground");
+
+        let mut sensor_faulted = Strut::new(LegKind::Wing);
+        let faults = StrutFaults { gas_charge_sensor_fail: 1.0, ..StrutFaults::default() };
+        let out = sensor_faulted.step(&grounded, &faults);
+        assert!(out.gas_charge_sensor_fault, "the armed pressure-monitoring BITE must report failed");
+        assert!(out.sensed_on_ground, "and must not affect weight-on-wheels sensing, which is a separate channel");
+
+        let mut wow_faulted = Strut::new(LegKind::Wing);
+        let wow_faults = StrutFaults { wow_sensing_fail: 1.0, ..StrutFaults::default() };
+        let wow_out = wow_faulted.step(&grounded, &wow_faults);
+        assert!(!wow_out.gas_charge_sensor_fault, "and must not affect the pressure-monitoring channel");
+        assert!(!wow_out.sensed_on_ground, "an armed WOW-sensing fault must invert the sensed ground-contact state");
+
+        let airborne = StrutInputs { on_ground: false, ..grounded };
+        let airborne_out = wow_faulted.step(&airborne, &wow_faults);
+        assert!(airborne_out.sensed_on_ground, "airborne with the same fault armed, the sensed state must invert the other way");
     }
 }
 

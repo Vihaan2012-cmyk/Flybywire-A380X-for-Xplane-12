@@ -337,10 +337,10 @@ fn ata21(v: &mut Vec<BreakerDef>) {
     // FDAC's own primary bus, AC_ESS).
     v.push(d("hotair-1", "HOT AIR VALVE 1", 21, Bus::Msfs(6), VALVE_ACTUATOR_W / 115., "typical motor-operated hot-air valve actuator (50 W, typical/derived); FDAC 1's own AC_ESS channel bus", &["hot air valve 1"], &[21_005]));
     v.push(d("hotair-2", "HOT AIR VALVE 2", 21, Bus::Msfs(6), VALVE_ACTUATOR_W / 115., "typical motor-operated hot-air valve actuator (50 W, typical/derived); FDAC 2's own AC_ESS channel bus", &["hot air valve 2"], &[21_006]));
-    v.push(d("fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, Bus::Msfs(9), VALVE_ACTUATOR_W / 28., "typical motor-operated isolation valve actuator (50 W, typical/derived); VCM Fwd's DC2 channel bus (mod.rs VentilationControlModule::new)", &["forward cargo isolation valve"], &[21_007]));
-    v.push(d("fwd-extract-fan", "FWD CARGO EXTRACT FAN", 21, Bus::Msfs(9), EXTRACT_FAN_W / 28., "typical small extraction fan motor (150 W, typical/derived); VCM Fwd's DC2 channel bus", &["forward cargo extraction fan"], &[21_008]));
-    v.push(d("bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, Bus::Msfs(10), VALVE_ACTUATOR_W / 28., "typical motor-operated isolation valve actuator (50 W, typical/derived); VCM Aft's DC_ESS channel bus", &["bulk cargo isolation valve"], &[21_009]));
-    v.push(d("bulk-extract-fan", "BULK CARGO EXTRACT FAN", 21, Bus::Msfs(10), EXTRACT_FAN_W / 28., "typical small extraction fan motor (150 W, typical/derived); VCM Aft's DC_ESS channel bus", &["bulk cargo extraction fan"], &[21_010]));
+    v.push(d("fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, Bus::Msfs(8), VALVE_ACTUATOR_W / 28., "typical motor-operated isolation valve actuator (50 W, typical/derived); VCM Fwd's own primary channel bus, DC1/411PP -- mod.rs VentilationControlModule::new(.., VcmId::Fwd, [DirectCurrent(1), DirectCurrentEssential]), channel 1 backed by powered_by[0] and default-active (was wired to DC2, which is VCM AFT's bus, not Fwd's)", &["forward cargo isolation valve"], &[21_007]));
+    v.push(d("fwd-extract-fan", "FWD CARGO EXTRACT FAN", 21, Bus::Msfs(2), EXTRACT_FAN_W / 115., "typical small extraction fan motor (150 W, typical/derived); the fan's own dedicated bus, not the VCM's channel bus -- ventilation_control_module.rs ForwardCargoVentilationControlSystem::new(AlternatingCurrent(1)), really gated in receive_power/fwd_extraction_fan_is_on (was wired to VCM Fwd's DC channel, which the fan does not draw from at all)", &["forward cargo extraction fan"], &[21_008]));
+    v.push(d("bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, Bus::Msfs(9), VALVE_ACTUATOR_W / 28., "typical motor-operated isolation valve actuator (50 W, typical/derived); VCM Aft's own primary channel bus, DC2/214PP -- mod.rs VentilationControlModule::new(.., VcmId::Aft, [DirectCurrent(2), DirectCurrentEssential]), channel 1 backed by powered_by[0] and default-active, matching fwd-isol-valve's convention (was on DC_ESS, Aft's secondary/standby channel)", &["bulk cargo isolation valve"], &[21_009]));
+    v.push(d("bulk-extract-fan", "BULK CARGO EXTRACT FAN", 21, Bus::Msfs(5), EXTRACT_FAN_W / 115., "typical small extraction fan motor (150 W, typical/derived); the fan's own dedicated bus, not the VCM's channel bus -- ventilation_control_module.rs BulkVentilationControlSystem::new(AlternatingCurrent(4)), really gated in receive_power/bulk_extraction_fan_is_on (was wired to VCM Aft's DC_ESS channel, which the fan does not draw from at all)", &["bulk cargo extraction fan"], &[21_010]));
     v.push(d("cargo-heater", "BULK CARGO HEATER", 21, Bus::Msfs(3), CARGO_HEATER_W / 115., "typical cargo-bay heater element (1000 W, typical/derived); mod.rs AirHeater::new(AlternatingCurrent(2)), \"// 200XP4\"", &["bulk cargo heater element"], &[21_011]));
 
     // FDAC 1/2, each two redundant channels (mod.rs: channel 1 on AC_ESS
@@ -355,7 +355,7 @@ fn ata21(v: &mut Vec<BreakerDef>) {
     v.push(dp("fdac-2b", "FDAC 2 CHANNEL 2", 21, Bus::Msfs(5), AVIONICS_LRU_W / 115., "generic avionics LRU (50 W, typical/derived); mod.rs FullDigitalAGUController::new(FdacId::Two, [..., AC4 \"204XP\"])", &["FDAC 2 channel 2 (pack 2 control)"], "ELEC_FDAC_2_2_BREAKER_OPEN"));
     v.push(dp("tadd-1", "TADD CHANNEL 1", 21, Bus::Msfs(3), AVIONICS_LRU_W / 115., "generic avionics LRU (50 W, typical/derived); mod.rs TrimAirDriveDevice::new([AC2 \"117XP\", ...])", &["trim air drive device channel 1"], "ELEC_TADD_1_BREAKER_OPEN"));
     v.push(dp("tadd-2", "TADD CHANNEL 2", 21, Bus::Msfs(5), AVIONICS_LRU_W / 115., "generic avionics LRU (50 W, typical/derived); mod.rs TrimAirDriveDevice::new([..., AC4 \"206XP\"])", &["trim air drive device channel 2"], "ELEC_TADD_2_BREAKER_OPEN"));
-    v.push(dp("vcm-fwd-1", "VCM FWD CHANNEL 1", 21, Bus::Msfs(9), AVIONICS_LRU_W / 28., "generic avionics LRU (50 W, typical/derived); mod.rs VentilationControlModule::new(Fwd, [DC2 \"411PP\", ...])", &["forward ventilation control module channel 1"], "ELEC_VCM_FWD_1_BREAKER_OPEN"));
+    v.push(dp("vcm-fwd-1", "VCM FWD CHANNEL 1", 21, Bus::Msfs(8), AVIONICS_LRU_W / 28., "generic avionics LRU (50 W, typical/derived); mod.rs VentilationControlModule::new(Fwd, [DC1 \"411PP\", ...]) -- fixes/W185.md: 411PP is DC1's own PP number (VcmId::Fwd's powered_by[0] is ElectricalBusType::DirectCurrent(1)), not DC2's as this entry's comment previously (self-contradictorily) said; was wired to Bus::Msfs(9)/DC2, which is VCM Aft's channel-1 bus, not Fwd's -- same class of bug fixes/W115.md and fixes/W161.md already fixed for fwd-isol-valve/fwd-extract-fan, flagged as a follow-up by fixes/W161.md but not fixed there", &["forward ventilation control module channel 1"], "ELEC_VCM_FWD_1_BREAKER_OPEN"));
     v.push(dp("vcm-fwd-2", "VCM FWD CHANNEL 2", 21, Bus::Msfs(10), AVIONICS_LRU_W / 28., "generic avionics LRU (50 W, typical/derived); mod.rs VentilationControlModule::new(Fwd, [..., DC_ESS \"109PP\"])", &["forward ventilation control module channel 2"], "ELEC_VCM_FWD_2_BREAKER_OPEN"));
     v.push(dp("vcm-aft-1", "VCM AFT CHANNEL 1", 21, Bus::Msfs(9), AVIONICS_LRU_W / 28., "generic avionics LRU (50 W, typical/derived); mod.rs VentilationControlModule::new(Aft, [DC2 \"214PP\", ...])", &["aft ventilation control module channel 1"], "ELEC_VCM_AFT_1_BREAKER_OPEN"));
     v.push(dp("vcm-aft-2", "VCM AFT CHANNEL 2", 21, Bus::Msfs(10), AVIONICS_LRU_W / 28., "generic avionics LRU (50 W, typical/derived); mod.rs VentilationControlModule::new(Aft, [..., DC_ESS \"109PP\"])", &["aft ventilation control module channel 2"], "ELEC_VCM_AFT_2_BREAKER_OPEN"));
@@ -403,8 +403,18 @@ fn ata21(v: &mut Vec<BreakerDef>) {
 
     // CPIOM B1-4 applications (mod.rs:1334-1337 CPIOM bus map: B1/DC1,
     // B2/DC_ESS, B3/DC_ESS, B4/DC2).
+    //
+    // AGS is handled separately below, not in this generic per-CPIOM loop:
+    // unlike TCS/VCS/CPCS (checked and found functionally symmetric across
+    // all 4 CPIOMs, no defensible per-panel-position split -- W08/W65), AGS
+    // really is a pack-pair application in FlyByWire's own source
+    // (a380_systems/air_conditioning/cpiom_b.rs:258-277
+    // `PackFlow::pack_flow_demand`: "CPIOM B1 and B3 calculate the LH AGU
+    // Flow Demand" / "CPIOM B2 and B4 calculate the RH AGU Flow Demand"),
+    // and `circuits::PANEL_CB_NODES` already carries a real
+    // "CB_PACK1_CTL"/"CB_PACK2_CTL" pair with exactly that LH/RH split.
     let cpiom_bus = [Bus::Msfs(8), Bus::Msfs(10), Bus::Msfs(10), Bus::Msfs(9)];
-    let apps: [(&str, [u64; 4]); 4] = [("AGS", [21_034, 21_035, 21_036, 21_037]), ("TCS", [21_038, 21_039, 21_040, 21_041]), ("VCS", [21_042, 21_043, 21_044, 21_045]), ("CPCS", [21_046, 21_047, 21_048, 21_049])];
+    let apps: [(&str, [u64; 4]); 3] = [("TCS", [21_038, 21_039, 21_040, 21_041]), ("VCS", [21_042, 21_043, 21_044, 21_045]), ("CPCS", [21_046, 21_047, 21_048, 21_049])];
     for (app, ids) in apps {
         for (k, &fail) in ids.iter().enumerate() {
             let bus = cpiom_bus[k];
@@ -415,13 +425,51 @@ fn ata21(v: &mut Vec<BreakerDef>) {
                 bus,
                 rating_a: AVIONICS_LRU_W / bus.nominal_voltage(),
                 basis: "generic avionics LRU (50 W, typical/derived); mod.rs CPIOM B bus map, lines ~1334-1337",
-                consumers: &["CPIOM B application (AGS/TCS/VCS/CPCS)"],
+                consumers: &["CPIOM B application (TCS/VCS/CPCS)"],
                 failures: Box::leak(vec![fail].into_boxed_slice()),
                 plugin_var: None,
                 panel_node: None, circuit: None, gates_none: false, pending_patch: None,
             });
         }
     }
+
+    // AGS pack controllers: CB_PACK1_CTL bridges CPIOM B1+B3 (LH AGU flow
+    // demand), CB_PACK2_CTL bridges CPIOM B2+B4 (RH AGU flow demand) -- see
+    // the comment above the `apps` loop for the FBW source citation.
+    // `failures` is already `&'static [u64]`, so one physical panel breaker
+    // legitimately bridges both CPIOM channels it feeds; no new field is
+    // needed on `BreakerDef`, and `Breakers::pre_systems` (below) already
+    // calls `crate::failures::set_active` for every id in the slice. Bus/
+    // rating use the pair's lower-numbered channel (B1, B2) as the
+    // representative figure, the same cosmetic-only role the PRIM/SEC
+    // alternating-bus precedent a few hundred lines down already gives this
+    // field: it sets the breaker's display rating, not which failure id
+    // fires -- B1 and B3 (and B2/B4) sit on different real buses
+    // (mod.rs:1334-1337) so no single figure is more "real" than the other.
+    v.push(BreakerDef {
+        id: "pack-1-ctl-ags",
+        name: "PACK 1 CTL (CPIOM B1+B3 AGS)",
+        ata: 21,
+        bus: Bus::Msfs(8),
+        rating_a: AVIONICS_LRU_W / Bus::Msfs(8).nominal_voltage(),
+        basis: "generic avionics LRU (50 W, typical/derived); mod.rs CPIOM B bus map ~1334-1337; LH/RH AGU split real & FBW-sourced: a380_systems/air_conditioning/cpiom_b.rs:258-277 PackFlow::pack_flow_demand",
+        consumers: &["CPIOM B1 AGS application (LH AGU pack flow demand)", "CPIOM B3 AGS application (LH AGU pack flow demand)"],
+        failures: &[21_034, 21_036],
+        plugin_var: None,
+        panel_node: Some("CB_PACK1_CTL"), circuit: None, gates_none: false, pending_patch: None,
+    });
+    v.push(BreakerDef {
+        id: "pack-2-ctl-ags",
+        name: "PACK 2 CTL (CPIOM B2+B4 AGS)",
+        ata: 21,
+        bus: Bus::Msfs(10),
+        rating_a: AVIONICS_LRU_W / Bus::Msfs(10).nominal_voltage(),
+        basis: "generic avionics LRU (50 W, typical/derived); mod.rs CPIOM B bus map ~1334-1337; LH/RH AGU split real & FBW-sourced: a380_systems/air_conditioning/cpiom_b.rs:258-277 PackFlow::pack_flow_demand",
+        consumers: &["CPIOM B2 AGS application (RH AGU pack flow demand)", "CPIOM B4 AGS application (RH AGU pack flow demand)"],
+        failures: &[21_035, 21_037],
+        plugin_var: None,
+        panel_node: Some("CB_PACK2_CTL"), circuit: None, gates_none: false, pending_patch: None,
+    });
 
     // Pack flow valves 1/2 per pack complex (pneumatic.rs `PackComplex`'s
     // `ElectroPneumaticValve`, DC_ESS-powered): new real power-path
@@ -1131,6 +1179,44 @@ fn published_hydraulic_power_current_multiplier(id: &str) -> f64 {
     crate::physics::motor::hydraulic_power_current_multiplier(crate::physics::motor::hydraulic_power_fraction(id))
 }
 
+/// `failures.rs` `extra::electrical()`'s 18 "<BUS> bus short circuit" ids
+/// (24_200-24_217, `Effect::Hook { var: "FAIL_BUS_SHORT_HOOK", owner:
+/// Owner::Electrical }`) had no reader at all (W50/W109). Same enumeration
+/// order as the bus-tie/feeder loop above (`BUS_LABELS` in failures.rs), so
+/// index k's short id is `24_200 + k` for this catalogue's own
+/// `"bus-<label.to_lowercase()>"` breaker -- the real feeder/tie breaker
+/// for that bus, already catalogued a few hundred lines up, not a new one.
+const BUS_SHORT_LABELS: [&str; 18] = [
+    "AC1", "AC2", "AC3", "AC4", "AC_ESS", "AC_ESS_SHED", "AC_247XP", "AC_GND_FLT_SVC", "DC1", "DC2", "DC_ESS", "DC_247PP", "DC_309PP", "DC_HOT1",
+    "DC_HOT2", "DC_HOT3", "DC_HOT4", "DC_GND_FLT_SVC",
+];
+
+/// A bolted short circuit draws current far above rated -- commonly tens of
+/// times rated current for a low-impedance fault (typical/derived: no
+/// per-bus A380 fault-current figure is public) -- so at full magnitude
+/// this must clear `physics::electrical::MAGNETIC_TRIP_MULTIPLE` (10x, that
+/// module's own instantaneous-trip pickup) and open the breaker the same
+/// tick, not wait on the thermal I^2t curve: a bolted short is exactly what
+/// the magnetic element exists to catch. `SHORT_CIRCUIT_PEAK_MULTIPLE` is
+/// set comfortably above that pickup so a full-magnitude short always
+/// trips magnetic, never thermal. Below full magnitude (a developing/high-
+/// impedance fault -- chafed insulation, not yet a bolted short) the
+/// multiplier ramps linearly from `1.0` (no extra current) so a partial
+/// fault still heats the thermal element correctly instead of jumping
+/// straight to an instant trip; `failures::magnitude` itself supplies that
+/// continuous 0..1 severity, the same convention every other multiplier on
+/// this file's `post_systems` chain already uses. Reads as `1.0` (no-op)
+/// for any breaker id that is not one of the 18 `"bus-*"` feeder breakers,
+/// so this can never affect a non-bus breaker's current.
+const SHORT_CIRCUIT_PEAK_MULTIPLE: f64 = 20.0;
+
+fn bus_short_circuit_current_multiplier(id: &str) -> f64 {
+    let Some(label) = id.strip_prefix("bus-") else { return 1.0 };
+    let Some(k) = BUS_SHORT_LABELS.iter().position(|l| l.to_lowercase() == label) else { return 1.0 };
+    let magnitude = crate::failures::magnitude(24_200 + k as u64);
+    1.0 + magnitude * (SHORT_CIRCUIT_PEAK_MULTIPLE - 1.0)
+}
+
 /// The breaker's consumer own *live* current dataref, when one is real and
 /// FBW already publishes it, so `post_systems` can read the actual drawn
 /// current every tick instead of estimating from `rated_a` -- the "actual
@@ -1378,11 +1464,18 @@ impl Breakers {
     /// this mirror the next tick -- the web app's Circuit Breakers tab is
     /// the controlling UI for an absorbed circuit from here on.
     pub fn pre_systems<V: VariableRegistry + SimulatorReaderWriter>(&mut self, vars: &mut V, circuits: &mut circuits::Circuits) {
+        // An open breaker's failures go through their own channel
+        // (`failures::set_breaker_levels`), not the crew's arming: they
+        // last exactly as long as the breaker is open, are never saved, and
+        // a closed breaker never un-arms a failure the crew armed.
+        let mut open_failures = std::collections::BTreeMap::new();
         for i in 0..self.live.len() {
             let closed = self.closed(vars, i);
             let def = &self.defs[self.live[i].def_index];
-            for &fail in def.failures {
-                crate::failures::set_active(fail, !closed);
+            if !closed {
+                for &fail in def.failures {
+                    open_failures.insert(fail, 1.0);
+                }
             }
             if let Some(id) = &self.live[i].plugin_var_id {
                 vars.write(id, if closed { 0. } else { 1. });
@@ -1391,7 +1484,20 @@ impl Breakers {
                 circuits.set_breaker(vars, number, closed);
             }
         }
+        crate::failures::set_breaker_levels(open_failures);
     }
+
+    /// The synthetic continuous load of a breaker with no measured current,
+    /// as a fraction of its rating. A breaker is sized with headroom above
+    /// the continuous load it protects, never at it (derived/typical: no
+    /// A380 per-breaker load is public). The estimate used to be the full
+    /// rating, which sits exactly on the thermal curve's threshold: once
+    /// `physics::bays` published real bay temperatures, any bay above the
+    /// curve's 25 degC reference put every such breaker past it, and they
+    /// all tripped together after a few minutes on the ground -- 75
+    /// failures armed at once (2026-09-28). At this fraction a normal load
+    /// trips only in a bay above ~52 degC, a genuinely overheated one.
+    const NOMINAL_CONTINUOUS_LOAD_FRACTION: f64 = 0.8;
 
     /// Real current + I^2t/magnetic trip, reusing `physics::electrical`'s
     /// own curve (`trip_step`). Call after the systems tick, alongside
@@ -1428,8 +1534,17 @@ impl Breakers {
                 // (`physics::motor`'s registry). Folds in as 1.0 (no-op) for
                 // every id nothing has published against, so this is a
                 // strict addition, never a change, for a breaker with no
-                // such coupling.
-                None => rated * bearing_overcurrent_multiplier(def.id) * published_load_current_multiplier(def.id) * published_hydraulic_power_current_multiplier(def.id),
+                // such coupling. `bus_short_circuit_current_multiplier`
+                // folds in the same way for a `"bus-*"` breaker whose own
+                // `failures.rs` extra-catalogue short-circuit id is armed.
+                None => {
+                    rated
+                        * Self::NOMINAL_CONTINUOUS_LOAD_FRACTION
+                        * bearing_overcurrent_multiplier(def.id)
+                        * published_load_current_multiplier(def.id)
+                        * published_hydraulic_power_current_multiplier(def.id)
+                        * bus_short_circuit_current_multiplier(def.id)
+                }
             };
             vars.write(&self.live[i].current_id, current);
             let ratio = if rated > 0. { current / rated } else { 0. };
@@ -1587,6 +1702,70 @@ mod tests {
         assert!(!crate::failures::active_ids().contains(&24_000), "resetting TR 1 should clear failure 24000");
     }
 
+    /// An open breaker's failure is the breaker's consequence, not something
+    /// the crew armed: it acts, but it is never in the crew's saved set.
+    #[test]
+    fn an_open_breakers_failure_acts_but_is_never_saved_as_crew_armed() {
+        let _g = crate::failures::tests::serial();
+        let mut vars = TestVars::default();
+        let mut circuits = crate::circuits::Circuits::new(&mut vars);
+        let _f = crate::failures::Failures::new();
+        let mut b = Breakers::new(&mut vars);
+        request_pull("tr-1".to_owned());
+        b.apply_requests(&mut vars);
+        b.pre_systems(&mut vars, &mut circuits);
+        assert!(crate::failures::is_active(24_000), "an open TR 1 breaker fails TR 1");
+        assert!(!crate::failures::armed_ids().contains(&24_000), "but the crew did not arm it, so it is not saved");
+    }
+
+    /// The crew can arm a failure whose breaker is closed; the closed
+    /// breaker must not un-arm it on the next tick.
+    #[test]
+    fn a_closed_breaker_never_clears_a_failure_the_crew_armed() {
+        let _g = crate::failures::tests::serial();
+        let mut vars = TestVars::default();
+        let mut circuits = crate::circuits::Circuits::new(&mut vars);
+        let _f = crate::failures::Failures::new();
+        let mut b = Breakers::new(&mut vars);
+        crate::failures::set_active(24_000, true);
+        for _ in 0..3 {
+            b.pre_systems(&mut vars, &mut circuits);
+        }
+        assert!(crate::failures::armed_ids().contains(&24_000), "TR 1's breaker is closed, and the crew's TR 1 failure stays armed");
+        assert!(crate::failures::is_active(24_000));
+    }
+
+    #[test]
+    fn pulling_pack_1_ctl_activates_both_of_its_bridged_ags_failures() {
+        // Same serialisation reasoning as the test above: this touches the
+        // process-wide `failures::STATE`.
+        let _g = crate::failures::tests::serial();
+        let mut vars = TestVars::default();
+        let mut circuits = crate::circuits::Circuits::new(&mut vars);
+        let _f = crate::failures::Failures::new();
+        let mut b = Breakers::new(&mut vars);
+
+        // "pack-1-ctl-ags" bridges both CPIOM B1 (21_034) and CPIOM B3
+        // (21_036) AGS failures -- one physical CB_PACK1_CTL panel breaker
+        // feeding the LH AGU's two redundant channels -- while pack 2's ids
+        // (21_035, 21_037) must stay untouched.
+        request_pull("pack-1-ctl-ags".to_owned());
+        b.apply_requests(&mut vars);
+        b.pre_systems(&mut vars, &mut circuits);
+        let active = crate::failures::active_ids();
+        assert!(active.contains(&21_034), "pulling PACK 1 CTL should activate CPIOM B1 AGS (21034)");
+        assert!(active.contains(&21_036), "pulling PACK 1 CTL should activate CPIOM B3 AGS (21036)");
+        assert!(!active.contains(&21_035), "PACK 1 CTL must not touch CPIOM B2 AGS (21035)");
+        assert!(!active.contains(&21_037), "PACK 1 CTL must not touch CPIOM B4 AGS (21037)");
+
+        request_reset("pack-1-ctl-ags".to_owned());
+        b.apply_requests(&mut vars);
+        b.pre_systems(&mut vars, &mut circuits);
+        let active = crate::failures::active_ids();
+        assert!(!active.contains(&21_034), "resetting PACK 1 CTL should clear CPIOM B1 AGS (21034)");
+        assert!(!active.contains(&21_036), "resetting PACK 1 CTL should clear CPIOM B3 AGS (21036)");
+    }
+
     #[test]
     fn pulling_an_absorbed_circuit_breaker_really_opens_its_systems_cfg_circuit() {
         // `pre_systems` below iterates *every* catalogued breaker, not just
@@ -1644,6 +1823,12 @@ mod tests {
 
     #[test]
     fn an_overloaded_breaker_trips_and_a_tripped_breaker_stays_open() {
+        // (build fix, INT-P4) `post_systems`'s overcurrent-trip path reads
+        // `crate::failures::magnitude` for the real-current bearing-wear
+        // input (see this file's own doc for `hyd-epump-ga`'s
+        // `real_current_var`); needs the guard the same as the file's other
+        // `crate::failures`-touching tests.
+        let _guard = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut circuits = crate::circuits::Circuits::new(&mut vars);
         let mut b = Breakers::new(&mut vars);
@@ -1700,6 +1885,8 @@ mod tests {
     /// not from re-running the code under test.
     #[test]
     fn real_pump_current_trips_within_its_independently_predicted_i2t_time() {
+        // (build fix, INT-P4) same guard as the other real-current tests.
+        let _guard = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut b = Breakers::new(&mut vars);
         let i = *b.by_id.get("hyd-epump-ga").unwrap();
@@ -1734,6 +1921,8 @@ mod tests {
     /// `post_systems` tripping on its own after enough ticks.
     #[test]
     fn without_the_real_current_feed_the_same_window_never_trips() {
+        // (build fix, INT-P4) same guard as the other real-current tests.
+        let _guard = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut b = Breakers::new(&mut vars);
         let i = *b.by_id.get("hyd-epump-ga").unwrap();
@@ -1757,6 +1946,8 @@ mod tests {
     /// same real current dataref, not the thermal I^2t accumulator.
     #[test]
     fn a_severe_real_overcurrent_trips_the_magnetic_curve_instantly() {
+        // (build fix, INT-P4) same guard as the other real-current tests.
+        let _guard = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut b = Breakers::new(&mut vars);
         let i = *b.by_id.get("hyd-epump-ga").unwrap();
@@ -1784,6 +1975,8 @@ mod tests {
     /// 121.6 s`.
     #[test]
     fn a_sub_rated_load_trips_in_a_hot_bay_at_its_predicted_time_but_never_at_reference_ambient() {
+        // (build fix, INT-P4) same guard as the other real-current tests.
+        let _guard = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut b = Breakers::new(&mut vars);
         let i = *b.by_id.get("hyd-epump-ga").unwrap();
@@ -1826,6 +2019,8 @@ mod tests {
     /// model existed.
     #[test]
     fn holding_ambient_at_reference_a_sub_rated_load_never_trips() {
+        // (build fix, INT-P4) same guard as the other real-current tests.
+        let _guard = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut b = Breakers::new(&mut vars);
         let i = *b.by_id.get("hyd-epump-ga").unwrap();
@@ -1838,6 +2033,47 @@ mod tests {
             b.post_systems(&mut vars, 1.0 / 60.0);
         }
         assert!(b.closed(&mut vars, i), "ambient held at reference: a 90%-rated load must never trip");
+    }
+
+    /// A breaker with no measured current, in a warm (30 degC) avionics bay
+    /// -- `physics::bays` publishes real bay temperatures now -- must carry
+    /// its normal load for a whole flight. Its synthetic load used to be
+    /// exactly 100% of rating, which in any bay above 25 degC sat past the
+    /// thermal threshold: every such breaker in the bay tripped together
+    /// after ~7.5 min at 30 degC (~17 min at 27 degC), arming 75 failures
+    /// (every generator, TR, DC bus, PRIM, SEC, FCDC...) on a runway
+    /// (2026-09-28).
+    #[test]
+    fn a_normal_load_in_a_warm_bay_does_not_trip_all_flight() {
+        let _g = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        let mut vars = TestVars::default();
+        let mut b = Breakers::new(&mut vars);
+        let i = *b.by_id.get("bus-dc1").unwrap();
+        assert!(b.live[i].real_current_id.is_none(), "this test is about the synthetic load");
+        vars.write(&b.live[i].ambient_id, 30.0);
+        for _ in 0..4 * 3600 {
+            b.post_systems(&mut vars, 1.0);
+        }
+        assert!(b.closed(&mut vars, i), "a normal load in a 30 degC bay must not trip in four hours");
+    }
+
+    /// Decouple: the bay ambient still matters -- a genuinely overheated bay
+    /// trips a breaker carrying only its normal load, as a bimetal element
+    /// that trips at a fixed absolute temperature does.
+    #[test]
+    fn a_normal_load_in_an_overheated_bay_still_trips() {
+        let _g = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        let mut vars = TestVars::default();
+        let mut b = Breakers::new(&mut vars);
+        let i = *b.by_id.get("bus-dc1").unwrap();
+        vars.write(&b.live[i].ambient_id, 70.0);
+        for _ in 0..3600 {
+            b.post_systems(&mut vars, 1.0);
+        }
+        assert!(!b.closed(&mut vars, i), "a 70 degC bay must trip even a normally loaded breaker within the hour");
+        assert_eq!(vars.read(&b.live[i].cause_id), 1., "thermal, not magnetic");
     }
 
     /// Bearing-wear coupling (docs/physics/breakers.md, replacing the old
@@ -1859,6 +2095,37 @@ mod tests {
         assert_eq!(bearing_overcurrent_multiplier("hyd-epump-ga"), 1.0);
         // An id this coupling does not own is never affected.
         assert_eq!(bearing_overcurrent_multiplier("sys-2"), 1.0);
+    }
+
+    /// `failures.rs` extra-catalogue "<BUS> bus short circuit" ids
+    /// (24_200-24_217, W50/W109): DC1 is index 8 in `BUS_LABELS`/
+    /// `BUS_SHORT_LABELS`, so its short id is 24_200+8 = 24_208 and its
+    /// catalogued feeder/tie breaker is "bus-dc1".
+    #[test]
+    fn a_bus_short_circuit_trips_its_feeder_breaker_magnetic() {
+        let _g = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        let mut vars = TestVars::default();
+        let mut b = Breakers::new(&mut vars);
+        let i = *b.by_id.get("bus-dc1").expect("DC1's feeder/tie breaker must be catalogued");
+
+        // Healthy: the normal synthetic rated-demand estimate must never trip.
+        b.post_systems(&mut vars, 1.0);
+        assert!(b.closed(&mut vars, i), "no short armed: must not trip");
+
+        // Full-magnitude short: `SHORT_CIRCUIT_PEAK_MULTIPLE` (20x) clears
+        // `physics::electrical::MAGNETIC_TRIP_MULTIPLE` (10x), so it must
+        // trip magnetic (cause 2) the same tick, not wait on the thermal
+        // curve.
+        crate::failures::set_magnitude(24_208, 1.0);
+        b.post_systems(&mut vars, 1.0);
+        assert!(!b.closed(&mut vars, i), "a full-magnitude short must trip its feeder breaker");
+        assert_eq!(vars.read(&b.live[i].cause_id), 2., "a bolted short must trip magnetic, not thermal");
+
+        // Decouple: an id this breaker does not own must never affect it.
+        crate::failures::set_magnitude(24_208, 0.0);
+        assert_eq!(bus_short_circuit_current_multiplier("bus-dc1"), 1.0);
+        assert_eq!(bus_short_circuit_current_multiplier("hyd-epump-ga"), 1.0, "a non-bus breaker id must never be affected");
     }
 
     /// Every feed pump sits on the AC bus the FCOM gives it, not on
@@ -1893,6 +2160,47 @@ mod tests {
         assert_eq!(used.len(), 4, "the eight feed pumps should spread across four buses, got {used:?}");
     }
 
+    /// The two cargo-ventilation isolation valves are gated by their own
+    /// VCM's real bus (VentilationControlModule has no separate power path
+    /// for the valve itself, so this catalogue reuses the VCM's own
+    /// channel), and both must use that VCM's *primary*, default-active
+    /// channel (channel 1 / `powered_by[0]`, `ventilation_control_module.rs`
+    /// `VentilationControlModule::new`) -- not the other VCM's bus, and not
+    /// the standby channel. The two extraction fans are different: each has
+    /// its own dedicated bus (`ForwardCargoVentilationControlSystem::new`/
+    /// `BulkVentilationControlSystem::new`) entirely independent of either
+    /// VCM channel, and must match that bus, not any VCM channel.
+    #[test]
+    fn cargo_ventilation_breakers_sit_on_their_real_bus() {
+        let mut vars = TestVars::default();
+        let b = Breakers::new(&mut vars);
+        let bus_of = |id: &str| b.defs.iter().find(|d| d.id == id).unwrap_or_else(|| panic!("no breaker {id}")).bus.label();
+        assert_eq!(bus_of("fwd-isol-valve"), "DC_1", "VCM Fwd's own primary channel is DC1 (411PP), not DC2 (that's VCM Aft's)");
+        assert_eq!(bus_of("bulk-isol-valve"), "DC_2", "VCM Aft's own primary channel is DC2 (214PP), matching fwd-isol-valve's primary-channel convention, not its DC_ESS standby channel");
+        assert_eq!(bus_of("fwd-extract-fan"), "AC_1", "the forward extraction fan's own dedicated bus (ForwardCargoVentilationControlSystem::new), not any VCM channel bus");
+        assert_eq!(bus_of("bulk-extract-fan"), "AC_4", "the bulk extraction fan's own dedicated bus (BulkVentilationControlSystem::new), not any VCM channel bus");
+    }
+
+    /// fixes/W185.md: the VCM *channel breakers themselves* (as opposed to
+    /// the isolation-valve/extract-fan loads fixes/W115.md and
+    /// fixes/W161.md already fixed) had the same wrong-unit bug for VCM
+    /// Fwd's channel 1 -- wired to DC2 (VCM Aft's own channel-1 bus)
+    /// instead of DC1 (Fwd's own, `mod.rs`
+    /// `VentilationControlModule::new(.., VcmId::Fwd, [DirectCurrent(1)
+    /// /* 411PP */, DirectCurrentEssential /* 109PP */])`). VCM Aft's
+    /// channel 1 (DC2/214PP) and both units' channel 2 (DC_ESS/109PP, the
+    /// standby channel for both) were already correct.
+    #[test]
+    fn vcm_channel_breakers_sit_on_their_real_bus() {
+        let mut vars = TestVars::default();
+        let b = Breakers::new(&mut vars);
+        let bus_of = |id: &str| b.defs.iter().find(|d| d.id == id).unwrap_or_else(|| panic!("no breaker {id}")).bus.label();
+        assert_eq!(bus_of("vcm-fwd-1"), "DC_1", "VCM Fwd's own primary channel is DC1 (411PP), not DC2 (that's VCM Aft's channel 1)");
+        assert_eq!(bus_of("vcm-fwd-2"), "DC_ESS", "VCM Fwd's standby channel (109PP)");
+        assert_eq!(bus_of("vcm-aft-1"), "DC_2", "VCM Aft's own primary channel is DC2 (214PP)");
+        assert_eq!(bus_of("vcm-aft-2"), "DC_ESS", "VCM Aft's standby channel (109PP), same physical bus as vcm-fwd-2");
+    }
+
     /// The regression that grounded both FEED 4 pumps in flight, and the
     /// contract that replaced it ([`fuel_pump_current_var`]'s doc has the
     /// full arithmetic). A fuel pump's breaker is rated from systems.cfg's
@@ -1910,6 +2218,8 @@ mod tests {
     /// keeps its breaker.
     #[test]
     fn a_fuel_pump_carrying_its_design_flow_keeps_its_breaker() {
+        // (build fix, INT-P4) same guard as the other real-current tests.
+        let _guard = crate::failures::tests::serial();
         let mut vars = TestVars::default();
         let mut b = Breakers::new(&mut vars);
 
@@ -1940,9 +2250,10 @@ mod tests {
         }
         assert!(b.closed(&mut vars, i), "a healthy fuel pump must still have its breaker after an hour of running");
         let current = vars.read(&b.live[i].current_id);
+        let nominal = rated * Breakers::NOMINAL_CONTINUOUS_LOAD_FRACTION;
         assert!(
-            (current - rated).abs() < 1e-9,
-            "with no load coupling published, a fuel pump draws exactly its rated current, got {current} against {rated}"
+            (current - nominal).abs() < 1e-9,
+            "with no load coupling published, a fuel pump draws its nominal continuous load, got {current} against {nominal}"
         );
     }
 

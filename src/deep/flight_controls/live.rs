@@ -95,11 +95,11 @@ use crate::deep::live::{Area as LiveArea, Faults, Truth};
 use super::actuator::{ActuatorFaults, ActuatorMode, ActuatorGeometry, ElectricPumpFaults, PowerControlUnit, HYDRAULIC_SUPPLY_PA};
 use super::allocation::{
     aileron_inboard, aileron_midboard, aileron_outboard, elevator_inboard, elevator_outboard, mode_for_surface, rudder_lower, rudder_upper, ths_motors, ActuatorAllocation,
-    ComputerHealth, PowerAvailability,
+    ComputerHealth, PowerAvailability, PowerDebounce,
 };
 use super::high_lift::{HighLiftFaults, HighLiftPair, HighLiftSystem};
 use super::hinge_moment::HingeMomentCoefficients;
-use super::sensors::{DualTransducer, TransducerFaults};
+use super::sensors::{DualTransducer, DualTransducerOutput, TransducerFaults};
 use super::spoiler::{GroundSpoilerInputs, GroundSpoilerLogic, GroundSpoilerLogicFaults};
 use super::surface::{inertia_uniform_plate_kg_m2, AeroInputs, ControlSurface, SurfaceDamping, SurfaceFaults, SurfaceLimits, SurfaceOutput};
 use super::ths::{RudderTrimActuator, ThsFaults, TrimmableHorizontalStabilizer};
@@ -275,6 +275,27 @@ impl SurfaceIds {
             intermittent: faults.get(self.transducer_intermittent),
         }
     }
+
+    /// Whether a fault that actually moves this surface off its commanded
+    /// position is armed this tick -- the signal
+    /// `deep::integration::flight_control_surfaces`'s override-active flag
+    /// publishes (W125's review of the first version of this wiring: a
+    /// consumer must never prefer this area's own physics over FlyByWire's
+    /// own actuator output except while something is actually wrong).
+    /// Deliberately excludes `transducer_fault`/`transducer_drift`/
+    /// `transducer_open`/`transducer_intermittent`: those corrupt the
+    /// *monitoring* channel, not the surface's real position, so an
+    /// otherwise-healthy surface must keep showing FlyByWire's own
+    /// (correct) commanded position, not this area's.
+    fn position_fault_active(&self, faults: &Faults) -> bool {
+        faults.get(self.jam) > 0.0
+            || faults.get(self.runaway) > 0.0
+            || faults.get(self.supply_loss) > 0.0
+            || faults.get(self.disconnect) > 0.0
+            || faults.get(self.flutter_damper_loss) > 0.0
+            || faults.get(self.valve_leakage) > 0.0
+            || faults.get(self.piston_seal_wear) > 0.0
+    }
 }
 
 /// THS failures, in `registry.rs`'s order.
@@ -286,6 +307,18 @@ struct ThsIds {
     ballscrew_jam: u64,
     transducer_drift: u64,
     transducer_open: u64,
+}
+
+impl ThsIds {
+    /// Same purpose as `SurfaceIds::position_fault_active`: excludes the
+    /// two transducer faults, which corrupt the THS's *reported* position,
+    /// not the trim it is actually at.
+    fn position_fault_active(&self, faults: &Faults) -> bool {
+        faults.get(self.motor_green_supply_loss) > 0.0
+            || faults.get(self.motor_yellow_supply_loss) > 0.0
+            || faults.get(self.no_back_failure) > 0.0
+            || faults.get(self.ballscrew_jam) > 0.0
+    }
 }
 
 /// Rudder trim failures, in order.
@@ -336,6 +369,127 @@ impl HighLiftIds {
             wingtip_brake_fail: faults.get(self.wingtip_brake_fail),
         }
     }
+}
+
+/// One cockpit input transducer's four failure fields, in
+/// `registry::input_sensor_fields`'s own order (E-FCTL, ECAM completeness
+/// pass).
+#[derive(Clone, Copy, Debug)]
+struct InputSensorIds {
+    chan_a_open: u64,
+    chan_a_drift: u64,
+    chan_b_open: u64,
+    chan_b_drift: u64,
+}
+
+impl InputSensorIds {
+    fn build(map: &BTreeMap<String, Vec<u64>>, component: &str) -> Self {
+        let i = take(map, component, 4);
+        Self { chan_a_open: i[0], chan_a_drift: i[1], chan_b_open: i[2], chan_b_drift: i[3] }
+    }
+
+    fn chan_a(&self, faults: &Faults) -> TransducerFaults {
+        TransducerFaults { open_circuit: faults.get(self.chan_a_open), drift: faults.get(self.chan_a_drift), intermittent: 0.0 }
+    }
+
+    fn chan_b(&self, faults: &Faults) -> TransducerFaults {
+        TransducerFaults { open_circuit: faults.get(self.chan_b_open), drift: faults.get(self.chan_b_drift), intermittent: 0.0 }
+    }
+}
+
+/// PRIM or SEC pin-programming identity's one failure field (E-FCTL, ECAM
+/// completeness pass).
+#[derive(Clone, Copy, Debug)]
+struct PinProgIds {
+    mismatch: u64,
+}
+
+impl PinProgIds {
+    fn build(map: &BTreeMap<String, Vec<u64>>, component: &str) -> Self {
+        let i = take(map, component, 1);
+        Self { mismatch: i[0] }
+    }
+
+    /// A discrete identity check, not a physical transient: any armed
+    /// magnitude at all means the affected unit's tag no longer matches the
+    /// other two, read the same tick it is armed (`E-FCTL-DESIGN.md` section
+    /// 3.3's own test spec -- no confirm delay).
+    fn disagrees(&self, faults: &Faults) -> bool {
+        faults.get(self.mismatch) > 0.0
+    }
+}
+
+/// Load alleviation function: three accelerometers per wing, in
+/// `registry::register`'s own field order (coordinator follow-up,
+/// 2026-09-27, `271800029`).
+#[derive(Clone, Copy, Debug)]
+struct LoadAlleviationIds {
+    left: [u64; 3],
+    right: [u64; 3],
+}
+
+impl LoadAlleviationIds {
+    fn build(map: &BTreeMap<String, Vec<u64>>, component: &str) -> Self {
+        let i = take(map, component, 6);
+        Self { left: [i[0], i[1], i[2]], right: [i[3], i[4], i[5]] }
+    }
+
+    /// FCOM PRO-ABN-ECAM p.5040 (`E-FCTL-FCOM.json`): "Two out of three
+    /// accelerometers used for the LAF are failed in one wing" -- a literal
+    /// 2-of-3 vote per wing, not an invented threshold.
+    fn fails(&self, faults: &Faults) -> bool {
+        let failed = |ids: &[u64; 3]| ids.iter().filter(|&&id| faults.get(id) > 0.5).count();
+        failed(&self.left) >= 2 || failed(&self.right) >= 2
+    }
+}
+
+/// Flap lever CSU communication, one failure per SFCC channel (E-FCTL,
+/// `272800014`/`272800015`).
+#[derive(Clone, Copy, Debug)]
+struct FlapLeverCsuIds {
+    chan_1_comm_lost: u64,
+    chan_2_comm_lost: u64,
+}
+
+impl FlapLeverCsuIds {
+    fn build(map: &BTreeMap<String, Vec<u64>>, component: &str) -> Self {
+        let i = take(map, component, 2);
+        Self { chan_1_comm_lost: i[0], chan_2_comm_lost: i[1] }
+    }
+
+    fn faults(&self, faults: &Faults) -> [bool; 2] {
+        [faults.get(self.chan_1_comm_lost) > 0.0, faults.get(self.chan_2_comm_lost) > 0.0]
+    }
+}
+
+/// This tick's cockpit-input-transducer and pin-programming outputs, cached
+/// here so `publish` (which sees no `Truth`/`Faults`) can report them
+/// (E-FCTL, ECAM completeness pass).
+#[derive(Clone, Copy, Debug, Default)]
+struct InputSensorOutputs {
+    l_sidestick_pitch: DualTransducerOutput,
+    l_sidestick_roll: DualTransducerOutput,
+    rudder_pedal: DualTransducerOutput,
+    /// Captain/F.O. sidestick disabled by the opposite side's priority
+    /// take-over pushbutton -- straight from `Truth::prim_left_sidestick_
+    /// disabled`/`prim_right_sidestick_disabled` (`271800001`/`002`).
+    l_sidestick_disabled_by_takeover: bool,
+    r_sidestick_disabled_by_takeover: bool,
+    prim_pin_prog_disagree: bool,
+    sec_pin_prog_disagree: bool,
+    // Coordinator follow-up, 2026-09-27.
+    rate_gyro_pitch: DualTransducerOutput,
+    rate_gyro_roll: DualTransducerOutput,
+    rate_gyro_yaw: DualTransducerOutput,
+    r_sidestick_pitch: DualTransducerOutput,
+    r_sidestick_roll: DualTransducerOutput,
+    /// `[PRIM 1, PRIM 2, PRIM 3]`, already gated on `Truth::prim_healthy`.
+    prim_elevator_channel_fault: [bool; 3],
+    prim_rudder_channel_fault: [bool; 3],
+    prim_sidestick_monitor_fault: [bool; 3],
+    load_alleviation_fault: bool,
+    /// `[SFCC 1, SFCC 2]`.
+    flap_lever_sys_fault: [bool; 2],
 }
 
 // ---------------------------------------------------------------------------
@@ -475,19 +629,33 @@ pub struct SurfaceCommands {
 }
 
 /// Every live surface angle, degrees, in the layout
-/// `integration::flight_control_surfaces::PhysicalSurfaces` uses.
+/// `integration::flight_control_surfaces::PhysicalSurfaces` uses, paired
+/// with whether a fault that actually moves that surface off its commanded
+/// position is armed this tick (`SurfaceIds`/`ThsIds::
+/// position_fault_active`). The pairing matters: `deep/plugin.rs`'s wiring
+/// must never let `deep::integration::flight_control_surfaces::
+/// SurfaceOverrideWriter` publish an angle as "active" for a surface that
+/// is not actually faulted (W125's review of the first version of this
+/// wiring -- see that module's own doc for why), and keeping the flag on
+/// the same struct as the angle it gates means there is no second lookup
+/// that could disagree with this one.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SurfaceAngles {
     /// `[side][inward, middle, outward]`, positive TE up.
     pub ailerons_deg: [[f64; 3]; 2],
+    pub ailerons_override_active: [[bool; 3]; 2],
     /// `[side][inward, outward]`, positive TE up.
     pub elevators_deg: [[f64; 2]; 2],
+    pub elevators_override_active: [[bool; 2]; 2],
     /// `[upper, lower]`.
     pub rudders_deg: [f64; 2],
+    pub rudders_override_active: [bool; 2],
     /// `[side][spoiler 1..=8]`, degrees up.
     pub spoilers_deg: [[f64; 8]; 2],
+    pub spoilers_override_active: [[bool; 8]; 2],
     /// Degrees, positive nose up.
     pub ths_deg: f64,
+    pub ths_override_active: bool,
     pub rudder_trim_deg: f64,
     /// `[side][inboard station, outboard station]`. These are **not**
     /// calibrated against a real A380 travel range
@@ -518,6 +686,12 @@ pub struct FlightControlsLive {
     /// power supplies and the module they feed, which is what flies the
     /// aircraft once every PRIM and SEC is gone.
     backup: super::backup::BackupControl,
+    /// Debounces `power`'s `Active`-authority decision for every
+    /// aileron/elevator/rudder actuator this tick (see [`PowerDebounce`]'s
+    /// own doc: a single glitchy tick of hydraulic pressure must never
+    /// strand a surface away from its commanded position with no restoring
+    /// force once the actuator drops back to `Damping`).
+    power_debounce: PowerDebounce,
 
     // The computers' own position monitoring, one dual channel per surface.
     aileron_monitors: [[DualTransducer; 3]; 2],
@@ -535,7 +709,41 @@ pub struct FlightControlsLive {
     rudder_trim_ids: RudderTrimIds,
     high_lift_ids: [[HighLiftIds; 2]; 3],
     ground_spoiler_ids: [u64; 2],
-    /// `(FCTL_<COMPONENT>_FAULT, that component's failure ids)` for all 37
+    /// E-ELEC Phase 2: `340800056`-`058` PRIM 1/2/3 RA-link fault ids (see
+    /// `registry.rs`'s own doc next to `27_fctl.prim_n`).
+    prim_ra_fault_ids: [u64; 3],
+    /// This tick's armed magnitude per PRIM, so `publish` can report
+    /// `DEEP_PRIM_n_USING_RA_X`.
+    prim_ra_fault: [f64; 3],
+    // Cockpit input transducers and PRIM/SEC pin-programming identity
+    // (E-FCTL, ECAM completeness pass).
+    l_sidestick_pitch_monitor: DualTransducer,
+    l_sidestick_roll_monitor: DualTransducer,
+    rudder_pedal_monitor: DualTransducer,
+    l_sidestick_pitch_ids: InputSensorIds,
+    l_sidestick_roll_ids: InputSensorIds,
+    rudder_pedal_ids: InputSensorIds,
+    prim_pin_prog_ids: PinProgIds,
+    sec_pin_prog_ids: PinProgIds,
+    // Coordinator follow-up, 2026-09-27.
+    rate_gyro_pitch_monitor: DualTransducer,
+    rate_gyro_roll_monitor: DualTransducer,
+    rate_gyro_yaw_monitor: DualTransducer,
+    rate_gyro_pitch_ids: InputSensorIds,
+    rate_gyro_roll_ids: InputSensorIds,
+    rate_gyro_yaw_ids: InputSensorIds,
+    r_sidestick_pitch_monitor: DualTransducer,
+    r_sidestick_roll_monitor: DualTransducer,
+    r_sidestick_pitch_ids: InputSensorIds,
+    r_sidestick_roll_ids: InputSensorIds,
+    /// `[PRIM 1, PRIM 2, PRIM 3]` -- one `channel_fault` failure id each.
+    prim_elevator_channel_ids: [u64; 3],
+    prim_rudder_channel_ids: [u64; 3],
+    prim_sidestick_monitor_ids: [u64; 3],
+    load_alleviation_ids: LoadAlleviationIds,
+    flap_lever_csu_ids: FlapLeverCsuIds,
+    input_sensor_out: InputSensorOutputs,
+    /// `(FCTL_<COMPONENT>_FAULT, that component's failure ids)` for all 61
     /// components -- the aggregate variable every ECAM trigger in this
     /// area's `registry.rs` reads.
     fault_vars: Vec<(String, Vec<u64>)>,
@@ -600,6 +808,7 @@ impl FlightControlsLive {
             ],
             ground_spoiler: GroundSpoilerLogic::new(),
             backup: super::backup::BackupControl::new(),
+            power_debounce: PowerDebounce::default(),
 
             aileron_monitors: std::array::from_fn(|_| std::array::from_fn(|_| DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S))),
             elevator_monitors: std::array::from_fn(|_| std::array::from_fn(|_| DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S))),
@@ -622,6 +831,32 @@ impl FlightControlsLive {
             rudder_trim_ids: RudderTrimIds { motor_failure: trim[0], jam: trim[1] },
             high_lift_ids: std::array::from_fn(|d| std::array::from_fn(|side| HighLiftIds::build(&map, HIGH_LIFT_COMPONENTS[d][side]))),
             ground_spoiler_ids: [gnd[0], gnd[1]],
+            prim_ra_fault_ids: std::array::from_fn(|i| take(&map, &format!("27_fctl.prim_{}", i + 1), 1)[0]),
+            prim_ra_fault: [0.0; 3],
+            l_sidestick_pitch_monitor: DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S),
+            l_sidestick_roll_monitor: DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S),
+            rudder_pedal_monitor: DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S),
+            l_sidestick_pitch_ids: InputSensorIds::build(&map, "27_fctl.l_sidestick_pitch"),
+            l_sidestick_roll_ids: InputSensorIds::build(&map, "27_fctl.l_sidestick_roll"),
+            rudder_pedal_ids: InputSensorIds::build(&map, "27_fctl.rudder_pedal"),
+            prim_pin_prog_ids: PinProgIds::build(&map, "27_fctl.prim_pin_prog"),
+            sec_pin_prog_ids: PinProgIds::build(&map, "27_fctl.sec_pin_prog"),
+            rate_gyro_pitch_monitor: DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S),
+            rate_gyro_roll_monitor: DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S),
+            rate_gyro_yaw_monitor: DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S),
+            rate_gyro_pitch_ids: InputSensorIds::build(&map, "27_fctl.rate_gyro_pitch"),
+            rate_gyro_roll_ids: InputSensorIds::build(&map, "27_fctl.rate_gyro_roll"),
+            rate_gyro_yaw_ids: InputSensorIds::build(&map, "27_fctl.rate_gyro_yaw"),
+            r_sidestick_pitch_monitor: DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S),
+            r_sidestick_roll_monitor: DualTransducer::new(TRANSDUCER_DISAGREE_TIMER_S),
+            r_sidestick_pitch_ids: InputSensorIds::build(&map, "27_fctl.r_sidestick_pitch"),
+            r_sidestick_roll_ids: InputSensorIds::build(&map, "27_fctl.r_sidestick_roll"),
+            prim_elevator_channel_ids: std::array::from_fn(|i| take(&map, &format!("27_fctl.prim_{}_elevator_channel", i + 1), 1)[0]),
+            prim_rudder_channel_ids: std::array::from_fn(|i| take(&map, &format!("27_fctl.prim_{}_rudder_channel", i + 1), 1)[0]),
+            prim_sidestick_monitor_ids: std::array::from_fn(|i| take(&map, &format!("27_fctl.prim_{}_sidestick_monitor", i + 1), 1)[0]),
+            load_alleviation_ids: LoadAlleviationIds::build(&map, "27_fctl.load_alleviation"),
+            flap_lever_csu_ids: FlapLeverCsuIds::build(&map, "27_fctl.flap_lever_csu"),
+            input_sensor_out: InputSensorOutputs::default(),
             fault_vars,
             armed: BTreeMap::new(),
 
@@ -741,13 +976,17 @@ impl FlightControlsLive {
         allocations: &[ActuatorAllocation; N],
         health: &ComputerHealth,
         power: &PowerAvailability,
+        mode_power: &PowerAvailability,
         faults: &Faults,
         commanded_deg: f64,
         travel_span_rad: f64,
         aero: &AeroInputs,
         dt: f64,
     ) -> (SurfaceOutput, bool, [ActuatorMode; N]) {
-        let (modes, _) = mode_for_surface(allocations, health, power);
+        // `mode_power` (debounced) decides *whether* an actuator may run
+        // Active this tick; `power` (instantaneous) still scales how fast
+        // it may move once it is -- see `PowerDebounce`'s own doc.
+        let (modes, _) = mode_for_surface(allocations, health, mode_power);
         let pressures = Self::pressures(allocations, power);
         let actuator_faults = ids.actuator_faults(faults, travel_span_rad);
         let out = surface.step(
@@ -800,6 +1039,10 @@ impl LiveArea for FlightControlsLive {
         "flight_controls"
     }
 
+    fn flight_control_surface_angles(&self) -> Option<SurfaceAngles> {
+        Some(self.surface_angles())
+    }
+
     fn tick(&mut self, truth: &Truth, faults: &Faults) {
         let dt = truth.dt_s.max(0.0);
         self.armed.clear();
@@ -811,8 +1054,17 @@ impl LiveArea for FlightControlsLive {
                 }
             }
         }
+        // E-ELEC Phase 2: `340800056`-`058` -- see `registry.rs`'s own
+        // `27_fctl.prim_n` doc.
+        for i in 0..3 {
+            self.prim_ra_fault[i] = faults.get(self.prim_ra_fault_ids[i]);
+        }
         let aero = self.aero(truth);
         let power = Self::power(truth);
+        // Gates *mode selection* only -- `Self::pressures` below still
+        // reads the raw, undebounced `power` for rate-limit scaling. See
+        // `PowerDebounce`'s own doc.
+        let mode_power = self.power_debounce.step(&power);
         let cmd = &truth.commanded_surfaces;
         let mut green_demand_m3_s = 0.0_f64;
         let mut yellow_demand_m3_s = 0.0_f64;
@@ -866,6 +1118,7 @@ impl LiveArea for FlightControlsLive {
                     &aileron_allocations[panel],
                     &health,
                     &power,
+                    &mode_power,
                     faults,
                     cmd.ailerons_deg[side][panel],
                     aileron_span,
@@ -875,6 +1128,7 @@ impl LiveArea for FlightControlsLive {
                 Self::accumulate_flow_demand(&aileron_allocations[panel], modes, out.rate_rad_s, ActuatorGeometry::aileron(), &mut green_demand_m3_s, &mut yellow_demand_m3_s);
                 self.aileron_out[side][panel] = out;
                 self.angles.ailerons_deg[side][panel] = out.angle_rad.to_degrees();
+                self.angles.ailerons_override_active[side][panel] = self.aileron_ids[side][panel].position_fault_active(faults);
                 self.monitor_fault.insert(bare(AILERON_COMPONENTS[side][panel]), monitoring);
             }
             for panel in 0..2 {
@@ -885,6 +1139,7 @@ impl LiveArea for FlightControlsLive {
                     &elevator_allocations[panel],
                     &health,
                     &power,
+                    &mode_power,
                     faults,
                     cmd.elevators_deg[side][panel],
                     aileron_span,
@@ -894,6 +1149,7 @@ impl LiveArea for FlightControlsLive {
                 Self::accumulate_flow_demand(&elevator_allocations[panel], modes, out.rate_rad_s, ActuatorGeometry::elevator(), &mut green_demand_m3_s, &mut yellow_demand_m3_s);
                 self.elevator_out[side][panel] = out;
                 self.angles.elevators_deg[side][panel] = out.angle_rad.to_degrees();
+                self.angles.elevators_override_active[side][panel] = self.elevator_ids[side][panel].position_fault_active(faults);
                 self.monitor_fault.insert(bare(ELEVATOR_COMPONENTS[side][panel]), monitoring);
             }
         }
@@ -906,6 +1162,7 @@ impl LiveArea for FlightControlsLive {
                 &rudder_allocations[panel],
                 &health,
                 &power,
+                &mode_power,
                 faults,
                 cmd.rudders_deg[panel],
                 rudder_span,
@@ -915,6 +1172,7 @@ impl LiveArea for FlightControlsLive {
             Self::accumulate_flow_demand(&rudder_allocations[panel], modes, out.rate_rad_s, ActuatorGeometry::rudder(), &mut green_demand_m3_s, &mut yellow_demand_m3_s);
             self.rudder_out[panel] = out;
             self.angles.rudders_deg[panel] = out.angle_rad.to_degrees();
+            self.angles.rudders_override_active[panel] = self.rudder_ids[panel].position_fault_active(faults);
             self.monitor_fault.insert(bare(RUDDER_COMPONENTS[panel]), monitoring);
         }
 
@@ -980,6 +1238,7 @@ impl LiveArea for FlightControlsLive {
                     .monitoring_fault;
                 self.spoiler_out[side][i] = out;
                 self.angles.spoilers_deg[side][i] = out.angle_rad.to_degrees();
+                self.angles.spoilers_override_active[side][i] = ids.position_fault_active(faults);
                 self.monitor_fault.insert(bare(&spoiler_component(side, i)), monitoring);
             }
         }
@@ -1003,6 +1262,7 @@ impl LiveArea for FlightControlsLive {
         };
         self.ths_out = self.ths.step(ths_modes, ths_command_rad, [power.green, power.yellow], &ths_faults, &aero, dt);
         self.angles.ths_deg = self.ths.angle_deg();
+        self.angles.ths_override_active = self.ths_ids.position_fault_active(faults);
         let ths_monitoring = self
             .ths_monitor
             .step(
@@ -1061,6 +1321,104 @@ impl LiveArea for FlightControlsLive {
 
         self.green_demand_m3_s = green_demand_m3_s;
         self.yellow_demand_m3_s = yellow_demand_m3_s;
+
+        // ---- Cockpit input transducers (E-FCTL, ECAM completeness pass,
+        // `E-FCTL-DESIGN.md` section 3.2): the captain's sidestick and the
+        // rudder pedal each get the same dual-channel monitoring every
+        // surface actuator above already has, watching the raw axis
+        // (`Truth::capt_sidestick_pitch_raw`'s own doc explains why there is
+        // no F.O.-side equivalent).
+        self.input_sensor_out.l_sidestick_pitch = self.l_sidestick_pitch_monitor.step(
+            truth.capt_sidestick_pitch_raw,
+            &self.l_sidestick_pitch_ids.chan_a(faults),
+            &self.l_sidestick_pitch_ids.chan_b(faults),
+            TRANSDUCER_DISAGREE_RAD,
+            dt,
+        );
+        self.input_sensor_out.l_sidestick_roll = self.l_sidestick_roll_monitor.step(
+            truth.capt_sidestick_roll_raw,
+            &self.l_sidestick_roll_ids.chan_a(faults),
+            &self.l_sidestick_roll_ids.chan_b(faults),
+            TRANSDUCER_DISAGREE_RAD,
+            dt,
+        );
+        self.input_sensor_out.rudder_pedal = self.rudder_pedal_monitor.step(
+            truth.rudder_pedal_raw,
+            &self.rudder_pedal_ids.chan_a(faults),
+            &self.rudder_pedal_ids.chan_b(faults),
+            TRANSDUCER_DISAGREE_RAD,
+            dt,
+        );
+
+        // ---- Sidestick disabled by the opposite side's priority take-over
+        // (`271800001`/`271800002`) -- a straight pass-through of the real
+        // compiled PRIM logic's own output (`E-FCTL-DESIGN.md` section 3.1),
+        // cached here for `publish` the same way every other live signal is.
+        self.input_sensor_out.l_sidestick_disabled_by_takeover = truth.prim_left_sidestick_disabled;
+        self.input_sensor_out.r_sidestick_disabled_by_takeover = truth.prim_right_sidestick_disabled;
+
+        // ---- PRIM/SEC pin-programming identity (E-FCTL, ECAM completeness
+        // pass, section 3.3): a discrete equality check, stepped every tick
+        // straight off the armed fault (no internal state needed).
+        self.input_sensor_out.prim_pin_prog_disagree = self.prim_pin_prog_ids.disagrees(faults);
+        self.input_sensor_out.sec_pin_prog_disagree = self.sec_pin_prog_ids.disagrees(faults);
+
+        // ---- Rate gyros (coordinator follow-up, `271800018`): the real
+        // sensed body rate `physics::adirs` already computes, through the
+        // same two-channel disagreement shape as every other transducer in
+        // this file.
+        self.input_sensor_out.rate_gyro_pitch = self.rate_gyro_pitch_monitor.step(
+            truth.body_rate_pitch_raw,
+            &self.rate_gyro_pitch_ids.chan_a(faults),
+            &self.rate_gyro_pitch_ids.chan_b(faults),
+            TRANSDUCER_DISAGREE_RAD,
+            dt,
+        );
+        self.input_sensor_out.rate_gyro_roll = self.rate_gyro_roll_monitor.step(
+            truth.body_rate_roll_raw,
+            &self.rate_gyro_roll_ids.chan_a(faults),
+            &self.rate_gyro_roll_ids.chan_b(faults),
+            TRANSDUCER_DISAGREE_RAD,
+            dt,
+        );
+        self.input_sensor_out.rate_gyro_yaw = self.rate_gyro_yaw_monitor.step(
+            truth.body_rate_yaw_raw,
+            &self.rate_gyro_yaw_ids.chan_a(faults),
+            &self.rate_gyro_yaw_ids.chan_b(faults),
+            TRANSDUCER_DISAGREE_RAD,
+            dt,
+        );
+
+        // ---- F.O. sidestick (coordinator follow-up, `271800026`/
+        // `271800028`): a real transducer pair held at a fixed neutral
+        // position (`Truth::capt_sidestick_pitch_raw`'s own doc explains
+        // why 0.0 here, not an invented reading -- this port's cockpit has
+        // no independent F.O. input device to move it).
+        self.input_sensor_out.r_sidestick_pitch =
+            self.r_sidestick_pitch_monitor.step(0.0, &self.r_sidestick_pitch_ids.chan_a(faults), &self.r_sidestick_pitch_ids.chan_b(faults), TRANSDUCER_DISAGREE_RAD, dt);
+        self.input_sensor_out.r_sidestick_roll =
+            self.r_sidestick_roll_monitor.step(0.0, &self.r_sidestick_roll_ids.chan_a(faults), &self.r_sidestick_roll_ids.chan_b(faults), TRANSDUCER_DISAGREE_RAD, dt);
+
+        // ---- Per-PRIM elevator/rudder command channel and sidestick-
+        // sensor monitor (coordinator follow-up, `271800033`-`271800035`/
+        // `271800039`-`271800041`/`271800042`-`271800044`): gated on that
+        // PRIM's own overall health so the whole-unit failure (already
+        // covered by FlyByWire's own wired `271800036`-`038`) is never
+        // double counted -- a channel cannot be "failed but fine" on a PRIM
+        // that is itself dead; that is simply the PRIM being dead.
+        for i in 0..3 {
+            let healthy = truth.prim_healthy[i];
+            self.input_sensor_out.prim_elevator_channel_fault[i] = healthy && faults.get(self.prim_elevator_channel_ids[i]) > 0.0;
+            self.input_sensor_out.prim_rudder_channel_fault[i] = healthy && faults.get(self.prim_rudder_channel_ids[i]) > 0.0;
+            self.input_sensor_out.prim_sidestick_monitor_fault[i] = healthy && faults.get(self.prim_sidestick_monitor_ids[i]) > 0.0;
+        }
+
+        // ---- Load alleviation function (coordinator follow-up,
+        // `271800029`): FCOM's own 2-of-3 accelerometer vote per wing.
+        self.input_sensor_out.load_alleviation_fault = self.load_alleviation_ids.fails(faults);
+
+        // ---- Flap lever CSU communication (`272800014`/`272800015`).
+        self.input_sensor_out.flap_lever_sys_fault = self.flap_lever_csu_ids.faults(faults);
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -1070,6 +1428,17 @@ impl LiveArea for FlightControlsLive {
         for (name, ids) in &self.fault_vars {
             let worst = ids.iter().map(|&id| self.armed.get(&id).copied().unwrap_or(0.0)).fold(0.0_f64, f64::max);
             out(name, worst);
+        }
+
+        // E-ELEC Phase 2: `340800056`-`058 NAV RA SYS A(B)(C) LOST BY PRIM`.
+        // Healthy, every PRIM uses all three RA systems; PRIM n's own fault
+        // drops only its own RA letter (n<->A/B/C, `registry.rs`'s own doc).
+        let ra_letters = ["A", "B", "C"];
+        for prim in 0..3 {
+            for (ra, letter) in ra_letters.iter().enumerate() {
+                let using = !(prim == ra && self.prim_ra_fault[prim] > 0.0);
+                out(&format!("DEEP_PRIM_{}_USING_RA_{}", prim + 1, letter), if using { 1.0 } else { 0.0 });
+            }
         }
 
         // The emergent physical state behind them, for the Study pages and
@@ -1125,6 +1494,45 @@ impl LiveArea for FlightControlsLive {
         for (component, fault) in &self.monitor_fault {
             out(&format!("FCTL_{component}_POSITION_MONITOR_FAULT"), f64::from(u8::from(*fault)));
         }
+
+        // ---- Cockpit input transducers and PRIM/SEC pin-programming
+        // identity (E-FCTL, ECAM completeness pass). The plain FAULT names
+        // are "both channels invalid" (`consolidated_rad.is_none()`); the
+        // SENSOR FAULT names are the narrower channel-disagreement monitor.
+        let io = &self.input_sensor_out;
+        out("FCTL_L_SIDESTICK_PITCH_FAULT", f64::from(u8::from(io.l_sidestick_pitch.consolidated_rad.is_none())));
+        out("FCTL_L_SIDESTICK_ROLL_FAULT", f64::from(u8::from(io.l_sidestick_roll.consolidated_rad.is_none())));
+        out("FCTL_L_SIDESTICK_PITCH_SENSOR_FAULT", f64::from(u8::from(io.l_sidestick_pitch.monitoring_fault)));
+        out("FCTL_L_SIDESTICK_ROLL_SENSOR_FAULT", f64::from(u8::from(io.l_sidestick_roll.monitoring_fault)));
+        out("FCTL_RUDDER_PEDAL_FAULT", f64::from(u8::from(io.rudder_pedal.consolidated_rad.is_none())));
+        out("FCTL_RUDDER_PEDAL_SENSOR_FAULT", f64::from(u8::from(io.rudder_pedal.monitoring_fault)));
+        out("FCTL_L_SIDESTICK_DISABLED_BY_TAKEOVER", f64::from(u8::from(io.l_sidestick_disabled_by_takeover)));
+        out("FCTL_R_SIDESTICK_DISABLED_BY_TAKEOVER", f64::from(u8::from(io.r_sidestick_disabled_by_takeover)));
+        // `FCTL_PRIM_VERSIONS_DISAGREE` and `FCTL_PRIM_PIN_PROG_DISAGREE`
+        // are the same underlying check published under FlyByWire's two
+        // separate titles (`271800045`/`271800047`) -- `E-FCTL-DESIGN.md`
+        // section 3.3's own accounting.
+        out("FCTL_PRIM_VERSIONS_DISAGREE", f64::from(u8::from(io.prim_pin_prog_disagree)));
+        out("FCTL_PRIM_PIN_PROG_DISAGREE", f64::from(u8::from(io.prim_pin_prog_disagree)));
+        out("FCTL_SEC_VERSIONS_DISAGREE", f64::from(u8::from(io.sec_pin_prog_disagree)));
+
+        // ---- Rate gyros, F.O. sidestick, per-PRIM channels, load
+        // alleviation, flap lever CSU (coordinator follow-up, 2026-09-27).
+        out("FCTL_RATE_GYRO_PITCH_FAULT", f64::from(u8::from(io.rate_gyro_pitch.consolidated_rad.is_none())));
+        out("FCTL_RATE_GYRO_ROLL_FAULT", f64::from(u8::from(io.rate_gyro_roll.consolidated_rad.is_none())));
+        out("FCTL_RATE_GYRO_YAW_FAULT", f64::from(u8::from(io.rate_gyro_yaw.consolidated_rad.is_none())));
+        out("FCTL_R_SIDESTICK_PITCH_FAULT", f64::from(u8::from(io.r_sidestick_pitch.consolidated_rad.is_none())));
+        out("FCTL_R_SIDESTICK_ROLL_FAULT", f64::from(u8::from(io.r_sidestick_roll.consolidated_rad.is_none())));
+        out("FCTL_R_SIDESTICK_PITCH_SENSOR_FAULT", f64::from(u8::from(io.r_sidestick_pitch.monitoring_fault)));
+        out("FCTL_R_SIDESTICK_ROLL_SENSOR_FAULT", f64::from(u8::from(io.r_sidestick_roll.monitoring_fault)));
+        for i in 0..3 {
+            out(&format!("FCTL_PRIM_{}_ELEVATOR_CHANNEL_FAULT", i + 1), f64::from(u8::from(io.prim_elevator_channel_fault[i])));
+            out(&format!("FCTL_PRIM_{}_RUDDER_CHANNEL_FAULT", i + 1), f64::from(u8::from(io.prim_rudder_channel_fault[i])));
+            out(&format!("FCTL_PRIM_{}_SIDESTICK_MONITOR_FAULT", i + 1), f64::from(u8::from(io.prim_sidestick_monitor_fault[i])));
+        }
+        out("FCTL_LOAD_ALLEVIATION_FAULT", f64::from(u8::from(io.load_alleviation_fault)));
+        out("FCTL_FLAPS_LEVER_SYS_1_FAULT", f64::from(u8::from(io.flap_lever_sys_fault[0])));
+        out("FCTL_FLAPS_LEVER_SYS_2_FAULT", f64::from(u8::from(io.flap_lever_sys_fault[1])));
     }
 }
 
@@ -1273,6 +1681,24 @@ mod tests {
             }
         }
         bound.extend(live.ground_spoiler_ids);
+        bound.extend(live.prim_ra_fault_ids);
+        // E-FCTL, ECAM completeness pass: cockpit input transducers and
+        // PRIM/SEC pin-programming identity.
+        for s in [live.l_sidestick_pitch_ids, live.l_sidestick_roll_ids, live.rudder_pedal_ids] {
+            bound.extend([s.chan_a_open, s.chan_a_drift, s.chan_b_open, s.chan_b_drift]);
+        }
+        bound.push(live.prim_pin_prog_ids.mismatch);
+        bound.push(live.sec_pin_prog_ids.mismatch);
+        // Coordinator follow-up, 2026-09-27.
+        for s in [live.rate_gyro_pitch_ids, live.rate_gyro_roll_ids, live.rate_gyro_yaw_ids, live.r_sidestick_pitch_ids, live.r_sidestick_roll_ids] {
+            bound.extend([s.chan_a_open, s.chan_a_drift, s.chan_b_open, s.chan_b_drift]);
+        }
+        bound.extend(live.prim_elevator_channel_ids);
+        bound.extend(live.prim_rudder_channel_ids);
+        bound.extend(live.prim_sidestick_monitor_ids);
+        bound.extend(live.load_alleviation_ids.left);
+        bound.extend(live.load_alleviation_ids.right);
+        bound.extend([live.flap_lever_csu_ids.chan_1_comm_lost, live.flap_lever_csu_ids.chan_2_comm_lost]);
         bound.sort_unstable();
 
         let mut r = Registry::default();
@@ -1283,9 +1709,18 @@ mod tests {
     }
 
     #[test]
-    fn all_thirty_seven_components_publish_the_fault_variable_their_ecam_trigger_reads() {
+    fn all_fifty_eight_components_publish_the_fault_variable_their_ecam_trigger_reads() {
+        // 37 original components + 3 cockpit input transducers + 2
+        // pin-programming components (E-FCTL, ECAM completeness pass) + 16
+        // more (coordinator follow-up: 3 rate gyros, 2 F.O. sidestick
+        // transducers, 9 per-PRIM channels, 1 load-alleviation component, 1
+        // flap-lever-CSU component); 61 with E-ELEC's 3, counted below.
         let live = ids();
-        assert_eq!(live.fault_vars.len(), 37);
+        // 37 real surface/actuator components, plus E-ELEC Phase 2's 3 PRIM
+        // RA-link components (`27_fctl.prim_n`), plus E-FCTL's 21 (cockpit input
+        // transducers, rate gyros, per-PRIM channels, load alleviation, flap
+        // lever CSU) = 61.
+        assert_eq!(live.fault_vars.len(), 61);
         let published = run(&mut ids(), &parked_truth(), &Faults::default(), 0.1);
         for name in [
             "FCTL_AIL_L1_FAULT",
@@ -1298,6 +1733,18 @@ mod tests {
             "FCTL_SLAT_R_FAULT",
             "FCTL_DROOP_R_FAULT",
             "FCTL_GND_SPLR_LOGIC_FAULT",
+            "FCTL_L_SIDESTICK_PITCH_FAULT",
+            "FCTL_L_SIDESTICK_ROLL_FAULT",
+            "FCTL_RUDDER_PEDAL_FAULT",
+            "FCTL_PRIM_PIN_PROG_FAULT",
+            "FCTL_SEC_PIN_PROG_FAULT",
+            "FCTL_RATE_GYRO_PITCH_FAULT",
+            "FCTL_R_SIDESTICK_PITCH_FAULT",
+            "FCTL_PRIM_1_ELEVATOR_CHANNEL_FAULT",
+            "FCTL_PRIM_2_RUDDER_CHANNEL_FAULT",
+            "FCTL_PRIM_3_SIDESTICK_MONITOR_FAULT",
+            "FCTL_LOAD_ALLEVIATION_FAULT",
+            "FCTL_FLAP_LEVER_CSU_FAULT",
         ] {
             assert!(published.contains_key(name), "missing {name}");
             assert_eq!(published[name], 0.0, "{name} must read healthy with nothing armed");
@@ -1444,8 +1891,26 @@ mod tests {
         // publish side of that coupling actually reacts to a real command
         // rather than reading zero forever.
         let mut truth = parked_truth();
-        truth.commanded_surfaces.ailerons_deg[0] = [20.0; 3];
         let mut moving = ids();
+        // (INT-FIX root-cause fix) `PowerDebounce` (W85, `allocation.rs`)
+        // requires several consecutive ticks of already-available power
+        // before it grants `Active` mode authority at all -- by design, so
+        // one glitchy tick can never hand an actuator `Active` for even one
+        // tick (`PowerDebounce`'s own doc). A real aircraft has had its
+        // hydraulic/electric supplies stable for far longer than that
+        // before a pilot ever touches a control; a fresh `ids()` starts
+        // with the debounce's own counters at 0, which is only true the
+        // instant this `FlightControlsLive` itself was constructed, not the
+        // instant the aircraft's power came up. Warm the debounce up first,
+        // at rest under the same (already fully powered) `parked_truth()`,
+        // exactly as production power already would have been well before
+        // any command -- this is the same "needs more than one tick to
+        // reach steady state" shape already fixed for the hydraulics
+        // electric-pump tests (PLUGIN-LOG's Round 3), not a weakened check.
+        for _ in 0..5 {
+            moving.tick(&truth, &Faults::default());
+        }
+        truth.commanded_surfaces.ailerons_deg[0] = [20.0; 3];
         // One tick only: freshly commanded, the surfaces are moving hard,
         // which is exactly when flow demand should be highest.
         moving.tick(&truth, &Faults::default());
@@ -1697,5 +2162,196 @@ mod tests {
         }
         assert_eq!(out["FCTL_GREEN_DEMAND_M3_S"], 0.0, "no computer left to drive any Green actuator");
         assert_eq!(out["FCTL_YELLOW_DEMAND_M3_S"], 0.0, "no computer left to drive any Yellow actuator");
+    }
+
+    // ---- Cockpit input transducers and PRIM/SEC pin-programming identity
+    // (E-FCTL, ECAM completeness pass, `E-FCTL-DESIGN.md` sections 3.2/3.3).
+
+    #[test]
+    fn a_healthy_captains_sidestick_reads_no_fault_and_both_channels_open_trips_it() {
+        let mut truth = flying_truth();
+        truth.capt_sidestick_pitch_raw = 0.3;
+        let mut area = ids();
+        let healthy = run(&mut area, &truth, &Faults::default(), 1.0);
+        assert_eq!(healthy["FCTL_L_SIDESTICK_PITCH_FAULT"], 0.0, "a healthy captain's stick must not fault");
+        assert_eq!(healthy["FCTL_L_SIDESTICK_PITCH_SENSOR_FAULT"], 0.0);
+
+        let ids_ = area.l_sidestick_pitch_ids;
+        let faults = Faults::from_pairs([(ids_.chan_a_open, 1.0), (ids_.chan_b_open, 1.0)]);
+        let mut area = ids();
+        let faulted = run(&mut area, &truth, &faults, 1.0);
+        assert_eq!(faulted["FCTL_L_SIDESTICK_PITCH_FAULT"], 1.0, "both channels open must read as the stick lost outright");
+    }
+
+    #[test]
+    fn one_drifting_sidestick_channel_trips_the_sensor_fault_not_the_plain_fault() {
+        let mut truth = flying_truth();
+        truth.capt_sidestick_roll_raw = 0.0;
+        let mut area = ids();
+        let ids_ = area.l_sidestick_roll_ids;
+        // Channel A drifts at the modelled maximum rate while channel B
+        // stays healthy: both remain individually valid (so the plain FAULT
+        // must stay clear), but they diverge past `TRANSDUCER_DISAGREE_RAD`
+        // for longer than `TRANSDUCER_DISAGREE_TIMER_S`, which is exactly
+        // what the SENSOR FAULT (a channel *disagreement*, not a loss) is
+        // for.
+        let faults = Faults::from_pairs([(ids_.chan_a_drift, 1.0)]);
+        let out = run(&mut area, &truth, &faults, 40.0);
+        assert_eq!(out["FCTL_L_SIDESTICK_ROLL_FAULT"], 0.0, "one drifting channel is not the same as losing the stick");
+        assert_eq!(out["FCTL_L_SIDESTICK_ROLL_SENSOR_FAULT"], 1.0, "a persistent channel disagreement must trip the sensor fault");
+    }
+
+    #[test]
+    fn rudder_pedal_transducer_mirrors_the_sidestick_pattern() {
+        let truth = flying_truth();
+        let mut area = ids();
+        let healthy = run(&mut area, &truth, &Faults::default(), 1.0);
+        assert_eq!(healthy["FCTL_RUDDER_PEDAL_FAULT"], 0.0);
+        assert_eq!(healthy["FCTL_RUDDER_PEDAL_SENSOR_FAULT"], 0.0);
+
+        let ids_ = area.rudder_pedal_ids;
+        let mut area = ids();
+        let both_open = run(&mut area, &truth, &Faults::from_pairs([(ids_.chan_a_open, 1.0), (ids_.chan_b_open, 1.0)]), 1.0);
+        assert_eq!(both_open["FCTL_RUDDER_PEDAL_FAULT"], 1.0);
+
+        let mut area = ids();
+        let disagreeing = run(&mut area, &truth, &Faults::from_pairs([(ids_.chan_a_drift, 1.0)]), 40.0);
+        assert_eq!(disagreeing["FCTL_RUDDER_PEDAL_FAULT"], 0.0);
+        assert_eq!(disagreeing["FCTL_RUDDER_PEDAL_SENSOR_FAULT"], 1.0);
+    }
+
+    #[test]
+    fn sidestick_disabled_by_takeover_passes_truth_straight_through() {
+        let healthy = run(&mut ids(), &flying_truth(), &Faults::default(), 0.1);
+        assert_eq!(healthy["FCTL_L_SIDESTICK_DISABLED_BY_TAKEOVER"], 0.0);
+        assert_eq!(healthy["FCTL_R_SIDESTICK_DISABLED_BY_TAKEOVER"], 0.0);
+
+        let mut fo_pressed = flying_truth();
+        fo_pressed.prim_left_sidestick_disabled = true;
+        let out = run(&mut ids(), &fo_pressed, &Faults::default(), 0.1);
+        assert_eq!(out["FCTL_L_SIDESTICK_DISABLED_BY_TAKEOVER"], 1.0, "271800001 CONFIG L SIDESTICK FAULT: the left stick reads disabled the same tick Truth says so");
+        assert_eq!(out["FCTL_R_SIDESTICK_DISABLED_BY_TAKEOVER"], 0.0);
+
+        let mut capt_pressed = flying_truth();
+        capt_pressed.prim_right_sidestick_disabled = true;
+        let out = run(&mut ids(), &capt_pressed, &Faults::default(), 0.1);
+        assert_eq!(out["FCTL_R_SIDESTICK_DISABLED_BY_TAKEOVER"], 1.0, "271800002 CONFIG R SIDESTICK FAULT");
+        assert_eq!(out["FCTL_L_SIDESTICK_DISABLED_BY_TAKEOVER"], 0.0);
+    }
+
+    #[test]
+    fn prim_and_sec_pin_programming_disagree_reads_the_armed_fault_the_same_tick() {
+        let truth = flying_truth();
+        let healthy = run(&mut ids(), &truth, &Faults::default(), 0.1);
+        assert_eq!(healthy["FCTL_PRIM_VERSIONS_DISAGREE"], 0.0);
+        assert_eq!(healthy["FCTL_PRIM_PIN_PROG_DISAGREE"], 0.0);
+        assert_eq!(healthy["FCTL_SEC_VERSIONS_DISAGREE"], 0.0);
+
+        let prim_id = ids().prim_pin_prog_ids.mismatch;
+        // A single tick is enough: this is a discrete identity check, not a
+        // physical transient (`E-FCTL-DESIGN.md` section 3.3).
+        let out = run(&mut ids(), &truth, &Faults::from_pairs([(prim_id, 1.0)]), 0.02);
+        assert_eq!(out["FCTL_PRIM_VERSIONS_DISAGREE"], 1.0, "271800045 F/CTL PRIM VERSIONS DISAGREE");
+        assert_eq!(out["FCTL_PRIM_PIN_PROG_DISAGREE"], 1.0, "271800047 F/CTL PRIMs PIN PROG DISAGREE -- the same underlying check under FlyByWire's second title");
+        assert_eq!(out["FCTL_SEC_VERSIONS_DISAGREE"], 0.0, "arming the PRIM mismatch must not also flag the SECs");
+
+        let sec_id = ids().sec_pin_prog_ids.mismatch;
+        let out = run(&mut ids(), &truth, &Faults::from_pairs([(sec_id, 1.0)]), 0.02);
+        assert_eq!(out["FCTL_SEC_VERSIONS_DISAGREE"], 1.0, "271800046 F/CTL SEC VERSIONS DISAGREE");
+        assert_eq!(out["FCTL_PRIM_VERSIONS_DISAGREE"], 0.0);
+    }
+
+    // ---- Coordinator follow-up, 2026-09-27: rate gyros, F.O. sidestick,
+    // per-PRIM channels, load alleviation, flap lever CSU.
+
+    #[test]
+    fn a_healthy_rate_gyro_reads_no_fault_and_both_channels_open_trips_it() {
+        let mut truth = flying_truth();
+        truth.body_rate_pitch_raw = 0.05;
+        let mut area = ids();
+        let healthy = run(&mut area, &truth, &Faults::default(), 1.0);
+        assert_eq!(healthy["FCTL_RATE_GYRO_PITCH_FAULT"], 0.0, "271800018 must be quiet with a healthy gyro pair");
+
+        let ids_ = area.rate_gyro_pitch_ids;
+        let faulted = run(&mut ids(), &truth, &Faults::from_pairs([(ids_.chan_a_open, 1.0), (ids_.chan_b_open, 1.0)]), 1.0);
+        assert_eq!(faulted["FCTL_RATE_GYRO_PITCH_FAULT"], 1.0, "both pitch-rate-gyro channels lost must read as 271800018's cause");
+    }
+
+    #[test]
+    fn f_o_sidestick_fault_and_sensor_fault_mirror_the_captains_pattern_at_a_fixed_neutral() {
+        let truth = flying_truth();
+        let mut area = ids();
+        let healthy = run(&mut area, &truth, &Faults::default(), 1.0);
+        assert_eq!(healthy["FCTL_R_SIDESTICK_PITCH_FAULT"], 0.0, "271800026 must be quiet with a healthy F.O. stick");
+        assert_eq!(healthy["FCTL_R_SIDESTICK_PITCH_SENSOR_FAULT"], 0.0, "271800028 must be quiet with a healthy F.O. stick");
+
+        let ids_ = area.r_sidestick_pitch_ids;
+        let both_open = run(&mut ids(), &truth, &Faults::from_pairs([(ids_.chan_a_open, 1.0), (ids_.chan_b_open, 1.0)]), 1.0);
+        assert_eq!(both_open["FCTL_R_SIDESTICK_PITCH_FAULT"], 1.0, "both channels open must fault even though the stick never moves -- the FCOM's own trigger never requires deflection");
+
+        let disagreeing = run(&mut ids(), &truth, &Faults::from_pairs([(ids_.chan_a_drift, 1.0)]), 40.0);
+        assert_eq!(disagreeing["FCTL_R_SIDESTICK_PITCH_FAULT"], 0.0);
+        assert_eq!(disagreeing["FCTL_R_SIDESTICK_PITCH_SENSOR_FAULT"], 1.0, "a channel drifting off a shared neutral still trips the disagreement monitor");
+    }
+
+    #[test]
+    fn a_per_prim_channel_fault_only_reads_while_that_prim_is_itself_healthy() {
+        let mut truth = flying_truth();
+        truth.prim_healthy = [true, true, true];
+        let elev1 = ids().prim_elevator_channel_ids[0];
+        let rud2 = ids().prim_rudder_channel_ids[1];
+        let stick3 = ids().prim_sidestick_monitor_ids[2];
+
+        let healthy = run(&mut ids(), &truth, &Faults::default(), 0.1);
+        assert_eq!(healthy["FCTL_PRIM_1_ELEVATOR_CHANNEL_FAULT"], 0.0);
+
+        let armed = run(&mut ids(), &truth, &Faults::from_pairs([(elev1, 1.0), (rud2, 1.0), (stick3, 1.0)]), 0.1);
+        assert_eq!(armed["FCTL_PRIM_1_ELEVATOR_CHANNEL_FAULT"], 1.0, "271800033 PRIM 1 ELEVATOR ACTUATOR FAULT");
+        assert_eq!(armed["FCTL_PRIM_2_RUDDER_CHANNEL_FAULT"], 1.0, "271800040 PRIM 2 RUDDER ACTUATOR FAULT");
+        assert_eq!(armed["FCTL_PRIM_3_SIDESTICK_MONITOR_FAULT"], 1.0, "271800044 PRIM 3 SIDESTICK SENSOR FAULT");
+        assert_eq!(armed["FCTL_PRIM_2_ELEVATOR_CHANNEL_FAULT"], 0.0, "untouched PRIM 2's own elevator channel must stay quiet");
+
+        // The whole-unit failure already covers PRIM 1 being wholly dead
+        // (FlyByWire's own wired 271800036); this component must not double
+        // up on top of that -- a channel on a dead PRIM reads quiet here.
+        truth.prim_healthy[0] = false;
+        let dead_prim = run(&mut ids(), &truth, &Faults::from_pairs([(elev1, 1.0)]), 0.1);
+        assert_eq!(dead_prim["FCTL_PRIM_1_ELEVATOR_CHANNEL_FAULT"], 0.0, "a channel fault on a wholly-dead PRIM must not double up with 271800036");
+    }
+
+    #[test]
+    fn load_alleviation_needs_two_of_three_accelerometers_failed_in_one_wing() {
+        let truth = flying_truth();
+        let laf = ids().load_alleviation_ids;
+
+        let healthy = run(&mut ids(), &truth, &Faults::default(), 0.1);
+        assert_eq!(healthy["FCTL_LOAD_ALLEVIATION_FAULT"], 0.0);
+
+        let one_failed = run(&mut ids(), &truth, &Faults::from_pairs([(laf.left[0], 1.0)]), 0.1);
+        assert_eq!(one_failed["FCTL_LOAD_ALLEVIATION_FAULT"], 0.0, "one of three accelerometers failed is not yet a 2-of-3 vote");
+
+        let two_failed_left = run(&mut ids(), &truth, &Faults::from_pairs([(laf.left[0], 1.0), (laf.left[1], 1.0)]), 0.1);
+        assert_eq!(two_failed_left["FCTL_LOAD_ALLEVIATION_FAULT"], 1.0, "271800029: two of three left-wing LAF accelerometers failed");
+
+        let two_failed_right = run(&mut ids(), &truth, &Faults::from_pairs([(laf.right[1], 1.0), (laf.right[2], 1.0)]), 0.1);
+        assert_eq!(two_failed_right["FCTL_LOAD_ALLEVIATION_FAULT"], 1.0, "the vote is per wing -- the right wing's own 2-of-3 also faults it");
+    }
+
+    #[test]
+    fn flap_lever_sys_fault_reads_per_sfcc_channel() {
+        let truth = flying_truth();
+        let csu = ids().flap_lever_csu_ids;
+
+        let healthy = run(&mut ids(), &truth, &Faults::default(), 0.1);
+        assert_eq!(healthy["FCTL_FLAPS_LEVER_SYS_1_FAULT"], 0.0);
+        assert_eq!(healthy["FCTL_FLAPS_LEVER_SYS_2_FAULT"], 0.0);
+
+        let sys1 = run(&mut ids(), &truth, &Faults::from_pairs([(csu.chan_1_comm_lost, 1.0)]), 0.1);
+        assert_eq!(sys1["FCTL_FLAPS_LEVER_SYS_1_FAULT"], 1.0, "272800014 F/CTL FLAPS LEVER SYS 1 FAULT");
+        assert_eq!(sys1["FCTL_FLAPS_LEVER_SYS_2_FAULT"], 0.0);
+
+        let sys2 = run(&mut ids(), &truth, &Faults::from_pairs([(csu.chan_2_comm_lost, 1.0)]), 0.1);
+        assert_eq!(sys2["FCTL_FLAPS_LEVER_SYS_2_FAULT"], 1.0, "272800015 F/CTL FLAPS LEVER SYS 2 FAULT");
+        assert_eq!(sys2["FCTL_FLAPS_LEVER_SYS_1_FAULT"], 0.0);
     }
 }

@@ -13,6 +13,7 @@
 
 use super::faults::{combine_pass_fraction, EndSystemFaults, LinkFaults, ModuleFaults, SwitchFaults};
 use super::topology::{EndSystemIdx, LINK_RATE_BPS, NetworkSide, NetworkTopology, NodeId, SwitchIdx};
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
 /// All faults acting on one network side's graph plus the end
@@ -93,8 +94,29 @@ pub struct NetworkGraph<'t> {
     /// and a live network re-runs these searches for every virtual link
     /// on every frame.
     adjacency: [HashMap<NodeId, Vec<NodeId>>; 2],
+    /// Answers already worked out, for a graph only ever asked about one
+    /// fault set ([`Self::memoized`]); `None` from [`Self::new`], so a caller
+    /// that changes the faults between questions never gets a stale one.
+    memo: Option<Memo>,
 }
+
+/// `shortest_path` and `port_load` answers, keyed by side and endpoints.
+/// Every message monitor asks for its own path and, per hop, a port load
+/// that walks every virtual link's paths again: without this the live
+/// area re-ran the same searches thousands of times a frame.
+#[derive(Default)]
+struct Memo {
+    paths: RefCell<HashMap<(usize, NodeId, NodeId), Option<Vec<NodeId>>>>,
+    loads: RefCell<HashMap<(usize, NodeId, NodeId), PortLoad>>,
+}
+
 impl<'t> NetworkGraph<'t> {
+    /// A graph that remembers its answers: for one fault set only, such as
+    /// the live area's graph, built fresh every tick for that tick's faults.
+    pub fn memoized(topology: &'t NetworkTopology) -> Self {
+        Self { memo: Some(Memo::default()), ..Self::new(topology) }
+    }
+
     pub fn new(topology: &'t NetworkTopology) -> Self {
         let adjacency = NetworkSide::BOTH.map(|side| {
             let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -104,7 +126,7 @@ impl<'t> NetworkGraph<'t> {
             }
             adj
         });
-        Self { topology, adjacency }
+        Self { topology, adjacency, memo: None }
     }
 
     fn adjacency(&self, side: NetworkSide) -> &HashMap<NodeId, Vec<NodeId>> {
@@ -136,6 +158,43 @@ impl<'t> NetworkGraph<'t> {
         faults.segment(side, a, b).is_available() && self.edge_pass_fraction(side, a, b, faults) > 0.0
     }
 
+    /// Every end system `reachable` from `from` on this side, indexed like
+    /// `NetworkTopology::end_systems`: the same walk as `shortest_path`, run
+    /// to completion instead of stopping at one target, so one search
+    /// answers `reachable(side, from, NodeId::End(i), faults)` for every
+    /// `i`. The live area asks that for every pair of modules on both
+    /// networks each frame; one search per source instead of one per pair
+    /// was most of this area's frame time.
+    pub fn reachable_ends(&self, side: NetworkSide, from: NodeId, faults: &NetworkFaults) -> Vec<bool> {
+        let mut ends = vec![false; self.topology.end_systems.len()];
+        if !self.node_up(side, from, faults) {
+            return ends;
+        }
+        let adj = self.adjacency(side);
+        let mut visited: HashMap<NodeId, bool> = HashMap::new();
+        let mut frontier = VecDeque::new();
+        frontier.push_back(from);
+        visited.insert(from, true);
+        while let Some(node) = frontier.pop_front() {
+            if let NodeId::End(i) = node {
+                if let Some(slot) = ends.get_mut(i) {
+                    *slot = true;
+                }
+            }
+            for &next in adj.get(&node).into_iter().flatten() {
+                if visited.contains_key(&next) {
+                    continue;
+                }
+                if !self.node_up(side, next, faults) || !self.edge_usable(side, node, next, faults) {
+                    continue;
+                }
+                visited.insert(next, true);
+                frontier.push_back(next);
+            }
+        }
+        ends
+    }
+
     /// Breadth-first search, exactly FlyByWire's algorithm generalised to
     /// this graph's node type: is there any path at all, ignoring how lossy
     /// it is.
@@ -150,6 +209,17 @@ impl<'t> NetworkGraph<'t> {
     /// (GENERIC) since the real per-VL static routing tables are not
     /// public.
     pub fn shortest_path(&self, side: NetworkSide, from: NodeId, to: NodeId, faults: &NetworkFaults) -> Option<Vec<NodeId>> {
+        let Some(memo) = &self.memo else { return self.search(side, from, to, faults) };
+        let key = (side.index(), from, to);
+        if let Some(path) = memo.paths.borrow().get(&key) {
+            return path.clone();
+        }
+        let path = self.search(side, from, to, faults);
+        memo.paths.borrow_mut().insert(key, path.clone());
+        path
+    }
+
+    fn search(&self, side: NetworkSide, from: NodeId, to: NodeId, faults: &NetworkFaults) -> Option<Vec<NodeId>> {
         if !self.node_up(side, from, faults) || !self.node_up(side, to, faults) {
             return None;
         }
@@ -222,6 +292,17 @@ impl<'t> NetworkGraph<'t> {
     /// any babbling end system directly on this edge flooding past its
     /// regulated share.
     pub fn port_load(&self, side: NetworkSide, a: NodeId, b: NodeId, faults: &NetworkFaults) -> PortLoad {
+        let Some(memo) = &self.memo else { return self.load(side, a, b, faults) };
+        let key = (side.index(), a, b);
+        if let Some(&load) = memo.loads.borrow().get(&key) {
+            return load;
+        }
+        let load = self.load(side, a, b, faults);
+        memo.loads.borrow_mut().insert(key, load);
+        load
+    }
+
+    fn load(&self, side: NetworkSide, a: NodeId, b: NodeId, faults: &NetworkFaults) -> PortLoad {
         let mut offered = 0.0;
         for vl in &self.topology.virtual_links {
             let source = NodeId::End(vl.source);
@@ -243,6 +324,41 @@ impl<'t> NetworkGraph<'t> {
             }
         }
         PortLoad { offered_bps: offered, capacity_bps: LINK_RATE_BPS }
+    }
+}
+
+#[cfg(test)]
+mod memo_tests {
+    use super::super::topology::a380_reference_topology;
+    use super::*;
+
+    #[test]
+    fn a_memoized_graph_answers_exactly_as_a_plain_one() {
+        let t = a380_reference_topology();
+        let plain = NetworkGraph::new(&t);
+        let memo = NetworkGraph::memoized(&t);
+        let faults = NetworkFaults::default();
+        let n = t.end_systems.len();
+        for side in NetworkSide::BOTH {
+            for a in 0..n {
+                let ends = plain.reachable_ends(side, NodeId::End(a), &faults);
+                for b in 0..n {
+                    let from = NodeId::End(a);
+                    let to = NodeId::End(b);
+                    let path = plain.shortest_path(side, from, to, &faults);
+                    assert_eq!(memo.shortest_path(side, from, to, &faults), path);
+                    assert_eq!(memo.shortest_path(side, from, to, &faults), path, "and again, from the memo");
+                    assert_eq!(ends[b], path.is_some(), "reachable_ends agrees with a search per pair");
+                    if let Some(p) = path {
+                        for w in p.windows(2) {
+                            let x = plain.port_load(side, w[0], w[1], &faults);
+                            let y = memo.port_load(side, w[0], w[1], &faults);
+                            assert_eq!((x.offered_bps, x.capacity_bps), (y.offered_bps, y.capacity_bps));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

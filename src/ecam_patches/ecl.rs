@@ -43,10 +43,10 @@
 //! ([`ecl_ecp_buttons_are_momentary`]): read every name the cockpit might
 //! write, and zero each one that read 1 -- exactly what `LEFT_LEAVE_CODE`
 //! does in MSFS. Fixing it here rather than in the converter keeps
-//! `D:\msfs2xp-aircraft` out of this workstream and works against the
+//! `D:\A380\msfs2xp-aircraft` out of this workstream and works against the
 //! already-installed aircraft.
 
-use crate::js::msfs::SourcePatch;
+use crate::source_patch::SourcePatch;
 
 const SYSTEMS_HOST: &str = "/Pages/VCockpit/Instruments/A380X/SystemsHost/SystemsHost.js";
 
@@ -232,6 +232,7 @@ mod tests {
     /// times. Needs FlyByWire's built html_ui and the MSFS package's panel
     /// like `boots_fbw_cockpit_views`:
     /// `cargo test --release --features js -- --ignored ecl_opens_and_closes`.
+    #[cfg(feature = "js")]
     #[test]
     #[ignore]
     fn ecl_opens_and_closes_on_every_c_l_press() {

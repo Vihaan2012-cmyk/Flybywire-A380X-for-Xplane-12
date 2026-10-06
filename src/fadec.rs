@@ -396,6 +396,22 @@ pub mod table1502 {
     }
 }
 
+/// FlyByWire's actual (uncorrected) idle N1 and N3 at this altitude, Mach
+/// and ambient temperature (deg C): Table1502's referred/ISA-corrected idle
+/// speeds scaled to real spool speed by `ratios::theta`/`theta2`, exactly as
+/// `Fadec::generate_idle_parameters` computes the `ENGINE_IDLE_N1`/`_N3`
+/// Vars that `next_state`'s Starting/Restarting -> On gate compares real N3
+/// against below. Shared with `engine_commands.rs`'s quick-mode snap so a
+/// quick-started engine lands on the same idle the state machine is
+/// actually waiting for, not the ISA-referred table value one
+/// `theta.sqrt()` short of it on a non-ISA day.
+pub fn idle_n1_n3(pressure_altitude: f64, mach: f64, ambient_temp: f64) -> (f64, f64) {
+    let idle_cn1 = table1502::icn1(pressure_altitude, mach, ambient_temp);
+    let idle_n1 = idle_cn1 * ratios::theta2(0., ambient_temp).sqrt();
+    let idle_n3 = table1502::icn3(pressure_altitude, mach) * ratios::theta(ambient_temp).sqrt();
+    (idle_n1, idle_n3)
+}
+
 /// N1 limits for take-off, go-around, climb and continuous thrust
 /// (ThrustLimits_A380X.hpp).
 pub mod thrust_limits {
@@ -651,6 +667,16 @@ pub fn next_state(state: EngineState, igniter: i32, starter: bool, sim_n3: f64, 
     }
 }
 
+/// A pack is drawing bleed air -- and so costs the FADEC's packs-bleed
+/// thrust-limit correction (`thrust_limits::limit_n1`'s `packs` flag) --
+/// whenever either of its two flow valves is open. Combines both packs into
+/// the single flag `update_thrust_limits` wants, exactly like the old
+/// `COND_PACK_n_IS_OPERATING != 0.` OR did, just fed from variables that are
+/// actually written (see the `packs` field comment in `Fadec::new`).
+pub fn pack_bleed_active(pack1_valve1: bool, pack1_valve2: bool, pack2_valve1: bool, pack2_valve2: bool) -> bool {
+    pack1_valve1 || pack1_valve2 || pack2_valve1 || pack2_valve2
+}
+
 /// The variables one engine reads and writes.
 struct EngineVars {
     // FlyByWire's engine readings.
@@ -673,6 +699,11 @@ struct EngineVars {
     master: VariableIdentifier,
     throttle_input: VariableIdentifier,
     lever_3d: VariableIdentifier,
+    // MSFS's own lever-position simvar (Percent, 0-100): every EWD/SD/ND/
+    // MFD/FCU/OIT/PFD bundle reads this directly, separately from
+    // FlyByWire's own A32NX_3D_THROTTLE_LEVER_POSITION_n above. Nothing
+    // fed it before, so it read 0 forever.
+    general_eng_throttle_lever_position: VariableIdentifier,
     // The simulator's engine, as FlyByWire's systems read it.
     corrected_n1: VariableIdentifier,
     corrected_n2: VariableIdentifier,
@@ -703,6 +734,7 @@ impl EngineVars {
             master: get(format!("GENERAL ENG STARTER:{n}")),
             throttle_input: get(format!("THROTTLE_MAPPING_INPUT:{n}")),
             lever_3d: get(format!("3D_THROTTLE_LEVER_POSITION_{n}")),
+            general_eng_throttle_lever_position: get(format!("GENERAL ENG THROTTLE LEVER POSITION:{n}")),
             corrected_n1: get(format!("TURB ENG CORRECTED N1:{n}")),
             corrected_n2: get(format!("TURB ENG CORRECTED N2:{n}")),
             jet_thrust: get(format!("TURB ENG JET THRUST:{n}")),
@@ -766,7 +798,9 @@ pub struct Fadec {
     limit_flx: VariableIdentifier,
     limit_mct: VariableIdentifier,
     limit_toga: VariableIdentifier,
-    packs: [VariableIdentifier; 2],
+    // Order: pack 1 flow valve 1, pack 1 flow valve 2, pack 2 flow valve 1,
+    // pack 2 flow valve 2 -- see the constructor comment.
+    packs: [VariableIdentifier; 4],
     wing_anti_ice: VariableIdentifier,
     flex_temp: VariableIdentifier,
     quick_mode: VariableIdentifier,
@@ -820,9 +854,21 @@ impl Fadec {
             limit_flx: vars.get("AUTOTHRUST_THRUST_LIMIT_FLX".into()),
             limit_mct: vars.get("AUTOTHRUST_THRUST_LIMIT_MCT".into()),
             limit_toga: vars.get("AUTOTHRUST_THRUST_LIMIT_TOGA".into()),
+            // COND_PACK_n_IS_OPERATING (both FBW's MSFS C++ FADEC and this
+            // plugin's own linked a380_systems FADEC use read it) is never
+            // written by anything -- see FadecSimData_A380X.hpp:437-438 for
+            // the matching blind read on the MSFS side, and
+            // AirGenerationSystemApplication::pack_is_operating (cpiom_b.rs)
+            // for why: it only feeds a private ARINC discrete bit, never a
+            // plain L:var. What IS written every tick is each pack's flow
+            // valve open state (PackComplex::write, fbw-a380x pneumatic.rs);
+            // a pack is bleeding air, and so costing thrust, whenever either
+            // of its two flow valves is open.
             packs: [
-                vars.get("COND_PACK_1_IS_OPERATING".into()),
-                vars.get("COND_PACK_2_IS_OPERATING".into()),
+                vars.get("COND_PACK_1_FLOW_VALVE_1_IS_OPEN".into()),
+                vars.get("COND_PACK_1_FLOW_VALVE_2_IS_OPEN".into()),
+                vars.get("COND_PACK_2_FLOW_VALVE_1_IS_OPEN".into()),
+                vars.get("COND_PACK_2_FLOW_VALVE_2_IS_OPEN".into()),
             ],
             wing_anti_ice: vars.get("PNEU_WING_ANTI_ICE_SYSTEM_ON".into()),
             flex_temp: vars.get("AIRLINER_TO_FLEX_TEMP".into()),
@@ -923,6 +969,9 @@ impl Fadec {
             vars.write(&id_tla, levers.angle[i]);
             vars.write(&id_input, levers.axis[i]);
             vars.write(&id_lever, levers.lever_3d[i]);
+            // Same 0-100 scale as the 3D lever above: MSFS's own simvar the
+            // cockpit bundles poll directly.
+            vars.write(&e.general_eng_throttle_lever_position, levers.lever_3d[i]);
         }
 
         let delta_time = delta.max(0.002);
@@ -967,7 +1016,12 @@ impl Fadec {
 
         self.update_fuel(vars, delta_time, xp.fuel_kg);
 
-        let packs = (vars.read(&self.packs[0]) != 0. || vars.read(&self.packs[1]) != 0.) as i32 as f64;
+        let packs = pack_bleed_active(
+            vars.read(&self.packs[0]) != 0.,
+            vars.read(&self.packs[1]) != 0.,
+            vars.read(&self.packs[2]) != 0.,
+            vars.read(&self.packs[3]) != 0.,
+        ) as i32 as f64;
         let nai = xp.anti_ice.iter().any(|&a| a != 0) as i32 as f64;
         let wai = vars.read(&self.wing_anti_ice).trunc();
         self.update_thrust_limits(vars, sim_time, pressure_altitude, ambient_temperature, ambient_pressure, mach, packs, nai, wai);
@@ -1077,8 +1131,7 @@ impl Fadec {
 
     fn generate_idle_parameters(&self, vars: &mut Vars, pressure_altitude: f64, mach: f64, ambient_temperature: f64, ambient_pressure: f64) {
         let idle_cn1 = table1502::icn1(pressure_altitude, mach, ambient_temperature);
-        let idle_n1 = idle_cn1 * ratios::theta2(0., ambient_temperature).sqrt();
-        let idle_n3 = table1502::icn3(pressure_altitude, mach) * ratios::theta(ambient_temperature).sqrt();
+        let (idle_n1, idle_n3) = idle_n1_n3(pressure_altitude, mach, ambient_temperature);
         let idle_cff = polynomial::corrected_fuel_flow(idle_cn1, 0., pressure_altitude);
         let idle_ff = idle_cff * LBS_TO_KGS * ratios::delta2(0., ambient_pressure) * ratios::theta2(0., ambient_temperature).sqrt();
         let idle_egt = polynomial::corrected_egt(idle_cn1, idle_cff, 0., pressure_altitude) * ratios::theta2(0., ambient_temperature);
@@ -1398,6 +1451,16 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_is_bleeding_if_either_of_its_own_flow_valves_is_open() {
+        assert!(!pack_bleed_active(false, false, false, false), "no valve open, no bleed");
+        assert!(pack_bleed_active(true, false, false, false), "pack 1 valve 1 alone");
+        assert!(pack_bleed_active(false, true, false, false), "pack 1 valve 2 alone");
+        assert!(pack_bleed_active(false, false, true, false), "pack 2 valve 1 alone");
+        assert!(pack_bleed_active(false, false, false, true), "pack 2 valve 2 alone");
+        assert!(pack_bleed_active(true, true, true, true), "both packs fully open");
+    }
+
+    #[test]
     fn standard_day_ratios_are_one() {
         assert!(close(ratios::theta(15.), 1., 1e-12));
         assert!(close(ratios::delta(1013.), 1., 1e-12));
@@ -1508,6 +1571,22 @@ mod tests {
             "engine_start must not fake ENGINE_STATE On before X-Plane's real N3 is at idle"
         );
         assert_ne!(vars.read(&fadec.engines[0].n3), 63., "engine_start must not fake ENGINE_N3 to idle either");
+    }
+
+    #[test]
+    fn general_eng_throttle_lever_position_mirrors_the_3d_lever() {
+        // MSFS's own simvar the cockpit bundles poll directly (Percent,
+        // 0-100): nothing fed it before this fix, so every EWD/SD/ND/MFD/
+        // FCU/OIT/PFD lever readout stuck at 0.
+        let xplm: &'static crate::xp::Xplm = Box::leak(Box::new(crate::xp::Xplm::dummy()));
+        let mut vars = crate::Vars::new(xplm);
+        let mut fadec = Fadec::new(&mut vars, xplm);
+        let mut levers = crate::throttle::Levers::default();
+        levers.lever_3d[0] = 55.;
+        levers.angle[0] = 25.;
+        fadec.update(&mut vars, xplm, &levers, 0.016, 0.);
+        let id = vars.get("GENERAL ENG THROTTLE LEVER POSITION:1".to_owned());
+        assert_eq!(vars.read(&id), 55.);
     }
 
     #[test]

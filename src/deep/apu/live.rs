@@ -16,7 +16,7 @@
 //! | `battery` | `Truth::dc_bus_volts` (see [`LiveApu::battery`]) |
 //! | `master_on` | `Truth::controls.apu_master_sw_on` |
 //! | `start_selected` | `Truth::controls.apu_start_pb_on` |
-//! | `fire_loop_detected` | `Truth::published`'s `FIRE_DETECTED_APU` |
+//! | `fire_loop_detected` | `Truth::published`'s `DEEP_FIRE_DETECTED_APU` (W162: `DEEP_` prefixed, it used to collide with FlyByWire's own `FIRE_DETECTED_APU`) |
 //!
 //! `master_on`/`start_selected` used to both be taken from `Truth::
 //! apu_running` -- the plugin's own "the APU is commanded to run" flag --
@@ -30,8 +30,10 @@
 //!
 //! Fire detection is `deep::fire_ice`'s own loop, not modelled again here;
 //! this directory only confirms and acts on it. That area publishes the
-//! APU bay's own confirmed detection as `FIRE_DETECTED_APU` (`fire_ice::
-//! live`'s own `Names::fire_detected`), read here one frame behind through
+//! APU bay's own confirmed detection as `DEEP_FIRE_DETECTED_APU` (W162:
+//! renamed from `FIRE_DETECTED_APU`, which collided with FlyByWire's own
+//! variable of that name; `fire_ice::live`'s own `Names::fire_detected`),
+//! read here one frame behind through
 //! `Truth::published` -- the documented inter-area mechanism -- rather than
 //! the permanent `false` this module used to hold `fire_loop_detected` at.
 //! `fire_button_pushed` (the APU fire pushbutton itself, which commands the
@@ -169,7 +171,11 @@ impl LiveApu {
         ApuFaults {
             power_section: PowerSectionFaults {
                 compressor_efficiency_loss: faults.get(ids::COMPRESSOR_EROSION),
-                turbine_efficiency_loss: faults.get(ids::TURBINE_DAMAGE),
+                // 49_000 "APU EGT overtemperature damage" (the extra
+                // catalogue's id, crew-armable) is this turbine damage; it
+                // had no consumer before. The overtemperature itself is
+                // already worn in physically by `life.rs`'s EGT creep.
+                turbine_efficiency_loss: faults.get(ids::TURBINE_DAMAGE).max(faults.get(49_000)),
             },
             load_compressor: LoadCompressorFaults {
                 efficiency_loss: faults.get(ids::LOAD_COMPRESSOR_EROSION),
@@ -177,7 +183,34 @@ impl LiveApu {
                 scv_jam: faults.get(ids::SCV_JAM),
             },
             starter: StarterFaults {
-                starter_degradation: faults.get(ids::STARTER_DEGRADATION),
+                // `failures::extra` 49_002 ("APU starter fault", the flat/
+                // legacy catalogue's own entry for this same physical
+                // fault, armable from the Study panel/EFB failures page
+                // like any of the ~4,400 there) is a different id from this
+                // area's own `STARTER_DEGRADATION` (`registry.rs`'s
+                // `failure_id(Area::Apu, ATA, 6)` numbering, not 49_002).
+                // `deep::live` areas only ever see `Faults`, which is built
+                // by filtering `failures::active_magnitudes()` down to this
+                // area's own registered ids (see this file's module doc),
+                // so 49_002 would otherwise never reach here at all --
+                // confirmed dead (nothing outside `failures.rs` read it).
+                // Read through `faults.get` (build fix, INT-P4: `deep/
+                // plugin.rs::DeepLayer::faults` now folds 49_002's real
+                // magnitude into the same `Faults` map production already
+                // builds, alongside this area's own registered ids), not a
+                // direct `crate::failures::magnitude(49_002)` call -- this
+                // is `deep::live`-area code, which the crate's own thread-
+                // safety invariant (`failure_audit.rs`'s module doc: no
+                // area calls back into `crate::failures`' process-wide,
+                // `serial()`-guarded state) assumes never touches that
+                // state directly; a raw call here panicked the audit
+                // harness's own `thread::scope` sweep workers, which build
+                // their own local `Faults` and never hold `serial()`.
+                // Combining by `max` with the area-native id means either
+                // one arms the same real weak/failed-starter effect
+                // (`starter.rs`'s back-EMF model), and arming both at once
+                // is not double the effect.
+                starter_degradation: faults.get(ids::STARTER_DEGRADATION).max(faults.get(49_002)),
                 igniter_failure: faults.get(ids::IGNITER_FAILURE),
             },
             gen1: GeneratorFaults {
@@ -189,7 +222,11 @@ impl LiveApu {
                 efficiency_loss: faults.get(ids::GEN2_WEAR),
                 overload_protection_failed: faults.get(ids::GEN2_OVERLOAD) >= 0.5,
             },
-            oil: OilFaults { leak: faults.get(ids::OIL_LEAK) },
+            // 49_004 "APU oil leak" (extra catalogue) is this leak: before
+            // this it drained a separate quantity in `physics/damage.rs`
+            // whose pressure nothing read. Here it drains the APU's own oil
+            // system, whose low pressure the ECB trips on.
+            oil: OilFaults { leak: faults.get(ids::OIL_LEAK).max(faults.get(49_004)) },
             fuel_control: FuelControlFaults { metering_valve_jam: faults.get(ids::FCU_FAULT) },
             inlet_door: InletDoorFaults { jam: faults.get(ids::INLET_DOOR_JAM) },
             fire: FireFaults {
@@ -260,7 +297,7 @@ impl Area for LiveApu {
             // behind through the documented published-frame mechanism (see
             // the module doc). Absent (nothing published yet, e.g. the
             // first frame) reads as no fire, never as a fabricated one.
-            fire_loop_detected: truth.published.get_or("FIRE_DETECTED_APU", 0.0) > 0.0,
+            fire_loop_detected: truth.published.get_or("DEEP_FIRE_DETECTED_APU", 0.0) > 0.0,
             fire_button_pushed: truth.controls.fire_pb_apu_released,
         };
 
@@ -271,12 +308,19 @@ impl Area for LiveApu {
         let o = &self.out;
 
         // --- the variables `registry.rs` triggers ECAM alerts on ---------
-        out("APU_N", o.n_percent);
+        // `DEEP_` prefixed (W162): FlyByWire's own `electronic_control_
+        // box.rs`/`apu/mod.rs` publish the bare `APU_N`/`APU_EGT`/
+        // `APU_OIL_PRESSURE_PSI`/`APU_OIL_TEMPERATURE_C` for its own live
+        // PW980 ECB model, and `deep.tick` runs after FlyByWire's own
+        // `simulation.tick`, so this area was silently overwriting
+        // FlyByWire's own numbers on those exact same live variables every
+        // frame -- an unintended collision, not an authority.md case.
+        out("DEEP_APU_N", o.n_percent);
         // Indicated, not true: an EGT thermocouple fault is registered
         // precisely because what the crew and the ECAM see can differ from
         // what the turbine is actually doing.
-        out("APU_EGT", o.egt_indicated_c);
-        out("APU_OIL_PRESSURE_PSI", o.oil_pressure_psi);
+        out("DEEP_APU_EGT", o.egt_indicated_c);
+        out("DEEP_APU_OIL_PRESSURE_PSI", o.oil_pressure_psi);
         out("APU_LOAD_COMPRESSOR_SURGE", f64::from(o.load_compressor_in_surge));
         out("APU_GEN_1_OVERLOAD", f64::from(o.gen1_output.overloaded));
         out("APU_GEN_2_OVERLOAD", f64::from(o.gen2_output.overloaded));
@@ -288,7 +332,7 @@ impl Area for LiveApu {
 
         // --- the rest of the machine, for the EFB Study pages ------------
         out("APU_EGT_TRUE_C", o.egt_true_c);
-        out("APU_OIL_TEMPERATURE_C", o.oil_temperature_c);
+        out("DEEP_APU_OIL_TEMPERATURE_C", o.oil_temperature_c);
         out("APU_BLEED_FLOW_KG_S", o.bleed_output.mass_flow_kg_s);
         out("APU_BLEED_PRESSURE_PA", o.bleed_output.pressure_pa);
         out("APU_BLEED_TEMPERATURE_K", o.bleed_output.temperature_k);
@@ -358,9 +402,9 @@ mod tests {
     fn a_cold_unpowered_aircraft_leaves_the_apu_stopped_and_publishes_it() {
         let mut area = LiveApu::new();
         let vars = run(&mut area, &Truth::default(), &Faults::default(), 60.0);
-        assert_eq!(vars["APU_N"], 0.0);
+        assert_eq!(vars["DEEP_APU_N"], 0.0);
         assert_eq!(vars["APU_AVAILABLE"], 0.0);
-        assert_eq!(vars["APU_OIL_PRESSURE_PSI"], 0.0);
+        assert_eq!(vars["DEEP_APU_OIL_PRESSURE_PSI"], 0.0);
         for (name, value) in &vars {
             assert!(value.is_finite(), "{name} is not finite");
         }
@@ -371,13 +415,13 @@ mod tests {
         let mut area = LiveApu::new();
         let vars = run(&mut area, &running_truth(), &Faults::default(), 600.0);
         assert!(
-            (vars["APU_N"] - params::GOVERNED_N_PERCENT).abs() < 1.0,
+            (vars["DEEP_APU_N"] - params::GOVERNED_N_PERCENT).abs() < 1.0,
             "governed at {}%",
-            vars["APU_N"]
+            vars["DEEP_APU_N"]
         );
         assert_eq!(vars["APU_AVAILABLE"], 1.0);
-        assert!(vars["APU_EGT"] > 100.0 && vars["APU_EGT"] < params::EGT_RUNNING_LIMIT_C);
-        assert!(vars["APU_OIL_PRESSURE_PSI"] > params::OIL_PRESSURE_TRIP_PSI);
+        assert!(vars["DEEP_APU_EGT"] > 100.0 && vars["DEEP_APU_EGT"] < params::EGT_RUNNING_LIMIT_C);
+        assert!(vars["DEEP_APU_OIL_PRESSURE_PSI"] > params::OIL_PRESSURE_TRIP_PSI);
         assert_eq!(vars["APU_START_PHASE"], 3.0);
     }
 
@@ -386,15 +430,35 @@ mod tests {
         let mut area = LiveApu::new();
         let truth = Truth { controls: crate::deep::live::Controls { apu_master_sw_on: true, apu_start_pb_on: true, ..crate::deep::live::Controls::default() }, ..Truth::default() };
         let vars = run(&mut area, &truth, &Faults::default(), 300.0);
-        assert!(vars["APU_N"] < 1.0, "{}", vars["APU_N"]);
+        assert!(vars["DEEP_APU_N"] < 1.0, "{}", vars["DEEP_APU_N"]);
         assert_eq!(vars["APU_AVAILABLE"], 0.0);
+    }
+
+    /// The extra catalogue's APU failures that had no consumer now act here:
+    /// 49_004 "APU oil leak" is this area's oil leak (the running APU loses
+    /// oil pressure and its ECB trips, which `APU_ECB_TRIP` hands to
+    /// FlyByWire's own ECB), and 49_000 "APU EGT overtemperature damage" is
+    /// its turbine damage.
+    #[test]
+    fn the_catalogues_apu_oil_leak_and_turbine_damage_reach_this_model() {
+        let leak = LiveApu::faults_from(&Faults::from_pairs([(49_004, 1.0)]));
+        assert_eq!(leak.oil.leak, 1.0);
+        let damage = LiveApu::faults_from(&Faults::from_pairs([(49_000, 0.4)]));
+        assert_eq!(damage.power_section.turbine_efficiency_loss, 0.4);
+
+        let truth = running_truth();
+        let mut area = LiveApu::new();
+        let vars = run(&mut area, &truth, &Faults::from_pairs([(49_004, 1.0)]), 900.0);
+        assert!(vars["DEEP_APU_OIL_PRESSURE_PSI"] < params::OIL_PRESSURE_TRIP_PSI, "{}", vars["DEEP_APU_OIL_PRESSURE_PSI"]);
+        assert_eq!(vars["APU_ECB_TRIP"], 1.0, "the ECB must trip the APU for FlyByWire's box to shut it down");
     }
 
     /// `registry.rs`'s oil leak: "Tank level falls; the pump progressively
     /// starves ... pressure falls, and sustained low pressure while running
     /// trips low oil pressure protection." `APU_OIL_LO_PR` triggers on
-    /// `APU_OIL_PRESSURE_PSI < 15`, so the published variable has to get
-    /// there on its own.
+    /// `DEEP_APU_OIL_PRESSURE_PSI < 15` (W162: `DEEP_` prefixed, it used to
+    /// collide with FlyByWire's own `APU_OIL_PRESSURE_PSI`), so the
+    /// published variable has to get there on its own.
     #[test]
     fn an_armed_oil_leak_drives_the_published_oil_pressure_under_the_ecam_trigger() {
         let truth = running_truth();
@@ -402,25 +466,27 @@ mod tests {
         let mut healthy = LiveApu::new();
         let healthy_vars = run(&mut healthy, &truth, &Faults::default(), 900.0);
         assert!(
-            healthy_vars["APU_OIL_PRESSURE_PSI"] >= params::OIL_PRESSURE_TRIP_PSI,
+            healthy_vars["DEEP_APU_OIL_PRESSURE_PSI"] >= params::OIL_PRESSURE_TRIP_PSI,
             "a healthy APU must not be near the trigger: {}",
-            healthy_vars["APU_OIL_PRESSURE_PSI"]
+            healthy_vars["DEEP_APU_OIL_PRESSURE_PSI"]
         );
 
         let mut leaking = LiveApu::new();
         let faults = Faults::from_pairs([(ids::OIL_LEAK, 1.0)]);
         let leaking_vars = run(&mut leaking, &truth, &faults, 900.0);
         assert!(
-            leaking_vars["APU_OIL_PRESSURE_PSI"] < params::OIL_PRESSURE_TRIP_PSI,
+            leaking_vars["DEEP_APU_OIL_PRESSURE_PSI"] < params::OIL_PRESSURE_TRIP_PSI,
             "oil pressure only fell to {} psi",
-            leaking_vars["APU_OIL_PRESSURE_PSI"]
+            leaking_vars["DEEP_APU_OIL_PRESSURE_PSI"]
         );
     }
 
     /// `registry.rs`'s EGT thermocouple fault: "Cockpit-indicated EGT reads
     /// low relative to the true turbine-exit temperature ... the true
-    /// physics and the hard protective trip are unaffected." `APU_EGT` is
-    /// the indicated one, so it must move and `APU_EGT_TRUE_C` must not.
+    /// physics and the hard protective trip are unaffected." `DEEP_APU_EGT`
+    /// (W162: `DEEP_` prefixed, it used to collide with FlyByWire's own
+    /// `APU_EGT`) is the indicated one, so it must move and `APU_EGT_TRUE_C`
+    /// must not.
     #[test]
     fn an_armed_egt_sensor_fault_moves_the_indicated_egt_but_not_the_true_one() {
         let truth = running_truth();
@@ -433,10 +499,10 @@ mod tests {
         let biased_vars = run(&mut biased, &truth, &faults, 600.0);
 
         assert!(
-            biased_vars["APU_EGT"] < healthy_vars["APU_EGT"] - 50.0,
+            biased_vars["DEEP_APU_EGT"] < healthy_vars["DEEP_APU_EGT"] - 50.0,
             "indicated EGT barely moved: {} vs {}",
-            biased_vars["APU_EGT"],
-            healthy_vars["APU_EGT"]
+            biased_vars["DEEP_APU_EGT"],
+            healthy_vars["DEEP_APU_EGT"]
         );
         assert!(
             (biased_vars["APU_EGT_TRUE_C"] - healthy_vars["APU_EGT_TRUE_C"]).abs() < 5.0,
@@ -448,17 +514,18 @@ mod tests {
 
     /// `registry.rs`'s igniter failure: "At full failure the threshold sits
     /// at/above self-sustaining speed ... a hung start with fuel never
-    /// lit." That is what `APU_START_FAULT` (START pb on, `APU_N < 55`)
-    /// exists to catch.
+    /// lit." That is what `APU_START_FAULT` (START pb on, `DEEP_APU_N < 55`,
+    /// W162: `DEEP_` prefixed, it used to collide with FlyByWire's own
+    /// `APU_N`) exists to catch.
     #[test]
     fn a_fully_failed_igniter_hangs_the_start_below_the_start_fault_threshold() {
         let mut area = LiveApu::new();
         let faults = Faults::from_pairs([(ids::IGNITER_FAILURE, 1.0)]);
         let vars = run(&mut area, &running_truth(), &faults, 600.0);
         assert!(
-            vars["APU_N"] < params::SELF_SUSTAINING_N_PERCENT,
+            vars["DEEP_APU_N"] < params::SELF_SUSTAINING_N_PERCENT,
             "it lit anyway and reached {}%",
-            vars["APU_N"]
+            vars["DEEP_APU_N"]
         );
         assert_eq!(vars["APU_AVAILABLE"], 0.0);
     }
@@ -482,7 +549,7 @@ mod tests {
             "door opened to {}",
             jammed_vars["APU_INLET_DOOR_OPEN"]
         );
-        assert!(jammed_vars["APU_N"] < healthy_vars["APU_N"] - 1.0);
+        assert!(jammed_vars["DEEP_APU_N"] < healthy_vars["DEEP_APU_N"] - 1.0);
     }
 
     #[test]
@@ -491,9 +558,9 @@ mod tests {
         area.tick(&running_truth(), &Faults::default());
         let vars = published(&area);
         for name in [
-            "APU_N",
-            "APU_EGT",
-            "APU_OIL_PRESSURE_PSI",
+            "DEEP_APU_N",
+            "DEEP_APU_EGT",
+            "DEEP_APU_OIL_PRESSURE_PSI",
             "APU_LOAD_COMPRESSOR_SURGE",
             "APU_GEN_1_OVERLOAD",
             "APU_GEN_2_OVERLOAD",
@@ -520,7 +587,7 @@ mod tests {
             ..Truth::default()
         };
         let vars = run(&mut not_started, &truth, &Faults::default(), 120.0);
-        assert_eq!(vars["APU_N"], 0.0, "apu_running alone must not start the machine: {}", vars["APU_N"]);
+        assert_eq!(vars["DEEP_APU_N"], 0.0, "apu_running alone must not start the machine: {}", vars["DEEP_APU_N"]);
         assert_eq!(vars["APU_AVAILABLE"], 0.0);
 
         // The reverse: `apu_running` says the machine is not running, but a
@@ -534,7 +601,7 @@ mod tests {
             ..Truth::default()
         };
         let vars = run(&mut started, &truth, &Faults::default(), 600.0);
-        assert!((vars["APU_N"] - params::GOVERNED_N_PERCENT).abs() < 1.0, "the real START pb must start and govern the machine: {}", vars["APU_N"]);
+        assert!((vars["DEEP_APU_N"] - params::GOVERNED_N_PERCENT).abs() < 1.0, "the real START pb must start and govern the machine: {}", vars["DEEP_APU_N"]);
         assert_eq!(vars["APU_AVAILABLE"], 1.0);
     }
 
@@ -550,11 +617,11 @@ mod tests {
         // `Deep::tick` would after `deep::fire_ice` published a confirmed
         // detection last frame.
         let mut published_frame = BTreeMap::new();
-        published_frame.insert("FIRE_DETECTED_APU".to_string(), 1.0);
-        truth.published = crate::deep::live::PublishedFrame(published_frame);
+        published_frame.insert("DEEP_FIRE_DETECTED_APU".to_string(), 1.0);
+        truth.published = crate::deep::live::PublishedFrame::from(published_frame);
 
         let vars = run(&mut area, &truth, &Faults::default(), 5.0);
-        assert_eq!(vars["APU_FIRE_LOOP_DETECTED"], 1.0, "a published FIRE_DETECTED_APU must be confirmed here");
+        assert_eq!(vars["APU_FIRE_LOOP_DETECTED"], 1.0, "a published DEEP_FIRE_DETECTED_APU must be confirmed here");
         assert_eq!(vars["APU_FIRE_CONFIRMED"], 1.0);
         assert!(vars["APU_FIRE_BOTTLE_PRESSURE"] < 1.0, "the fire pushbutton must actually discharge the bottle");
     }
@@ -581,7 +648,7 @@ mod tests {
         // (`params::GENERATOR_RATED_APPARENT_VA * ..._POWER_FACTOR`, 96 kW).
         published_frame.insert("ELEC_APU_GEN_1_LOAD_W".to_string(), 3.0 * params::GENERATOR_RATED_APPARENT_VA * params::GENERATOR_RATED_POWER_FACTOR);
         let mut truth_with_load = truth.clone();
-        truth_with_load.published = crate::deep::live::PublishedFrame(published_frame);
+        truth_with_load.published = crate::deep::live::PublishedFrame::from(published_frame);
         let vars = run(&mut overloaded, &truth_with_load, &Faults::default(), 1.0 / 30.0);
         assert_eq!(vars["APU_GEN_1_OVERLOAD"], 1.0, "a published load past rating must overload generator 1");
         assert_eq!(vars["APU_GEN_2_OVERLOAD"], 0.0, "generator 2's own load was never published and must stay healthy");
@@ -601,7 +668,7 @@ mod tests {
         for (name, value) in &vars {
             assert!(value.is_finite(), "{name} = {value}");
         }
-        assert!((vars["APU_N"] - params::GOVERNED_N_PERCENT).abs() < 2.0, "{}", vars["APU_N"]);
+        assert!((vars["DEEP_APU_N"] - params::GOVERNED_N_PERCENT).abs() < 2.0, "{}", vars["DEEP_APU_N"]);
     }
 }
 
@@ -625,7 +692,7 @@ mod probe {
                 }
                 let mut map = BTreeMap::new();
                 a.publish(&mut |n, v| { map.insert(n.to_string(), v); });
-                println!("{label} {m}: surged_ever={surged} N={:.2} igv={:.3} scv={:.3}", map["APU_N"], map["APU_IGV_POSITION"], map["APU_SCV_POSITION"]);
+                println!("{label} {m}: surged_ever={surged} N={:.2} igv={:.3} scv={:.3}", map["DEEP_APU_N"], map["APU_IGV_POSITION"], map["APU_SCV_POSITION"]);
             }
         }
     }

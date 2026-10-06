@@ -237,6 +237,11 @@ gl_functions! {
     check_framebuffer_status: "glCheckFramebufferStatus" => fn(c_uint) -> c_uint;
     blit_framebuffer: "glBlitFramebuffer" => fn(c_int, c_int, c_int, c_int, c_int, c_int, c_int, c_int, c_uint, c_uint);
     get_error: "glGetError" => fn() -> c_uint;
+    // Core since GL 3.0 / ARB_framebuffer_object, the same feature that
+    // brought glGenFramebuffers and glBlitFramebuffer above: a driver that
+    // loaded those (this renderer already requires them for the
+    // multisampled framebuffer) has this too.
+    generate_mipmap: "glGenerateMipmap" => fn(c_uint);
 }
 
 /// The multisampled framebuffer every screen draws through.
@@ -258,7 +263,8 @@ pub struct ScreenGpu {
 
 /// A screen's GPU copy of XPHFBW's pixels (docs/briefs/xphfbw-js-bridge.md
 /// rule 6), drawn as a textured quad in place of the tessellated mesh while
-/// `displays_active`.
+/// this screen's own bridge switch-over is active (`Displays::bridge_active`,
+/// per screen since S08).
 #[derive(Default)]
 pub struct BridgeGpu {
     texture: c_int,
@@ -302,6 +308,10 @@ pub struct Renderer {
     /// a multisampled framebuffer cannot be resolved into one, so the mesh
     /// is then drawn straight into it with its own samples.
     target_multisampled: Option<bool>,
+    /// Screens [`Renderer::draw_bridge`] has already logged the "no texture
+    /// yet" warning for, so a screen stuck that way is reported once, not
+    /// every frame.
+    bridge_no_texture_warned: std::collections::HashSet<&'static str>,
 }
 
 /// Where in the target a region of the screen lands.
@@ -366,6 +376,7 @@ impl Renderer {
             stencil_warned: false,
             gl_error_warned: std::collections::HashSet::new(),
             target_multisampled: None,
+            bridge_no_texture_warned: std::collections::HashSet::new(),
         };
         if safe_mode {
             crate::log("display: xphfbw.displaySafeMode is on; skipping the multisampled framebuffer (no anti-aliasing, no clip paths)");
@@ -725,6 +736,14 @@ impl Renderer {
     /// ([`crate::xphfbw_bridge::ScreenBlock::pixels`]); a size change (first
     /// use, or a resized screen) always uploads the whole thing regardless
     /// of `rects`.
+    ///
+    /// The texture carries a full mip chain (`GL_LINEAR_MIPMAP_LINEAR`,
+    /// [`bridge_mip_levels`]), rebuilt with `glGenerateMipmap` whenever this
+    /// call actually changed a pixel -- not every frame: the caller
+    /// (`display::mod::draw_bridge_screen`) already only reaches this
+    /// function when there is something to upload, rate-limited by the same
+    /// 24 MB/frame `upload_budget` `UPLOADED_BYTES` below counts against, so
+    /// gating the mipmap rebuild on that call is free.
     pub fn bridge_upload(&mut self, gpu: &mut BridgeGpu, width: u32, height: u32, pixels: &[u8], rects: &[[u32; 4]]) {
         if width == 0 || height == 0 || pixels.len() < (width as usize * height as usize * 4) {
             return;
@@ -739,11 +758,13 @@ impl Renderer {
             if gpu.size != (width, height) {
                 crate::perf::UPLOADED_BYTES.fetch_add(width as u64 * height as u64 * 4, std::sync::atomic::Ordering::Relaxed);
                 (gl.tex_image)(GL_TEXTURE_2D, 0, GL_RGBA8, width as c_int, height as c_int, 0, GL_BGRA, GL_UNSIGNED_BYTE, pixels.as_ptr().cast());
-                self.texture_parameters(GL_LINEAR, 1);
+                self.texture_parameters(GL_LINEAR_MIPMAP_LINEAR, bridge_mip_levels(width, height));
+                (gl.generate_mipmap)(GL_TEXTURE_2D);
                 gpu.size = (width, height);
                 return;
             }
             (gl.pixel_store)(GL_UNPACK_ROW_LENGTH, width as c_int);
+            let mut updated = false;
             for &[x, y, w, h] in rects {
                 if w == 0 || h == 0 || x + w > width || y + h > height {
                     continue;
@@ -751,8 +772,17 @@ impl Renderer {
                 let offset = (y as usize * width as usize + x as usize) * 4;
                 crate::perf::UPLOADED_BYTES.fetch_add(w as u64 * h as u64 * 4, std::sync::atomic::Ordering::Relaxed);
                 (gl.tex_sub_image)(GL_TEXTURE_2D, 0, x as c_int, y as c_int, w as c_int, h as c_int, GL_BGRA, GL_UNSIGNED_BYTE, pixels[offset..].as_ptr().cast());
+                updated = true;
             }
             (gl.pixel_store)(GL_UNPACK_ROW_LENGTH, 0);
+            // Sub-image writes don't touch the mip levels above 0 by
+            // themselves (unlike glTexImage2D, which reallocates and leaves
+            // them stale); regenerate only when a rect actually landed, so a
+            // due-but-empty call (all rects clipped away by the bounds check
+            // above) doesn't pay for a no-op rebuild.
+            if updated {
+                (gl.generate_mipmap)(GL_TEXTURE_2D);
+            }
         }
     }
 
@@ -807,8 +837,21 @@ impl Renderer {
     /// texture (panel.cfg: the terrain gauge, then nd.html): opaque black,
     /// `underlay` (straight alpha) when given, then Chromium's pixels, which
     /// CEF paints with premultiplied alpha.
-    pub fn draw_bridge(&mut self, gpu: &mut BridgeGpu, underlay: Option<&BridgeGpu>, width: u32, height: u32, target: Target, brightness: &[f32], dimming: &[[f32; 4]]) {
-        if gpu.texture == 0 || width == 0 || height == 0 {
+    pub fn draw_bridge(&mut self, screen_id: &'static str, gpu: &mut BridgeGpu, underlay: Option<&BridgeGpu>, width: u32, height: u32, target: Target, brightness: &[f32], dimming: &[[f32; 4]]) {
+        if gpu.texture == 0 {
+            // Distinct from the width/height == 0 case below (a ScreenBlock
+            // that simply has not published a size yet, normal for a
+            // frame or two after attach): this is a screen the bridge is
+            // supposed to be drawing that has never had a single
+            // bridge_upload land a texture for it, so there is nothing to
+            // show and nothing will ever appear until that changes. Logged
+            // once, not every frame (60+ times a second while it persists).
+            if self.bridge_no_texture_warned.insert(screen_id) {
+                crate::log(&format!("display: {screen_id}: draw_bridge has no texture yet (no bridge_upload has landed); drawing nothing"));
+            }
+            return;
+        }
+        if width == 0 || height == 0 {
             return;
         }
         unsafe {
@@ -896,13 +939,22 @@ impl Renderer {
             } else {
                 (gl.disable)(GL_SCISSOR_TEST);
             }
-            (gl.bind_buffer)(GL_ARRAY_BUFFER, 0);
             for mode in [GL_TEXTURE, GL_MODELVIEW, GL_PROJECTION] {
                 (gl.matrix_mode)(mode);
                 (gl.pop_matrix)();
             }
             (gl.matrix_mode)(GL_MODELVIEW);
+            // Cleanup matches Renderer::draw's tail (~713-717). This used to
+            // turn GL_TEXTURE_COORD_ARRAY back off and stop there, leaving
+            // GL_COLOR_ARRAY enabled for whatever drew next -- another
+            // screen's plain-mesh draw() call, or X-Plane's own 3-D drawing
+            // -- in violation of this module's own rule ("only the
+            // fixed-function vertex array left enabled", see the file
+            // header).
+            (gl.disable_client_state)(GL_COLOR_ARRAY);
             (gl.disable_client_state)(GL_TEXTURE_COORD_ARRAY);
+            (gl.enable_client_state)(GL_VERTEX_ARRAY);
+            (gl.bind_buffer)(GL_ARRAY_BUFFER, 0);
         }
     }
 
@@ -1095,6 +1147,55 @@ mod safe_mode_tests {
 /// The factor on sRGB-encoded values that scales their light by `b`.
 pub fn screens_dim_srgb(b: f32) -> f32 {
     b.clamp(0., 1.).powf(1. / 2.2)
+}
+
+/// Mip levels a `width`x`height` bridge screen texture needs for a full
+/// chain down to 1x1: `floor(log2(max(width, height))) + 1`, the count
+/// [`Renderer::texture_parameters`]'s `levels` argument expects (it sets
+/// `GL_TEXTURE_MAX_LEVEL` to `levels - 1`). The EFB (1430 px) covers only
+/// ~700 screen px at the pilot's eye (docs/screens.md) -- minified ~2:1 --
+/// and `GL_LINEAR` with a single level samples that straight, aliasing text;
+/// a full chain plus `GL_LINEAR_MIPMAP_LINEAR` lets the driver blend down
+/// instead.
+fn bridge_mip_levels(width: u32, height: u32) -> c_int {
+    (width.max(height).max(1).ilog2() + 1) as c_int
+}
+
+#[cfg(test)]
+mod bridge_mip_levels_tests {
+    use super::bridge_mip_levels;
+
+    #[test]
+    fn one_by_one_needs_one_level() {
+        assert_eq!(bridge_mip_levels(1, 1), 1);
+    }
+
+    #[test]
+    fn a_power_of_two_matches_its_own_log2_plus_one() {
+        // 1024 = 2^10, so the chain is 1024,512,...,2,1: 11 levels.
+        assert_eq!(bridge_mip_levels(1024, 1024), 11);
+    }
+
+    #[test]
+    fn the_larger_side_drives_the_count() {
+        // The EFB: 1430x1000. floor(log2(1430)) = 10, so 11 levels.
+        assert_eq!(bridge_mip_levels(1430, 1000), 11);
+        assert_eq!(bridge_mip_levels(1000, 1430), 11);
+    }
+
+    #[test]
+    fn a_du_screen() {
+        // 768x1024: floor(log2(1024)) = 10, so 11 levels.
+        assert_eq!(bridge_mip_levels(768, 1024), 11);
+    }
+
+    #[test]
+    fn zero_never_underflows_the_log2() {
+        // A malformed size should not panic (ilog2(0) would); bridge_upload
+        // already returns before this runs for a real zero width/height, but
+        // the helper stays safe on its own.
+        assert_eq!(bridge_mip_levels(0, 0), 1);
+    }
 }
 
 /// A full-screen quad (device pixels, y down, matching [`Vertex`]'s

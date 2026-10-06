@@ -429,8 +429,8 @@ mod tests {
         let mut cold = OxygenLive::new();
         let mut hot_truth = truth_at_cabin_ft(0.0);
         let mut cold_truth = truth_at_cabin_ft(0.0);
-        hot_truth.published = PublishedFrame(BTreeMap::from([(BOTTLE_BAY_TEMP_VAR.to_string(), 45.0)]));
-        cold_truth.published = PublishedFrame(BTreeMap::from([(BOTTLE_BAY_TEMP_VAR.to_string(), -30.0)]));
+        hot_truth.published = PublishedFrame::from(BTreeMap::from([(BOTTLE_BAY_TEMP_VAR.to_string(), 45.0)]));
+        cold_truth.published = PublishedFrame::from(BTreeMap::from([(BOTTLE_BAY_TEMP_VAR.to_string(), -30.0)]));
         let h = run(&mut hot, &hot_truth, &Faults::default(), 6 * 3600);
         let c = run(&mut cold, &cold_truth, &Faults::default(), 6 * 3600);
         assert!((h["DEEP_OXY_CREW_MASS_KG"] - c["DEEP_OXY_CREW_MASS_KG"]).abs() < 1e-12, "neither bottle lost a gram");
@@ -446,7 +446,7 @@ mod tests {
         let mut area = OxygenLive::new();
         let mut truth = truth_at_cabin_ft(20_000.0);
         truth.dc_bus_volts = [0.0; 2];
-        truth.published = PublishedFrame(BTreeMap::from([("ELEC_DC_ESS_BUS_IS_POWERED".to_string(), 0.0)]));
+        truth.published = PublishedFrame::from(BTreeMap::from([("ELEC_DC_ESS_BUS_IS_POWERED".to_string(), 0.0)]));
         let p = run(&mut area, &truth, &Faults::default(), 60);
         assert_eq!(p["DEEP_OXY_PAX_MASKS_DEPLOYED"], 0.0, "the automatic trigger is electrical");
     }

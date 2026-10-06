@@ -223,6 +223,44 @@ pub fn register(r: &mut Registry) {
             });
             failures_here.push(pid);
             partition_params.push(ParamDef { name: format!("partition_{}_failure", key_safe(part)), meaning: format!("{part} (ARINC 653 partition) failure fraction"), healthy: 0.0 });
+
+            // `E-IND-DESIGN.md` 314800001/005: the CPIOM-C1 FWS partition's
+            // own two database-validity checks. Named per module/partition
+            // like every failure above, but only the FWS partition on
+            // CPIOM-C1 actually has a real behaviour behind it (the FWS
+            // function's own airline-customization and ATQC databases) --
+            // every other module/partition combination still gets a
+            // harmless, never-armed id rather than a special case in the
+            // loop, matching this file's own "expanded per instance" habit.
+            if es.name == "CPIOM-C1" && *part == "FWS" {
+                let custom_id = failure_id(Area::AvionicsNetwork, ATA_IMA, next!());
+                r.failure(FailureDef {
+                    id: custom_id,
+                    area: Area::AvionicsNetwork,
+                    ata: ATA_IMA,
+                    name: format!("{} partition {} customization database rejected", es.name, part),
+                    component: comp_id.clone(),
+                    model_field: "deep::avionics_network::faults::PartitionFaults.customization_db_rejected".into(),
+                    magnitude: "inherently boolean (a software validation step either passed or failed, like a failed checksum): 0 accepted, >= 0.5 rejected -- this crate's own discrete BITE-flag convention, not a fabricated continuous threshold".into(),
+                    effect: "the FWS function rejected the loaded airline-customization database at startup (314800001 FWS AIRLINE CUSTOMIZATION REJECTED)".into(),
+                });
+                failures_here.push(custom_id);
+                partition_params.push(ParamDef { name: "fws_customization_db_rejected".into(), meaning: "FWS partition airline-customization database rejected at startup: 0 accepted, 1 rejected".into(), healthy: 0.0 });
+
+                let atqc_id = failure_id(Area::AvionicsNetwork, ATA_IMA, next!());
+                r.failure(FailureDef {
+                    id: atqc_id,
+                    area: Area::AvionicsNetwork,
+                    ata: ATA_IMA,
+                    name: format!("{} partition {} ATQC database rejected", es.name, part),
+                    component: comp_id.clone(),
+                    model_field: "deep::avionics_network::faults::PartitionFaults.atqc_db_rejected".into(),
+                    magnitude: "inherently boolean, same convention as fws_customization_db_rejected above: 0 accepted, >= 0.5 rejected".into(),
+                    effect: "the FWS function rejected the loaded ATQC database at startup (314800005 FWS ATQC DATABASE REJECTED)".into(),
+                });
+                failures_here.push(atqc_id);
+                partition_params.push(ParamDef { name: "fws_atqc_db_rejected".into(), meaning: "FWS partition ATQC database rejected at startup: 0 accepted, 1 rejected".into(), healthy: 0.0 });
+            }
         }
 
         module_available_ids.push((es.name.to_string(), vec![hardware_id, power_id]));
@@ -280,6 +318,58 @@ pub fn register(r: &mut Registry) {
     }
 
     register_ventilation(r, &t);
+    register_supplemental_cooling(r);
+}
+
+/// ECAM completeness (`E:/fbw-debug/ecam/E-AIR-DESIGN.md`, ATA 21 VENT):
+/// 212800019/020 VENT COOLG SYS n OVHT and 212800021 VENT COOLG SYS PROT
+/// FAULT. The A380's supplemental (liquid-loop) avionics cooling system is a
+/// real, distinct LRU from the bay air-ventilation fans/valves
+/// `register_ventilation` above models -- confirmed by the FCOM (p.4731,
+/// p.4733: "the supplemental cooling system 1(2)"), which this port has no
+/// other model of at all (`a380_systems`' own `AvionicsVentilationSystem
+/// Application` is commented out and unused, cpiom_b.rs:59,76). ATA 21, `n`
+/// starting at 90 -- well clear of `register_ventilation`'s own `n` (one
+/// fresh counter per bay-loop iteration, a handful of values per bay), so
+/// the two functions' ids cannot collide even though both use ata=21.
+fn register_supplemental_cooling(r: &mut Registry) {
+    const ATA_COOLING: u16 = 21;
+    for (i, n) in [1u16, 2].into_iter().zip([90u16, 92]) {
+        let comp = format!("21_vent.avionics_cooling_system_{i}");
+        let overheat_id = failure_id(Area::AvionicsNetwork, ATA_COOLING, n);
+        let prot_id = failure_id(Area::AvionicsNetwork, ATA_COOLING, n + 1);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::AvionicsNetwork,
+            ata: ATA_COOLING,
+            name: format!("Avionics cooling system {i} (liquid loop + heat exchanger)"),
+            params: vec![
+                ParamDef { name: "overheat".into(), meaning: "the cooling loop itself overheated, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 },
+                ParamDef { name: "protection_fault".into(), meaning: "the loop's own overheat-detection/protection monitor lost, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 },
+            ],
+            failures: vec![overheat_id, prot_id],
+        });
+        r.failure(FailureDef {
+            id: overheat_id,
+            area: Area::AvionicsNetwork,
+            ata: ATA_COOLING,
+            name: format!("Avionics cooling system {i} overheat"),
+            component: comp.clone(),
+            model_field: "avionics_network::live::LiveAvionicsNetwork.coolg_overheat_id".into(),
+            magnitude: "0 healthy .. 1 fully faulted -- a component-broken flag; this network has no cooling-loop thermal-cycle physics, so there is no real magnitude to degrade and no threshold to invent".into(),
+            effect: format!("FlyByWire's own {} VENT COOLG SYS {i} OVHT", if i == 1 { "212800019" } else { "212800020" }),
+        });
+        r.failure(FailureDef {
+            id: prot_id,
+            area: Area::AvionicsNetwork,
+            ata: ATA_COOLING,
+            name: format!("Avionics cooling system {i} protection fault"),
+            component: comp,
+            model_field: "avionics_network::live::LiveAvionicsNetwork.coolg_prot_fault_id".into(),
+            magnitude: "0 healthy .. 1 fully faulted".into(),
+            effect: "FlyByWire's own 212800021 VENT COOLG SYS PROT FAULT (one id covers either system's protection monitor, OR'd)".into(),
+        });
+    }
 }
 
 /// ATA 21, Air Conditioning's "Equipment Cooling" sub-chapter: the fan(s)

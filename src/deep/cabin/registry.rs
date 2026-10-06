@@ -15,6 +15,11 @@ const ATA_WASTE: u16 = 38;
 const ATA_IFE: u16 = 44;
 const ATA_GALLEY: u16 = 25;
 const ATA_DOORS: u16 = 52;
+/// ATA 21, Air Conditioning's "Ventilation" sub-chapter -- the crew-facing
+/// panels and equipment-bay ventilation this area newly owns as of the
+/// ECAM-completeness pass (`E:/fbw-debug/ecam/E-AIR-DESIGN.md`), a chapter
+/// this area had not used before.
+const ATA_VENT: u16 = 21;
 
 pub fn register(r: &mut Registry) {
     register_water(r);
@@ -22,6 +27,111 @@ pub fn register(r: &mut Registry) {
     register_ife(r);
     register_galley(r);
     register_doors_slides(r);
+    register_ecam_completeness_additions(r);
+}
+
+/// ECAM completeness (`E-AIR-DESIGN.md`, ATA 21 AIR/VENT): the purser
+/// temperature selector, the IFE bay's own isolation valve and extraction
+/// fan, the lav & galley extraction fan, and the four secondary
+/// (recirculation) cabin fans -- none of which this area modelled before
+/// this pass. All are real LRUs (the design sheet's own per-id sourcing);
+/// none carries an invented threshold.
+fn register_ecam_completeness_additions(r: &mut Registry) {
+    let purser = "21_vent.purser_temp_sel_panel";
+    r.component(ComponentDef {
+        id: purser.into(),
+        area: Area::Cabin,
+        ata: ATA_VENT,
+        name: "Purser cabin-temperature selector panel".into(),
+        params: vec![ParamDef { name: "fault".into(), meaning: "the selector panel itself broken, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+        failures: vec![failure_id(Area::Cabin, ATA_VENT, 1)],
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::Cabin, ATA_VENT, 1),
+        area: Area::Cabin,
+        ata: ATA_VENT,
+        name: "Purser temperature selector panel fault".into(),
+        component: purser.into(),
+        model_field: "cabin::live::CabinLive.purser_temp_sel_fault".into(),
+        magnitude: "0 healthy .. 1 fully faulted".into(),
+        effect: "FlyByWire's own 211800036 COND PURSER TEMP SEL FAULT; the real panel input FlyByWire already reads (cpiom_b.rs:861, purs_sel_temp_id) has no fault modelled on the panel itself anywhere else".into(),
+    });
+
+    let ife_bay = "21_vent.ife_bay_ventilation";
+    r.component(ComponentDef {
+        id: ife_bay.into(),
+        area: Area::Cabin,
+        ata: ATA_VENT,
+        name: "IFE (in-flight entertainment) equipment bay isolation valve and extraction fan".into(),
+        params: vec![
+            ParamDef { name: "isol_fault".into(), meaning: "the bay's own isolation valve broken, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 },
+            ParamDef { name: "vent_fault".into(), meaning: "the bay's own extraction fan broken, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 },
+        ],
+        failures: vec![failure_id(Area::Cabin, ATA_VENT, 2), failure_id(Area::Cabin, ATA_VENT, 3)],
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::Cabin, ATA_VENT, 2),
+        area: Area::Cabin,
+        ata: ATA_VENT,
+        name: "IFE bay isolation valve fault".into(),
+        component: ife_bay.into(),
+        model_field: "cabin::live::CabinLive.ife_bay_isol_fault".into(),
+        magnitude: "0 healthy .. 1 fully faulted".into(),
+        effect: "FlyByWire's own 212800022 VENT IFE BAY ISOL FAULT; the real IFE hardware is functionally modelled in this area's own `ife.rs`, but no bay ventilation/isolation valve existed anywhere until this pass".into(),
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::Cabin, ATA_VENT, 3),
+        area: Area::Cabin,
+        ata: ATA_VENT,
+        name: "IFE bay extraction fan fault".into(),
+        component: ife_bay.into(),
+        model_field: "cabin::live::CabinLive.ife_bay_vent_fault".into(),
+        magnitude: "0 healthy .. 1 fully faulted".into(),
+        effect: "FlyByWire's own 212800023 VENT IFE BAY VENT FAULT".into(),
+    });
+
+    let lav_gal = "21_vent.lav_galley_extract_fan";
+    r.component(ComponentDef {
+        id: lav_gal.into(),
+        area: Area::Cabin,
+        ata: ATA_VENT,
+        name: "Lavatory & galley extraction fan".into(),
+        params: vec![ParamDef { name: "fault".into(), meaning: "the fan itself broken, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+        failures: vec![failure_id(Area::Cabin, ATA_VENT, 4)],
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::Cabin, ATA_VENT, 4),
+        area: Area::Cabin,
+        ata: ATA_VENT,
+        name: "Lavatory & galley extraction fan fault".into(),
+        component: lav_gal.into(),
+        model_field: "cabin::live::CabinLive.lav_galley_extract_fault".into(),
+        magnitude: "0 healthy .. 1 fully faulted".into(),
+        effect: "FlyByWire's own 212800024 VENT LAV & GALLEYS EXTRACT FAULT; distinct from the FWD/BULK cargo extraction fans a380_systems' VCM models (cpiom_b.rs:753-767), which are cargo-hold ventilation, not lav/galley".into(),
+    });
+
+    for n in 1u16..=4 {
+        let comp = format!("21_vent.secondary_cabin_fan_{n}");
+        let fid = failure_id(Area::Cabin, ATA_VENT, 4 + n);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::Cabin,
+            ata: ATA_VENT,
+            name: format!("Secondary (recirculation) cabin fan {n}"),
+            params: vec![ParamDef { name: "failed".into(), meaning: "the fan itself broken, 0 healthy .. 1 fully failed".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::Cabin,
+            ata: ATA_VENT,
+            name: format!("Secondary cabin fan {n} failure"),
+            component: comp,
+            model_field: "cabin::live::CabinLive.secondary_cabin_fan_failed".into(),
+            magnitude: "0 healthy .. 1 fully failed".into(),
+            effect: "counted toward FlyByWire's own 212800012 COND PART SECONDARY CABIN FANS FAULT (1..3 failed) and 212800013 COND SECONDARY CABIN FANS FAULT (all 4) -- this port's own model of the same 4 real fans a380_systems' A380AirConditioningSystem::cabin_fan_has_failed already computes per fan (mod.rs:732-734), modelled directly here rather than bridged: a380_systems does not publish the per-fan bit as its own SimVar (only folded into an internal discrete_word_vcs this port has no documented bit layout for), so a bridge would need the same kind of fbw-aircraft write() this pass could not make for the pack FCVs".into(),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +416,15 @@ fn register_ife(r: &mut Registry) {
             area: Area::Cabin,
             ata: ATA_IFE,
             name: format!("{} seat power/IFE wiring", super::Zone::ALL[i].name()),
-            params: vec![ParamDef { name: "fault".into(), meaning: "0 healthy .. 1 fraction of the zone's seat wiring shorted, self-heating toward smoke".into(), healthy: 0.0 }],
+            params: vec![
+                ParamDef { name: "fault".into(), meaning: "0 healthy .. 1 fraction of the zone's seat wiring shorted, self-heating toward smoke".into(), healthy: 0.0 },
+                // ECAM completeness pass (E-FIRE, cross-area addition for
+                // `260800032` SMOKE IFE BAY DET FAULT): the zone's own
+                // monitored smoke-sensing element, added between the
+                // temperature comparison and the published alarm --
+                // orthogonal to the seat-wiring fault above.
+                ParamDef { name: "smoke_detector_fault".into(), meaning: "0 healthy .. 1 the zone's own smoke-sensing element circuit/self-test faulted, independent of the seat wiring".into(), healthy: 0.0 },
+            ],
             failures: vec![],
         });
     }
@@ -346,6 +464,24 @@ fn register_ife(r: &mut Registry) {
             magnitude: "0 healthy .. 1 (>=0.95 fails outright) server output lost".into(),
             effect: "that server's content is lost; the redundant server keeps the cabin served until both fail".into(),
         }));
+    }
+
+    // ECAM completeness pass (E-FIRE, cross-area addition): each zone's
+    // own smoke-detector circuit/self-test fault, for `260800032` SMOKE
+    // IFE BAY DET FAULT -- wired directly in `deep::ecam::fbw::ata26` off
+    // `CABIN_IFE_ZONE_SMOKE_FAULT:<zone>` (this alert's cause lives here,
+    // the area that owns the physical system, per the spec's own rule).
+    for i in 0..super::Zone::COUNT {
+        r.failure(FailureDef {
+            id: failure_id(Area::Cabin, ATA_IFE, 6 + i as u16),
+            area: Area::Cabin,
+            ata: ATA_IFE,
+            name: format!("{} smoke detector circuit/self-test fault", super::Zone::ALL[i].name()),
+            component: zones[i].into(),
+            model_field: format!("deep::cabin::ife::IfeFaults.smoke_detector_fault[{i}]"),
+            magnitude: "0 healthy .. 1 the zone's own smoke-sensing element reports a monitored circuit/self-test fault".into(),
+            effect: "that zone's own IFE-bay smoke-detector fault discrete goes true, independent of whether smoke is actually present".into(),
+        });
     }
 
     r.alert(
@@ -607,6 +743,40 @@ fn register_doors_slides(r: &mut Registry) {
         magnitude: "0 full pressure .. 1 no driving pressure".into(),
         effect: "the actuator cannot move at all".into(),
     });
+
+    // ---- E-ELEC Phase 2 (2026-09-27): `520800027`-`032 DOOR UPPER 1L/1R/
+    // 2L/2R/3L/3R NOT CLOSED`. `deep::live::DOOR_NAMES`/`DOOR_POINTS` (this
+    // pass) now carry all six upper doors' own real interactive-point
+    // travel from `src/doors.rs`'s aircraft model (previously only U1L was
+    // exposed), so `deep::cabin::live` reads that directly rather than
+    // simulating a new door -- see this pass's own `DOOR_NAMES` doc. Each
+    // door gets its own not-latched proximity-sensor fault, the same
+    // component/failure shape as `f_latch` above (`latch_sensor`), one
+    // instance per door rather than the shared generic one.
+    let upper_pos = ["1L", "1R", "2L", "2R", "3L", "3R"];
+    let mut f_upper_latch = Vec::new();
+    for (i, pos) in upper_pos.iter().enumerate() {
+        let comp_id = format!("52_dr.door_upper_{pos}_latch_sensor");
+        r.component(ComponentDef {
+            id: comp_id.clone(),
+            area: Area::Cabin,
+            ata: ATA_DOORS,
+            name: format!("Upper door {pos} not-latched proximity sensor"),
+            params: vec![ParamDef { name: "stuck".into(), meaning: "0 healthy .. 1 (>=0.5) freezes the last reading".into(), healthy: 0.0 }],
+            failures: vec![],
+        });
+        f_upper_latch.push(r.failure(FailureDef {
+            id: failure_id(Area::Cabin, ATA_DOORS, 6 + i as u16),
+            area: Area::Cabin,
+            ata: ATA_DOORS,
+            name: format!("Upper door {pos} not-latched sensor stuck"),
+            component: comp_id,
+            model_field: format!("deep::cabin::live::CabinLive.upper_door_latch_fault[{i}]"),
+            magnitude: "0 healthy .. 1 (>=0.5) freezes the displayed latched/not-latched state".into(),
+            effect: "the indication can disagree with the door's real position".into(),
+        }));
+    }
+    let _ = f_upper_latch; // raised_by omitted: 520800027-032 read the door's own real open percent directly, not a deep::api alert of our own (FlyByWire's id owns the alert; see fbw/ata46_49_52_56.rs)
 
     r.alert(
         EcamAlert::new("CABIN_DOOR_NOT_LATCHED", ATA_DOORS, "DOOR NOT LATCHED", Level::Warning, var("CABIN_DOOR_LATCHED:1").off())

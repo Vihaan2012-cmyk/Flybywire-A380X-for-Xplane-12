@@ -52,7 +52,7 @@ undocumented. Not a bug — no action needed.
    character key on one side while the named navigation keys (DIR/PERF/...)
    kept working, which is exactly the "only some keys working" report.
 
-2. **Cockpit → X-Plane command** (`D:\msfs2xp-aircraft\src\behaviour\bind.rs`,
+2. **Cockpit → X-Plane command** (`D:\A380\msfs2xp-aircraft\src\behaviour\bind.rs`,
    `events.rs`; read-only, out of this task's editable files). The
    `LEFT_SINGLE_CODE`'s `(>H:NAME)` RPN resolves to `Click::Command` for the
    `ASOBO_GT_Push_Button_Airliner` template (`bind.rs:333-339`, one-shot per
@@ -276,7 +276,7 @@ versa) — the KBD/CCD failure mode above — and **(b)** duplicate/overlapping
 command registration causing a double delivery — the `hevents.txt` failure
 mode above.
 
-- **FCU** (`src/key_events.rs`'s `afs_event`, `D:\msfs2xp-aircraft\src\behaviour\events.rs`'s
+- **FCU** (`src/key_events.rs`'s `afs_event`, `D:\A380\msfs2xp-aircraft\src\behaviour\events.rs`'s
   `h_event`). Cross-checked every `A32NX.FCU_*`/`AUTO_THROTTLE_*` name
   `events.rs::h_event` can produce (17 names: `AP_1_PUSH`, `AP_2_PUSH`,
   `LOC_PUSH`, `APPR_PUSH`, `ALT_PUSH`, `ALT_PULL`, `SPD_INC`, `SPD_DEC`,

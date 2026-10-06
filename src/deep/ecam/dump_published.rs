@@ -6,7 +6,7 @@
 //! Run it with
 //!
 //! ```text
-//! CARGO_TARGET_DIR=D:/fbw-xp-systems/target-j1 \
+//! CARGO_TARGET_DIR=D:/A380/fbw-xp-systems/target-j1 \
 //!   cargo test --lib deep::ecam::dump_published -- --nocapture
 //! ```
 //!

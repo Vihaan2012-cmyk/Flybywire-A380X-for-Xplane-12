@@ -26,14 +26,14 @@
 //!
 //! `PUSH_SURV_WXR_TAWS_SYS1`/`_SYS2` and `_GS_MODE` also have real,
 //! already-consumed FBW variables once found: `L:A32NX_WXR_TAWS_SYS_
-//! SELECTED` (1 or 2) picks the AESU lane `src/wxr` (`wxr_failed`,
-//! `side_config`) and FBW's own `EfisTawsBridge.ts:560`, `LegacyGpws.ts:257`
+//! SELECTED` (1 or 2) picks the AESU lane
+//! FlyByWire's own `EfisTawsBridge.ts:560`, `LegacyGpws.ts:257`
 //! and `FwsCore.ts:1866` all read — this one press wires WXR, TAWS terrain
 //! fail flags and GPWS lane select all at once. `L:A32NX_GPWS_GS_OFF`
 //! (`LegacyGpws.ts:556`) is the G/S mode inhibit `PUSH_SURV_GS_MODE`'s
 //! tooltip ("SET G/S MODE") describes. Neither var had anything driving it
-//! before this: `A32NX_WXR_TAWS_SYS_SELECTED` unset means `src/wxr` and
-//! GPWS both treat the AESS as unselected (`wxr_failed` returns `true` for
+//! before this: `A32NX_WXR_TAWS_SYS_SELECTED` unset means
+//! GPWS treats the AESS as unselected (it reads `true` for
 //! anything but 1./2.), so this module also seeds it to system 1 at
 //! startup, same as the real aircraft powering up on AESU 1.
 //!
@@ -57,6 +57,29 @@
 //! has. This reuses the electrical system's own already-computed bus state
 //! (`circuits.rs`/`efb.rs` read the identical `ELEC_AC_<n>_BUS_IS_POWERED`
 //! names) rather than adding a second, parallel power model.
+//!
+//! **The transponder MODE (STBY/ON/ALT/GND), not just its squawk code or
+//! IDENT, also has to reach X-Plane.** `key_events.rs` already forwards the
+//! RMP's `XPNDR_SET` (squawk code, to `sim/cockpit2/radios/actuators/
+//! transponder_code`) and `XPNDR_IDENT_ON` (to the `sim/transponder/
+//! transponder_ident` command) correctly. The mode does not travel the same
+//! way: `systems-host`'s `Transponder` (`Transponder.ts`, one instance per
+//! AESU) derives MSFS's own `MsfsTransponderState` enum from the RMP's AUTO
+//! switch, the MFD's ALT RPTG switch and on-ground state, and writes it with
+//! a plain `SimVar.SetSimVarValue('TRANSPONDER STATE:<n>', 'Enum', v)` --
+//! not a `K:` event, so `key_events.rs` never sees it, and not an
+//! `L:A32NX_...` name, so it is not one of this module's own vars either.
+//! `radios.rs` documents itself as NAV/ADF/COM only. The write lands in this
+//! plugin's own variable store (`js_bridge.rs`'s generic `SetSimVarValue`
+//! path) and stays there unread: X-Plane's own `sim/cockpit2/radios/
+//! actuators/transponder_mode` never moves, so X-Plane's stock ATC and any
+//! online network reading X-Plane's datarefs directly (rather than this
+//! aircraft's own RMP/MFD pages) never sees AUTO switch to ALT, or STBY at
+//! all. `update` below mirrors the *selected* AESU's `TRANSPONDER STATE:<n>`
+//! (the same `transponder_system` selector `LegacyTcasComputer.ts:324`
+//! already uses for the identical purpose) into that dataref every tick,
+//! translated through [`xp_transponder_mode`] -- the two enums do not share
+//! a numbering past Off/Standby.
 
 use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
@@ -154,7 +177,7 @@ pub struct Surveillance {
     transponder_system: VariableIdentifier,
     tcas_ta_only_var: VariableIdentifier,
     /// `L:A32NX_WXR_TAWS_SYS_SELECTED`: 1 or 2, the AESU lane feeding WXR,
-    /// TAWS terrain and GPWS alike (`wxr::wxr_failed`, `EfisTawsBridge.ts`,
+    /// TAWS terrain and GPWS alike (`EfisTawsBridge.ts`,
     /// `LegacyGpws.ts`, `FwsCore.ts`).
     wxr_taws_sys_selected: VariableIdentifier,
     /// `L:A32NX_GPWS_GS_OFF`: G/S mode inhibit (`LegacyGpws.ts:556`).
@@ -173,6 +196,41 @@ pub struct Surveillance {
     /// Written every tick rather than only on change: a plain scalar write
     /// costs nothing and needs no extra "did it change" bookkeeping.
     tcas_range_var: VariableIdentifier,
+
+    /// `TRANSPONDER STATE:1`/`TRANSPONDER STATE:2` (`Transponder.ts:41-42`):
+    /// FlyByWire's own MSFS-enum transponder state for each AESU, written
+    /// every tick by the systems-host `Transponder` instance. Index 0 is
+    /// AESU 1's, index 1 AESU 2's -- the same numbering `transponder_system`
+    /// (0./1.) already selects between.
+    transponder_state: [VariableIdentifier; 2],
+    /// `sim/cockpit2/radios/actuators/transponder_mode`, found lazily like
+    /// every other dataref this module looks up (X-Plane's own datarefs are
+    /// present from plugin start, unlike the SASL-published `fbw/cockpit/...`
+    /// ones `PushButton` waits for, but a lazy `Option` keeps the same shape
+    /// and avoids doing the lookup before it is first needed).
+    transponder_mode_dataref: Option<DataRef>,
+}
+
+/// `Transponder.ts`'s `MsfsTransponderState` (`Off=0, Standby=1, Test=2,
+/// On(ModeA)=3, Alt(ModeC)=4, Ground(ModeS)=5`), translated to X-Plane's
+/// `sim/cockpit2/radios/actuators/transponder_mode` (`DataRefs.txt`:
+/// `off=0, stdby=1, on(modeA)=2, alt(modeC)=3, test=4, GND(modeS)=5,
+/// ta_only=6, ta/ra=7`). The two enums only agree on Off/Standby: MSFS puts
+/// Test before On, X-Plane puts On before Alt before Test. A code this port
+/// never produces (nothing here reaches `Test`, and X-Plane's `ta_only`/
+/// `ta/ra` have no MSFS equivalent at all) falls back to Standby rather than
+/// leaving the dataref on whatever it last held -- a network reading a
+/// stale or unrecognised mode is worse than one reading STBY.
+fn xp_transponder_mode(msfs_state: f64) -> i32 {
+    match msfs_state.round() as i32 {
+        0 => 0, // Off -> off
+        1 => 1, // Standby -> stdby
+        2 => 4, // Test -> test
+        3 => 2, // On (Mode A) -> on (mode A)
+        4 => 3, // Alt (Mode C) -> alt (mode C)
+        5 => 5, // Ground (Mode S) -> GND (mode S)
+        _ => 1,
+    }
 }
 
 impl Surveillance {
@@ -194,6 +252,12 @@ impl Surveillance {
             ac_4_bus_powered: vars.get("ELEC_AC_4_BUS_IS_POWERED".into()),
             tcas_range: TcasRange::Normal,
             tcas_range_var: vars.get("TCAS_RANGE".into()),
+            // Plain names with a space are MSFS's own simulator variables
+            // (`is_simulator_variable`, lib.rs), stored under the exact name
+            // `Transponder.ts` writes -- not prefixed with `A32NX_` like
+            // this struct's other vars.
+            transponder_state: ["TRANSPONDER STATE:1", "TRANSPONDER STATE:2"].map(|n| vars.get(n.into())),
+            transponder_mode_dataref: None,
         };
         // Nothing else in this port writes A32NX_WXR_TAWS_SYS_SELECTED
         // (checked: `rg -i wxr_taws_sys_selected` over src/ and the js
@@ -263,6 +327,26 @@ impl Surveillance {
         // `self.tcas_range` directly (that field is this struct's, not
         // shared state).
         vars.write(&self.tcas_range_var, self.tcas_range.code());
+
+        // Mirror the *selected* AESU's transponder mode into X-Plane's own
+        // actuator dataref every tick, the same "always publish" pattern as
+        // the TCAS range above. `transponder_system` is already 0./1. (AESU
+        // 1/2, see `xpdr_tcas_sys1/2` above), matching `transponder_state`'s
+        // index directly -- no `- 1.` offset needed here (that belongs to
+        // `wxr_taws_sys_selected`, which is 1./2., not this var). Without
+        // this, `key_events.rs`'s `XPNDR_SET` reaches X-Plane's squawk code
+        // and `XPNDR_IDENT_ON` reaches its ident command, but AUTO/ALT RPTG
+        // never move X-Plane's own transponder_mode: X-Plane's stock ATC and
+        // any online network reading X-Plane's datarefs directly never see
+        // the mode this aircraft's RMP/MFD pages already show correctly.
+        let active_xpdr = if vars.read(&self.transponder_system) <= 0.5 { 0 } else { 1 };
+        let msfs_state = vars.read(&self.transponder_state[active_xpdr]);
+        if self.transponder_mode_dataref.is_none() {
+            self.transponder_mode_dataref = xplm.find("sim/cockpit2/radios/actuators/transponder_mode");
+        }
+        if let Some(d) = self.transponder_mode_dataref {
+            xplm.set_i(d, xp_transponder_mode(msfs_state));
+        }
     }
 }
 
@@ -341,5 +425,39 @@ mod tests {
         let mut range = TcasRange::Normal;
         range = if range == TcasRange::Below { TcasRange::Normal } else { TcasRange::Below };
         assert_eq!(range, TcasRange::Below);
+    }
+
+    #[test]
+    fn transponder_mode_translates_msfs_enum_to_xplane_enum() {
+        // Off and Standby line up; everything past them does not (MSFS puts
+        // Test before On, X-Plane puts On/Alt before Test).
+        assert_eq!(xp_transponder_mode(0.), 0); // Off -> off
+        assert_eq!(xp_transponder_mode(1.), 1); // Standby -> stdby
+        assert_eq!(xp_transponder_mode(2.), 4); // Test -> test
+        assert_eq!(xp_transponder_mode(3.), 2); // On (Mode A) -> on (mode A)
+        assert_eq!(xp_transponder_mode(4.), 3); // Alt (Mode C) -> alt (mode C)
+        assert_eq!(xp_transponder_mode(5.), 5); // Ground (Mode S) -> GND (mode S)
+    }
+
+    #[test]
+    fn transponder_mode_unknown_state_falls_back_to_standby() {
+        // A state this port's Transponder.ts never produces (or a slot
+        // nothing has written yet, default 0. -- which is Off, not this
+        // branch) must not leave X-Plane's dataref on a stale or
+        // out-of-range mode.
+        assert_eq!(xp_transponder_mode(6.), 1);
+        assert_eq!(xp_transponder_mode(99.), 1);
+    }
+
+    #[test]
+    fn transponder_state_index_matches_transponder_system_numbering() {
+        // `transponder_system` is 0./1. (AESU 1/2); `update`'s
+        // `active_xpdr` must land 0 on AESU 1's index and 1 on AESU 2's,
+        // directly, unlike `wxr_taws_sys_selected` (1./2.) which needs a
+        // `- 1.` first. A regression here would silently mirror the wrong
+        // AESU's mode when XPDR SYS2 is selected.
+        let active_xpdr = |transponder_system: f64| if transponder_system <= 0.5 { 0 } else { 1 };
+        assert_eq!(active_xpdr(0.), 0);
+        assert_eq!(active_xpdr(1.), 1);
     }
 }

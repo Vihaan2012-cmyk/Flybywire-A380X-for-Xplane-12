@@ -13,7 +13,7 @@ with **no `LEFT_SINGLE_CODE`/handling code at all** — only backlighting. Their
 `INDICATOR_CODE` is the same nonsense placeholder for all eight
 (`(L:A32NX_OVHD_INTLT_ANN) 0 ==`, an overhead-panel light test var, not a SURV
 state). Confirmed by the converter's cockpit-binding audit
-(`D:\fbw-build\conv-test\A380X (branch fs2020-master)\cockpit_bindings.txt`):
+(`D:\A380\fbw-build\conv-test\A380X (branch fs2020-master)\cockpit_bindings.txt`):
 
 ```
 PUSH_SURV_GS_MODE:        unresolved (ASOBO_GT_Push_Button), keeps fbw/cockpit/PUSH_SURV_GS_MODE: template parameter never given: #BUTTON_CODE#

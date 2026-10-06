@@ -464,6 +464,33 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+/// X-Plane P/Q/R (deg/s) in the senses of MSFS's "ROTATION VELOCITY BODY
+/// X/Y/Z" (pitch, yaw, roll), which FBW's `AdirsSensedData` reads in their
+/// place: `mapping()` (lib.rs) negates pitch and roll on the way to those
+/// names, and FBW's `update_attitude_values` negates them back.
+fn msfs_body_rates_deg_s(p: f64, q: f64, r: f64) -> (f64, f64, f64) {
+    (-q, r, -p)
+}
+
+/// The body rates (aviation p, q, r in deg/s, the same senses as X-Plane's
+/// own P/Q/R) that carry the airframe from attitude `prev` to `now`
+/// ([theta, phi, psi], degrees) in `dt`: inverse Euler kinematics at the
+/// interval's mid-point attitude (Stevens & Lewis eq. 1.4-4, the inverse of
+/// `state_derivative`'s attitude rates).
+fn kinematic_body_rates(prev: [f64; 3], now: [f64; 3], dt: f64) -> [f64; 3] {
+    let wrap_180 = |deg: f64| wrap_360(deg + 180.0) - 180.0;
+    let d_theta = now[0] - prev[0];
+    let d_phi = wrap_180(now[1] - prev[1]);
+    let d_psi = wrap_180(now[2] - prev[2]);
+    let (theta, phi) = ((prev[0] + d_theta / 2.0).to_radians(), (prev[1] + d_phi / 2.0).to_radians());
+    let (theta_dot, phi_dot, psi_dot) = (d_theta / dt, d_phi / dt, d_psi / dt);
+    [
+        phi_dot - psi_dot * theta.sin(),
+        theta_dot * phi.cos() + psi_dot * phi.sin() * theta.cos(),
+        psi_dot * phi.cos() * theta.cos() - theta_dot * phi.sin(),
+    ]
+}
+
 fn wrap_360(deg: f64) -> f64 {
     let m = deg % 360.0;
     if m < 0.0 {
@@ -570,6 +597,9 @@ struct AdiruVars {
     /// bullet): the probe heaters' electrical load, for the electrical
     /// workstream to read as a bus consumer.
     probe_heat_load_w: VariableIdentifier,
+    /// `DEEP_IR_<n>_GYRO_DRIFT_DEG_HR`, the gyro drift `deep::sensors`
+    /// publishes for this unit's armed `alignment_drift` failure.
+    fault_gyro_drift_deg_hr: VariableIdentifier,
 }
 impl AdiruVars {
     /// All fields default (unregistered) identifiers, for tests that never
@@ -606,6 +636,7 @@ impl AdiruVars {
             study_static_pa: Default::default(),
             study_total_pa: Default::default(),
             probe_heat_load_w: Default::default(),
+            fault_gyro_drift_deg_hr: Default::default(),
         }
     }
 
@@ -641,6 +672,7 @@ impl AdiruVars {
             study_static_pa: vars.get(format!("ADIRS_STUDY_{n}_STATIC_PRESSURE_PA")),
             study_total_pa: vars.get(format!("ADIRS_STUDY_{n}_TOTAL_PRESSURE_PA")),
             probe_heat_load_w: vars.get(format!("PROBE_HEAT_LOAD_W:{n}")),
+            fault_gyro_drift_deg_hr: vars.get(format!("DEEP_IR_{n}_GYRO_DRIFT_DEG_HR")),
         }
     }
 }
@@ -672,9 +704,9 @@ pub struct Adiru {
     heading_error_deg: f64,
     seconds_aligning: f64,
     /// The last sensed body rates, X-Plane's own P/Q/R convention (deg/s),
-    /// for [`Self::write`] to put back in the same slots the truth
-    /// passthrough used. Zero while not running (ignored downstream anyway,
-    /// since `valid` is false then).
+    /// for [`Self::write`] to publish in the slots the truth passthrough
+    /// used (see [`msfs_body_rates_deg_s`]). Zero while not running (ignored
+    /// downstream anyway, since `valid` is false then).
     last_p_sensed_xp: f64,
     last_q_sensed_xp: f64,
     last_r_sensed_xp: f64,
@@ -684,15 +716,29 @@ pub struct Adiru {
     /// Sensed body rate last tick (rad/s, aviation p/q/r), for the lever-arm
     /// correction's finite-differenced angular acceleration.
     last_omega_body_rad_s: [f64; 3],
+    /// X-Plane's attitude last tick ([theta, phi, psi], degrees), for the
+    /// rotation the airframe actually made since (see `advance`).
+    last_truth_attitude: Option<[f64; 3]>,
     /// Fixed per-unit IMU-case-to-airframe mounting misalignment (rad),
     /// drawn once at construction (see [`MOUNT_MISALIGNMENT_SIGMA_DEG`]).
     misalign_eps_rad: [f64; 3],
+    /// Gyro bias from an armed failure, deg/s, added to all three gyros on
+    /// top of their own error draw (see `AdiruVars::fault_gyro_drift_deg_hr`).
+    fault_gyro_bias_deg_s: f64,
 
     // ADR probe state.
     pitot_ice_kg: f64,
     static_ice_kg: f64,
     frozen_total_pressure_pa: f64,
     frozen_static_pressure_pa: f64,
+    /// The AoA vane's last live reading before a walkaround cover
+    /// (`walkaround.rs`) jammed it (`failures` 34_106-34_108): a physical
+    /// vane held by a cover reads whatever angle it was mechanically stuck
+    /// at, not a moving freestream value, the same "freeze the last live
+    /// reading" convention `frozen_total_pressure_pa`/
+    /// `frozen_static_pressure_pa` already use for a blocked pitot/static
+    /// source.
+    frozen_aoa_deg: f64,
 
     // Latest ADR outputs (computed every tick regardless of IR alignment --
     // a real ADR's ~18s init timer is independent of IR gyrocompassing).
@@ -795,11 +841,14 @@ impl Adiru {
             last_r_sensed_xp: 0.,
             last_fbw_state: 0.,
             last_omega_body_rad_s: [0., 0., 0.],
+            last_truth_attitude: None,
             misalign_eps_rad,
+            fault_gyro_bias_deg_s: 0.,
             pitot_ice_kg: 0.,
             static_ice_kg: 0.,
             frozen_total_pressure_pa: 0.,
             frozen_static_pressure_pa: 0.,
+            frozen_aoa_deg: 0.,
             adr_static_pa: P0_PA,
             adr_total_pa: P0_PA,
             adr_cas_kt: 0.,
@@ -835,6 +884,7 @@ impl Adiru {
         nav_mode: bool,
         gps_valid: bool,
     ) {
+        self.fault_gyro_bias_deg_s = SimulatorReaderWriter::read(vars, &self.v.fault_gyro_drift_deg_hr) / 3600.0;
         let should_run = self.advance(dt, t, fbw_state, powered, nav_mode, gps_valid);
         self.write(vars, should_run);
     }
@@ -859,6 +909,17 @@ impl Adiru {
         gps_valid: bool,
     ) -> bool {
         self.last_fbw_state = fbw_state;
+        // The rotation the airframe made this tick, from the attitude X-Plane
+        // placed it at, for the gyros to sense. X-Plane's own P/Q/R agree with
+        // it in the air, but on the gear they can hold a steady rate while
+        // the attitude stays put (-0.2 deg/s pitch live, parked), and a
+        // strapdown IR integrating that tilts its attitude without limit.
+        let attitude = [t.theta_xp, t.phi_xp, t.psi_xp];
+        let truth_rates = match self.last_truth_attitude {
+            Some(prev) if dt > 1e-4 => kinematic_body_rates(prev, attitude, dt),
+            _ => [t.p_xp, t.q_xp, t.r_xp],
+        };
+        self.last_truth_attitude = Some(attitude);
         // `&& t.placed`: see [`TrueState::placed`]'s doc comment and
         // `docs/deep/debug_vs.md`. FBW's own ADIRS (fbw-common's
         // `navigation/adirs.rs`, `InertialReference::new`) starts every unit
@@ -972,7 +1033,7 @@ impl Adiru {
                 self.v_east = t.v_east_ms;
                 self.v_down = 0.0;
             }
-            self.mechanize(dt, t);
+            self.mechanize(dt, t, truth_rates);
             // The vertical channel is always baro-aided: free-inertial
             // altitude is exponentially unstable (gravity falls with height).
             self.baro_inertial_correct(dt, t);
@@ -1080,14 +1141,15 @@ impl Adiru {
     /// function: a tilt or velocity error leaks gravity into the horizontal
     /// specific force, which the transport-rate term feeds back into the
     /// attitude/position estimate at the classical ~84.4 minute period.
-    fn mechanize(&mut self, dt: f64, t: &TrueState) {
-        // FBW's own aviation-convention body rates (adirs.rs
-        // `update_attitude_values`): p = -P_xp, q = -Q_xp, r = +R_xp. Using
-        // the same relationship keeps this module's attitude convention
-        // identical to FBW's already-tested one. Sampled once for this dt,
-        // like a real IMU's fixed output rate -- RK4 below integrates this
-        // one measured rate/force more accurately over the interval, it
-        // doesn't re-sample the sensor.
+    fn mechanize(&mut self, dt: f64, t: &TrueState, truth_rates: [f64; 3]) {
+        // `truth_rates` are aviation body rates (p roll right, q pitch up,
+        // r yaw right, deg/s), the same senses as X-Plane's own P/Q/R --
+        // FBW's `update_attitude_values` negates pitch and roll only because
+        // MSFS's "ROTATION VELOCITY BODY" names count them the other way
+        // (see `msfs_body_rates_deg_s`). Sampled once for this dt, like a
+        // real IMU's fixed output rate -- RK4 below integrates this one
+        // measured rate/force more accurately over the interval, it doesn't
+        // re-sample the sensor.
         // X-Plane's rates are relative to the local-level frame; a gyro
         // senses inertial rate, which adds the Earth's rotation and the nav
         // frame's transport rate over the curved Earth, in body axes (Groves
@@ -1100,15 +1162,17 @@ impl Adiru {
             -EARTH_RATE_RAD_S * lat.sin() - t.v_east_ms * lat.tan() / r_h,
         ];
         let om_in_b = ned_to_body(t.theta_xp, t.phi_xp, t.psi_xp, om_in_n);
-        let p_sensed = self.gyro[0].sense(-t.p_xp + om_in_b[0].to_degrees(), dt, &mut self.rng);
-        let q_sensed = self.gyro[1].sense(-t.q_xp + om_in_b[1].to_degrees(), dt, &mut self.rng);
-        let r_sensed = self.gyro[2].sense(t.r_xp + om_in_b[2].to_degrees(), dt, &mut self.rng);
-        // Back to X-Plane's own P/Q/R convention, for `write` to put in the
-        // same body_rotation_rate_x/y/z slots the truth passthrough used
-        // (x=Q_xp, y=R_xp, z=P_xp, see AdirsSimulatorData::read).
-        self.last_q_sensed_xp = -q_sensed;
-        self.last_r_sensed_xp = r_sensed;
-        self.last_p_sensed_xp = -p_sensed;
+        let [p_true, q_true, r_true] = truth_rates;
+        let fault = self.fault_gyro_bias_deg_s;
+        let p_sensed = self.gyro[0].sense(p_true + om_in_b[0].to_degrees(), dt, &mut self.rng) + fault;
+        let q_sensed = self.gyro[1].sense(q_true + om_in_b[1].to_degrees(), dt, &mut self.rng) + fault;
+        let r_sensed = self.gyro[2].sense(r_true + om_in_b[2].to_degrees(), dt, &mut self.rng) + fault;
+        // The published rates feed the flight control laws' damping, so
+        // they keep X-Plane's instantaneous P/Q/R (the attitude-derived
+        // rate is half a frame late) with this unit's own sensor error.
+        self.last_p_sensed_xp = t.p_xp + (p_sensed - p_true);
+        self.last_q_sensed_xp = t.q_xp + (q_sensed - q_true);
+        self.last_r_sensed_xp = t.r_xp + (r_sensed - r_true);
 
         // Lever arm: this unit's own IMU sits at `ADIRU_LEVER_ARM_M[number]`
         // relative to the CG the true state (`t.g_*`) is referenced to, so
@@ -1423,8 +1487,16 @@ impl Adiru {
         // struct's own intermediate state.
         self.pitot_ice_kg = (self.pitot_ice_kg + net_kg_s * dt).max(0.0);
         self.static_ice_kg = (self.static_ice_kg + net_kg_s * dt).max(0.0);
-        let pitot_blocked = self.pitot_ice_kg >= PROBE_BLOCK_MASS_KG;
-        let static_blocked = self.static_ice_kg >= PROBE_BLOCK_MASS_KG;
+        // A walkaround pitot/static cover (`walkaround.rs`, failures.rs's
+        // extra ATA34 ids 34_100-34_105) blocks the probe outright, the same
+        // "frozen last reading" consequence a full ice accretion already
+        // produces below -- a physical cover does not care whether the
+        // blockage came from ice or from cloth. `is_active` (not
+        // `magnitude`): a cover is a binary block, not a partial one.
+        let pitot_blocked =
+            self.pitot_ice_kg >= PROBE_BLOCK_MASS_KG || crate::failures::is_active(34_100 + self.number as u64 - 1);
+        let static_blocked =
+            self.static_ice_kg >= PROBE_BLOCK_MASS_KG || crate::failures::is_active(34_103 + self.number as u64 - 1);
 
         // Impact pressure from the true compressible flow (standard
         // subsonic pitot-static relation): qc = Ps * ((1 + 0.2 M^2)^3.5 - 1).
@@ -1479,7 +1551,16 @@ impl Adiru {
         self.adr_mach = mach_sensed;
         self.adr_tas_ms = mach_sensed * speed_of_sound_ms;
         self.adr_tat_c = tat_k - 273.15;
-        self.adr_aoa_deg = t.alpha_deg * AOA_VANE_UPWASH_FACTOR;
+        // A walkaround AoA vane cover (34_106-34_108) jams the vane
+        // mechanically: it reads whatever angle it was stuck at, not the
+        // live freestream angle, the same frozen-last-reading treatment as
+        // the blocked pitot/static sources above.
+        let aoa_cover_active = crate::failures::is_active(34_106 + self.number as u64 - 1);
+        let live_aoa_deg = t.alpha_deg * AOA_VANE_UPWASH_FACTOR;
+        if !aoa_cover_active || self.frozen_aoa_deg == 0.0 {
+            self.frozen_aoa_deg = live_aoa_deg;
+        }
+        self.adr_aoa_deg = self.frozen_aoa_deg;
     }
 
     fn write(&self, vars: &mut Vars, valid: bool) {
@@ -1496,12 +1577,14 @@ impl Adiru {
         w(vars, &self.v.true_heading, self.heading_deg);
         let track_deg = wrap_360(self.v_east.atan2(self.v_north).to_degrees());
         w(vars, &self.v.true_track, track_deg);
-        // Sensed body rates in the same slots/convention as the truth
-        // passthrough they replace (body_rotation_rate_x/y/z = Q_xp/R_xp/
-        // P_xp, deg/s), so FBW's own downstream sign-flips are unaffected.
-        w(vars, &self.v.body_rotation_rate_x, self.last_q_sensed_xp);
-        w(vars, &self.v.body_rotation_rate_y, self.last_r_sensed_xp);
-        w(vars, &self.v.body_rotation_rate_z, self.last_p_sensed_xp);
+        // Sensed body rates in the same slots and signs as the truth
+        // passthrough they replace, so FBW's own downstream sign-flips undo
+        // them correctly.
+        let (x, y, z) =
+            msfs_body_rates_deg_s(self.last_p_sensed_xp, self.last_q_sensed_xp, self.last_r_sensed_xp);
+        w(vars, &self.v.body_rotation_rate_x, x);
+        w(vars, &self.v.body_rotation_rate_y, y);
+        w(vars, &self.v.body_rotation_rate_z, z);
         w(vars, &self.v.latitude, self.lat_rad.to_degrees());
         w(vars, &self.v.longitude, self.lon_rad.to_degrees());
         let ground_speed_kt =
@@ -1958,7 +2041,7 @@ mod tests {
         let dt = 0.1;
         let steps = (hours * 3600.0 / dt) as u64;
         for _ in 0..steps {
-            a.mechanize(dt, &t);
+            a.mechanize(dt, &t, [t.p_xp, t.q_xp, t.r_xp]);
             a.baro_inertial_correct(dt, &t);
             a.gpirs_correct(dt, &t);
         }
@@ -2067,6 +2150,65 @@ mod tests {
             a.update_adr(dt, &t, false);
         }
         assert_eq!(a.adr_static_pa, frozen, "a blocked static port must keep its last reading");
+    }
+
+    /// A walkaround pitot cover (`walkaround.rs`, ids 34_100-34_102) blocks
+    /// the probe outright, even with no icing at all -- a cloth cover does
+    /// not care about SAT/LWC -- and clears the instant it comes off.
+    #[test]
+    fn a_walkaround_pitot_cover_blocks_and_freezes_the_probe_with_no_icing() {
+        let _guard = crate::failures::tests::serial();
+        let mut a = Adiru::new_for_test(1);
+        let t = stationary_level_state(45.0); // no icing conditions at all
+        crate::failures::set_walkaround_levels([(34_100, 1.0)].into_iter().collect());
+        a.update_adr(1.0, &t, true);
+        assert!(a.adr_pitot_blocked, "a covered pitot must read blocked with no ice involved");
+        assert!(a.pitot_ice_kg < PROBE_BLOCK_MASS_KG, "the cover blocks it directly, not by accreting ice");
+        let frozen = a.adr_total_pa;
+        a.update_adr(1.0, &t, true);
+        assert_eq!(a.adr_total_pa, frozen, "still covered: the reading must not move");
+        crate::failures::set_walkaround_levels(std::collections::BTreeMap::new());
+        a.update_adr(1.0, &t, true);
+        assert!(!a.adr_pitot_blocked, "removing the cover clears the block immediately");
+    }
+
+    /// The single `static_covers` walkaround item covers every ADR's static
+    /// source at once (the interface has one item, not one per ADIRU), so
+    /// this exercises `walkaround.rs`'s mapping onto all three static ids
+    /// (34_103-34_105).
+    #[test]
+    fn a_walkaround_static_cover_blocks_every_adirus_static_source() {
+        let _guard = crate::failures::tests::serial();
+        let mut a1 = Adiru::new_for_test(1);
+        let mut a2 = Adiru::new_for_test(2);
+        let mut a3 = Adiru::new_for_test(3);
+        let t = stationary_level_state(45.0);
+        crate::failures::set_walkaround_levels([(34_103, 1.0), (34_104, 1.0), (34_105, 1.0)].into_iter().collect());
+        a1.update_adr(1.0, &t, true);
+        a2.update_adr(1.0, &t, true);
+        a3.update_adr(1.0, &t, true);
+        assert!(a1.adr_static_blocked && a2.adr_static_blocked && a3.adr_static_blocked);
+        crate::failures::set_walkaround_levels(std::collections::BTreeMap::new());
+    }
+
+    /// A walkaround AoA vane cover (34_106-34_108) jams the vane: its
+    /// reading must not follow a changing angle of attack while covered.
+    #[test]
+    fn a_walkaround_aoa_cover_freezes_the_vane_reading() {
+        let _guard = crate::failures::tests::serial();
+        let mut a = Adiru::new_for_test(1);
+        let mut t = stationary_level_state(45.0);
+        t.alpha_deg = 2.0;
+        a.update_adr(1.0, &t, true);
+        let live = a.adr_aoa_deg;
+        assert!(live > 0.0);
+        crate::failures::set_walkaround_levels([(34_106, 1.0)].into_iter().collect());
+        t.alpha_deg = 15.0; // a real change in AoA the vane would otherwise follow
+        a.update_adr(1.0, &t, true);
+        assert_eq!(a.adr_aoa_deg, live, "a jammed vane must not track a new angle of attack");
+        crate::failures::set_walkaround_levels(std::collections::BTreeMap::new());
+        a.update_adr(1.0, &t, true);
+        assert!((a.adr_aoa_deg - live).abs() > 1.0, "removing the cover must let the vane read live again");
     }
 
     /// failures::extra 30_000 ("ADIRU 1 probe heater open circuit"): even
@@ -2719,5 +2861,124 @@ mod tests {
         assert!(a.roll_deg.is_finite() && a.roll_deg.abs() < 5.0);
         let ground_speed_kt = (a.v_north * a.v_north + a.v_east * a.v_east).sqrt() * MS_TO_KNOT;
         assert!(ground_speed_kt.is_finite() && ground_speed_kt < 50.0);
+    }
+
+    /// Drives an aligned IR through `seconds` of truth where X-Plane's
+    /// attitude follows `attitude(t)` and its reported P/Q/R are `rates(t)`,
+    /// returning the unit afterwards.
+    fn fly(
+        seconds: f64,
+        attitude: impl Fn(f64) -> [f64; 3],
+        rates: impl Fn(f64) -> [f64; 3],
+    ) -> (Adiru, TrueState) {
+        fly_unit(Adiru::new_for_test(1), seconds, attitude, rates)
+    }
+
+    fn fly_unit(
+        mut a: Adiru,
+        seconds: f64,
+        attitude: impl Fn(f64) -> [f64; 3],
+        rates: impl Fn(f64) -> [f64; 3],
+    ) -> (Adiru, TrueState) {
+        let mut t = stationary_level_state(28.0);
+        let dt = 1.0 / 30.0;
+        let steps = (seconds / dt).round() as u64;
+        for i in 0..=steps {
+            let time = i as f64 * dt;
+            let [theta, phi, psi] = attitude(time);
+            let [p, q, r] = rates(time);
+            (t.theta_xp, t.phi_xp, t.psi_xp) = (theta, phi, psi);
+            (t.p_xp, t.q_xp, t.r_xp) = (p, q, r);
+            // At rest the specific force is 1 g straight up, in body axes
+            // (see `level_from_specific_force`), so ground alignment levels
+            // to the attitude the aircraft actually has.
+            let (st, ct) = (theta.to_radians().sin(), theta.to_radians().cos());
+            let (sp, cp) = (phi.to_radians().sin(), phi.to_radians().cos());
+            (t.g_axil, t.g_side, t.g_nrml) = (st, -sp * ct, cp * ct);
+            a.update_for_test(dt, &t, 2.0, true);
+        }
+        (a, t)
+    }
+
+    /// The live defect: the PFD showed the nose rising while the aircraft
+    /// sat level, and would have shown a rotation as the nose going down.
+    /// Aviation p/q/r are X-Plane's own P/Q/R, sign for sign: roll right,
+    /// pitch up and yaw right are positive in both.
+    #[test]
+    fn a_rotation_moves_the_ir_attitude_the_same_way_as_the_aircraft() {
+        let _serial = crate::failures::tests::serial();
+        // 2 s of a 3 deg/s rotation with a 5 deg/s roll to the right.
+        let (a, t) = fly(2.0, |s| [3.0 * s, 5.0 * s, 0.0], |_| [5.0, 3.0, 0.0]);
+        assert!(
+            (a.pitch_deg - t.theta_xp).abs() < 0.5,
+            "IR pitch {:.2} must follow the aircraft's {:.2}",
+            a.pitch_deg,
+            t.theta_xp
+        );
+        assert!(
+            (a.roll_deg - t.phi_xp).abs() < 0.5,
+            "IR roll {:.2} must follow the aircraft's {:.2}",
+            a.roll_deg,
+            t.phi_xp
+        );
+    }
+
+    /// On its gear X-Plane can report a steady pitch rate (-0.2 deg/s live)
+    /// while the attitude it places the aircraft at does not move. A gyro
+    /// senses the rotation the airframe actually makes, so the IR holds.
+    #[test]
+    fn a_rate_x_plane_reports_while_the_aircraft_holds_still_does_not_tilt_the_ir() {
+        let _serial = crate::failures::tests::serial();
+        let (a, t) = fly(60.0, |_| [-0.8, 0.3, 50.0], |_| [0.1, -0.2, 0.15]);
+        assert!(
+            (a.pitch_deg - t.theta_xp).abs() < 0.1,
+            "IR pitch drifted to {:.2} while the aircraft held {:.2}",
+            a.pitch_deg,
+            t.theta_xp
+        );
+        assert!(
+            (a.roll_deg - t.phi_xp).abs() < 0.1,
+            "IR roll drifted to {:.2} while the aircraft held {:.2}",
+            a.roll_deg,
+            t.phi_xp
+        );
+    }
+
+    /// An armed gyro drift reaches the IR's solution through its gyros: the
+    /// drifting unit's attitude walks away from the aircraft's, past the
+    /// FCOM's 5 deg ATT DISAGREE threshold within minutes at full fault,
+    /// while a healthy unit flying the same seconds stays with it.
+    #[test]
+    fn a_gyro_drift_fault_tilts_that_ir_away_from_the_aircraft() {
+        let _serial = crate::failures::tests::serial();
+        let held = |_: f64| [2.0, 0.0, 90.0];
+        let still = |_: f64| [0.0, 0.0, 0.0];
+        let (healthy, t) = fly(240.0, held, still);
+        let mut drifting = Adiru::new_for_test(1);
+        drifting.fault_gyro_bias_deg_s = crate::deep::sensors::live::IR_GYRO_DRIFT_AT_FULL_FAULT_DEG_HR / 3600.0;
+        let (drifting, _) = fly_unit(drifting, 240.0, held, still);
+        assert!((healthy.pitch_deg - t.theta_xp).abs() < 0.1, "healthy IR pitch {:.2} vs {:.2}", healthy.pitch_deg, t.theta_xp);
+        assert!(
+            (drifting.pitch_deg - healthy.pitch_deg).abs() > 5.0,
+            "a full gyro drift moved the IR only {:.2} deg in 4 minutes",
+            (drifting.pitch_deg - healthy.pitch_deg).abs()
+        );
+    }
+
+    /// FBW reads these slots as MSFS's "ROTATION VELOCITY BODY X/Y/Z" and
+    /// negates pitch and roll back (`update_attitude_values`), so they must
+    /// carry the same signs `mapping()` gives the truth it replaces --
+    /// otherwise the flight control laws get their rate damping inverted.
+    #[test]
+    fn published_body_rates_carry_the_same_signs_as_the_named_variables() {
+        let (p, q, r) = (0.3_f64, 0.1_f64, 0.2_f64);
+        let (x, y, z) = msfs_body_rates_deg_s(p, q, r);
+        let named = |name: &str, deg_s: f64| {
+            let (_, _, convert) = crate::mapping(name).unwrap();
+            convert(deg_s.to_radians())
+        };
+        assert!((x - named("ROTATION VELOCITY BODY X", q)).abs() < 1e-6, "pitch rate");
+        assert!((y - named("ROTATION VELOCITY BODY Y", r)).abs() < 1e-6, "yaw rate");
+        assert!((z - named("ROTATION VELOCITY BODY Z", p)).abs() < 1e-6, "roll rate");
     }
 }

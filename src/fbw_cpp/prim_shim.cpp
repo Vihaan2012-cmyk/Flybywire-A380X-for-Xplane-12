@@ -88,6 +88,10 @@ void fbw_prim_flare_law(fbw_prim *p, ap_raw_laws_flare *out) {
   *out = p->prim.getDebugOutputs().fg_laws.ap_fd_1.flare_law;
 }
 
+void fbw_prim_fctl_logic_outputs(fbw_prim *p, base_prim_fctl_logic_outputs *out) {
+  *out = p->prim.getDebugOutputs().fctl_logic;
+}
+
 void fbw_prim_diagnostics(fbw_prim *p, double *out) {
   const prim_outputs &o = p->prim.getDebugOutputs();
   const double values[FBW_PRIM_DIAGNOSTICS] = {
@@ -111,6 +115,12 @@ void fbw_prim_diagnostics(fbw_prim *p, double *out) {
   for (int i = 0; i < FBW_PRIM_DIAGNOSTICS; i++) {
     out[i] = values[i];
   }
+}
+
+void fbw_prim_health_diagnostics(fbw_prim *p, bool *out) {
+  out[0] = p->prim.isSelfTestInProgress();
+  out[1] = p->prim.isMonitoringHealthy();
+  out[2] = p->prim.isPowerSupplyFault();
 }
 
 fbw_sec *fbw_sec_create(int unit) {

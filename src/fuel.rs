@@ -253,6 +253,21 @@ const JET_A_SPECIFIC_HEAT_J_KGK: f64 = 2000.;
 /// Wing-tank aspect ratio used for the wetted-area estimate (long, shallow
 /// box): see `physics::fluids::tank_wetted_area_m2`'s doc.
 const TANK_ASPECT_RATIO: f64 = 6.0;
+/// Thermal mass `update_temperatures` uses to convert a tick's convective/
+/// HHX heat into a temperature step, kg. **GENERIC**: a floor, not a
+/// measurement. W89 found the previous guard (`mass_kg > 1e-6`) let a tank
+/// just above `update_temperatures`'s own `gallons_now > 0.1` cutoff
+/// (about 0.3 kg of fuel there) divide real HHX heat by a few tenths of a
+/// kilogram every tick while it drained the rest of the way to empty,
+/// running the published temperature away to 49-58 degC. 5 kg is an order
+/// of magnitude above that worst case and orders of magnitude below any
+/// normally fuelled tank's real mass, so `effective_thermal_mass_kg` only
+/// ever changes behaviour in the near-empty regime this guard exists for.
+const MIN_TANK_THERMAL_MASS_KG: f64 = 5.0;
+/// See [`MIN_TANK_THERMAL_MASS_KG`].
+fn effective_thermal_mass_kg(mass_kg: f64) -> f64 {
+    mass_kg.max(MIN_TANK_THERMAL_MASS_KG)
+}
 /// hyperrealism.md physics workstream 5: FUEL gap "pump outlet pressure not
 /// dropping with low tank quantity [or] unporting in pitch" -- a boost
 /// pump's inlet sits a small margin above the tank floor (the same physical
@@ -653,6 +668,11 @@ pub struct Fuel {
     ids: Ids,
     xp_tanks: Option<DataRef>,
     mixture: Option<DataRef>,
+    /// `sim/operation/override/override_fuel_system` (X-Plane's own SDK
+    /// doc, `Resources/plugins/DataRefs.txt`: "Turns off transfer and dump
+    /// and lets the plugin decide if the engine gets fuel"). Set once in
+    /// `new` (see its own doc, W89) and handed back in `release`.
+    override_fuel_system: Option<DataRef>,
     last_written: Option<[f32; 9]>,
     previous_master: [Option<bool>; 4],
     starved: [bool; 4],
@@ -751,7 +771,7 @@ impl Fuel {
             // per valve.
             switch: std::array::from_fn(|i| vars.get(format!("FUEL CROSSFEED SWITCH:{}", i + 1))),
         };
-        Ok(Self {
+        let mut this = Self {
             net,
             legacy: LegacyFuel::new(),
             apu: None,
@@ -760,6 +780,7 @@ impl Fuel {
             ids,
             xp_tanks: xplm.find("sim/flightmodel/weight/m_fuel"),
             mixture: xplm.find("sim/cockpit2/engine/actuators/mixture_ratio"),
+            override_fuel_system: xplm.find("sim/operation/override/override_fuel_system"),
             last_written: None,
             previous_master: [None; 4],
             starved: [false; 4],
@@ -769,13 +790,43 @@ impl Fuel {
             jettison,
             crossfeed,
             persist: true,
-        })
+        };
+        // W89: without this, X-Plane keeps running its own stock fuel
+        // system (transfer, dump, and each engine's own fuel draw) on the
+        // very same `sim/flightmodel/weight/m_fuel` array `write_xplane`
+        // (below) mirrors this network's totals into. `override_fuel_flow`
+        // (`engine_commands.rs`) only overrides the *displayed* `ENGN_FF_`
+        // dataref, not X-Plane's own tank consumption --
+        // `Resources/plugins/DataRefs.txt` gives each dataref its own,
+        // different, job. Left unset, X-Plane's stock engine model burns
+        // the same tanks independently once the engines are actually
+        // running, and `update`'s own "outside change" detector
+        // (`OUTSIDE_CHANGE_KG`, below) then faithfully copies that (wrong,
+        // much faster) burn back into this network, mistaking it for an
+        // edit made in X-Plane's own fuel menu -- this is what drained the
+        // feed tanks an expedited-load preset had just filled, around real
+        // engine start.
+        if let Some(d) = this.override_fuel_system {
+            xplm.set_i(d, 1);
+        }
+        Ok(this)
     }
 
     /// Whether the saved tank levels are read at a cold start and saved on
     /// the ground; without, a cold start takes FlyByWire's default load.
     pub fn set_persistence(&mut self, on: bool) {
         self.persist = on;
+    }
+
+    /// Hands X-Plane's stock fuel system back on exit
+    /// (`override_fuel_system`, set in `new`): the same convention
+    /// `CrossfeedCommands::release` and `engine_commands::EngineCommands::
+    /// release` already follow for every override this plugin takes at
+    /// start.
+    pub fn release(&mut self, xplm: &Xplm) {
+        if let Some(d) = self.override_fuel_system {
+            xplm.set_i(d, 0);
+        }
     }
 
     fn read_xplane(&self, xplm: &Xplm) -> Option<[f32; 9]> {
@@ -832,6 +883,23 @@ impl Fuel {
             };
             let gallons = if self.persist { parse_ini(&text) } else { DEFAULT_GALLONS };
             for (i, g) in gallons.iter().enumerate() {
+                // W211: fbw_a380x_fuel.ini is free text -- a hand edit, or
+                // the X-Plane-stock-fuel-system contamination fixes/W89.md
+                // and fixes/W145.md traced (override_fuel_system left
+                // unset lets X-Plane's own transfer land on the same
+                // m_fuel array this file is saved from) -- can put
+                // anything in it. set_tank_gallons below already clamps
+                // to 0.0..=capacity and maps non-finite to 0.0, but log it
+                // here first so a corrupt/implausible save is visible in
+                // Log.txt instead of silently loading a clamped value
+                // with no trace of why.
+                let capacity = self.net.tank_capacity(i + 1);
+                if !g.is_finite() || *g < 0.0 || (capacity > 0.0 && *g > capacity) {
+                    crate::log(&format!(
+                        "fbw_a380x_fuel.ini: tank {} loaded {g:.1} gal, outside 0..{capacity:.1} gal capacity; clamped on load",
+                        i + 1
+                    ));
+                }
                 self.net.set_tank_gallons(i + 1, *g);
             }
         } else if let Some(kg) = self.read_xplane(xplm) {
@@ -1225,9 +1293,12 @@ impl Fuel {
                 let mass_kg = volume_m3 * fluids::jet_a_density_kg_m3(self.temp_c[i]);
                 let q_ext_w = fluids::convective_heat_w(u, area_m2, recovery_c - self.temp_c[i]);
                 let q_hhx_w = if ENGINE_FEED_TANKS.contains(&tank_n) { hhx_w_per_feed_tank } else { 0. };
-                if mass_kg > 1e-6 {
-                    self.temp_c[i] += (q_ext_w + q_hhx_w) * delta / (mass_kg * JET_A_SPECIFIC_HEAT_J_KGK);
-                }
+                // W89: floored (`effective_thermal_mass_kg`), not gated on
+                // `mass_kg > 1e-6` -- that let a near-empty tank's real
+                // heat divide by a near-zero mass and run the temperature
+                // away.
+                let thermal_mass_kg = effective_thermal_mass_kg(mass_kg);
+                self.temp_c[i] += (q_ext_w + q_hhx_w) * delta / (thermal_mass_kg * JET_A_SPECIFIC_HEAT_J_KGK);
                 if self.temp_c[i] <= FUEL_FREEZE_POINT_C {
                     any_cold = true;
                 }
@@ -1420,6 +1491,17 @@ impl Fuel {
     }
 
     fn write_xplane(&mut self, xplm: &Xplm) {
+        // `weight_balance.rs`'s payload/CG writes are bisectable with
+        // `FBW_XP_WRITES=weight`/`weight-stations`/`weight-cg`; `m_fuel` is
+        // the fourth mass X-Plane's own physics sums in (alongside
+        // `m_fixed`/`m_stations` and the CG offset) and had no knob of its
+        // own, so that bisect could not isolate it. `weight-fuel` closes the
+        // gap; skipping the write here also naturally skips the "outside
+        // change" absorption below (`last_written` stays `None`), which is
+        // the right behaviour for an isolated bisect run.
+        if crate::xp_writes_skip("weight-fuel") {
+            return;
+        }
         let Some(d) = self.xp_tanks else { return };
         let mut kg = [0f32; 9];
         for (x, tanks) in XPLANE_TANKS.iter().enumerate() {
@@ -1514,6 +1596,21 @@ mod tests {
     }
 
     #[test]
+    fn a_near_empty_tank_does_not_divide_heat_by_a_near_zero_mass() {
+        // W89: 500 W into a bare 0.3 kg (just above `update_temperatures`'s
+        // own `gallons_now > 0.1` cutoff) used to step temperature by
+        // `500 * delta / (0.3 * 2000)` every tick -- 0.83 degC/tick at
+        // delta=0.05 s, tens of degrees over the several seconds a feed
+        // tank takes to finish draining. Floored, the same heat over the
+        // same delta steps at most `500 * 0.05 / (5.0 * 2000)`.
+        let step_c = |mass_kg: f64| 500. * 0.05 / (effective_thermal_mass_kg(mass_kg) * JET_A_SPECIFIC_HEAT_J_KGK);
+        assert!(step_c(0.3) < 0.01, "a near-empty tank still ran away: {}", step_c(0.3));
+        // A normally fuelled tank (thousands of kg) is unaffected: the
+        // floor never binds there.
+        assert_eq!(effective_thermal_mass_kg(5000.), 5000.);
+    }
+
+    #[test]
     fn a_merged_xplane_tank_fills_the_feed_tank_first() {
         let capacity = |t: usize| if t == 2 { 7299.6 } else if t == 12 { 1.0 } else { 2731.5 };
         let split = split_into(8000., &[2, 12, 1], capacity);
@@ -1522,6 +1619,37 @@ mod tests {
         assert!((split[2].1 - 699.4).abs() < 1e-9);
         let total: f64 = split.iter().map(|s| s.1).sum();
         assert!((total - 8000.).abs() < 1e-9);
+    }
+
+    #[test]
+    fn distinct_right_side_tanks_stay_distinct_through_an_xplane_round_trip() {
+        // W145 (redo of W88, wrongly REFUTED the first time -- the log
+        // evidence is real: `A32NX_FUEL_TANK_QUANTITY_7` and `_8` track
+        // bit-for-bit equal while `_3` (a lone tank, same shape) does not).
+        // `XPLANE_TANKS` never merges tank 7 (RightInner) or tank 8
+        // (RightMid) with anything else -- each is its own single-tank
+        // X-Plane slot (index 6 and index 7) -- so `write_xplane`'s
+        // per-group sum and `take_from_xplane`'s `split_into` can never
+        // equalise them on their own; this pins that math innocent. The
+        // equalisation actually seen in the logs is X-Plane's OWN stock
+        // fuel system transferring fuel on the raw `m_fuel` array while
+        // `override_fuel_system` is left unset (see fixes/W89.md, which
+        // this test complements rather than duplicates).
+        let no_cap = |_: usize| 0.0; // a single-element group ignores its capacity fn -- see `split_into`
+        let kg7 = (824.5722 * JET_A_LBS_PER_GAL * LB_TO_KG) as f32;
+        let kg8 = (900.0 * JET_A_LBS_PER_GAL * LB_TO_KG) as f32;
+        assert!((kg7 - kg8).abs() > 1.0, "inputs must differ going in");
+        let back7 = split_into(kg7 as f64 / LB_TO_KG / JET_A_LBS_PER_GAL, &[7], no_cap);
+        let back8 = split_into(kg8 as f64 / LB_TO_KG / JET_A_LBS_PER_GAL, &[8], no_cap);
+        // W171/W145's own APPLY-ADJUST: loosened from < 1e-6 to < 1e-3 (the
+        // f32 mass round trip through JET_A_LBS_PER_GAL/LB_TO_KG does not
+        // hold f64-tight precision, per the coordinator's review).
+        assert!((back7[0].1 - 824.5722).abs() < 1e-3);
+        assert!((back8[0].1 - 900.0).abs() < 1e-3);
+        assert!(
+            (back7[0].1 - back8[0].1).abs() > 1.0,
+            "a legitimate write_xplane/take_from_xplane round trip must not equalise tank 7 and tank 8"
+        );
     }
 
     #[test]

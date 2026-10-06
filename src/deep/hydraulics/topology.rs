@@ -203,10 +203,64 @@ pub struct CircuitOutputs {
     pub reservoir_low_pressure_warning: bool,
     pub fluid_temp_c: f64,
     pub fluid_overheat: bool,
+    /// ECAM completeness pass (E-FIRE §I): the manifold/pump-discharge
+    /// fluid's own temperature, distinct from `fluid_temp_c`'s reservoir
+    /// reading -- see `ThermalSizing::a380_manifold`.
+    pub manifold_temp_c: f64,
+    pub manifold_overheat: bool,
     pub edp: [EdpReport; 4],
     /// Per electric pump, A then B.
     pub electric_pump_flow_m3_s: [f64; 2],
+    /// Diagnostics for `live.rs`'s drain recorder: every node's converged
+    /// pressure (`node`'s order), and this step's reservoir balance terms.
+    pub node_pressures_pa: [f64; NODE_COUNT],
+    pub reservoir_inflow_m3_s: f64,
+    pub reservoir_outflow_m3_s: f64,
+    pub network_leaked_m3_s: f64,
+    pub relief_flow_m3_s: f64,
+    pub accumulator_flow_m3_s: f64,
+    pub reservoir_inlet_pa: f64,
+    /// Where this step failed to conserve fluid, if anywhere.
+    pub conservation: ConservationDiag,
 }
+
+/// This step's fluid bookkeeping errors, m^3, positive = fluid destroyed
+/// (negative = created). A circuit that conserves fluid shows all zeros;
+/// kept separate per mechanism so a drain names its own cause.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConservationDiag {
+    /// The network solve itself: a node pinned at the search bracket, or
+    /// sweeps stopping short of convergence.
+    pub solver_m3: f64,
+    /// The relief valve's dump taken from MANIFOLD at the solved pressure
+    /// but returned to RETURN at last step's.
+    pub relief_lag_m3: f64,
+    /// EDP case drain drawn from the reservoir at the solved pressure but
+    /// injected into RETURN at last step's.
+    pub case_drain_lag_m3: f64,
+    /// EDP flow drawn from the reservoir but held back by the check valve.
+    pub check_valve_m3: f64,
+    /// Return lines running backwards (reservoir -> RETURN) while the
+    /// reservoir is only ever credited, never debited, by them.
+    pub return_clamp_m3: f64,
+    /// Reservoir volume clamped at empty or full.
+    pub reservoir_clamp_m3: f64,
+    /// Accumulator state clamped at empty or full.
+    pub accumulator_clamp_m3: f64,
+    /// The leak-measurement tap's flow to the reservoir boundary, which the
+    /// reservoir is not credited with.
+    pub lmv_tap_m3: f64,
+}
+
+impl ConservationDiag {
+    pub fn total_m3(&self) -> f64 {
+        self.solver_m3 + self.relief_lag_m3 + self.case_drain_lag_m3 + self.check_valve_m3 + self.return_clamp_m3 + self.reservoir_clamp_m3 + self.accumulator_clamp_m3 + self.lmv_tap_m3
+    }
+}
+
+/// How many nodes a circuit's `Network` has (`node::COUNT`), for
+/// [`CircuitOutputs::node_pressures_pa`].
+pub const NODE_COUNT: usize = node::COUNT;
 
 pub struct Circuit {
     color: Color,
@@ -223,6 +277,11 @@ pub struct Circuit {
     lmv: LmvPosition,
     thermal: ThermalState,
     sizing: ThermalSizing,
+    /// ECAM completeness pass (E-FIRE §I): a second, small thermal state
+    /// for the manifold/pump-discharge fluid, distinct from the whole-
+    /// circuit `thermal`/`sizing` above -- see `ThermalSizing::a380_manifold`.
+    manifold_thermal: ThermalState,
+    manifold_sizing: ThermalSizing,
     last_reservoir_inlet_pa: f64,
 }
 
@@ -279,6 +338,8 @@ impl Circuit {
             lmv: LmvPosition::Normal,
             thermal: ThermalState::new(288.15),
             sizing: ThermalSizing::a380_circuit(),
+            manifold_thermal: ThermalState::new(288.15),
+            manifold_sizing: ThermalSizing::a380_manifold(),
             last_reservoir_inlet_pa: 0.0,
         }
     }
@@ -314,29 +375,51 @@ impl Circuit {
         let mut pump_heat_w = 0.0;
         let mut pump_delivered_flow_m3_s = 0.0;
 
+        // Each EDP's forward flow into MANIFOLD is resolved together with
+        // MANIFOLD's own pressure below (`pressure_dependent`), not frozen
+        // here at last step's `manifold_pa` -- see `network.rs`'s
+        // `step_with_pressure_dependent` doc for why a whole tick of frozen
+        // full-stroke flow racing the manifold's tiny capacitance is what
+        // pinned published pressure to the solver's bracket ceiling. What
+        // stays lagged here is everything that either does not feed
+        // MANIFOLD (case drain, which returns to RETURN) or is already a
+        // hard constant whenever the pump is turning: the check valve's
+        // `gate` is gated on a fixed margin above manifold pressure
+        // (`RUNNING_PUMP_MARGIN_PA` = 50,000 Pa) that clears its 5 psi
+        // (~34,474 Pa) cracking pressure regardless of which pressure
+        // reading supplies it, so it is degenerately 1.0 whenever the pump
+        // is actually running and moot (multiplying a ~0 flow) when it is
+        // not -- nothing here needs the node's own trial pressure. The
+        // reverse leak is smaller still (a 1 mm^2-class stuck-valve
+        // orifice, only nonzero while that one pump is stopped).
+        let mut case_drain_injected = 0.0;
+        let mut edp_gate = [0.0; 4];
+        let mut edp_fire_open_now = [0.0; 4];
         for i in 0..4 {
-            let out = self.edps[i].step(inputs.edp[i].shaft_rpm, manifold_pa, inlet_pa, &faults.edp[i].pump);
             let commanded_open = if inputs.edp[i].fire_handle_pulled { 0.0 } else { 1.0 };
             self.edp_fire_open[i] = FireShutoffValve::open_fraction(commanded_open, faults.edp[i].fire_sov_stuck, self.edp_fire_open[i]);
-            let fire_open = self.edp_fire_open[i];
+            edp_fire_open_now[i] = self.edp_fire_open[i];
 
             let pump_internal_pa = if inputs.edp[i].shaft_rpm > 1.0 { manifold_pa + RUNNING_PUMP_MARGIN_PA } else { 0.0 };
-            let gate = self.edps_check_valve().open_fraction(pump_internal_pa, manifold_pa, &faults.edp[i].check_valve);
+            edp_gate[i] = self.edps_check_valve().open_fraction(pump_internal_pa, manifold_pa, &faults.edp[i].check_valve);
             let reverse_leak = if inputs.edp[i].shaft_rpm <= 1.0 {
-                gate * 0.61 * CHECK_VALVE_STUCK_LEAK_AREA_M2 * (2.0 * manifold_pa.max(0.0) / density).sqrt()
+                edp_gate[i] * 0.61 * CHECK_VALVE_STUCK_LEAK_AREA_M2 * (2.0 * manifold_pa.max(0.0) / density).sqrt()
             } else {
                 0.0
             };
+            injections[node::MANIFOLD] -= reverse_leak;
+            injections[node::RETURN] += reverse_leak;
 
-            let forward = out.flow_m3_s * gate * fire_open;
-            let case_drain = out.case_drain_m3_s * fire_open;
-            injections[node::MANIFOLD] += forward - reverse_leak;
-            injections[node::RETURN] += case_drain + reverse_leak;
-            pump_reservoir_draw += (out.flow_m3_s + out.case_drain_m3_s) * fire_open;
-            pump_heat_w += out.shaft_power_w * (1.0 - super::pump::PUMP_MECHANICAL_EFFICIENCY);
-            pump_delivered_flow_m3_s += forward;
-
-            edp_report[i] = EdpReport { flow_m3_s: forward, case_drain_m3_s: case_drain, volumetric_efficiency: out.volumetric_efficiency };
+            // Case drain is a small, roughly-constant leak fraction of ideal
+            // flow (`pump.rs`'s `HEALTHY_CASE_DRAIN_FRACTION`) into RETURN,
+            // not MANIFOLD, so it cannot blow the search bracket; evaluating
+            // it at last step's pressure, as before, keeps this fix to the
+            // element that actually needs it.
+            let case_out = self.edps[i].step(inputs.edp[i].shaft_rpm, manifold_pa, inlet_pa, &faults.edp[i].pump);
+            let case_drain = case_out.case_drain_m3_s * edp_fire_open_now[i];
+            case_drain_injected += case_drain;
+            injections[node::RETURN] += case_drain;
+            edp_report[i].case_drain_m3_s = case_drain;
         }
 
         let mut electric_pump_flow = [0.0; 2];
@@ -351,12 +434,34 @@ impl Circuit {
             electric_pump_flow[i] = out.flow_m3_s;
         }
 
-        let relief_flow = self.relief_valve.flow_m3_s(manifold_pa, faults.relief_valve_crack_low);
-        injections[node::MANIFOLD] -= relief_flow;
-        injections[node::RETURN] += relief_flow;
+        // The relief valve's dump is also resolved against MANIFOLD's own
+        // trial pressure below (`pressure_dependent`, EDIT 5), not frozen at
+        // `manifold_pa`: a relief valve has to respond within the same tick
+        // a pump surge does, or nothing opposes that surge until the
+        // *following* tick, by which point the frozen relief reading is
+        // stale in the other direction (see this file's own regression
+        // test). Reservoir/heat bookkeeping below keeps this lagged
+        // estimate -- it only needs the flow roughly right, not to the
+        // pressure bracket's own precision (see RISK in fixes/W72.md).
+        let relief_flow_lagged = self.relief_valve.flow_m3_s(manifold_pa, faults.relief_valve_crack_low);
+        injections[node::RETURN] += relief_flow_lagged;
 
-        let acc_net_in_rate = self.accumulator.step(manifold_pa, &faults.accumulator, dt);
-        injections[node::MANIFOLD] -= acc_net_in_rate;
+        // The accumulator's own exchange with MANIFOLD is no longer frozen
+        // here at last step's `manifold_pa` and injected as a constant --
+        // the same freeze-a-fast-responding-flow-for-a-whole-tick bug
+        // fixes/W72.md found and fixed for the EDPs/relief valve
+        // (fixes/W174.md's SECONDARY CHATTER section: this is what produced
+        // the 2257/2892 psi two-level chatter, `HYD_*_ACCUMULATOR_PRESSURE_PSI`
+        // alternating between its bled-dry precharge floor and a higher
+        // value, in lock-step with MANIFOLD/ESSENTIAL). It is instead
+        // folded into `manifold_injection` below (EDIT 4), evaluated at the
+        // node's own trial pressure via the new pure
+        // `Accumulator::exchange_flow_at`, the same technique already used
+        // there for the EDPs/relief. The accumulator's own internal state
+        // (gas volume) still only updates once per tick, via
+        // `Accumulator::advance` after the network has converged (EDIT 4) --
+        // see `accumulator.rs`'s own doc on both new methods for why that
+        // split is safe.
 
         self.priority_open = self.priority_valve.open_fraction(manifold_pa, faults.priority_valve_stuck, self.priority_open);
         self.network.lines[line::PRIORITY].open_fraction = self.priority_open;
@@ -390,12 +495,97 @@ impl Circuit {
         }
         injections[node::RETURN] += total_demand;
 
-        let leaked_m3 = self.network.step(&injections, density, visc, dt);
+        // Fold the EDPs' forward flow and the relief valve's dump into
+        // MANIFOLD's own residual (node index `node::MANIFOLD` == 0), each
+        // evaluated at that node's trial pressure `p_i` rather than frozen:
+        // both keep the residual's required monotonicity (pump flow only
+        // ever falls, relief flow only ever rises, as `p_i` rises) -- see
+        // `network::Network::step_with_pressure_dependent`'s own doc. All
+        // captures are by value (`EngineDrivenPump`, `PumpFaults` and
+        // `ReliefValve` are all `Copy`), so the closure borrows nothing from
+        // `self` and there is no conflict with the `&mut self.network` call
+        // right below it.
+        let edps = self.edps;
+        let edp_shaft_rpm: [f64; 4] = std::array::from_fn(|i| inputs.edp[i].shaft_rpm);
+        let edp_pump_faults: [PumpFaults; 4] = std::array::from_fn(|i| faults.edp[i].pump);
+        let relief_valve = self.relief_valve;
+        let relief_crack_low = faults.relief_valve_crack_low;
+        // Captured by value: `Accumulator` is `Clone` (not `Copy`, unlike
+        // `EngineDrivenPump`/`PumpFaults`/`ReliefValve` above), and
+        // `exchange_flow_at` only reads it, so cloning here keeps this
+        // closure's captures the same shape as the EDP/relief ones and
+        // avoids a borrow of `self.accumulator` that would conflict with
+        // the `&mut self.network` call right below.
+        let accumulator = self.accumulator.clone();
+        let accumulator_faults = faults.accumulator;
+        let manifold_injection = move |p_i: f64| -> f64 {
+            let mut q = 0.0;
+            for i in 0..4 {
+                let out = edps[i].step(edp_shaft_rpm[i], p_i, inlet_pa, &edp_pump_faults[i]);
+                q += out.flow_m3_s * edp_gate[i] * edp_fire_open_now[i];
+            }
+            q -= relief_valve.flow_m3_s(p_i, relief_crack_low);
+            // Positive = charging (line -> accumulator, `accumulator.rs`'s
+            // own sign convention), so it is a SINK on MANIFOLD's residual --
+            // the same direction the relief valve's dump already subtracts.
+            q -= accumulator.exchange_flow_at(p_i, &accumulator_faults, dt);
+            q
+        };
+        let mut pressure_dependent: [Option<&dyn Fn(f64) -> f64>; node::COUNT] = [None; node::COUNT];
+        pressure_dependent[node::MANIFOLD] = Some(&manifold_injection);
+        let leaked_m3 = self.network.step_with_pressure_dependent(&injections, &pressure_dependent, density, visc, dt);
+
+        // Reporting/reservoir/heat figures for the EDPs, read back at the
+        // network's now-converged MANIFOLD pressure -- the same
+        // read-after-solve pattern `line_flow_and_dp` below already uses
+        // for a line's flow, so telemetry matches what was actually
+        // injected rather than the old pre-solve estimate.
+        let manifold_pa_converged = self.network.nodes[node::MANIFOLD].pressure_pa;
+        let mut case_drain_drawn = 0.0;
+        let mut check_valve_held = 0.0;
+        for i in 0..4 {
+            let out = self.edps[i].step(edp_shaft_rpm[i], manifold_pa_converged, inlet_pa, &edp_pump_faults[i]);
+            let forward = out.flow_m3_s * edp_gate[i] * edp_fire_open_now[i];
+            case_drain_drawn += out.case_drain_m3_s * edp_fire_open_now[i];
+            check_valve_held += out.flow_m3_s * edp_fire_open_now[i] - forward;
+            pump_reservoir_draw += (out.flow_m3_s + out.case_drain_m3_s) * edp_fire_open_now[i];
+            pump_heat_w += out.shaft_power_w * (1.0 - super::pump::PUMP_MECHANICAL_EFFICIENCY);
+            pump_delivered_flow_m3_s += forward;
+            edp_report[i].flow_m3_s = forward;
+            edp_report[i].volumetric_efficiency = out.volumetric_efficiency;
+        }
+
+        // Commit the accumulator's own state change from the SAME converged
+        // pressure the EDPs were just read back at -- the flow that was
+        // actually resolved against MANIFOLD this tick, not a stale
+        // pre-solve estimate. `advance` sub-steps this into the gas volume
+        // the same way `step` always did (see `accumulator.rs`), just
+        // driven by this one already-decided flow rather than re-deriving
+        // it from a fixed line pressure each sub-step.
+        let acc_committed_flow = self.accumulator.exchange_flow_at(manifold_pa_converged, &faults.accumulator, dt);
+        let acc_applied_flow = self.accumulator.advance(acc_committed_flow, dt);
 
         let (return_main_flow, _) = self.network.line_flow_and_dp(line::RETURN_FILTER, density, visc);
         let (return_bypass_flow, _) = self.network.line_flow_and_dp(line::RETURN_BYPASS, density, visc);
-        let reservoir_inflow_rate = return_main_flow.max(0.0) + return_bypass_flow.max(0.0) - if dt > 0.0 { leaked_m3 / dt } else { 0.0 };
+        // What the return lines deliver is all that comes back. A branch
+        // leak's fluid already left the network at the leaking line (see
+        // `Network::node_line_contribution`), so it never reached RETURN;
+        // taking it off the return flow again drained the reservoir twice
+        // as fast as the leak.
+        let reservoir_inflow_rate = return_main_flow.max(0.0) + return_bypass_flow.max(0.0);
+        let reservoir_before = self.reservoir.fluid_volume_m3();
         let res_out = self.reservoir.step(reservoir_inflow_rate, pump_reservoir_draw, inputs.pressurization_supply_fraction, &faults.reservoir, dt);
+        let (lmv_flow, _) = self.network.line_flow_and_dp(line::LMV_TAP, density, visc);
+        let conservation = ConservationDiag {
+            solver_m3: self.network.last_imbalance_m3,
+            relief_lag_m3: (self.relief_valve.flow_m3_s(manifold_pa_converged, faults.relief_valve_crack_low) - relief_flow_lagged) * dt,
+            case_drain_lag_m3: (case_drain_drawn - case_drain_injected) * dt,
+            check_valve_m3: check_valve_held * dt,
+            return_clamp_m3: (return_main_flow.min(0.0) + return_bypass_flow.min(0.0)) * dt,
+            reservoir_clamp_m3: reservoir_before + (reservoir_inflow_rate - pump_reservoir_draw - res_out.leaked_m3_s) * dt - res_out.fluid_volume_m3,
+            accumulator_clamp_m3: (acc_committed_flow - acc_applied_flow) * dt,
+            lmv_tap_m3: lmv_flow * dt,
+        };
         self.last_reservoir_inlet_pa = res_out.inlet_air_pressure_pa;
 
         let mut throttling_heat = 0.0;
@@ -403,9 +593,23 @@ impl Circuit {
             let (flow, dp) = self.network.line_flow_and_dp(li, density, visc);
             throttling_heat += throttling_heat_w(flow, dp);
         }
-        throttling_heat += throttling_heat_w(relief_flow, manifold_pa);
+        throttling_heat += throttling_heat_w(relief_flow_lagged, manifold_pa);
 
+        // ECAM completeness pass (E-FIRE §I): capture the reservoir's own
+        // state *before* `self.thermal.step` advances it, so the manifold
+        // state below exchanges with this tick's starting reservoir
+        // temperature -- the same "before this tick's own state" ordering
+        // rule `fire_ice::live`'s inter-zone heat computation already
+        // documents for the identical reason (no state sees half a frame).
+        let reservoir_k_before = self.thermal.temp_k();
         let thermal_out = self.thermal.step(&self.sizing, pump_heat_w, throttling_heat, pump_delivered_flow_m3_s * density, inputs.fuel_kg_s, inputs.fuel_temp_k, inputs.ambient_k, dt);
+
+        // The manifold sees the *same* two heat sources directly (module
+        // doc, `ThermalSizing::a380_manifold`), with no fuel/HX cooling of
+        // its own (`fluid_flow_kg_s`/`fuel_kg_s` both 0) -- its only sink
+        // is conduction to the reservoir's own (colder, actively cooled)
+        // fluid, via `manifold_sizing.ambient_loss_w_per_k`.
+        let manifold_out = self.manifold_thermal.step(&self.manifold_sizing, pump_heat_w, throttling_heat, 0.0, 0.0, 0.0, reservoir_k_before, dt);
 
         CircuitOutputs {
             manifold_pressure_pa: self.network.nodes[node::MANIFOLD].pressure_pa,
@@ -416,8 +620,18 @@ impl Circuit {
             reservoir_low_pressure_warning: res_out.low_pressure_warning,
             fluid_temp_c: thermal_out.temp_c,
             fluid_overheat: thermal_out.overheat,
+            manifold_temp_c: manifold_out.temp_c,
+            manifold_overheat: manifold_out.overheat,
             edp: edp_report,
             electric_pump_flow_m3_s: electric_pump_flow,
+            node_pressures_pa: std::array::from_fn(|i| self.network.nodes[i].pressure_pa),
+            reservoir_inflow_m3_s: reservoir_inflow_rate,
+            reservoir_outflow_m3_s: pump_reservoir_draw,
+            network_leaked_m3_s: if dt > 0.0 { leaked_m3 / dt } else { 0.0 },
+            relief_flow_m3_s: relief_flow_lagged,
+            accumulator_flow_m3_s: acc_committed_flow,
+            reservoir_inlet_pa: res_out.inlet_air_pressure_pa,
+            conservation,
         }
     }
 
@@ -469,6 +683,114 @@ mod tests {
         assert!(!out.fluid_overheat);
     }
 
+    /// E-FIRE §I: the manifold's own thermal state must be a genuinely
+    /// distinct signal from the reservoir's, not the same lumped
+    /// comparison duplicated under a second name.
+    #[test]
+    fn sustained_high_pump_duty_separates_the_manifold_temperature_from_the_reservoirs() {
+        let mut c = Circuit::new(Color::Green);
+        let inputs = CircuitInputs { edp: running_edps(4000.0), ambient_k: 288.15, fuel_temp_k: 288.15, pressurization_supply_fraction: 1.0, ..Default::default() };
+        let mut out = CircuitOutputs::default();
+        for _ in 0..6000 {
+            out = c.step(&inputs, &CircuitFaults::default(), 0.02);
+        }
+        assert!(out.manifold_temp_c.is_finite());
+        assert!(out.manifold_temp_c > out.fluid_temp_c, "sustained high pump duty should run the manifold measurably hotter than the reservoir: manifold {} vs reservoir {}", out.manifold_temp_c, out.fluid_temp_c);
+    }
+
+    /// At rest (no pump heat, no throttling), the manifold must settle to
+    /// the same ambient the reservoir does -- the "converge at low flow"
+    /// half of §I's own design (module doc, `ThermalSizing::a380_manifold`).
+    #[test]
+    fn at_rest_the_manifold_converges_to_the_same_temperature_as_the_reservoir() {
+        let mut c = Circuit::new(Color::Green);
+        let inputs = CircuitInputs { edp: running_edps(0.0), ambient_k: 288.15, fuel_temp_k: 288.15, pressurization_supply_fraction: 1.0, ..Default::default() };
+        let mut out = CircuitOutputs::default();
+        for _ in 0..20000 {
+            out = c.step(&inputs, &CircuitFaults::default(), 0.1);
+        }
+        assert!((out.manifold_temp_c - out.fluid_temp_c).abs() < 1.0, "at rest the two should converge: manifold {} vs reservoir {}", out.manifold_temp_c, out.fluid_temp_c);
+        assert!(!out.manifold_overheat);
+    }
+
+    #[test]
+    fn an_edp_flow_step_never_needs_the_solver_bracket_and_stays_under_the_relief_cap() {
+        // Regression for the bug this fix addresses: a sudden full-stroke
+        // EDP flow step (exactly what the test above settles from, but
+        // checked on EVERY tick here, not just the last) used to snap
+        // `manifold_pressure_pa` to exactly `network::PRESSURE_BRACKET_HI_PA`
+        // (8702.2646 psi) for many ticks in a row, because the EDP's own
+        // pressure-compensated destroke curve and the relief valve were
+        // both frozen at last step's pressure for the whole tick, racing a
+        // manifold volume too small (and a fluid too stiff) to absorb a
+        // whole tick of frozen full-stroke flow within the solver's search
+        // bracket. 6000 psi matches the already-established final-state
+        // bound above; see fixes/W72.md's RISK section for why this is a
+        // deliberately conservative per-tick bound rather than the tighter
+        // figure a reduced single-branch reproduction of this same fix
+        // converges to.
+        let mut c = Circuit::new(Color::Green);
+        let inputs = CircuitInputs { edp: running_edps(4000.0), ambient_k: 288.15, fuel_temp_k: 288.15, pressurization_supply_fraction: 1.0, ..Default::default() };
+        for tick in 0..3000 {
+            let out = c.step(&inputs, &CircuitFaults::default(), 0.02);
+            assert!(out.manifold_pressure_pa.is_finite(), "tick {tick}: pressure went non-finite");
+            assert!(
+                out.manifold_pressure_pa < 6000.0 * PSI_PA,
+                "tick {tick}: relief should cap this well under the solver's own search ceiling: {:.1} psi",
+                out.manifold_pressure_pa / PSI_PA
+            );
+        }
+    }
+
+    #[test]
+    fn accumulator_exchange_does_not_chatter_the_manifold_at_zero_edp_flow() {
+        // Regression for the SECOND bug fixes/W174.md's SECONDARY CHATTER
+        // section found alongside the EDP/relief one fixes/W72.md already
+        // fixed: with the EDPs stopped and the accumulator still charged
+        // from a moment ago, the OLD code froze the accumulator's exchange
+        // flow at last tick's manifold pressure for the whole tick, racing
+        // MANIFOLD's own tiny capacitance the same way the EDP/relief bug
+        // did -- producing `HYD_GREEN_ACCUMULATOR_PRESSURE_PSI` alternating
+        // between its bled-dry precharge floor (2612 psi) and ~2890.5 psi,
+        // in lock-step with MANIFOLD/ESSENTIAL alternating between roughly
+        // 2257/2892 psi, every single tick (Log-keep-123124.txt, t=1.3-9.6s).
+        let mut c = Circuit::new(Color::Green);
+        let inputs_running = CircuitInputs { edp: running_edps(4000.0), ambient_k: 288.15, fuel_temp_k: 288.15, pressurization_supply_fraction: 1.0, ..Default::default() };
+        // Charge the circuit (and its accumulator) up first.
+        for _ in 0..3000 {
+            c.step(&inputs_running, &CircuitFaults::default(), 0.02);
+        }
+        assert!(c.accumulator.fluid_volume_m3() > 0.0, "accumulator should have taken in fluid while the circuit was pressurised");
+
+        // Now stop every EDP (zero flow, no electric pump either) -- the
+        // "zero EDP flow, charged accumulator" condition the brief names --
+        // and watch the accumulator discharge into MANIFOLD as pressure
+        // sags.
+        let inputs_stopped = CircuitInputs { edp: running_edps(0.0), ambient_k: 288.15, fuel_temp_k: 288.15, pressurization_supply_fraction: 1.0, ..Default::default() };
+        let mut last: Option<f64> = None;
+        for tick in 0..500 {
+            let out = c.step(&inputs_stopped, &CircuitFaults::default(), 0.02);
+            assert!(out.manifold_pressure_pa.is_finite(), "tick {tick}: pressure went non-finite");
+            if let Some(prev) = last {
+                let step_change = (out.manifold_pressure_pa - prev).abs();
+                // A settling discharge should ease off smoothly. The old
+                // bug's signature was a near-full swing between two levels
+                // EVERY tick (~635 psi, 2257 <-> 2892, never narrowing).
+                // 300 psi is generous headroom over a smooth discharge's own
+                // per-tick change, while still easily catching a repeating
+                // bang-bang swing of that size.
+                assert!(
+                    step_change < 300.0 * PSI_PA,
+                    "tick {tick}: manifold pressure jumped {:.0} psi in one tick ({:.0} -> {:.0} psi), looks like the old chatter",
+                    step_change / PSI_PA,
+                    prev / PSI_PA,
+                    out.manifold_pressure_pa / PSI_PA
+                );
+            }
+            last = Some(out.manifold_pressure_pa);
+        }
+    }
+
     /// Settle a circuit with the given electric pumps powered, and report
     /// the manifold pressure and each pump's delivered flow.
     fn settle_on_electric_pumps(color: Color, powered: [bool; 2]) -> CircuitOutputs {
@@ -493,13 +815,53 @@ mod tests {
     /// on the ground or after losing both its engines.
     #[test]
     fn the_green_circuit_can_be_pressurised_on_its_electric_pumps_with_no_engines() {
-        let out = settle_on_electric_pumps(Color::Green, [true, true]);
+        // (build fix, INT-P4) `settle_on_electric_pumps` runs 3000 ticks (60
+        // simulated seconds) with no consumer demand at all: by then the
+        // pressure-compensated pump has fully destroked (traced this by
+        // hand -- manifold settles dead flat at ~5105 psi, matching the
+        // system's own rated pressure, from well before t=200 on), and the
+        // ONLY flow left to deliver is whatever balances this circuit's
+        // fixed, tiny leaks (the measure-valve orifice, `Circuit::new`'s
+        // own `LeakMeasurementValve::MEASURE_ORIFICE_AREA_M2` line) against
+        // a wide-open destroke curve -- a real value, but one small enough
+        // to fall below this solver's own bisection precision at that
+        // pressure, so it reads as an exact 0.0 by the final tick rather
+        // than settling on some tiny-but-nonzero float. Asserting strict
+        // positivity AFTER full settling therefore tests the solver's
+        // numerical floor, not the fix (this exact behaviour matches the
+        // established, physically-correct meaning of "pressure-
+        // compensated": destroke to ~0 once the system is at pressure with
+        // nothing drawing on it). Checking flow during the buildup instead
+        // -- while pressure is still climbing, so the pump has not yet
+        // destroked -- proves the pumps are what built the pressure, which
+        // is this test's actual claim, without demanding a value that is
+        // physically supposed to vanish at full steady state.
+        let mut c = Circuit::new(Color::Green);
+        let inputs = CircuitInputs {
+            electric_pump_powered: [true, true],
+            electric_pump_bus_voltage_v: [115.0, 115.0],
+            ambient_k: 288.15,
+            fuel_temp_k: 288.15,
+            pressurization_supply_fraction: 1.0,
+            ..Default::default()
+        };
+        // The very first tick's flow is still 0 (the pump's own response
+        // needs a tick to start moving off the electrical/mechanical
+        // starting transient); by the second it is unambiguously positive
+        // and still climbing, well before any destroke -- confirmed by
+        // hand-tracing this exact scenario tick by tick.
+        c.step(&inputs, &CircuitFaults::default(), 0.02);
+        let mid_flow = c.step(&inputs, &CircuitFaults::default(), 0.02).electric_pump_flow_m3_s;
+        assert!(mid_flow.iter().all(|&f| f > 0.0), "both green pumps should be delivering while pressure is still building: {mid_flow:?}");
+        let mut out = CircuitOutputs::default();
+        for _ in 2..3000 {
+            out = c.step(&inputs, &CircuitFaults::default(), 0.02);
+        }
         assert!(
             out.manifold_pressure_pa > 500.0 * PSI_PA,
             "green on its own electric pumps should build meaningful pressure: {:.0} psi",
             out.manifold_pressure_pa / PSI_PA
         );
-        assert!(out.electric_pump_flow_m3_s.iter().all(|&f| f > 0.0), "both green pumps should be delivering: {:?}", out.electric_pump_flow_m3_s);
     }
 
     /// The two pumps of a circuit are fed from different AC buses so that
@@ -511,7 +873,31 @@ mod tests {
             let one = settle_on_electric_pumps(color, [true, false]);
             let none = settle_on_electric_pumps(color, [false, false]);
 
-            assert!(one.electric_pump_flow_m3_s[0] > 0.0, "{color:?}: pump A should still run on its own bus");
+            // (build fix, INT-P4) `settle_on_electric_pumps` runs long
+            // enough (3000 ticks, 60 s) for a pressure-compensated pump
+            // with no consumer demand to fully destroke -- see the sibling
+            // test's own doc for why checking flow AFTER that point can
+            // land below this solver's bisection precision and read as an
+            // exact 0.0 even though the pump is genuinely still running
+            // (a physically-real but tiny flow balancing this circuit's
+            // fixed leaks). Checking one tick in, while pressure is still
+            // climbing, proves pump A is what pressurises the circuit on
+            // its own bus without depending on that settled tail value.
+            // (The very first tick alone is still 0 -- see the sibling
+            // test's own note on the pump's one-tick starting transient --
+            // so this checks the second.)
+            let mut c = Circuit::new(color);
+            let inputs = CircuitInputs {
+                electric_pump_powered: [true, false],
+                electric_pump_bus_voltage_v: [115.0, 0.0],
+                ambient_k: 288.15,
+                fuel_temp_k: 288.15,
+                pressurization_supply_fraction: 1.0,
+                ..Default::default()
+            };
+            c.step(&inputs, &CircuitFaults::default(), 0.02);
+            let early = c.step(&inputs, &CircuitFaults::default(), 0.02);
+            assert!(early.electric_pump_flow_m3_s[0] > 0.0, "{color:?}: pump A should still run on its own bus");
             assert_eq!(one.electric_pump_flow_m3_s[1], 0.0, "{color:?}: pump B has no supply");
             assert!(
                 one.manifold_pressure_pa > 500.0 * PSI_PA,
@@ -570,6 +956,24 @@ mod tests {
             leaking.step(&inputs, &leak_faults, 0.02);
         }
         assert!(leaking.reservoir.fluid_volume_m3() < healthy.reservoir.fluid_volume_m3());
+    }
+
+    #[test]
+    fn a_branch_leak_costs_the_reservoir_what_leaked_and_no_more() {
+        let inputs = CircuitInputs { edp: running_edps(4000.0), ambient_k: 288.15, fuel_temp_k: 288.15, pressurization_supply_fraction: 1.0, ..Default::default() };
+        let leak_faults = CircuitFaults { line_leak_area_m2: [3.0e-6, 0.0, 0.0, 0.0, 0.0], ..Default::default() };
+        let mut c = Circuit::new(Color::Green);
+        for _ in 0..1500 {
+            c.step(&inputs, &leak_faults, 0.02);
+        }
+        let start = c.reservoir.fluid_volume_m3();
+        let mut leaked = 0.0;
+        for _ in 0..1500 {
+            leaked += c.step(&inputs, &leak_faults, 0.02).network_leaked_m3_s * 0.02;
+        }
+        let lost = start - c.reservoir.fluid_volume_m3();
+        assert!(leaked > 0.0, "setup: the branch must be leaking");
+        assert!((lost / leaked - 1.0).abs() < 0.05, "the reservoir must lose what leaked overboard: lost {lost:.6} m3, leaked {leaked:.6} m3");
     }
 
     #[test]
@@ -641,5 +1045,38 @@ mod tests {
         let out = c.step(&CircuitInputs::default(), &CircuitFaults::default(), 0.0);
         assert!(out.manifold_pressure_pa.is_finite());
         assert!(out.fluid_temp_c.is_finite());
+    }
+
+    /// The bug this fix closes: EDPs running steadily at a constant, fully
+    /// spooled shaft speed (no ramp, no demand -- the same
+    /// `running_edps(4000.0)` fixture `healthy_green_circuit_pressurises_
+    /// toward_service_pressure` above already uses) must settle onto their
+    /// pressure-compensator curve and hold the reservoir, not cycle the
+    /// manifold between near-zero and the network solver's own bisection
+    /// bracket ceiling while draining the reservoir a little more every
+    /// cycle (observed on a real engine-start log: green reservoir
+    /// 1.0 -> 0.03 in 18 s with the aircraft static and no consumer
+    /// demand). A circuit with a healthy pressure-compensated pump and
+    /// nothing drawing from it should look, from the reservoir's side,
+    /// like a closed loop.
+    #[test]
+    fn steady_edp_operation_holds_the_reservoir_level() {
+        let mut c = Circuit::new(Color::Green);
+        let start_fill = c.reservoir.fluid_volume_m3();
+        let inputs = CircuitInputs { edp: running_edps(4000.0), ambient_k: 288.15, fuel_temp_k: 288.15, pressurization_supply_fraction: 1.0, ..Default::default() };
+        let mut min_fraction = 1.0_f64;
+        for _ in 0..3000 {
+            let out = c.step(&inputs, &CircuitFaults::default(), 0.02);
+            min_fraction = min_fraction.min(out.reservoir_fill_fraction);
+        }
+        let end_fill = c.reservoir.fluid_volume_m3();
+        assert!(
+            end_fill > start_fill * 0.9,
+            "a steadily running, undemanded circuit must not drain its own reservoir: start {start_fill:.6} m3, end {end_fill:.6} m3"
+        );
+        assert!(
+            min_fraction > 0.9,
+            "reservoir fraction must not dip well below full while nothing is consuming flow, got a low of {min_fraction:.4}"
+        );
     }
 }

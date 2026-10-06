@@ -6,9 +6,9 @@ change its layouts or record formats — if you truly need a change, stop and
 report it instead), src/remote/ (systems process bridge, already working).
 
 Build commands
-- Plugin: `CARGO_TARGET_DIR=/d/fbw-build/target-main cargo +stable-x86_64-pc-windows-gnu build --release --features js` (tests: `... test --release --features js --lib <filter>`)
-- App: `cd D:/fbw-xp-systems/app && CEF_PATH=D:/fbw-build/cef CARGO_TARGET_DIR=/d/fbw-build/target-app cargo +stable-x86_64-pc-windows-msvc build --release`
-- Staged app for manual runs: D:\fbw-build\xphfbw-stage (XPHFBW.exe + CEF runtime + ui/).
+- Plugin: `CARGO_TARGET_DIR=/d/A380/fbw-build/target-main cargo +stable-x86_64-pc-windows-gnu build --release --features js` (tests: `... test --release --features js --lib <filter>`)
+- App: `cd D:/A380/fbw-xp-systems/app && CEF_PATH=D:/A380/fbw-build/cef CARGO_TARGET_DIR=/d/A380/fbw-build/target-app cargo +stable-x86_64-pc-windows-msvc build --release`
+- Staged app for manual runs: D:\A380\fbw-build\xphfbw-stage (XPHFBW.exe + CEF runtime + ui/).
 - X-Plane: do not launch/close it; do not run tools/install.sh except agent A who edits it (A may run it only if X-Plane is not running: `tasklist | grep -i x-plane`).
 - No sub-agents. Shared target dirs; builds queue on cargo's lock — expected.
 
@@ -67,10 +67,23 @@ adds `pub fn view_list(panel_cfg: &str) -> Vec<ViewDef>` to src/xphfbw_bridge_vi
    skip if `writing` = 1; upload dirty rects (or the whole screen if frames were
    missed since the last upload: frame > last + 1); re-read `frame` after — if
    it moved during upload, upload the whole screen next frame.
-7. **Displays switch-over.** `displays_active` = 1 is set by the plugin only
-   after every screened view reported `Loaded { ok: true }`; until then the
-   QuickJS screens stay; if XPHFBW goes away (process exits) the plugin sets it
-   0 and restarts its own engine. Never both engines drawing one screen.
+7. **Displays switch-over.** Per screen (S08, built on S10's per-view
+   `SlotHeader::view_loaded` mirror): the plugin sets `view_loaded[view]` to
+   1 the moment that view reports `Loaded { ok: true }` (S10). The screens
+   code maps each screen to the view that governs it from panel.cfg's own
+   view list (`display::Bridge::view_for_screen`) and switches that one
+   screen to XPHFBW as soon as its view's entry reads 1, independent of
+   every other screen -- a view stuck loading, crashed, or never created
+   only keeps its own screen on the QuickJS path. The EFB has no view of
+   its own (its gauge is excluded from `view_list`); it switches over once
+   its own `ScreenBlock` has painted a frame instead. `displays_active` = 1
+   once every screened view has loaded: that remains all-or-nothing on
+   purpose, since it is what turns the plugin's own QuickJS *worker* off as
+   a whole (it must keep running for whichever screens have not yet
+   switched over) and what `xphfbw/displays_active` publishes. If XPHFBW
+   goes away (process exits) the plugin clears `displays_active`, every
+   `view_loaded` entry, and every screen's `ScreenBlock` frame counter, and
+   restarts its own engine. Never both engines drawing one screen.
 8. **Files.** FlyByWire's stored data (datastore JSON, flyPad ini) and
    xphfbw.json are written by several processes: every writer holds the named
    mutex `Local\XPHFBW_settings_files` (NamedMutex) around read-modify-write,

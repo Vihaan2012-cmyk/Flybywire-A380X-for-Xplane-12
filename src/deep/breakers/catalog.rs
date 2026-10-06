@@ -375,10 +375,10 @@ fn ata21(v: &mut Vec<BreakerDef>) {
     }
     push_electrical(v, "hotair-1", "HOT AIR VALVE 1", 21, Bus::AcEss, 50.0, 0.8, "hot air valve actuator", "deep::electrical::loads.rs::ata21 HOT AIR VALVE 1");
     push_electrical(v, "hotair-2", "HOT AIR VALVE 2", 21, Bus::AcEss, 50.0, 0.8, "hot air valve actuator", "deep::electrical::loads.rs::ata21 HOT AIR VALVE 2");
-    push_electrical(v, "fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, Bus::Dc2, 50.0, 0.8, "forward cargo isolation valve actuator", "deep::electrical::loads.rs::ata21 FWD CARGO ISOL VALVE (VCM Fwd DC2 channel)");
-    push_electrical(v, "fwd-extract-fan", "FWD CARGO EXTRACT FAN", 21, Bus::Dc2, 150.0, 0.85, "forward cargo extraction fan motor", "deep::electrical::loads.rs::ata21 FWD CARGO EXTRACT FAN");
-    push_electrical(v, "bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, Bus::DcEss, 50.0, 0.8, "bulk cargo isolation valve actuator", "deep::electrical::loads.rs::ata21 BULK CARGO ISOL VALVE (VCM Aft DC_ESS channel)");
-    push_electrical(v, "bulk-extract-fan", "BULK CARGO EXTRACT FAN", 21, Bus::DcEss, 150.0, 0.85, "bulk cargo extraction fan motor", "deep::electrical::loads.rs::ata21 BULK CARGO EXTRACT FAN");
+    push_electrical(v, "fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, Bus::Dc1, 50.0, 0.8, "forward cargo isolation valve actuator", "deep::electrical::loads.rs::ata21 FWD CARGO ISOL VALVE (VCM Fwd's own primary channel, DC1/411PP -- ventilation_control_module.rs VentilationControlModule::new(.., VcmId::Fwd, [DirectCurrent(1), DirectCurrentEssential]), channel 1 backed by powered_by[0] and default-active; fixes/W161.md, matching fixes/W115.md's src/breakers.rs correction -- was wired to DC2, VCM Aft's bus)");
+    push_electrical(v, "fwd-extract-fan", "FWD CARGO EXTRACT FAN", 21, Bus::Ac1, 150.0, 0.85, "forward cargo extraction fan motor", "deep::electrical::loads.rs::ata21 FWD CARGO EXTRACT FAN (the fan's own dedicated bus, not the VCM's channel bus -- ventilation_control_module.rs ForwardCargoVentilationControlSystem::new(AlternatingCurrent(1)), really gated in receive_power/fwd_extraction_fan_is_on; fixes/W161.md, matching fixes/W115.md -- was wired to VCM Fwd's DC channel, which the fan does not draw from at all)");
+    push_electrical(v, "bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, Bus::Dc2, 50.0, 0.8, "bulk cargo isolation valve actuator", "deep::electrical::loads.rs::ata21 BULK CARGO ISOL VALVE (VCM Aft's own primary channel, DC2/214PP -- ventilation_control_module.rs VentilationControlModule::new(.., VcmId::Aft, [DirectCurrent(2), DirectCurrentEssential]), channel 1 backed by powered_by[0] and default-active; fixes/W161.md, matching fixes/W115.md -- was on DC_ESS, Aft's secondary/standby channel)");
+    push_electrical(v, "bulk-extract-fan", "BULK CARGO EXTRACT FAN", 21, Bus::Ac4, 150.0, 0.85, "bulk cargo extraction fan motor", "deep::electrical::loads.rs::ata21 BULK CARGO EXTRACT FAN (the fan's own dedicated bus, not the VCM's channel bus -- ventilation_control_module.rs BulkVentilationControlSystem::new(AlternatingCurrent(4)), really gated in receive_power/bulk_extraction_fan_is_on; fixes/W161.md, matching fixes/W115.md -- was wired to VCM Aft's DC_ESS channel, which the fan does not draw from at all)");
     push_electrical(v, "cargo-heater", "BULK CARGO HEATER", 21, Bus::Ac2, 1000.0, 1.0, "bulk cargo heater element", "deep::electrical::loads.rs::ata21 BULK CARGO HEATER (AirHeater::new(AC2))");
 
     const FDAC: [(&str, &str, Bus); 4] = [("fdac-1a", "FDAC 1 CHANNEL 1", Bus::AcEss), ("fdac-1b", "FDAC 1 CHANNEL 2", Bus::Ac2), ("fdac-2a", "FDAC 2 CHANNEL 1", Bus::AcEss), ("fdac-2b", "FDAC 2 CHANNEL 2", Bus::Ac4)];
@@ -389,7 +389,16 @@ fn ata21(v: &mut Vec<BreakerDef>) {
     for (id, name, bus) in TADD {
         push_electrical(v, id, name, 21, bus, 50.0, avionics_pf(bus), "trim air drive device channel", "deep::electrical::loads.rs::ata21 TADD (TrimAirDriveDevice)");
     }
-    const VCM: [(&str, &str, Bus); 4] = [("vcm-fwd-1", "VCM FWD CHANNEL 1", Bus::Dc2), ("vcm-fwd-2", "VCM FWD CHANNEL 2", Bus::DcEss), ("vcm-aft-1", "VCM AFT CHANNEL 1", Bus::Dc2), ("vcm-aft-2", "VCM AFT CHANNEL 2", Bus::DcEss)];
+    // fixes/W185.md: vcm-fwd-1 was wired to Bus::Dc2 (VCM Aft's own
+    // channel-1 bus). VCM Fwd's own primary/default-active channel
+    // (channel 1 / powered_by[0]) is DC1 -- mod.rs
+    // VentilationControlModule::new(.., VcmId::Fwd, [DirectCurrent(1)
+    // /* 411PP */, DirectCurrentEssential /* 109PP */]), vs VcmId::Aft's
+    // [DirectCurrent(2) /* 214PP */, DirectCurrentEssential /* 109PP */].
+    // Same class of bug fixes/W115.md/fixes/W161.md fixed for
+    // fwd-isol-valve/fwd-extract-fan; flagged as a follow-up by
+    // fixes/W161.md but not fixed there.
+    const VCM: [(&str, &str, Bus); 4] = [("vcm-fwd-1", "VCM FWD CHANNEL 1", Bus::Dc1), ("vcm-fwd-2", "VCM FWD CHANNEL 2", Bus::DcEss), ("vcm-aft-1", "VCM AFT CHANNEL 1", Bus::Dc2), ("vcm-aft-2", "VCM AFT CHANNEL 2", Bus::DcEss)];
     for (id, name, bus) in VCM {
         push_electrical(v, id, name, 21, bus, 50.0, avionics_pf(bus), "ventilation control module channel", "deep::electrical::loads.rs::ata21 VCM (VentilationControlModule)");
     }
@@ -717,6 +726,29 @@ fn ata31_recorders(v: &mut Vec<BreakerDef>) {
     push_electrical(v, "qar", "QAR", 31, Bus::Dc2, 30.0, avionics_pf(Bus::Dc2), "Quick Access Recorder", "GENERIC: typical small avionics LRU class figure");
 }
 
+/// The CDS/KCCU/HUD/video/recorder avionics loads E-IND's ECAM pass added to
+/// `deep::electrical::loads.rs::ata31_ind_group`, one breaker per real feed.
+/// Display-unit feeds follow FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus; the rest are single DC ESS
+/// avionics LRUs at the same GENERIC class figures as the loads.
+fn ata31_ind_group(v: &mut Vec<BreakerDef>) {
+    push_electrical(v, "capt-efis-bkup-ctl", "CAPT EFIS BKUP CTL", 31, Bus::DcEss, 30.0, avionics_pf(Bus::DcEss), "captain's EFIS backup control panel", "GENERIC: typical small avionics LRU class figure (loads.rs ata31_ind_group)");
+    push_electrical(v, "fo-efis-bkup-ctl", "F/O EFIS BKUP CTL", 31, Bus::DcEss, 30.0, avionics_pf(Bus::DcEss), "first officer's EFIS backup control panel", "GENERIC: same class as CAPT EFIS BKUP CTL");
+    push_electrical(v, "capt-efis-ctl-panel", "CAPT EFIS CTL PANEL", 31, Bus::DcEss, 30.0, avionics_pf(Bus::DcEss), "captain's EFIS control panel", "GENERIC: typical small avionics LRU class figure");
+    push_electrical(v, "fo-efis-ctl-panel", "F/O EFIS CTL PANEL", 31, Bus::DcEss, 30.0, avionics_pf(Bus::DcEss), "first officer's EFIS control panel", "GENERIC: same class as CAPT EFIS CTL PANEL");
+    push_electrical(v, "capt-pfd-du", "CAPT PFD DU", 31, Bus::DcEss, 60.0, avionics_pf(Bus::DcEss), "captain's PFD display unit", "GENERIC display-unit-class figure; feed DC ESS per FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus:42 (409PP)");
+    push_electrical_dual(v, "capt-nd-du", "CAPT ND DU", 31, Bus::DcEss, Bus::Dc1, 60.0, avionics_pf(Bus::DcEss), "captain's ND display unit", "GENERIC display-unit-class figure; dual feed DC ESS + DC 1 per FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus:43 (415PP or 105PP)");
+    push_electrical(v, "capt-ewd-du", "CAPT EWD DU", 31, Bus::DcEss, 60.0, avionics_pf(Bus::DcEss), "EWD display unit", "GENERIC display-unit-class figure; feed DC ESS per FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus:48 (423PP)");
+    push_electrical(v, "fo-pfd-du", "F/O PFD DU", 31, Bus::Dc2, 60.0, avionics_pf(Bus::Dc2), "first officer's PFD display unit", "GENERIC display-unit-class figure; feed DC 2 per FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus:45");
+    push_electrical_dual(v, "fo-nd-du", "F/O ND DU", 31, Bus::Dc1, Bus::Dc2, 60.0, avionics_pf(Bus::Dc1), "first officer's ND display unit", "GENERIC display-unit-class figure; dual feed DC 1 + DC 2 per FlyByWire CdsDisplayUnit.tsx DisplayUnitToDCBus:46");
+    push_electrical(v, "kccu-capt", "CAPT KCCU", 31, Bus::DcEss, 40.0, avionics_pf(Bus::DcEss), "captain's keyboard and cursor control unit", "GENERIC: typical small keyboard/cursor-control-unit LRU figure");
+    push_electrical(v, "kccu-fo", "F/O KCCU", 31, Bus::DcEss, 40.0, avionics_pf(Bus::DcEss), "first officer's keyboard and cursor control unit", "GENERIC: same class as CAPT KCCU");
+    push_electrical(v, "cds-mailbox-capt", "CAPT CDS MAILBOX", 31, Bus::DcEss, 20.0, avionics_pf(Bus::DcEss), "captain's CDS mailbox", "GENERIC: typical small CDS peripheral LRU figure");
+    push_electrical(v, "hud", "HUD", 31, Bus::DcEss, 50.0, avionics_pf(Bus::DcEss), "head-up display projector/combiner", "GENERIC: typical HUD projector/combiner-unit LRU figure");
+    push_electrical(v, "video-multiplexer", "VIDEO MULTIPLEXER", 31, Bus::DcEss, 30.0, avionics_pf(Bus::DcEss), "cockpit video multiplexer", "GENERIC: typical small avionics LRU class figure");
+    push_electrical(v, "recorder-accelerometer", "RECORDER ACCELEROMETER", 31, Bus::DcEss, 20.0, avionics_pf(Bus::DcEss), "flight data recorder accelerometer", "GENERIC: typical small avionics accessory LRU figure");
+    push_electrical(v, "dfdau", "DFDAU", 31, Bus::DcEss, 50.0, avionics_pf(Bus::DcEss), "digital flight data acquisition unit", "GENERIC: typical avionics LRU class figure");
+}
+
 fn ata35_oxygen(v: &mut Vec<BreakerDef>) {
     push_electrical(v, "crew-o2-shutoff", "CREW OXYGEN SHUTOFF VALVE", 35, Bus::Dc1, 50.0, 0.8, "crew oxygen supply shutoff valve actuator", "GENERIC: typical motor/solenoid-operated shutoff valve actuator, real A380 crew oxygen system");
     push_electrical(v, "pax-o2-gen-ctl", "PAX OXYGEN GENERATOR CONTROL", 35, Bus::DcEss, 30.0, avionics_pf(Bus::DcEss), "passenger chemical oxygen generator deployment/control circuit", "GENERIC: typical small control-circuit LRU figure");
@@ -853,8 +885,8 @@ fn ata_control_excitation_supplies(v: &mut Vec<BreakerDef>) {
     }
     push_position_excitation(v, "hotair-1", "HOT AIR VALVE 1", 21, Bus::AcEss, "pairs with HOT AIR VALVE 1's own actuator breaker");
     push_position_excitation(v, "hotair-2", "HOT AIR VALVE 2", 21, Bus::AcEss, "pairs with HOT AIR VALVE 2's own actuator breaker");
-    push_position_excitation(v, "fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, Bus::Dc2, "pairs with FWD CARGO ISOL VALVE's own actuator breaker");
-    push_position_excitation(v, "bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, Bus::DcEss, "pairs with BULK CARGO ISOL VALVE's own actuator breaker");
+    push_position_excitation(v, "fwd-isol-valve", "FWD CARGO ISOL VALVE", 21, Bus::Dc1, "pairs with FWD CARGO ISOL VALVE's own actuator breaker (fixes/W161.md: DC1, VCM Fwd's own primary channel)");
+    push_position_excitation(v, "bulk-isol-valve", "BULK CARGO ISOL VALVE", 21, Bus::Dc2, "pairs with BULK CARGO ISOL VALVE's own actuator breaker (fixes/W161.md: DC2, VCM Aft's own primary channel)");
     for pack in 1..=2u32 {
         for side in 1..=2u32 {
             let parent_id: &'static str = Box::leak(format!("pack-{pack}-flow-valve-{side}").into_boxed_str());
@@ -896,6 +928,7 @@ fn build_catalog() -> Vec<BreakerDef> {
     ata24_power_sources(&mut v);
     ata23_comms(&mut v);
     ata31_recorders(&mut v);
+    ata31_ind_group(&mut v);
     ata35_oxygen(&mut v);
     ata49_apu(&mut v);
     ata7x_engine(&mut v);
@@ -1072,6 +1105,45 @@ mod tests {
             assert!(!def.basis.is_empty(), "{} has no basis citation", def.id);
             assert!(!def.consumer.is_empty(), "{} has no consumer description", def.id);
         }
+    }
+
+    /// fixes/W161.md (goes with fixes/W115.md, which made this same
+    /// correction in `src/breakers.rs` -- this module is a self-contained
+    /// re-derivation per `docs/deep/BRIEF.md` hard rule 2 and does not
+    /// `use crate::breakers`, so that fix never reached it). The two
+    /// isolation valves sit on their own VCM's real, *primary* channel bus
+    /// (`ventilation_control_module.rs` `VentilationControlModule::new`,
+    /// channel 1 / `powered_by[0]`); the two extraction fans are different
+    /// -- each has its own dedicated bus
+    /// (`ForwardCargoVentilationControlSystem::new`/
+    /// `BulkVentilationControlSystem::new`) entirely independent of either
+    /// VCM channel.
+    #[test]
+    fn cargo_ventilation_breakers_sit_on_their_real_bus() {
+        let bus_of = |id: &str| all().into_iter().find(|d| d.id == id).unwrap_or_else(|| panic!("no breaker {id}")).bus.label();
+        assert_eq!(bus_of("fwd-isol-valve"), "DC1", "VCM Fwd's own primary channel is DC1 (411PP), not DC2 (that's VCM Aft's)");
+        assert_eq!(bus_of("bulk-isol-valve"), "DC2", "VCM Aft's own primary channel is DC2 (214PP), matching fwd-isol-valve's primary-channel convention, not its DC_ESS standby channel");
+        assert_eq!(bus_of("fwd-extract-fan"), "AC1", "the forward extraction fan's own dedicated bus (ForwardCargoVentilationControlSystem::new), not any VCM channel bus");
+        assert_eq!(bus_of("bulk-extract-fan"), "AC4", "the bulk extraction fan's own dedicated bus (BulkVentilationControlSystem::new), not any VCM channel bus");
+    }
+
+    /// fixes/W185.md (goes with fixes/W161.md's own follow-up flag): the
+    /// VCM channel breakers themselves, not just the isolation-valve/
+    /// extract-fan loads they power, were also mis-wired for VCM Fwd's
+    /// channel 1 in this self-contained re-derivation. VCM Fwd's own
+    /// primary/default-active channel (channel 1 / `powered_by[0]`) is DC1
+    /// (`mod.rs` `VentilationControlModule::new(.., VcmId::Fwd,
+    /// [DirectCurrent(1) /* 411PP */, DirectCurrentEssential /* 109PP */])`);
+    /// VCM Aft's channel 1 really is DC2 (`VcmId::Aft`, `[DirectCurrent(2)
+    /// /* 214PP */, DirectCurrentEssential /* 109PP */]`), already correct,
+    /// as is both units' channel 2 (standby, DC_ESS for both).
+    #[test]
+    fn vcm_channel_breakers_sit_on_their_real_bus() {
+        let bus_of = |id: &str| all().into_iter().find(|d| d.id == id).unwrap_or_else(|| panic!("no breaker {id}")).bus.label();
+        assert_eq!(bus_of("vcm-fwd-1"), "DC1", "VCM Fwd's own primary channel is DC1 (411PP), not DC2 (that's VCM Aft's channel 1)");
+        assert_eq!(bus_of("vcm-fwd-2"), "DC_ESS", "VCM Fwd's standby channel (109PP)");
+        assert_eq!(bus_of("vcm-aft-1"), "DC2", "VCM Aft's own primary channel is DC2 (214PP)");
+        assert_eq!(bus_of("vcm-aft-2"), "DC_ESS", "VCM Aft's standby channel (109PP), same physical bus as vcm-fwd-2");
     }
 }
 

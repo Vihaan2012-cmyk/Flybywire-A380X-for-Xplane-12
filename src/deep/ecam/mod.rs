@@ -29,7 +29,10 @@ pub mod codegen;
 pub mod fbw;
 pub mod fbw_codegen;
 pub mod ids;
-#[cfg(feature = "js")]
+// Not `feature = "js"`-gated: its only cross-feature dependency,
+// `SourcePatch`, now lives in the always-compiled `crate::source_patch`
+// (see that module's doc), so this can be called from XPHFBW's separate
+// `coui://` handler too (`lib.rs::static_source_patches`).
 pub mod patches;
 
 #[cfg(test)]

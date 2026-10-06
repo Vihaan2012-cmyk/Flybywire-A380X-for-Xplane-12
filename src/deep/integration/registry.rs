@@ -56,7 +56,7 @@ pub fn register(r: &mut Registry) {
             name: format!("{leg} gear leg -> X-Plane deploy_ratio/drag relay"),
             params: vec![ParamDef {
                 name: "relay_active".into(),
-                meaning: "1.0 gear_structure::LegOutput.collapsed is being relayed as a forced-retracted sim/flightmodel2/gear/deploy_ratio element plus ground-drag force injection .. 0.0 leg intact, X-Plane's own gear physics unmodified".into(),
+                meaning: "1.0 gear_structure::LegOutput.collapsed is being relayed as a forced-retracted sim/aircraft/parts/acf_gear_deploy element (W215, E:/fbw-debug/fixes/W215.md: not the read-only sim/flightmodel2/gear/deploy_ratio this used to name) .. 0.0 leg intact, X-Plane's own gear physics unmodified. The 'plus ground-drag force injection' this string used to claim is not wired (fixes/W124.md's own SUMMARY: a collapsed leg's own drag force is deliberately left out, no static_load_share_n is published to compute it from)".into(),
                 healthy: 0.0,
             }],
             failures: vec![],

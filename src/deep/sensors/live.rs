@@ -330,6 +330,9 @@ struct Snapshot {
     ra_in_range: [bool; 3],
     ra_agl_ft: [f64; 3],
     gps_valid: [bool; 3],
+    /// `340800033`: jamming armed but the fix still holds (see `tick`'s own
+    /// doc next to where this is set).
+    gps_degraded: [bool; 3],
     gps_error_m: [f64; 3],
     gps_offset_m: [[f64; 2]; 3],
     standby_oat_c: f64,
@@ -337,6 +340,64 @@ struct Snapshot {
     n1_pickup_valid: [[bool; 2]; 4],
     n1_pickup_frac: [[f64; 2]; 4],
     total_heater_power_w: f64,
+    /// E-ELEC Phase 2 additions -- see `LiveSensors`'s own struct doc.
+    oat_1_2_heater_failed: [bool; 2],
+    sideslip_jammed: [bool; 3],
+    sideslip_heater_failed: [bool; 3],
+    tat3_heater_failed: bool,
+    /// `340800016 NAV CAPT AND F/O ALT DISAGREE`: `|ADR1 - ADR2| pressure
+    /// altitude`, feet, the same two channels this port's `AC ESS`/GEN
+    /// numbering elsewhere treats as CAPT (1) and F.O (2).
+    adr_capt_fo_alt_diff_ft: f64,
+    /// `340800017`/`020`/`316800002`: how far the IRs selected for the
+    /// captain's and the first officer's side disagree, degrees, from
+    /// their own published outputs (`Truth::ir`); 0 while either word is
+    /// invalid, since an invalid IR flags its parameter instead.
+    ir_capt_fo_pitch_diff_deg: f64,
+    ir_capt_fo_roll_diff_deg: f64,
+    ir_capt_fo_hdg_diff_deg: f64,
+    ir_capt_fo_fpa_diff_deg: f64,
+    /// Each IR's armed gyro drift, deg/hr, for `physics::adirs` to add to
+    /// that unit's gyros (see [`IR_GYRO_DRIFT_AT_FULL_FAULT_DEG_HR`]).
+    ir_gyro_drift_deg_hr: [f64; 3],
+    /// `313800001`/`002`/`005`/`006`: each KCCU's cursor control device
+    /// and keyboard BITE, `[capt, fo][ccd, keyboard]`.
+    kccu_part_failed: [[bool; 2]; 2],
+    /// `311800012`: each monitored display unit's CDS display/monitor
+    /// comparison, in [`CDS_MONITORED_DUS`] order.
+    du_display_monitor_disagree: [bool; 5],
+    /// `340800018 NAV CAPT AND F/O BARO REF DISAGREE`.
+    baro_ref_disagree: bool,
+}
+
+/// The display units `deep::electrical` models as their own loads, in the
+/// order `311800012` CDS DISPLAY DISAGREE monitors them. FCOM p.5393 lists
+/// the SD and both MFDs too; they have no component of their own yet.
+pub const CDS_MONITORED_DUS: [&str; 5] = ["capt-pfd-du", "capt-nd-du", "capt-ewd-du", "fo-pfd-du", "fo-nd-du"];
+
+/// The variable [`LiveSensors`] publishes one [`CDS_MONITORED_DUS`] entry's
+/// display/monitor comparison on.
+pub fn cds_monitor_var(du: &str) -> String {
+    format!("DEEP_CDS_{}_MONITOR_DISAGREE", du.to_ascii_uppercase().replace('-', "_"))
+}
+
+/// Full-magnitude `alignment_drift`: gyro bias added to all three of that
+/// IR's gyros. GENERIC: no public ARINC 704 or A380 figure for a degraded
+/// but undetected ring-laser gyro; 100 deg/hr is four orders of magnitude
+/// past the 0.01 deg/hr navigation-grade bias `physics::adirs` draws, and
+/// sized so a full fault carries one IR past the FCOM's 5 deg ATT DISAGREE
+/// threshold within a few minutes (tilt grows as bias times time well
+/// inside the 84 minute Schuler period), as a failing unit would.
+pub const IR_GYRO_DRIFT_AT_FULL_FAULT_DEG_HR: f64 = 100.0;
+
+/// How far two IR words disagree, degrees; 0 unless both are valid.
+/// `wrap` for angles that wrap at 360 (roll, heading).
+fn ir_disagreement_deg(a: Option<f64>, b: Option<f64>, wrap: bool) -> f64 {
+    match (a, b) {
+        (Some(a), Some(b)) if wrap => ((a - b + 540.0).rem_euclid(360.0) - 180.0).abs(),
+        (Some(a), Some(b)) => (a - b).abs(),
+        _ => 0.0,
+    }
 }
 
 pub struct LiveSensors {
@@ -350,6 +411,26 @@ pub struct LiveSensors {
     n1_pickup_faults: [[[u64; 2]; 2]; 4],
     /// Standby OAT probe: open circuit, short circuit.
     oat_faults: [u64; 2],
+    /// E-ELEC Phase 2: `340800050`/`051` OAT probes 1/2 (heater-failure
+    /// boolean each, no simulated reading -- see `registry::
+    /// register_oat_probe_1_2`).
+    oat_1_2_faults: [u64; 2],
+    /// `340800064`-`066` sideslip vanes 1-3: `[heater_failure,
+    /// mechanically_stuck]` per unit (see `registry::register_sideslip_vane`).
+    sideslip_faults: [[u64; 2]; 3],
+    /// `340800070` TAT probe 3: `[heater_failure, recovery_degradation]`,
+    /// only the first feeding this alert (see `registry::
+    /// register_tat_probe_3`).
+    tat3_faults: [u64; 2],
+    /// `340800017`/`020`: one alignment/gyro-drift fault per IR unit (see
+    /// `registry::register_inertial_reference`).
+    ir_faults: [u64; 3],
+    /// `[capt, fo][ccd_failed, keyboard_failed]` (see `registry::
+    /// register_kccu_parts`).
+    kccu_faults: [[u64; 2]; 2],
+    /// One `display_monitor_disagree` per [`CDS_MONITORED_DUS`] entry (see
+    /// `registry::register_cds_display_monitors`).
+    du_faults: [u64; 5],
     /// Every sensor that senses something another deep area computes --
     /// gear and door proximity, brake temperature and wear, smoke,
     /// hydraulic reservoir and system transducers, duct temperature, the
@@ -478,6 +559,16 @@ impl LiveSensors {
 
         let oat_faults = index.ids("34_nav.oat_standby", ["open_circuit", "short_circuit"]);
 
+        // E-ELEC Phase 2: see `registry::register_oat_probe_1_2`/
+        // `register_sideslip_vane`/`register_tat_probe_3`'s own doc for why
+        // these are boolean-only faults, not a full probe/vane engine.
+        let oat_1_2_faults = core::array::from_fn(|i| index.id(&format!("34_nav.oat_{}", i + 1), "heater_failure"));
+        let sideslip_faults = core::array::from_fn(|i| index.ids(&format!("34_nav.sideslip_{}", i + 1), ["heater_failure", "mechanically_stuck"]));
+        let tat3_faults = index.ids("34_nav.tat_3", ["heater_failure", "recovery_degradation"]);
+        let ir_faults = core::array::from_fn(|i| index.id(&format!("34_nav.ir_{}", i + 1), "alignment_drift"));
+        let kccu_faults = ["capt", "fo"].map(|side| index.ids(&format!("31_elec.kccu-{side}"), ["ccd_failed", "keyboard_failed"]));
+        let du_faults = CDS_MONITORED_DUS.map(|du| index.id(&format!("31_elec.{du}"), "display_monitor_disagree"));
+
         let discrete = DiscreteSensors::new(&index);
 
         Self {
@@ -489,6 +580,12 @@ impl LiveSensors {
             gps,
             n1_pickup_faults,
             oat_faults,
+            oat_1_2_faults,
+            sideslip_faults,
+            tat3_faults,
+            ir_faults,
+            kccu_faults,
+            du_faults,
             discrete,
             snapshot: Snapshot::default(),
         }
@@ -741,6 +838,12 @@ impl Area for LiveSensors {
             snap.gps_valid[i] = out.valid;
             snap.gps_error_m[i] = out.position_error_1sigma_m;
             snap.gps_offset_m[i] = out.position_offset_m;
+            // `340800033 NAV GNSS SIGNAL DEGRADED`: the already-tested
+            // intermediate state between healthy and failed --
+            // `armed_gps_jamming_costs_that_receiver_its_fix`'s own "mild"
+            // case (jamming armed but the fix still holds), not a new
+            // threshold.
+            snap.gps_degraded[i] = faults.get(g.receiver_faults[1]) > 0.0 && out.valid;
         }
 
         // ---- Engine N1 speed pickups, EEC channels A and B -------------
@@ -772,6 +875,63 @@ impl Area for LiveSensors {
             },
         );
 
+        // ---- E-ELEC Phase 2 additions -----------------------------------
+        // `340800050`/`051` OAT probes 1/2, `340800064`-`066` sideslip
+        // vanes, `340800070` TAT probe 3: boolean-only faults (see each
+        // `registry.rs` doc for why no reading is simulated), `> 0.0` is
+        // the whole verdict, the same convention this whole pass uses for
+        // every computer/monitoring-class fault.
+        for i in 0..2 {
+            snap.oat_1_2_heater_failed[i] = faults.get(self.oat_1_2_faults[i]) > 0.0;
+        }
+        for i in 0..3 {
+            snap.sideslip_heater_failed[i] = faults.get(self.sideslip_faults[i][0]) > 0.0;
+            snap.sideslip_jammed[i] = faults.get(self.sideslip_faults[i][1]) > 0.0;
+        }
+        snap.tat3_heater_failed = faults.get(self.tat3_faults[0]) > 0.0;
+
+        // `340800016 NAV CAPT AND F/O ALT DISAGREE`: FCOM p.5569 gives 500 ft
+        // (STD) or 250 ft (QNH); this pass applies the tighter, more
+        // conservative 250 ft threshold unconditionally (no baro-mode input
+        // exists here to pick between them -- see `ata34.rs`'s own citation)
+        // rather than inventing which of the two applies.
+        snap.adr_capt_fo_alt_diff_ft = (snap.adr[0].pressure_altitude_m - snap.adr[1].pressure_altitude_m).abs() * crate::M_TO_FT;
+
+        // `340800017`/`020 NAV CAPT AND F/O ATT/HDG DISAGREE` and
+        // `316800002 NAV HUD FPV DISAGREE`: the two IRs the ATT HDG knob
+        // selects for the captain's and the first officer's side, compared
+        // on their own published outputs. They are `physics::adirs`'s three
+        // strapdown solutions, each with its own gyro and accelerometer
+        // errors, so they only part company when one really drifts -- which
+        // an armed `alignment_drift` does by adding gyro bias to that unit
+        // (`ir_gyro_drift_deg_hr` below), not by offsetting its answer.
+        let (capt, fo) = crate::deep::live::capt_fo_ir(truth.att_hdg_switching_knob);
+        let (a, b) = (&truth.ir[capt], &truth.ir[fo]);
+        snap.ir_capt_fo_pitch_diff_deg = ir_disagreement_deg(a.pitch_deg, b.pitch_deg, false);
+        snap.ir_capt_fo_roll_diff_deg = ir_disagreement_deg(a.roll_deg, b.roll_deg, true);
+        snap.ir_capt_fo_hdg_diff_deg = ir_disagreement_deg(a.true_heading_deg, b.true_heading_deg, true);
+        snap.ir_capt_fo_fpa_diff_deg = ir_disagreement_deg(a.flight_path_angle_deg, b.flight_path_angle_deg, false);
+        snap.ir_gyro_drift_deg_hr = core::array::from_fn(|i| faults.get(self.ir_faults[i]) * IR_GYRO_DRIFT_AT_FULL_FAULT_DEG_HR);
+
+        // `313800001`/`002`/`005`/`006` CDS CAPT (F/O) CURSOR CTL /
+        // KEYBOARD FAULT: FCOM p.5377/5383, "the Cursor Control Device (the
+        // Keyboard) is failed" -- the KCCU's own BITE on either part, which
+        // FCOM DSC-31-30-10 says fail independently of each other.
+        snap.kccu_part_failed = core::array::from_fn(|side| core::array::from_fn(|part| faults.get(self.kccu_faults[side][part]) > 0.0));
+        // `311800012` CDS DISPLAY DISAGREE: FCOM p.5393, the CDS sends what
+        // a display unit shows to a second unit to monitor, and the two
+        // disagree.
+        snap.du_display_monitor_disagree = core::array::from_fn(|i| faults.get(self.du_faults[i]) > 0.0);
+
+        // `340800018 NAV CAPT AND F/O BARO REF DISAGREE` -- FCOM p.5572:
+        // "The Captain's barometric reference is QNH(STD), and the First
+        // Officer's barometric reference is STD(QNH)." FlyByWire's own raw
+        // `A32NX_FCU_EFIS_{L,R}_DISPLAY_BARO_MODE` enum (`Truth::controls::
+        // baro_mode`, E-ELEC Phase 2) already carries exactly this state;
+        // this port does not need to decode which enum value is STD vs
+        // QNH, only that the two sides differ.
+        snap.baro_ref_disagree = truth.controls.baro_mode[0] != truth.controls.baro_mode[1];
+
         snap.total_heater_power_w = heater_w;
         self.snapshot = snap;
 
@@ -802,6 +962,7 @@ impl Area for LiveSensors {
         for i in 0..3 {
             out(&format!("DEEP_RA_{}_VALID", i + 1), f64::from(s.ra_valid[i]));
             out(&format!("DEEP_GPS_{}_VALID", i + 1), f64::from(s.gps_valid[i]));
+            out(&format!("DEEP_GPS_{}_DEGRADED", i + 1), f64::from(s.gps_degraded[i]));
         }
 
         // --- the rest of the sensor set, for the EFB Study pages ---------
@@ -851,6 +1012,32 @@ impl Area for LiveSensors {
         }
         out("DEEP_STANDBY_OAT_C", s.standby_oat_c);
         out("DEEP_PROBE_HEAT_TOTAL_W", s.total_heater_power_w);
+
+        // ---- E-ELEC Phase 2 additions -----------------------------------
+        for i in 0..2 {
+            out(&format!("DEEP_OAT_{}_HEATER_FAILED", i + 1), f64::from(s.oat_1_2_heater_failed[i]));
+        }
+        for i in 0..3 {
+            out(&format!("DEEP_SIDESLIP_{}_HEATER_FAILED", i + 1), f64::from(s.sideslip_heater_failed[i]));
+            out(&format!("DEEP_SIDESLIP_{}_JAMMED", i + 1), f64::from(s.sideslip_jammed[i]));
+        }
+        out("DEEP_TAT_3_HEATER_FAILED", f64::from(s.tat3_heater_failed));
+        out("DEEP_ADR_CAPT_FO_ALT_DIFF_FT", s.adr_capt_fo_alt_diff_ft);
+        for i in 0..3 {
+            out(&format!("DEEP_IR_{}_GYRO_DRIFT_DEG_HR", i + 1), s.ir_gyro_drift_deg_hr[i]);
+        }
+        out("DEEP_IR_CAPT_FO_PITCH_DIFF_DEG", s.ir_capt_fo_pitch_diff_deg);
+        out("DEEP_IR_CAPT_FO_ROLL_DIFF_DEG", s.ir_capt_fo_roll_diff_deg);
+        out("DEEP_IR_CAPT_FO_HDG_DIFF_DEG", s.ir_capt_fo_hdg_diff_deg);
+        out("DEEP_IR_CAPT_FO_FPA_DIFF_DEG", s.ir_capt_fo_fpa_diff_deg);
+        for (side, name) in ["CAPT", "FO"].iter().enumerate() {
+            out(&format!("DEEP_KCCU_{name}_CCD_FAILED"), f64::from(s.kccu_part_failed[side][0]));
+            out(&format!("DEEP_KCCU_{name}_KEYBOARD_FAILED"), f64::from(s.kccu_part_failed[side][1]));
+        }
+        for (i, du) in CDS_MONITORED_DUS.iter().enumerate() {
+            out(&cds_monitor_var(du), f64::from(s.du_display_monitor_disagree[i]));
+        }
+        out("DEEP_BARO_REF_DISAGREE", f64::from(s.baro_ref_disagree));
 
         self.discrete.publish(out);
     }

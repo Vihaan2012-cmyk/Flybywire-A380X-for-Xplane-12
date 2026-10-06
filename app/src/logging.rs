@@ -67,12 +67,15 @@ pub fn init() {
 /// Every [`STATUS_POLL`], a line with the systems thread's status, once
 /// `main` has published `Shared` to `window::SHARED`.
 fn poll_status() {
+    // `XPHFBW_STATUS_SECS` shortens the interval for a diagnostic run (a
+    // throwaway instance with no plugin behind it only lives a few seconds).
+    let every = std::env::var("XPHFBW_STATUS_SECS").ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|&s| s > 0).map_or(STATUS_POLL, Duration::from_secs);
     loop {
-        std::thread::sleep(STATUS_POLL);
+        std::thread::sleep(every);
         let Some(shared) = crate::window::SHARED.get() else { continue };
         let Ok(st) = shared.status.lock() else { continue };
         let error = st.systems_error.as_deref().map(|e| format!(" error=\"{e}\"")).unwrap_or_default();
-        log(&format!("status: xplane_connected={} systems_running={}{error}", st.xplane_connected, st.systems_running));
+        log(&format!("status: xplane_connected={} systems_running={}{error}; {}", st.xplane_connected, st.systems_running, crate::views::paint_summary()));
     }
 }
 

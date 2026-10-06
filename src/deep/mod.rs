@@ -3,11 +3,25 @@
 
 pub mod api;
 pub mod apu;
+/// ATA 22: the FCU (AFS control panel), its two MFD backups, and the
+/// TCAS/AP mode arbitration fault. New with the ECAM-completeness pass;
+/// see `E-AIR-DESIGN.md`'s ATA 22 section for why this is a new area
+/// rather than being folded into an existing one -- no `deep::` area
+/// modelled the autoflight control panel before this.
+pub mod autoflight;
 pub mod avionics_network;
 pub mod breakers;
 pub mod cabin;
+/// ATA 23: CIDS, the cockpit PTT switches, the ATSU/datalink router, and
+/// the HF/SATCOM/VHF transceivers' own LRU faults. New with the ECAM-
+/// completeness pass; see `E-AIR-DESIGN.md`'s ATA 23 section.
+pub mod communications;
 pub mod ecam;
 pub mod electrical;
+#[cfg(test)]
+mod cost_profile;
+#[cfg(test)]
+mod electrical_crate_parity;
 pub mod engine_accessories;
 pub mod environment;
 pub mod fire_ice;
@@ -16,6 +30,7 @@ pub mod fuel;
 pub mod gear_structure;
 pub mod hydraulics;
 pub mod integration;
+pub mod frame;
 pub mod live;
 /// The variable bridge to a host simulator -- what the deep layer
 /// publishes and reads, behind a `VarStore` trait so one mapping serves
@@ -38,35 +53,8 @@ pub mod thermal_zones;
 pub mod weather;
 pub mod wiring;
 
-/// Every area's failures, components and ECAM alerts in one registry.
-pub fn registry() -> api::Registry {
-    let mut r = api::Registry::default();
-    apu::registry::register(&mut r);
-    avionics_network::registry::register(&mut r);
-    breakers::registry::register(&mut r);
-    cabin::registry::register(&mut r);
-    electrical::registry::register(&mut r);
-    engine_accessories::registry::register(&mut r);
-    environment::registry::register(&mut r);
-    fire_ice::registry::register(&mut r);
-    flight_controls::registry::register(&mut r);
-    fuel::registry::register(&mut r);
-    gear_structure::registry::register(&mut r);
-    hydraulics::registry::register(&mut r);
-    integration::registry::register(&mut r);
-    oxygen::registry::register(&mut r);
-    pneumatic_ducts::registry::register(&mut r);
-    sensors::registry::register(&mut r);
-    thermal_zones::registry::register(&mut r);
-    wiring::registry::register(&mut r);
-    // One flight-deck warning, one catalogue entry: an area that models a
-    // further cause for an alert another area owns, or another side of a
-    // component another area owns, registers a contribution instead of a
-    // second copy, and this folds them in. Nothing may read the registry
-    // before it runs.
-    r.resolve();
-    r
-}
+mod all_registry;
+pub use all_registry::registry;
 
 #[cfg(test)]
 mod tests {

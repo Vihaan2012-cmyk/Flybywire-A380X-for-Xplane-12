@@ -222,6 +222,297 @@ pub fn register(r: &mut Registry) {
         tank_leak_ids.push(id);
         one(r, id, format!("28_fuel.tank_wall.{suffix}"), format!("{name} TANK skin/structure"), "leak_magnitude", "0..1, leak orifice size fraction of a GENERIC maximum hole area", format!("{name} tank structural fuel leak"), "leak.rs::tank_wall_leak_kg_s (orifice_area_m2, via leak::leak_area_m2(magnitude, max_area))".into(), "0..1 of leak::leak_area_m2's own max_area_m2 ceiling", "fuel is lost overboard at a rate set by the tank's own remaining head (leak.rs::head_pressure_pa), unmetered by any engine/APU flow meter -- exactly the discrepancy leak::LeakDetector is built to catch");
     }
+
+    // ---- Item 7: named units added for Phase 2 (E-FUEL, ata28 unwired pass) ----
+    // Every failure below is either a named real pump/valve from
+    // `flight_model.cfg` given the same `valve_stuck_fraction`/
+    // `pump_degradation_fraction` treatment already used above for the trim
+    // pumps and the six CG-transfer valves, or a discrete computer-health
+    // verdict of the same shape `ata24.rs`'s `ELEC_TR_APU_FAULT` already
+    // uses for an LRU with no further physical model of its own. None of
+    // these feeds `tick_transfers`' own achieved-rate computation for the
+    // paths this model has no pump-pressure-gated physics for at all
+    // (engine burn is `Truth::engine_fuel_flow_kg_s` directly, and APU burn
+    // is `commands.apu_fuel_flow_kg_s` directly -- neither runs through a
+    // pump or an LP valve in this model) -- each such failure is published
+    // as a direct instrument reading only, the same convention this file's
+    // own trim-pump precedent already documents ("a real aircraft still
+    // shows a LO PRESS caution on the specific failed pump even though its
+    // redundant twin keeps the transfer going", `live.rs`). The wing
+    // transfer pumps (outer/mid/inner) are the one group with a real path to
+    // derate: `tick_transfers`'s own per-side CG-transfer source selection.
+
+    // APU feed pump + valve. Real units: `APUFeedPump` (Pump.21,
+    // `flight_model.cfg:438`, 5 psi), `APUIsoValve`/`APULPValve`
+    // (Valve.50/51, `:407-408`).
+    let apu_feed_pump = next();
+    one(
+        r,
+        apu_feed_pump,
+        "28_fuel.pump.apu_feed".into(),
+        "APUFeedPump".into(),
+        "pump_degradation_fraction",
+        "0..1, delivered flow/pressure lost to wear",
+        "APU feed pump degradation".into(),
+        "live.rs::apu_feed_pump_degradation (direct reading; this model's APU burn is commands.apu_fuel_flow_kg_s directly, not pump-pressure-gated)".into(),
+        "0..1 fraction of rated flow lost",
+        "the APU's dedicated fuel feed pump has lost delivery; past half its rated flow it can no longer reliably supply the APU on its own",
+    );
+    let apu_feed_valve = next();
+    one(
+        r,
+        apu_feed_valve,
+        "28_fuel.valve.apu_feed".into(),
+        "APUIsoValve/APULPValve".into(),
+        "valve_stuck_fraction",
+        "0..1, seized fraction, frozen at its position when it seized",
+        "APU feed valve sticks".into(),
+        "jettison.rs::JettisonValve (reused struct; stuck_fraction input to .step)".into(),
+        "0..1 stuck fraction",
+        "the APU feed valve does not follow the commanded APU fuel-flow state: stuck open denies the isolation the real system uses once the APU stops drawing fuel, stuck shut starves the APU of fuel it was commanded to receive",
+    );
+
+    // Engine LP (fire) shutoff valves. Real units: `Engine{1..4}LPValve`
+    // (Valve.1-4, `flight_model.cfg:358-361`), commanded by the engine
+    // master switch (`Truth::engine_master_on`, cited even though the real
+    // open/close behaviour lives in `src/fuel.rs`'s own module doc).
+    let mut eng_lp_valve_ids = [0u64; 4];
+    for n in 1..=4u16 {
+        let id = next();
+        eng_lp_valve_ids[(n - 1) as usize] = id;
+        one(
+            r,
+            id,
+            format!("28_fuel.valve.eng_lp.{n}"),
+            format!("Engine{n}LPValve"),
+            "valve_stuck_fraction",
+            "0..1, seized fraction, frozen at its position when it seized",
+            format!("ENG {n} LP fuel shutoff valve sticks"),
+            "jettison.rs::JettisonValve (reused struct; stuck_fraction input to .step)".into(),
+            "0..1 stuck fraction",
+            "that engine's low-pressure (fire) shutoff valve fails to follow the engine master/fire-handle command, denying (stuck shut) or defeating (stuck open) the fuel isolation the master switch/fire handle commands",
+        );
+    }
+    let _ = eng_lp_valve_ids;
+
+    // Feed-tank main/standby pumps. Real units: `Feed{1..4}TankPump1` =
+    // main, `Feed{1..4}TankPump2` = standby (Pump.1-8, `flight_model.cfg:
+    // 418-425`, all 30 psi).
+    for n in 1..=4u16 {
+        let main_id = next();
+        one(
+            r,
+            main_id,
+            format!("28_fuel.pump.feed_main.{n}"),
+            format!("Feed{n}TankPump1"),
+            "pump_degradation_fraction",
+            "0..1, delivered flow/pressure lost to wear",
+            format!("Feed tank {n} main pump degradation"),
+            "live.rs::feed_pump_degradation (direct reading; feed-tank draw in this model is Truth::engine_fuel_flow_kg_s directly, not pump-pressure-gated)".into(),
+            "0..1 fraction of rated flow lost",
+            "the feed tank's main boost pump has lost delivery -- the same LO PRESS-caution reading a real aircraft still carries per pump even when its standby partner is healthy",
+        );
+        let stby_id = next();
+        one(
+            r,
+            stby_id,
+            format!("28_fuel.pump.feed_stby.{n}"),
+            format!("Feed{n}TankPump2"),
+            "pump_degradation_fraction",
+            "0..1, delivered flow/pressure lost to wear",
+            format!("Feed tank {n} standby pump degradation"),
+            "live.rs::feed_pump_degradation (direct reading; feed-tank draw in this model is Truth::engine_fuel_flow_kg_s directly, not pump-pressure-gated)".into(),
+            "0..1 fraction of rated flow lost",
+            "the feed tank's standby boost pump has lost delivery; with the main pump also degraded the tank has no boosted supply left",
+        );
+    }
+
+    // Wing tank transfer pumps: outer, mid fwd/aft, inner fwd/aft, each
+    // side. Real units, all `flight_model.cfg:426-435`:
+    // `Left/RightOuterTankPump` (Pump.9/14, 14.72 psi),
+    // `Left/RightMidTankPump{Fwd,Aft}` (Pump.10/11, 15/16, 36.8 psi),
+    // `Left/RightInnerTankPump{Fwd,Aft}` (Pump.12/17 fwd, 13/18 aft).
+    // Unlike the feed pumps above, this group *does* have a real path to
+    // derate: `tick_transfers`'s own per-side CG-transfer source selection
+    // (`cg_source_index`) already picks exactly one of these tanks as that
+    // side's source each tick, so its own pump's health can genuinely
+    // throttle the mass actually moved (see `FuelLive::tick_transfers`).
+    for (side, side_name) in [("left", "Left"), ("right", "Right")] {
+        let outer_id = next();
+        one(
+            r,
+            outer_id,
+            format!("28_fuel.pump.outer.{side}"),
+            format!("{side_name}OuterTankPump"),
+            "pump_degradation_fraction",
+            "0..1, delivered flow/pressure lost to wear",
+            format!("{side_name} outer tank pump degradation"),
+            "cg_transfer.rs::TransferFaults.pump_degradation_fraction (this side's CG-transfer path, while the outer tank is its own source)".into(),
+            "0..1 fraction of rated flow lost",
+            "when this side's outer tank is the active CG-transfer source, less of its own fuel reaches the feed tanks per second",
+        );
+        let mid_fwd_id = next();
+        one(
+            r,
+            mid_fwd_id,
+            format!("28_fuel.pump.mid_fwd.{side}"),
+            format!("{side_name}MidTankPumpFwd"),
+            "pump_degradation_fraction",
+            "0..1, delivered flow/pressure lost to wear",
+            format!("{side_name} mid tank forward pump degradation"),
+            "cg_transfer.rs::TransferFaults.pump_degradation_fraction (this side's CG-transfer path, while the mid tank is its own source; combined with the aft pump as the mid tank's own redundant pair)".into(),
+            "0..1 fraction of rated flow lost",
+            "when this side's mid tank is the active CG-transfer source, less of its own fuel reaches the feed tanks per second unless the aft pump is still healthy",
+        );
+        let mid_aft_id = next();
+        one(
+            r,
+            mid_aft_id,
+            format!("28_fuel.pump.mid_aft.{side}"),
+            format!("{side_name}MidTankPumpAft"),
+            "pump_degradation_fraction",
+            "0..1, delivered flow/pressure lost to wear",
+            format!("{side_name} mid tank aft pump degradation"),
+            "cg_transfer.rs::TransferFaults.pump_degradation_fraction (this side's CG-transfer path, while the mid tank is its own source; combined with the forward pump as the mid tank's own redundant pair)".into(),
+            "0..1 fraction of rated flow lost",
+            "when this side's mid tank is the active CG-transfer source, less of its own fuel reaches the feed tanks per second unless the forward pump is still healthy",
+        );
+        let inner_fwd_id = next();
+        one(
+            r,
+            inner_fwd_id,
+            format!("28_fuel.pump.inner_fwd.{side}"),
+            format!("{side_name}InnerTankPumpFwd"),
+            "pump_degradation_fraction",
+            "0..1, delivered flow/pressure lost to wear",
+            format!("{side_name} inner tank forward pump degradation"),
+            "cg_transfer.rs::TransferFaults.pump_degradation_fraction (this side's CG-transfer path, while the inner tank is its own source; combined with the aft pump as the inner tank's own redundant pair)".into(),
+            "0..1 fraction of rated flow lost",
+            "when this side's inner tank is the active CG-transfer source, less of its own fuel reaches the feed tanks per second unless the aft pump is still healthy",
+        );
+        let inner_aft_id = next();
+        one(
+            r,
+            inner_aft_id,
+            format!("28_fuel.pump.inner_aft.{side}"),
+            format!("{side_name}InnerTankPumpAft"),
+            "pump_degradation_fraction",
+            "0..1, delivered flow/pressure lost to wear",
+            format!("{side_name} inner tank aft pump degradation"),
+            "cg_transfer.rs::TransferFaults.pump_degradation_fraction (this side's CG-transfer path, while the inner tank is its own source; combined with the forward pump as the inner tank's own redundant pair)".into(),
+            "0..1 fraction of rated flow lost",
+            "when this side's inner tank is the active CG-transfer source, less of its own fuel reaches the feed tanks per second unless the forward pump is still healthy",
+        );
+        let _ = (outer_id, mid_fwd_id, mid_aft_id, inner_fwd_id, inner_aft_id);
+    }
+
+    // Leak-detection function's own self-fault (distinct from a real leak,
+    // already registered above): a discrete monitor-health verdict, the
+    // same shape as `ata24.rs`'s `ELEC_TR_APU_FAULT`.
+    let leak_detector_fault = next();
+    one(
+        r,
+        leak_detector_fault,
+        "28_fuel.leak_detector".into(),
+        "Fuel leak detection computer".into(),
+        "detector_fault_fraction",
+        "0/1, the leak-detection function itself has failed",
+        "Fuel leak detection system fault".into(),
+        "live.rs::LeakDetector output forced false while this is active".into(),
+        "0/1 (failed)".into(),
+        "the leak-detection computation is forced to report no leak regardless of the real indicated-vs-metered discrepancy: an honest 'detector cannot see a real leak right now' effect, not a fabricated leak",
+    );
+
+    // FQDC (Fuel Quantity Data Concentrator) and FQMS (Fuel Quantity
+    // Management System) channel faults, and the transfer sequencer: real
+    // A380 LRUs, modelled the same discrete-health way as the leak detector
+    // above -- no tank-to-channel allocation table is needed to model the
+    // fault itself, only the plain 0/1 health flag.
+    let mut fqdc_ids = [0u64; 2];
+    for n in 1..=2u16 {
+        let id = next();
+        fqdc_ids[(n - 1) as usize] = id;
+        one(
+            r,
+            id,
+            format!("28_fuel.computer.fqdc.{n}"),
+            format!("FQDC channel {n}"),
+            "channel_fault_fraction",
+            "0/1, that FQDC channel has failed",
+            format!("FQDC channel {n} fault"),
+            "live.rs::fqms_low_confidence (this channel's own half of the gauging chain forced to confidence = 0 while active)".into(),
+            "0/1 (failed)".into(),
+            "that data-acquisition channel's own half of the fuel-gauging chain is forced to zero confidence, the same real consequence a probe/densitometer fault already produces",
+        );
+    }
+    let _ = fqdc_ids;
+    let mut fqms_ids = [0u64; 2];
+    for n in 1..=2u16 {
+        let id = next();
+        fqms_ids[(n - 1) as usize] = id;
+        one(
+            r,
+            id,
+            format!("28_fuel.computer.fqms.{n}"),
+            format!("FQMS channel {n}"),
+            "channel_fault_fraction",
+            "0/1, that FQMS channel has failed",
+            format!("FQMS channel {n} fault"),
+            "live.rs::fqms_low_confidence (this channel's own half of the gauging chain forced to confidence = 0 while active)".into(),
+            "0/1 (failed)".into(),
+            "the higher-level function FQDC feeds has failed (a processing/software fault downstream of good FQDC data), forcing that channel's own half of the gauging chain to zero confidence",
+        );
+    }
+    let _ = fqms_ids;
+    let seq_norm = next();
+    let seq_altn = next();
+    r.component(ComponentDef {
+        id: "28_fuel.computer.transfer_sequencer".into(),
+        area: Area::Fuel,
+        ata: ATA,
+        name: "Fuel transfer sequencing computer (automatic CG/wing transfer logic)".into(),
+        params: vec![
+            ParamDef { name: "norm_fault_fraction".into(), meaning: "0/1, the normal (primary) transfer-sequencing channel has failed".into(), healthy: 0.0 },
+            ParamDef { name: "altn_fault_fraction".into(), meaning: "0/1, the alternate (backup) transfer-sequencing channel has failed".into(), healthy: 0.0 },
+        ],
+        failures: vec![seq_norm, seq_altn],
+    });
+    r.failure(FailureDef {
+        id: seq_norm,
+        area: Area::Fuel,
+        ata: ATA,
+        name: "Normal transfer sequencer fault".into(),
+        component: "28_fuel.computer.transfer_sequencer".into(),
+        model_field: "live.rs::transfer_sequencer_norm_fault (direct reading)".into(),
+        magnitude: "0/1 (failed)".into(),
+        effect: "the primary computer that commands the automatic CG/wing transfer sequence has failed; the valves and pumps it would command stay mechanically healthy but unsequenced".into(),
+    });
+    r.failure(FailureDef {
+        id: seq_altn,
+        area: Area::Fuel,
+        ata: ATA,
+        name: "Alternate transfer sequencer fault".into(),
+        component: "28_fuel.computer.transfer_sequencer".into(),
+        model_field: "live.rs::transfer_sequencer_altn_fault (direct reading)".into(),
+        magnitude: "0/1 (failed)".into(),
+        effect: "the backup transfer-sequencing channel has failed; with the normal channel also failed the automatic sequence is lost entirely".into(),
+    });
+
+    // Weight & balance backup computation fault: a real backup LRU concept,
+    // the same discrete-health shape as the FQDC/FQMS channels above.
+    let wb_backup_fault = next();
+    one(
+        r,
+        wb_backup_fault,
+        "28_fuel.computer.wb_backup".into(),
+        "Weight & balance backup computer".into(),
+        "backup_fault_fraction",
+        "0/1, the backup weight-and-balance computation channel has failed",
+        "Weight & balance backup computation fault".into(),
+        "live.rs::wb_backup_fault (direct reading; a discrete health verdict, no numeric threshold)".into(),
+        "0/1 (failed)".into(),
+        "the backup channel that cross-checks the primary weight-and-balance computation has failed",
+    );
     let gallery_leak_fwd = next();
     let gallery_leak_aft = next();
     one(r, gallery_leak_fwd, "28_fuel.gallery.forward".into(), "Forward transfer gallery".into(), "leak_fraction", "0..1, fraction of transfer flow through this gallery section diverted by a leak instead of reaching its destination tank", "Forward transfer gallery leak".into(), "cg_transfer.rs::TransferFaults.gallery_leak_fraction (forward-gallery transfer paths) and leak.rs::gallery_leak_kg_s (mass lost overboard, same fault)".into(), "0..1 diverted fraction", "forward transfers (inner/mid/outer to feed, forward trim path) are throttled exactly as `cg_transfer::achieved_transfer_rate_kg_s` models, and the diverted fuel is an unmetered loss `leak::LeakDetector` can catch");
@@ -255,12 +546,15 @@ pub fn register(r: &mut Registry) {
             .raised_by(&[outer_xfer_left, outer_xfer_right, inner_xfer_left, inner_xfer_right, mid_xfer_left, mid_xfer_right]),
     );
 
-    r.alert(
-        EcamAlert::new("FUEL_IMBALANCE_XFEED_FAULT", ATA, "FUEL WING XFEED FAULT", Level::Caution, var("FUEL_CROSSFEED_FAULT").on())
-            .confirm(2.0)
-            .status_line("MAN WING BALANCE MAY BE RQRD")
-            .raised_by(&crossfeed_ids),
-    );
+    // FUEL_IMBALANCE_XFEED_FAULT ("FUEL WING XFEED FAULT") retired on this
+    // revision (E-FUEL-DESIGN.md D12): FlyByWire's own four crossfeed-valve
+    // ids (281800014-017) are now each wired individually in
+    // `fbw/ata28.rs`, straight off `crossfeed_ids`'s own already-registered
+    // failures (`FUEL_CROSSFEED_VALVE_FAULT:{1..4}`) -- each carrying
+    // strictly more information (which valve) than this aggregate ever did.
+    // Keeping both would recreate the double-alert the "no duplicates" rule
+    // forbids, so the aggregate is deleted rather than left alongside them.
+    let _ = &crossfeed_ids;
 
     r.alert(
         EcamAlert::new("FUEL_FOB_LO_TEMP", ATA, "FUEL FOB LO TEMP", Level::Caution, var("FUEL_FOB_LO_TEMP").on())

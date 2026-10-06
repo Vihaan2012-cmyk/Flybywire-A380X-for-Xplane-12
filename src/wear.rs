@@ -100,6 +100,41 @@ impl WearStore {
     }
 }
 
+/// Validate a persisted `WearStore` on load, once, the same way
+/// `physics::damage::load_engines` already guards `EngineWear`'s
+/// `creep_life_fraction` against the identical bug class (a transient
+/// spike from a single bad tick, saved, then carried forward forever
+/// because nothing on load ever looks at it again -- the W217 persisted-
+/// creep incident this module's own doc alludes to as "a substrate agent
+/// is adding logged physical clamps at the shared accessors"). This is
+/// deliberately narrower than that accessor is expected to be: it only
+/// rejects a `degradation_fraction` that is negative or non-finite --
+/// unambiguous corruption, not a value merely above the documented
+/// `0.0..=1.0` ceiling, which the module doc (see above) leaves for the
+/// shared accessor to interpret, not this load path, to decide. It does
+/// NOT change [`WearStore::accumulate`]/[`WearStore::set`]'s own no-clamp
+/// behaviour during a live session -- only what a *previous* session's
+/// file is trusted to restore.
+pub fn load_checked(saved: WearStore) -> (WearStore, Vec<String>) {
+    let mut rejections = Vec::new();
+    let mut checked = WearStore::default();
+    for id in saved.ids() {
+        let mut w = saved.get(id);
+        let bad_degradation = !w.degradation_fraction.is_finite() || w.degradation_fraction < 0.0;
+        let bad_hot_hours = !w.hot_hours.is_finite() || w.hot_hours < 0.0;
+        let bad_stress = !w.thermal_stress_integral.is_finite() || w.thermal_stress_integral < 0.0;
+        if bad_degradation || bad_hot_hours || bad_stress {
+            rejections.push(format!(
+                "component {id}: persisted wear (degradation_fraction={:.4}, hot_hours={:.4}, thermal_stress_integral={:.4}) has a negative or non-finite field, not physically reachable through accumulate(); reset to new on load",
+                w.degradation_fraction, w.hot_hours, w.thermal_stress_integral
+            ));
+            w = Wear::default();
+        }
+        checked.set(id, w);
+    }
+    (checked, rejections)
+}
+
 /// The process-global "current" wear, published each tick the same way
 /// `physics/damage.rs`'s `LATEST_WEAR` is: the owning tracker (wherever it
 /// ends up living -- `Plugin`, alongside `damage`) calls [`publish`] after

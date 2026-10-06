@@ -139,6 +139,30 @@ pub fn register(r: &mut Registry) {
             branch_leak_failures.push(leak);
         }
 
+        // ---- ECAM completeness pass (E-FIRE §G/§H): the fuel/hydraulic
+        // heat exchanger's own valve, its air-side leak-detection switch,
+        // and the dual overheat-detection channels -- each a pure
+        // monitored-circuit discrete (`thermal::{HxValveFaults,
+        // AirLeakSwitchFaults, OverheatChannelFaults}`'s own doc), wired
+        // directly in `deep::ecam::fbw::ata29` off the published names
+        // `HydraulicsLive::publish` adds. Not physics: none of these gate
+        // `topology::Circuit`'s own heat balance (§I's manifold state is
+        // the one genuine physics addition, unconditional and un-faulted).
+        let hx_valve_id = format!("29_hyd.{color}_fuel_hx_valve");
+        let hx_valve_stuck = next_id(r, &format!("{color} fuel/hydraulic HX valve stuck"), &hx_valve_id, "hydraulics::thermal::HxValveFaults.stuck", "0 healthy .. 1 (any nonzero) the valve's own monitored position/circuit reports faulted", "the HX valve's own monitored circuit reports faulted, independent of whether the fluid is actually hot");
+        r.component(ComponentDef { id: hx_valve_id, area: Area::Hydraulics, ata: ATA, name: format!("{color} system fuel/hydraulic heat exchanger valve"), params: vec![], failures: vec![hx_valve_stuck] });
+
+        let air_leak_id = format!("29_hyd.{color}_fuel_hx_air_leak_switch");
+        let air_leak_leak = next_id(r, &format!("{color} fuel/hydraulic HX air-side leak"), &air_leak_id, "hydraulics::thermal::AirLeakSwitchFaults.leak", "0 healthy .. 1 (any nonzero) the leak-detection switch reports a leak", "the heat exchanger's air-side leak-detection switch reports a leak present");
+        let air_leak_circuit_fault = next_id(r, &format!("{color} fuel/hydraulic HX air-leak switch circuit fault"), &air_leak_id, "hydraulics::thermal::AirLeakSwitchFaults.circuit_fault", "0 healthy .. 1 (any nonzero) the switch's own monitoring circuit reports faulted", "the leak-detection switch's own monitoring circuit is faulted, independent of whether a leak is actually present");
+        r.component(ComponentDef { id: air_leak_id, area: Area::Hydraulics, ata: ATA, name: format!("{color} system fuel/hydraulic heat exchanger air-leak detection switch"), params: vec![], failures: vec![air_leak_leak, air_leak_circuit_fault] });
+
+        for channel in ["a", "b"] {
+            let chan_id = format!("29_hyd.{color}_ovht_chan_{channel}");
+            let chan_fault = next_id(r, &format!("{color} system overheat-detection channel {}", channel.to_uppercase()), &chan_id, "hydraulics::thermal::OverheatChannelFaults.circuit_fault", "0 healthy .. 1 (any nonzero) this channel's own monitoring circuit reports faulted", "this overheat-detection channel's own monitoring circuit is faulted, independent of the circuit's actual fluid temperature");
+            r.component(ComponentDef { id: chan_id, area: Area::Hydraulics, ata: ATA, name: format!("{color} system overheat-detection channel {}", channel.to_uppercase()), params: vec![], failures: vec![chan_fault] });
+        }
+
         // ---- ECAM alerts for this circuit.
         let upper = color.to_uppercase();
         let letter = upper.chars().next().unwrap();

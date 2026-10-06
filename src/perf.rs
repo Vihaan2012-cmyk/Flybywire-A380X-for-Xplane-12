@@ -29,6 +29,11 @@ fn add(totals: &mut Vec<(&'static str, Duration)>, label: &'static str, d: Durat
 }
 
 /// Ends the section before this point and starts `label`'s.
+/// The section the frame is in now (the last [`lap`] label), for tracing.
+pub fn current_section() -> &'static str {
+    LAPS.with(|l| l.borrow().last.map_or("before the first lap", |(_, label)| label))
+}
+
 pub fn lap(label: &'static str) {
     LAPS.with(|l| {
         let mut l = l.borrow_mut();

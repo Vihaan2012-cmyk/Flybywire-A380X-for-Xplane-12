@@ -2,14 +2,14 @@
 
 Read-only research brief. Goal: enumerate everything the FBW A380X (`fbw-a380x`, plus the
 `fbw-common` code it shares) takes from Microsoft Flight Simulator, so that an external process
-emulating MSFS (the `fbw-xp-systems` X-Plane host, `D:\fbw-xp-systems`) can be checked against the
+emulating MSFS (the `fbw-xp-systems` X-Plane host, `D:\A380\fbw-xp-systems`) can be checked against the
 full contract, not just the parts it has already hit in testing.
 
 Sources read: `fbw-a380x/src/systems` and `fbw-common/src/systems` (TypeScript instruments/FMS/EFB),
 `fbw-a380x/src/wasm` and `fbw-common/src/wasm` (Rust `systems_wasm`/`a380_systems_wasm` and C++
 `fbw_a380`/`extra-backend`), the behaviour XML under `fbw-a380x/src/base/**/model/behaviour`, the
 package's `.cfg`/`.FLT` files, and `node_modules/@microsoft/msfs-sdk/msfssdk.js`. Coverage was
-checked against `D:\fbw-xp-systems\src` (`lib.rs`, `js_bridge.rs`, `key_events.rs`, `afs_events.rs`,
+checked against `D:\A380\fbw-xp-systems\src` (`lib.rs`, `js_bridge.rs`, `key_events.rs`, `afs_events.rs`,
 `sensors.rs`, `fadec.rs`, `prim.rs`, `js/msfs/*`).
 
 **Methodology note on the two largest tables (Layers 1 and 3).** The 481-row SimConnect data
@@ -1283,7 +1283,7 @@ for a dedicated follow-up brief rather than folding in here superficially.
 | `.FLT` files (`apron.FLT`, `hangar.flt`, `taxi.flt`, `runway.FLT`, `cruise.FLT`, `final.FLT`, `approach.FLT`, `Climb.flt`) | `A32NX_START_STATE` value per file (apron=2, hangar=1, taxi=3, runway=4, cruise=6, final=8), `BatterySwitch` (hangar vs. apron) | `fbw-xp-systems/src/start_state.rs` header, with exact line numbers per file already recorded there (e.g. `apron.FLT:398`, `hangar.flt:212,375`) |
 | `panel.cfg` | `[VCockpitNN]` sections — 24 found in the interior cockpit's `panel.cfg`, each naming an HTML gauge FBW's build outputs into `html_ui/Pages/VCockpit/Instruments/A380X/...` | `js_bridge.rs` module doc lines 3-13 |
 | `engines.cfg`, `cockpit.cfg` | not independently confirmed read by FBW's own Rust/C++ code in this pass (vs. just present for MSFS's own engine/cockpit modelling) — flag for follow-up | — |
-| behaviour XML (`model/behaviour/**`, 36 files) | cockpit switch/knob/cursor bindings: `<SIMVAR>`, `<CURSOR>`, `<POTENTIOMETER>`, `<TOOLTIPID>` elements, RPN `(A:...)`/`(>K:...)` — 400 `A:`/`K:` references total | `fbw-a380x/src/base/.../model/behaviour/*.xml`; conversion already owned by `D:\msfs2xp-aircraft` per the task's own framing, not `fbw-xp-systems` |
+| behaviour XML (`model/behaviour/**`, 36 files) | cockpit switch/knob/cursor bindings: `<SIMVAR>`, `<CURSOR>`, `<POTENTIOMETER>`, `<TOOLTIPID>` elements, RPN `(A:...)`/`(>K:...)` — 400 `A:`/`K:` references total | `fbw-a380x/src/base/.../model/behaviour/*.xml`; conversion already owned by `D:\A380\msfs2xp-aircraft` per the task's own framing, not `fbw-xp-systems` |
 
 **Our coverage:** the `.FLT`-driven start-state contract and the `systems.cfg`/`flight_model.cfg`
 pieces above are explicitly, precisely ported (`start_state.rs`, `sensors.rs`, `electrical.rs`'s

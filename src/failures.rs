@@ -424,6 +424,12 @@ pub mod extra {
         /// (`physics/damage.rs`): a wear/exceedance state with no further
         /// physical model needed (e.g. driving the MEL/dispatch state).
         Local,
+        /// Wired now: `var` is an input FlyByWire's own model reads for this
+        /// one failure (`drive` sets it 1.0/0.0 with the failure's state).
+        /// Unlike `Hook`, whose single variable a whole family shares -- so
+        /// arming one unit's failure and clearing another's fought over it
+        /// -- each failure has its own.
+        FbwInput { var: &'static str },
     }
 
     pub struct ExtraFailure {
@@ -549,18 +555,22 @@ pub mod extra {
 
     /// ATA29: hydraulic degradation beyond the binary reservoir/pump-overheat
     /// failures already registered.
+    ///
+    /// 29_102 was "Power transfer unit fault": the A380 has no PTU (two
+    /// independent circuits, green and yellow, with electric pumps as their
+    /// backup), so nothing could ever consume it. Removed; the id is left
+    /// unused so the ids after it keep their numbers.
     fn hydraulics(v: &mut Vec<ExtraFailure>) {
-        let items: &[(&str, &str)] = &[
-            ("Green circuit filter clogging", "The green circuit's return filter clogs, raising case drain back-pressure."),
-            ("Yellow circuit filter clogging", "The yellow circuit's return filter clogs, raising case drain back-pressure."),
-            ("Power transfer unit fault", "The PTU fails to transfer flow between the green and yellow circuits."),
-            ("Green local electric pump degraded", "A green local electric pump's output falls below its rated flow."),
-            ("Yellow local electric pump degraded", "A yellow local electric pump's output falls below its rated flow."),
-            ("Hydraulic fluid contamination", "Particulate contamination accelerates wear in whichever pump is running."),
+        let items: &[(u64, &str, &str)] = &[
+            (29_100, "Green circuit filter clogging", "The green circuit's return filter clogs, raising case drain back-pressure."),
+            (29_101, "Yellow circuit filter clogging", "The yellow circuit's return filter clogs, raising case drain back-pressure."),
+            (29_103, "Green local electric pump degraded", "A green local electric pump's output falls below its rated flow."),
+            (29_104, "Yellow local electric pump degraded", "A yellow local electric pump's output falls below its rated flow."),
+            (29_105, "Hydraulic fluid contamination", "Particulate contamination accelerates wear in whichever pump is running."),
         ];
-        for (k, (name, desc)) in items.iter().enumerate() {
+        for (id, name, desc) in items.iter() {
             v.push(f(
-                29_100 + k as u64,
+                *id,
                 29,
                 *name,
                 *desc,
@@ -626,6 +636,14 @@ pub mod extra {
 
     /// ATA34: air data/inertial sensor failures for the ADIRS workstream
     /// (three independent ADIRUs, each with its own probes).
+    ///
+    /// The pitot (34_100-34_102), static (34_103-34_105) and AoA
+    /// (34_106-34_108) ids are, as of `walkaround.rs`, no longer only a
+    /// hook: `physics/adirs.rs`'s `update_adr` also reads each directly with
+    /// `failures::is_active` (the same per-id direct-read pattern this
+    /// file's own doc on `is_active` describes) to force that probe blocked/
+    /// frozen while a ground-crew cover is on it, in addition to whatever
+    /// `FAIL_ADIRU_SENSOR_HOOK` still carries for a manually-armed "fault".
     fn adirs(v: &mut Vec<ExtraFailure>) {
         let sensors: &[&str] = &["Pitot probe", "Static port", "AOA vane"];
         for (si, sensor) in sensors.iter().enumerate() {
@@ -646,7 +664,10 @@ pub mod extra {
                 34,
                 format!("ADIRU {adiru} internal fault"),
                 format!("ADIRU {adiru}'s inertial platform fails; its outputs are no longer valid."),
-                Effect::Hook { var: "FAIL_ADIRU_INTERNAL_HOOK", owner: Owner::Adirs },
+                // FlyByWire's own InertialReference reads it (navigation/
+                // adirs.rs): no alignment or attitude, IR FAULT lit, and a
+                // full realignment once it works again.
+                Effect::FbwInput { var: ["ADIRS_IR_1_PLATFORM_FAILED", "ADIRS_IR_2_PLATFORM_FAILED", "ADIRS_IR_3_PLATFORM_FAILED"][adiru as usize - 1] },
                 Some(MelCategory::C),
             ));
         }
@@ -820,9 +841,20 @@ pub mod extra {
             Item { ata: 72, base: 72_012, name: "HP compressor destruction", description: "HP compressor blades are lost: the core can no longer compress, its flow capacity collapses and the imbalance loads the bearings. Compression lost, the flame goes out and the core runs down.", mel: None },
             Item { ata: 72, base: 72_016, name: "HP turbine blade release", description: "HP turbine blades are released: the turbine extracts far less work and the imbalance loads the bearings.", mel: None },
             Item { ata: 72, base: 72_020, name: "main bearing seizure", description: "A main shaft bearing seizes: friction beyond what the turbine can overcome.", mel: None },
+            // Armed by `physics/damage.rs`'s `Damage::arm_fod`, called from
+            // `walkaround.rs` the moment a ground-crew inlet cover left
+            // installed is ingested by a rotating engine (ATA71 covers the
+            // engine's own air inlet; kept in the same per-engine 72_0xx
+            // block as the other on-condition compressor/turbine damage
+            // above, since the physical consequence -- the same
+            // `compressor_efficiency_loss` channel -- is identical). Not
+            // MEL-eligible, matching this block's other on-condition damage:
+            // an ingestion event requires an inspection before further
+            // dispatch, not a deferral.
+            Item { ata: 72, base: 72_024, name: "FOD (foreign object) damage", description: "A ground-crew inlet cover left installed through engine start is pulled into the fan and down the core: the HP compressor is destroyed (as 72_012), the flame goes out and the core runs down. Persists until the engine is repaired.", mel: None },
             Item { ata: 73, base: 73_000, name: "FADEC channel fault", description: "One EEC channel fails; the engine reverts to its remaining channel.", mel: Some(MelCategory::C) },
             Item { ata: 73, base: 73_004, name: "fuel metering valve stuck", description: "The fuel metering valve sticks, decoupling commanded fuel flow from actual flow.", mel: Some(MelCategory::B) },
-            Item { ata: 74, base: 74_000, name: "igniter fault", description: "An igniter no longer sparks reliably, lengthening light-up time and risking a hung start.", mel: Some(MelCategory::C) },
+            Item { ata: 74, base: 74_000, name: "ignition fault", description: "The igniters no longer spark: a start spins past light-off but never lights (a hung start), and a flame that goes out cannot be relit; a running engine keeps its flame. Complete fault only: there is no sourced figure for a weak spark's longer light-up.", mel: Some(MelCategory::C) },
             Item { ata: 76, base: 76_000, name: "throttle resolver fault", description: "The thrust lever angle resolver reads a frozen or biased angle.", mel: Some(MelCategory::C) },
             Item { ata: 77, base: 77_000, name: "EGT probe fault", description: "The EGT thermocouple reads a frozen or biased temperature.", mel: Some(MelCategory::C) },
             Item { ata: 77, base: 77_004, name: "N1 tachometer fault", description: "The N1 tachometer reads a frozen or biased speed.", mel: Some(MelCategory::C) },
@@ -831,7 +863,7 @@ pub mod extra {
             Item { ata: 78, base: 78_000, name: "thrust reverser lock fault", description: "The reverser fails to lock stowed, or fails to deploy on command.", mel: Some(MelCategory::C) },
             Item { ata: 79, base: 79_000, name: "oil pump fault", description: "The lubrication pump's output falls below the rate the bearings need.", mel: Some(MelCategory::B) },
             Item { ata: 79, base: 79_004, name: "oil leak", description: "A seal or line leaks oil overboard; quantity falls, then pressure, then the starved bearings wear and can seize.", mel: Some(MelCategory::B) },
-            Item { ata: 80, base: 80_000, name: "starter valve stuck", description: "The pneumatic starter air valve sticks open or closed.", mel: Some(MelCategory::C) },
+            Item { ata: 80, base: 80_000, name: "starter valve stuck", description: "The pneumatic starter air valve sticks where it is: shut, the engine cannot be motored or started; open, the starter keeps driving after the start. A partial fault is a sluggish valve.", mel: Some(MelCategory::C) },
         ];
         for item in items {
             for n in 1..=4u64 {
@@ -860,6 +892,28 @@ pub mod extra {
     /// rather than an immediately different flight-model behaviour. None
     /// are MEL-eligible: all require an inspection before further flight.
     fn exceedances(v: &mut Vec<ExtraFailure>) {
+        // Structural damage past ultimate load (CS 25.303: 1.5 x limit),
+        // armed by `physics/damage.rs` into `failures::set_damage_levels`.
+        for (id, var, surface) in [(27_101, "FLAPS_JAMMED", "flaps"), (27_102, "SLATS_JAMMED", "slats")] {
+            v.push(f(
+                id,
+                27,
+                format!("{surface} jammed by structural damage"),
+                format!("An airload past ultimate (the placard speed x sqrt(1.5), held) bent the {surface} drive: they stay where they were, whatever is selected. FlyByWire's own flap/slat assembly reads `{var}`."),
+                Effect::FbwInput { var },
+                None,
+            ));
+        }
+        for (k, leg) in ["nose", "left body", "right body", "left wing", "right wing"].into_iter().enumerate() {
+            v.push(f(
+                32_130 + k as u64,
+                32,
+                format!("{leg} gear leg collapsed"),
+                format!("The {leg} leg's strut failed past its ultimate load (`deep::gear_structure`): X-Plane's own gear collapse for that leg."),
+                Effect::NativeXplane { dataref: ["sim/operation/failures/rel_collapse1", "sim/operation/failures/rel_collapse2", "sim/operation/failures/rel_collapse3", "sim/operation/failures/rel_collapse4", "sim/operation/failures/rel_collapse5"][k] },
+                None,
+            ));
+        }
         v.push(f(
             27_100,
             27,
@@ -955,6 +1009,10 @@ pub mod extra {
                     }
                 }
             }
+            Effect::FbwInput { var } => {
+                let ident = vars.get(var.to_owned());
+                vars.write(&ident, active as i32 as f64);
+            }
             Effect::Local => {}
         }
     }
@@ -963,6 +1021,25 @@ pub mod extra {
     mod tests {
         use super::*;
         use std::collections::BTreeSet;
+
+        /// Each ADIRU's internal fault drives that ADIRU's own platform input
+        /// in FlyByWire's IR, not a variable the three share.
+        #[test]
+        fn each_adiru_internal_fault_fails_only_its_own_ir_platform() {
+            let mut vars = crate::aspects::test_vars::TestVars::default();
+            drive(&mut vars, None, 34_110, true);
+            let read = |vars: &mut crate::aspects::test_vars::TestVars, n: u64| {
+                let id = systems::simulation::VariableRegistry::get(vars, format!("ADIRS_IR_{n}_PLATFORM_FAILED"));
+                systems::simulation::SimulatorReaderWriter::read(vars, &id)
+            };
+            assert_eq!(read(&mut vars, 2), 1.0);
+            assert_eq!(read(&mut vars, 1), 0.0);
+            assert_eq!(read(&mut vars, 3), 0.0);
+            drive(&mut vars, None, 34_109, false);
+            assert_eq!(read(&mut vars, 2), 1.0, "clearing ADIRU 1 must not clear ADIRU 2");
+            drive(&mut vars, None, 34_110, false);
+            assert_eq!(read(&mut vars, 2), 0.0);
+        }
 
         #[test]
         fn every_extra_id_is_unique_and_outside_the_original_catalogue() {
@@ -1138,7 +1215,14 @@ pub fn affected_components(id: u64) -> Vec<String> {
 /// flap/gear overspeed) -- the same set `random_failures.rs`'s
 /// `damage_armed` test excludes from the MTBF draw, kept in sync here.
 pub fn trigger_condition(id: u64) -> &'static str {
-    let damage_armed = (32_100..=32_123).contains(&id) || (72_000..=72_011).contains(&id) || id == 34_120 || id == 49_000;
+    let damage_armed = (32_100..=32_123).contains(&id)
+        || (32_130..=32_134).contains(&id)
+        || (72_000..=72_011).contains(&id)
+        || (72_024..=72_027).contains(&id)
+        || id == 27_101
+        || id == 27_102
+        || id == 34_120
+        || id == 49_000;
     if damage_armed {
         return "manual arm, or wear/exceedance-armed by physics/damage.rs (touchdown, brake energy, EGT creep, overspeed)";
     }
@@ -1182,6 +1266,30 @@ struct State {
     /// so a derived failure can never clear one the crew armed, and the
     /// crew can never hide one the deep model is presently concluding.
     derived_levels: std::collections::BTreeMap<u64, f64>,
+    /// The failures behind every open circuit breaker this tick
+    /// (`breakers.rs`), combined the same way. A fourth source, not the
+    /// crew's `active`: a breaker's consequence lasts exactly as long as the
+    /// breaker is open, is never saved as though the crew armed it, and a
+    /// closed breaker never un-arms what the crew did arm (2026-09-28: a
+    /// mass trip wrote 75 failures to the save file, and a closed breaker
+    /// cleared its failures every tick, so the crew could not arm them).
+    breaker_levels: std::collections::BTreeMap<u64, f64>,
+    /// The ADIRS-blocking ids a walkaround cover currently causes
+    /// (`walkaround.rs`'s pitot/static/AoA covers: ATA34 ids 34_100-34_108),
+    /// replaced whole each tick by `Walkaround::update`. A fifth source,
+    /// modelled exactly on `breaker_levels` immediately above: a covered
+    /// probe's consequence lasts exactly as long as the cover is on, is
+    /// never saved as though the crew armed it (a pilot did not arm a
+    /// pitot-cover fault; the ground crew's own walkaround record is what
+    /// `persistence.rs`'s `walkaround_installed` saves instead), and taking
+    /// the cover off clears it the same tick.
+    walkaround_levels: std::collections::BTreeMap<u64, f64>,
+    /// Structural damage past ultimate load (`physics/damage.rs`'s
+    /// `structural`): jammed flaps/slats or gear doors, a collapsed gear
+    /// leg. Effective the moment it happens and for the rest of the session,
+    /// never saved as though the crew armed it -- a restart is the repair,
+    /// as with `Damage`'s other derived consequences.
+    damage_levels: std::collections::BTreeMap<u64, f64>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -1191,6 +1299,9 @@ static STATE: Mutex<State> = Mutex::new(State {
     dirty: true,
     component_levels: std::collections::BTreeMap::new(),
     derived_levels: std::collections::BTreeMap::new(),
+    breaker_levels: std::collections::BTreeMap::new(),
+    walkaround_levels: std::collections::BTreeMap::new(),
+    damage_levels: std::collections::BTreeMap::new(),
 });
 
 impl State {
@@ -1199,8 +1310,23 @@ impl State {
         let mut set = self.active.clone();
         set.extend(self.component_levels.keys().copied());
         set.extend(self.derived_levels.keys().copied());
+        set.extend(self.breaker_levels.keys().copied());
+        set.extend(self.walkaround_levels.keys().copied());
+        set.extend(self.damage_levels.keys().copied());
         set
     }
+}
+
+/// The failures every open circuit breaker causes, replaced whole each tick
+/// by `breakers::Breakers::pre_systems` (see `State::breaker_levels`).
+pub fn set_breaker_levels(levels: std::collections::BTreeMap<u64, f64>) {
+    with_state(|s| {
+        if s.breaker_levels != levels {
+            let keys_changed = !s.breaker_levels.keys().eq(levels.keys());
+            s.breaker_levels = levels;
+            s.dirty |= keys_changed;
+        }
+    });
 }
 
 /// The components system's combined loss per failure (`components.rs`,
@@ -1229,6 +1355,32 @@ pub fn set_component_levels(levels: std::collections::BTreeMap<u64, f64>) {
         if s.component_levels != levels {
             let keys_changed = !s.component_levels.keys().eq(levels.keys());
             s.component_levels = levels;
+            s.dirty |= keys_changed;
+        }
+    });
+}
+
+/// This session's structural damage (`physics/damage.rs`), replaced whole
+/// each tick -- the same pattern as [`set_walkaround_levels`] (see
+/// `State::damage_levels`).
+pub fn set_damage_levels(levels: std::collections::BTreeMap<u64, f64>) {
+    with_state(|s| {
+        if s.damage_levels != levels {
+            let keys_changed = !s.damage_levels.keys().eq(levels.keys());
+            s.damage_levels = levels;
+            s.dirty |= keys_changed;
+        }
+    });
+}
+
+/// The ADIRS-blocking ids a walkaround pitot/static/AoA cover causes right
+/// now (`walkaround.rs`), replaced whole each tick -- modelled exactly on
+/// [`set_breaker_levels`] (see `State::walkaround_levels`).
+pub fn set_walkaround_levels(levels: std::collections::BTreeMap<u64, f64>) {
+    with_state(|s| {
+        if s.walkaround_levels != levels {
+            let keys_changed = !s.walkaround_levels.keys().eq(levels.keys());
+            s.walkaround_levels = levels;
             s.dirty |= keys_changed;
         }
     });
@@ -1297,6 +1449,17 @@ pub fn active_ids() -> Vec<u64> {
     with_state(|s| s.effective().into_iter().collect()).unwrap_or_default()
 }
 
+/// The crew's own armed set, which is what the airframe save file holds.
+/// [`active_ids`] is the *effective* set and also carries the components
+/// system's and the deep areas' present conclusions; those re-derive
+/// themselves live every frame, and saving them restored a deep verdict
+/// (2026-09-26: `deep::hydraulics`' reservoir-leak couplings 29000-29003)
+/// as crew-armed on every later load, where nothing but the Study panel
+/// ever clears it.
+pub fn armed_ids() -> Vec<u64> {
+    with_state(|s| s.active.iter().copied().collect()).unwrap_or_default()
+}
+
 /// Test-isolation helper (see `scenarios::reset_global_state`): clears every
 /// active failure and its magnitude, leaving `registered` (populated once by
 /// `Failures::new()`, and generally harmless to leave set between tests)
@@ -1310,6 +1473,9 @@ pub fn reset_for_tests() {
         s.magnitudes.clear();
         s.component_levels.clear();
         s.derived_levels.clear();
+        s.breaker_levels.clear();
+        s.walkaround_levels.clear();
+        s.damage_levels.clear();
         s.dirty = true;
     });
 }
@@ -1319,12 +1485,21 @@ pub fn reset_for_tests() {
 /// `extra` failure's state directly by id, instead of the shared
 /// `Effect::Hook` variable an item's whole group writes (which cannot tell
 /// two ids in the same group apart) -- e.g. `fuel.rs`/`breakers.rs` gating a
-/// real pressure/current effect on one particular pump's own failure id.
+/// real pressure/current effect on one particular pump's own failure id, and
+/// `physics/adirs.rs` reading a pitot/static/AoA cover's id (ATA34
+/// 34_100-34_108) directly the same way.
 /// Active means `magnitude(id) > 0.0`; every existing consumer of this
 /// binary reading keeps working unchanged under the continuous model.
 pub fn is_active(id: u64) -> bool {
-    with_state(|s| s.active.contains(&id) || s.component_levels.contains_key(&id) || s.derived_levels.contains_key(&id))
-        .unwrap_or(false)
+    with_state(|s| {
+        s.active.contains(&id)
+            || s.component_levels.contains_key(&id)
+            || s.derived_levels.contains_key(&id)
+            || s.breaker_levels.contains_key(&id)
+            || s.walkaround_levels.contains_key(&id)
+            || s.damage_levels.contains_key(&id)
+    })
+    .unwrap_or(false)
 }
 
 /// Activate `id` at a continuous magnitude in `0.0..=1.0` -- a physical
@@ -1362,7 +1537,12 @@ pub fn set_magnitude(id: u64, magnitude: f64) {
 pub fn magnitude(id: u64) -> f64 {
     with_state(|s| {
         let armed = if s.active.contains(&id) { s.magnitudes.get(&id).copied().unwrap_or(1.0) } else { 0.0 };
-        armed.max(s.component_levels.get(&id).copied().unwrap_or(0.0)).max(s.derived_levels.get(&id).copied().unwrap_or(0.0))
+        armed
+            .max(s.component_levels.get(&id).copied().unwrap_or(0.0))
+            .max(s.derived_levels.get(&id).copied().unwrap_or(0.0))
+            .max(s.breaker_levels.get(&id).copied().unwrap_or(0.0))
+            .max(s.walkaround_levels.get(&id).copied().unwrap_or(0.0))
+            .max(s.damage_levels.get(&id).copied().unwrap_or(0.0))
     })
     .unwrap_or(0.0)
 }
@@ -1456,6 +1636,9 @@ pub fn reset_all() {
         s.magnitudes.clear();
         s.component_levels.clear();
         s.derived_levels.clear();
+        s.breaker_levels.clear();
+        s.walkaround_levels.clear();
+        s.damage_levels.clear();
         s.dirty = true;
     });
 }
@@ -1895,6 +2078,36 @@ pub(crate) mod tests {
         toggle(27_001);
         assert!(active_ids().is_empty());
         drop(f);
+    }
+
+    #[test]
+    fn a_derived_verdict_is_effective_but_never_part_of_the_armed_set_that_is_saved() {
+        let _g = serial();
+        let _f = Failures::new();
+        replace([26_001]);
+        set_derived_levels([(29_000, 1.0)].into_iter().collect());
+        assert_eq!(active_ids(), vec![26_001, 29_000], "the derived leak acts like any failure");
+        assert_eq!(armed_ids(), vec![26_001], "but only what the crew armed is saved");
+        set_derived_levels(std::collections::BTreeMap::new());
+        replace([]);
+    }
+
+    /// A walkaround cover's failure id (`walkaround.rs`) must behave exactly
+    /// like a breaker/derived-level id: effective while the cover is on,
+    /// never part of the crew-armed set the airframe save file records, and
+    /// gone the instant the cover comes off (docs comment on
+    /// `State::walkaround_levels`).
+    #[test]
+    fn a_walkaround_cover_is_effective_but_never_armed_or_saved() {
+        let _g = serial();
+        let _f = Failures::new();
+        set_walkaround_levels([(34_100, 1.0)].into_iter().collect());
+        assert!(active_ids().contains(&34_100), "a covered pitot probe is an active failure");
+        assert!(is_active(34_100));
+        assert!(!armed_ids().contains(&34_100), "the crew did not arm this; the ground crew's cover did");
+        set_walkaround_levels(std::collections::BTreeMap::new());
+        assert!(!active_ids().contains(&34_100), "removing the cover clears it immediately");
+        assert!(!is_active(34_100));
     }
 
     #[test]

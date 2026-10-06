@@ -21,9 +21,11 @@
 //! once per tick from `lib.rs` (its whole footprint there is the `mod`
 //! declaration and one call in `tick`). The X-Plane dataref handles are
 //! looked up once into a process-wide [`std::sync::OnceLock`] the same way
-//! `xp.rs`'s own `probe_terrain_y`/`magnetic_variation` cache their XPLM
-//! symbols — raw pointers are kept as `usize` so the `OnceLock` itself stays
-//! `Sync`. FlyByWire's own variable identifiers are *not* cached: `Vars::get`
+//! `xp.rs`'s own `probe_terrain_y` caches its probe handle and its
+//! `XPLMProbeTerrainXYZ` pointer, and `magnetic_variation` caches its
+//! `XPLMGetMagneticVariation` pointer — raw pointers are kept as `usize` so
+//! the `OnceLock` itself stays `Sync`. FlyByWire's own variable identifiers
+//! are *not* cached: `Vars::get`
 //! is a cheap hash-map lookup (`lib.rs`'s `Vars::add`), so this module just
 //! asks for each name fresh every tick rather than adding another persistent
 //! cache to keep in sync.
@@ -52,6 +54,12 @@
 //! | `sim/cockpit2/autopilot/autothrottle_enabled` | `A32NX_AUTOTHRUST_STATUS` | [`autothrottle_enum`]: -1 off, 0 armed, 1 engaged (X-Plane's enum is coarser than the A380's own ATHR status) |
 //! | `sim/cockpit2/annunciators/plugin_master_warning` | `A32NX_MASTER_WARNING` | the SDK's plugin-owned trigger path, not the read-only `master_warning` itself |
 //! | `sim/cockpit2/annunciators/plugin_master_caution` | `A32NX_MASTER_CAUTION` | ditto |
+//!
+//! One entry is not an X-Plane dataref: `XMLVAR_AirSpeedIsInMach` (an
+//! MSFS/`Simplane`-shim local, `src/js/msfs/environment.js`) is written the
+//! same way, from the same `A32NX_FCU_AFS_DISPLAY_MACH_MODE` read, for the
+//! installed MFD/ND bundles' `Simplane.getAutoPilotMachModeActive()` calls
+//! -- see [`update`].
 //!
 //! ## Skipped
 //! - `sim/cockpit2/switches/*` (beacon/strobe/nav/landing/taxi lights, wiper
@@ -313,7 +321,19 @@ pub fn update(vars: &mut Vars, xplm: &Xplm) {
     if let Some(spd) = from_dash_sentinel(v(vars, "A32NX_AUTOPILOT_SPEED_SELECTED")) {
         set_scalar(xplm, dr(r.airspeed_dial_mach), spd);
     }
-    set_scalar_i(xplm, dr(r.airspeed_is_mach), bool_to_i(v(vars, "A32NX_FCU_AFS_DISPLAY_MACH_MODE")));
+    let mach_active = v(vars, "A32NX_FCU_AFS_DISPLAY_MACH_MODE") != 0.;
+    set_scalar_i(xplm, dr(r.airspeed_is_mach), mach_active as i32);
+    // Same boolean, mirrored onto the stock MSFS `XMLVAR_AirSpeedIsInMach`
+    // local: no FlyByWire A380X behaviour, TS or Rust source writes it
+    // anywhere (grepped the whole aircraft repo), but the installed MFD and
+    // ND bundles still call the generic `Simplane.getAutoPilotMachModeActive()`
+    // compatibility shim (`src/js/msfs/environment.js`), which reads it by
+    // this exact name -- it would otherwise stay stuck at its unwritten-0
+    // ("always knots") default forever (`js_bridge.rs`'s `VarsHost::read`
+    // first-unwritten-read log). `register_named` (not `get`): this is a
+    // pure local, never a simulator variable.
+    let xmlvar_mach = vars.register_named("XMLVAR_AirSpeedIsInMach");
+    SimulatorReaderWriter::write(vars, &xmlvar_mach, mach_active as u8 as f64);
     set_scalar(xplm, dr(r.vvi_dial), v(vars, "A32NX_AUTOPILOT_VS_SELECTED"));
     set_scalar(xplm, dr(r.fpa), v(vars, "A32NX_AUTOPILOT_FPA_SELECTED"));
     set_scalar_i(xplm, dr(r.trk_fpa), bool_to_i(v(vars, "A32NX_TRK_FPA_MODE_ACTIVE")));
@@ -380,5 +400,31 @@ mod tests {
         let p: DataRef = 0x1234 as DataRef;
         assert_eq!(dr(Some(p as usize)), Some(p));
         assert_eq!(dr(None), None);
+    }
+
+    #[test]
+    fn mach_mode_mirrors_onto_the_xmlvar_local_too() {
+        // No FlyByWire A380X source writes L:XMLVAR_AirSpeedIsInMach, but
+        // the installed MFD/ND bundles read it through the Simplane shim;
+        // this module must keep it in step with the real FCU mach state.
+        let xplm: &'static crate::xp::Xplm = Box::leak(Box::new(crate::xp::Xplm::dummy()));
+        let mut vars = crate::Vars::new(xplm);
+        let mach = vars.get("A32NX_FCU_AFS_DISPLAY_MACH_MODE".to_string());
+        vars.write(&mach, 1.);
+        update(&mut vars, xplm);
+        // (build fix, INT-P4) `register_named`, not `get`: the production
+        // code writes this local via `vars.register_named("XMLVAR_
+        // AirSpeedIsInMach")` (this file's own `update`, deliberately
+        // unprefixed -- see that call site's own doc). `Vars::get` prefixes
+        // any non-simulator-style name with `A32NX_` (`is_simulator_
+        // variable` is false for this bare local name, since it has no
+        // space), so it was reading back a different variable
+        // ("A32NX_XMLVAR_AirSpeedIsInMach") than the one `update` actually
+        // wrote to.
+        let xmlvar = vars.register_named("XMLVAR_AirSpeedIsInMach");
+        assert_eq!(vars.read(&xmlvar), 1.);
+        vars.write(&mach, 0.);
+        update(&mut vars, xplm);
+        assert_eq!(vars.read(&xmlvar), 0.);
     }
 }

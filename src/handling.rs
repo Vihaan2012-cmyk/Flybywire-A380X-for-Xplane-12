@@ -48,12 +48,30 @@ enum Kind {
     Swallow,
 }
 
+/// A manual trim switch's one-tick pulse variable (`prim.rs`'s
+/// `TrimPulses::NAMES`), written directly rather than as an event.
+fn is_trim_pulse(event: &str) -> bool {
+    event.starts_with("XP_")
+        && ["_TRIM_UP_PULSE", "_TRIM_DOWN_PULSE", "_TRIM_LEFT_PULSE", "_TRIM_RIGHT_PULSE", "_TRIM_RESET_PULSE"].iter().any(|s| event.ends_with(s))
+}
+
 /// X-Plane's stock commands and the MSFS event each stands for.
 const STOCK: &[(&str, &str, Kind)] = &[
     ("sim/flight_controls/landing_gear_up", "GEAR_UP", Kind::Press),
     ("sim/flight_controls/landing_gear_down", "GEAR_DOWN", Kind::Press),
     ("sim/flight_controls/landing_gear_toggle", "GEAR_TOGGLE", Kind::Press),
     ("sim/flight_controls/landing_gear_off", "", Kind::Swallow),
+    // The manual trim switches. FlyByWire takes ELEV_TRIM_UP/DN and the
+    // rudder trim events in its C++ interface, not as mapped events, as the
+    // PRIM/SEC discretes `prim.rs`'s `TrimPulses` reads; these X-Plane
+    // commands used to move only X-Plane's own trim, which the plugin
+    // overwrites from the THS every frame, so a pilot's trim input did
+    // nothing at all. Held, one pulse a tick, as a held switch.
+    ("sim/flight_controls/pitch_trim_up", "XP_PITCH_TRIM_UP_PULSE", Kind::Hold),
+    ("sim/flight_controls/pitch_trim_down", "XP_PITCH_TRIM_DOWN_PULSE", Kind::Hold),
+    ("sim/flight_controls/rudder_trim_left", "XP_RUDDER_TRIM_LEFT_PULSE", Kind::Hold),
+    ("sim/flight_controls/rudder_trim_right", "XP_RUDDER_TRIM_RIGHT_PULSE", Kind::Hold),
+    ("sim/flight_controls/rudder_trim_center", "XP_RUDDER_TRIM_RESET_PULSE", Kind::Press),
     ("sim/flight_controls/flaps_up", "FLAPS_DECR", Kind::Press),
     ("sim/flight_controls/flaps_down", "FLAPS_INCR", Kind::Press),
     ("sim/flight_controls/flaps_up_full", "FLAPS_UP", Kind::Press),
@@ -173,6 +191,17 @@ unsafe extern "C" fn on_command(_command: CommandRef, phase: c_int, refcon: *mut
 /// names them in this order from 1; this X-Plane's own joystick preferences
 /// agree: axes set to Left toe brake, Right toe brake, Flaps, Throttle 1 hold
 /// 6, 7, 11 and 20).
+/// Yaw (3): read here rather than via `sim/joystick/yoke_heading_ratio`
+/// (which `inputs()` and `lib.rs`'s `PrimRefs::read` used to read instead).
+/// X-Plane's own DataRefs.txt documents `override_joystick_heading` as
+/// uniquely "disabl[ing] auto-coordination" (`override_joystick_pitch`/
+/// `_roll` say nothing of the kind), meaning that without real rudder-pedal
+/// hardware `yoke_heading_ratio` silently carries X-Plane's own
+/// turn-coordination synthesis, not the pilot's pedal -- and FlyByWire's own
+/// yaw damper (prim.rs) then doubles that on top (W84/W99). This constant
+/// indexes `joy_mapped_axis_avail`/`_value` instead, the same raw-hardware
+/// arrays the other axes below already use.
+const AXIS_YAW: usize = 3;
 const AXIS_LEFT_TOE: usize = 6;
 const AXIS_RIGHT_TOE: usize = 7;
 const AXIS_FLAPS: usize = 11;
@@ -185,7 +214,6 @@ const AXES: usize = 81;
 struct Refs {
     joy_avail: Option<DataRef>,
     joy_value: Option<DataRef>,
-    yoke_heading: Option<DataRef>,
 
     override_gearbrake: Option<DataRef>,
     override_toe_brakes: Option<DataRef>,
@@ -220,7 +248,6 @@ impl Refs {
         Self {
             joy_avail: f("sim/joystick/joy_mapped_axis_avail"),
             joy_value: f("sim/joystick/joy_mapped_axis_value"),
-            yoke_heading: f("sim/joystick/yoke_heading_ratio"),
             override_gearbrake: f("sim/operation/override/override_gearbrake"),
             override_toe_brakes: f("sim/operation/override/override_toe_brakes"),
             override_wheel_steer: f("sim/operation/override/override_wheel_steer"),
@@ -295,8 +322,9 @@ pub struct Handling {
     ids: OutIds,
     refs: Refs,
     registered: Vec<Registered>,
-    /// Last reading of each hardware axis, once it is available.
-    axes: [Option<f64>; 4],
+    /// Last reading of each hardware axis, once it is available: left toe
+    /// brake, right toe brake, flaps, tiller, yaw (rudder pedals, W99).
+    axes: [Option<f64>; 5],
     flaps_lever: Lever,
     gear_lever: Lever,
     park_lever: Lever,
@@ -355,7 +383,7 @@ impl Handling {
             ids,
             refs,
             registered: Vec::new(),
-            axes: [None; 4],
+            axes: [None; 5],
             flaps_lever: Lever::new("fbw/cockpit/flaps_lever"),
             gear_lever: Lever::new("fbw/cockpit/lever_landing_gear"),
             park_lever: Lever::new("fbw/cockpit/lever_parking_brake"),
@@ -370,7 +398,7 @@ impl Handling {
     fn register(&mut self, xplm: &Xplm) {
         let mut table: Vec<(&'static str, Kind, bool)> = Vec::new();
         for &(name, event, kind) in STOCK {
-            debug_assert!(kind == Kind::Swallow || self.aspects.handles(event));
+            debug_assert!(kind == Kind::Swallow || is_trim_pulse(event) || self.aspects.handles(event));
             if let Some(command) = xplm.create_command(name, name) {
                 table.push((event, kind, true));
                 self.registered.push(Registered { command });
@@ -417,18 +445,26 @@ impl Handling {
             Err(_) => Vec::new(),
         };
         for (event, at) in events {
-            self.aspects.handle(vars, event, 0, at);
+            if is_trim_pulse(event) {
+                let id = vars.get(event.to_owned());
+                vars.write(&id, 1.);
+            } else {
+                self.aspects.handle(vars, event, 0, at);
+            }
         }
 
         self.read_axes(vars, xplm);
 
         // FlyByWireInterface.cpp:2896: the rudder pedals in percent, from the
         // sim's rudder input (inputs[2], which prim.rs takes as the negated
-        // yoke heading ratio).
-        if let Some(d) = self.refs.yoke_heading {
-            let input_2 = -(xplm.get_f(d) as f64);
-            vars.write(&self.ids.rudder_pedal_position, (-100. * input_2).clamp(-100., 100.));
-        }
+        // yoke heading ratio) -- here, `self.axes[4]` (AXIS_YAW), the raw
+        // pedal axis `read_axes()` just refreshed above, NOT
+        // `sim/joystick/yoke_heading_ratio` (see AXIS_YAW's doc comment for
+        // why). With no rudder-pedal hardware `self.axes[4]` is `None`, read
+        // as centred, matching MSFS never sending an AXIS_RUDDER_SET without
+        // a real rudder-pedal peripheral.
+        let input_2 = -self.axes[4].unwrap_or(0.);
+        vars.write(&self.ids.rudder_pedal_position, (-100. * input_2).clamp(-100., 100.));
 
         self.cockpit_levers(vars, xplm);
     }
@@ -439,7 +475,7 @@ impl Handling {
         let mut value = [0f32; AXES];
         xplm.get_vi(avail_ref, &mut avail);
         xplm.get_vf(value_ref, &mut value);
-        let axis = |i: usize| (avail[i] != 0).then_some(value[i] as f64);
+        let axis = |i: usize| crate::hardware_axis(avail[i], value[i]);
         let either = |a: Option<f64>, b: Option<f64>| match (a, b) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
@@ -449,6 +485,7 @@ impl Handling {
             either(axis(AXIS_RIGHT_TOE), axis(AXIS_COPILOT_RIGHT_TOE)),
             axis(AXIS_FLAPS),
             axis(AXIS_TILLER),
+            axis(AXIS_YAW),
         ];
         let t = now();
         for (i, reading) in readings.into_iter().enumerate() {
@@ -469,7 +506,10 @@ impl Handling {
                 2 => ("AXIS_FLAPS_SET", aspects::f64_to_pos_32k(v)),
                 // X-Plane's tiller is -1 (left) to 1; MSFS's steering axis
                 // is inverted (nose_wheel_steering.rs:50-55).
-                _ => ("AXIS_STEERING_SET", aspects::f64_to_pos_32k((1. - v) / 2.)),
+                3 => ("AXIS_STEERING_SET", aspects::f64_to_pos_32k((1. - v) / 2.)),
+                // Yaw (4): no MSFS axis event exists for this one; `inputs()`
+                // reads `self.axes[4]` directly, every tick, below (W99).
+                _ => continue,
             };
             self.aspects.handle(vars, event, data, t);
         }
@@ -540,7 +580,9 @@ impl Handling {
             xplm.set_i(d, 1);
         }
 
-        // Gear (gear.rs:49-55, 91-111).
+        // Gear (gear.rs:49-55, 91-111). A walkaround downlock pin acts in
+        // FlyByWire's own gear model (`walkaround.rs`: GearActuatorJammed),
+        // so its published positions already hold a pinned leg down.
         let (deploy, handle_down) = physics::gear_deploy(
             read(&ids.gear_center),
             read(&ids.gear_left),
@@ -667,7 +709,7 @@ mod tests {
         let mut vars = aspects::tests::TestVars::default();
         let a = aspects::Aspects::new(&mut vars);
         for &(name, event, kind) in STOCK {
-            assert!(kind == Kind::Swallow || a.handles(event), "{name} -> {event}");
+            assert!(kind == Kind::Swallow || is_trim_pulse(event) || a.handles(event), "{name} -> {event}");
         }
         for &(event, _) in FBW_EVENTS {
             assert!(a.handles(event), "{event}");
@@ -685,5 +727,21 @@ mod tests {
             a.post_tick(&mut vars, 0.);
         }
         assert!((vars.value("LEFT_BRAKE_PEDAL_INPUT") - 60.).abs() < 1e-9);
+    }
+
+    #[test]
+    fn x_planes_trim_commands_reach_the_prims_trim_switches() {
+        for (command, pulse) in [
+            ("sim/flight_controls/pitch_trim_up", "XP_PITCH_TRIM_UP_PULSE"),
+            ("sim/flight_controls/pitch_trim_down", "XP_PITCH_TRIM_DOWN_PULSE"),
+            ("sim/flight_controls/rudder_trim_left", "XP_RUDDER_TRIM_LEFT_PULSE"),
+            ("sim/flight_controls/rudder_trim_right", "XP_RUDDER_TRIM_RIGHT_PULSE"),
+            ("sim/flight_controls/rudder_trim_center", "XP_RUDDER_TRIM_RESET_PULSE"),
+        ] {
+            let entry = STOCK.iter().find(|(name, _, _)| *name == command);
+            assert_eq!(entry.map(|(_, event, _)| *event), Some(pulse), "{command} must drive {pulse}");
+            assert!(is_trim_pulse(pulse));
+        }
+        assert!(!is_trim_pulse("GEAR_UP") && !is_trim_pulse("BRAKES"));
     }
 }

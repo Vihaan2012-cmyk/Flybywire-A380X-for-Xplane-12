@@ -272,7 +272,7 @@ Code:
   systems\src\hydraulic\electrical_pump_physics.rs`,
   `D:\fbw-aircraft\fbw-a380x\src\wasm\systems\a380_systems\src\hydraulic\
   autobrakes.rs`. Diff saved at
-  `D:\fbw-xp-systems\patches\fbw-rust\breakers.patch`.
+  `D:\A380\fbw-xp-systems\patches\fbw-rust\breakers.patch`.
 
 ## The three gating mechanisms
 

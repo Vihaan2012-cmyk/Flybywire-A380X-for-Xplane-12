@@ -77,6 +77,16 @@ pub const CALLS: &[&str] = &[
     // The legacy GPS module's nearest airport list (C:fs9gps:NearestAirport*),
     // read with SimVar.GetSimVarArrayValues (app/js/msfs/simvar.js).
     "FS9GPS_NEAREST_AIRPORTS",
+    // [weather] X-Plane's own METAR (XPLMGetMETARForAirport, src/xp.rs);
+    // FBW reads these directly with Coherent.call (WeatherService.ts,
+    // MsfsConnector.ts, TemperatureCorrectionWidget.tsx, and msfs-sdk's own
+    // FacilityLoader), not through this module's facility objects.
+    // GET_TAF_* has no X-Plane source at all (the SDK has no TAF API) and
+    // always answers "no report" -- see `call` below.
+    "GET_METAR_BY_IDENT",
+    "GET_METAR_BY_LATLON",
+    "GET_TAF_BY_IDENT",
+    "GET_TAF_BY_LATLON",
 ];
 
 /// Built airport facilities kept.
@@ -127,6 +137,12 @@ pub struct NavData {
     magvar: Option<Box<dyn Fn(f64, f64) -> f64 + Send>>,
     /// +1 or -1 once the source's sign is checked against the data.
     magvar_sign: Option<f64>,
+    /// Where `GET_METAR_BY_IDENT`/`GET_METAR_BY_LATLON` (W156) get X-Plane's
+    /// own last-downloaded METAR for an airport ident: the plugin passes
+    /// `crate::xp::metar_for_airport` (`XPLMGetMETARForAirport`). Without
+    /// one, or when it answers `None`, both calls reply with the msfs-sdk
+    /// "no report" shape instead of being rejected.
+    metar_source: Option<Box<dyn Fn(&str) -> Option<String> + Send>>,
 }
 
 impl NavData {
@@ -162,6 +178,7 @@ impl NavData {
             approach_types: HashMap::new(),
             magvar: None,
             magvar_sign: None,
+            metar_source: None,
         })
     }
 
@@ -178,6 +195,16 @@ impl NavData {
     pub fn set_magvar_source(&mut self, source: Box<dyn Fn(f64, f64) -> f64 + Send>) {
         self.magvar = Some(source);
         self.magvar_sign = None;
+    }
+
+    /// Where `GET_METAR_BY_IDENT`/`GET_METAR_BY_LATLON` get a real METAR
+    /// (W156): the plugin passes `crate::xp::metar_for_airport`
+    /// (`XPLMGetMETARForAirport`, main thread only). `source` should return
+    /// `None` rather than an empty string for "no report" -- `call` turns
+    /// either into the same msfs-sdk "not found" shape, but `None` says so
+    /// without allocating.
+    pub fn set_metar_source(&mut self, source: Box<dyn Fn(&str) -> Option<String> + Send>) {
+        self.metar_source = Some(source);
     }
 
     fn check_magvar_sign(&mut self, db: &Db) {
@@ -427,6 +454,33 @@ impl NavData {
                 out.push(']');
                 out
             }
+            "GET_METAR_BY_IDENT" => {
+                let ident = arg(0).as_str().unwrap_or("").trim().to_ascii_uppercase();
+                let report = self.metar_source.as_ref().and_then(|f| f(&ident));
+                metar_json(report.as_deref().map(|m| (ident.as_str(), m)))
+            }
+            // `XPLMGetMETARForAirport` only answers by ident, so this
+            // resolves to the nearest open airport first (`nearest_open_airport`
+            // below), the same way MSFS quietly does for its own lat/lon query.
+            "GET_METAR_BY_LATLON" => {
+                let (lat, lon) = (num(0), num(1));
+                let report = nearest_open_airport(&db, lat, lon)
+                    .and_then(|ident| self.metar_source.as_ref().and_then(|f| f(&ident)).map(|text| (ident, text)));
+                metar_json(report.as_ref().map(|(i, m)| (i.as_str(), m.as_str())))
+            }
+            // X-Plane's SDK has no TAF API at all (XPLMWeather.h: METAR and
+            // generic weather-info only), so this is always the "no report"
+            // shape, never invented. Answered rather than left Rejected:
+            // msfs-sdk's own FacilityLoader.getTaf/searchTaf (bundled into
+            // every A380X instrument, e.g. installed PFD/pfd.js ~27849-27863)
+            // call this with no try/catch of their own.
+            "GET_TAF_BY_IDENT" | "GET_TAF_BY_LATLON" => {
+                let mut out = String::new();
+                let mut obj = json::Obj::new(&mut out);
+                obj.str("icao", "").str("tafString", "");
+                obj.end();
+                out
+            }
             _ => unreachable!("every name in CALLS is handled"),
         })
     }
@@ -611,6 +665,46 @@ fn search_by_ident(db: &Db, ident: &str, filter: i32, max: usize) -> Vec<FacRef>
     exact.sort_by_key(|(_, r)| *r);
     partial.sort();
     exact.into_iter().chain(partial).map(|(_, r)| r).take(max).collect()
+}
+
+/// The nearest open land airport to `(lat, lon)`, for `GET_METAR_BY_LATLON`:
+/// `XPLMGetMETARForAirport` (`crate::xp::metar_for_airport`) only answers by
+/// airport ident, not by position, so a lat/lon query has to resolve to one
+/// first. Search radius matches X-Plane's own default weather report radius
+/// (`XPLM_DEFAULT_WXR_RADIUS_NM`, XPLMWeather.h) rather than an arbitrary
+/// value.
+fn nearest_open_airport(db: &Db, lat: f64, lon: f64) -> Option<String> {
+    const METAR_RADIUS_M: f64 = 30. * db::NM_TO_M;
+    let mut best: Option<(f64, String)> = None;
+    db.within(lat, lon, METAR_RADIUS_M, |r, d| {
+        if let FacRef::Airport(i) = r {
+            let a = &db.airports[i as usize];
+            if a.kind == 1 && !a.closed && best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+                best = Some((d, a.ident.as_str().trim().to_string()));
+            }
+        }
+    });
+    best.map(|(_, ident)| ident)
+}
+
+/// Builds the msfs-sdk `Metar`-shaped Coherent reply `GET_METAR_BY_IDENT`/
+/// `GET_METAR_BY_LATLON` answer with, from `found` (ident, raw METAR text),
+/// or the "not found" shape when `None`. msfs-sdk's own
+/// `FacilityLoader.cleanMetar`/`cleanTaf` and every FBW caller
+/// (`WeatherService.ts`, `MsfsConnector.ts`) treat an empty `icao` as "no
+/// report", so this must never invent a `metarString` for an ident that has
+/// none. Only `icao`/`metarString` are filled in: the two fields FBW's A380
+/// actually reads (`WeatherService.ts`, `MsfsConnector.ts`,
+/// `TemperatureCorrectionWidget.tsx`, which all re-parse the rest of the
+/// report from `metarString` itself with `parseMetar`), not the full
+/// msfs-sdk `Metar` shape (wind, clouds, temp, ...).
+fn metar_json(found: Option<(&str, &str)>) -> String {
+    let (icao, metar_string) = found.unwrap_or(("", ""));
+    let mut out = String::new();
+    let mut obj = json::Obj::new(&mut out);
+    obj.str("icao", icao).str("metarString", metar_string);
+    obj.end();
+    out
 }
 
 /// Days since 1970-01-01 for a civil date.

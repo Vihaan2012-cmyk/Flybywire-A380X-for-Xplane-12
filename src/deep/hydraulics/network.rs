@@ -358,6 +358,11 @@ pub struct Network {
     /// Line indices touching each node, precomputed once (topology is fixed
     /// after construction; only `open_fraction`/`leak_area_m2` change).
     adjacency: Vec<Vec<usize>>,
+    /// Fluid the last `step` failed to account for, m^3 (positive =
+    /// destroyed): the sum over nodes of net inflow minus what the node's
+    /// compliance stored. Zero when every node converged; nonzero when a
+    /// node sat pinned at the search bracket or the sweeps stopped short.
+    pub last_imbalance_m3: f64,
 }
 
 impl Network {
@@ -371,7 +376,7 @@ impl Network {
                 adjacency[j].push(li);
             }
         }
-        Self { nodes, lines, adjacency }
+        Self { nodes, lines, adjacency, last_imbalance_m3: 0.0 }
     }
 
     /// One implicit step. `injections_m3_s[i]` is the external flow into
@@ -381,6 +386,37 @@ impl Network {
     /// this step's fluid properties (from the thermal model). Returns the
     /// total leaked volume this step, m^3, for reservoir bookkeeping.
     pub fn step(&mut self, injections_m3_s: &[f64], density: f64, dyn_visc_pa_s: f64, dt_s: f64) -> f64 {
+        self.step_with_pressure_dependent(injections_m3_s, &[], density, dyn_visc_pa_s, dt_s)
+    }
+
+    /// As `step`, but a node may ALSO carry a pressure-dependent injection
+    /// (`pressure_dependent[i]`, `Some(f)` with `f(p_i)` the extra net
+    /// m^3/s into node `i` at that node's own trial pressure `p_i`, Pa
+    /// gauge; `None`, or a shorter slice, for a node with none -- same
+    /// tolerant indexing `injections_m3_s` already uses), folded into the
+    /// very same bisection its line flows already use.
+    ///
+    /// This exists for supply/relief elements whose real response time is
+    /// much faster than one physics tick -- a pressure-compensated pump's
+    /// destroke curve, a relief valve's dump -- which cannot be frozen at
+    /// last step's pressure the way `injections_m3_s` freezes a plain
+    /// consumer demand without risking the exact failure this module's own
+    /// doc above warns implicit solving avoids: a large frozen injection
+    /// racing a tiny node capacitance can need a next pressure outside the
+    /// whole search bracket. That is what pinned
+    /// `HYD_GREEN`/`YELLOW_MANIFOLD_PRESSURE_PSI` to exactly
+    /// `PRESSURE_BRACKET_HI_PA` during engine start/TOGA: a frozen EDP
+    /// compensator still reporting full stroke, and a frozen relief valve
+    /// still reading last step's lower pressure, together for one whole
+    /// `dt_s`. Folding the element in here instead -- the same technique
+    /// `physics::engine::oil.rs::hydraulics` already uses for its own
+    /// pump/relief flow split, applied to a network node instead of a
+    /// standalone algebraic one -- keeps the residual's required
+    /// monotonicity rather than undermining it: a pump's forward flow only
+    /// ever falls as its own node's trial pressure rises (the compensator
+    /// destroking), and a relief valve's dump only ever rises, both
+    /// reinforcing the same direction every line's own flow already pushes.
+    pub fn step_with_pressure_dependent(&mut self, injections_m3_s: &[f64], pressure_dependent: &[Option<&dyn Fn(f64) -> f64>], density: f64, dyn_visc_pa_s: f64, dt_s: f64) -> f64 {
         let dt = dt_s.max(1e-6);
         let n = self.nodes.len();
         let p_old: Vec<f64> = self.nodes.iter().map(|nd| nd.pressure_pa).collect();
@@ -391,6 +427,9 @@ impl Network {
             for i in 0..n {
                 let residual = |p_i: f64| -> f64 {
                     let mut q = injections_m3_s.get(i).copied().unwrap_or(0.0);
+                    if let Some(Some(f)) = pressure_dependent.get(i) {
+                        q += f(p_i);
+                    }
                     for &li in &self.adjacency[i] {
                         q += Self::node_line_contribution(&self.lines[li], i, p_i, &pressures, density, dyn_visc_pa_s);
                     }
@@ -418,6 +457,19 @@ impl Network {
                 pressures[i] = 0.5 * (lo + hi);
             }
         }
+
+        let mut imbalance_m3 = 0.0;
+        for i in 0..n {
+            let mut q = injections_m3_s.get(i).copied().unwrap_or(0.0);
+            if let Some(Some(f)) = pressure_dependent.get(i) {
+                q += f(pressures[i]);
+            }
+            for &li in &self.adjacency[i] {
+                q += Self::node_line_contribution(&self.lines[li], i, pressures[i], &pressures, density, dyn_visc_pa_s);
+            }
+            imbalance_m3 += q * dt - cap[i] * (pressures[i] - p_old[i]);
+        }
+        self.last_imbalance_m3 = imbalance_m3;
 
         let mut leaked_m3 = 0.0;
         for line in &self.lines {
@@ -511,6 +563,48 @@ mod tests {
             last = p;
         }
         assert!(last > 0.0, "should have pressurised against the return orifice");
+    }
+
+    #[test]
+    fn a_pressure_dependent_injection_keeps_a_stiff_node_off_the_bracket_where_a_frozen_one_pins_it() {
+        // The exact shape of the bug this fix addresses: a huge constant
+        // ("frozen") supply against a tiny outlet on a stiff (small-volume)
+        // node has no root inside the bracket at all, so the solver sits at
+        // `PRESSURE_BRACKET_HI_PA` -- reproducing what pinned
+        // `HYD_GREEN/YELLOW_MANIFOLD_PRESSURE_PSI` to exactly that value
+        // during engine start/TOGA (`Circuit::step`'s own regression test
+        // in `topology.rs` is the real-world version of this). Folding the
+        // same supply in as a pressure-dependent injection that destrokes
+        // to zero by a modest pressure -- a toy compensator curve -- keeps
+        // the node's own residual solvable well inside the bracket.
+        let (density, visc) = props();
+        let huge_supply = 1.0; // m^3/s: wildly more than a 1e-6 m^2 orifice can ever pass
+        let nodes = vec![Node::new(1e-4, 0.0)];
+        let lines = vec![Line::valve(Endpoint::Node(0), Endpoint::Fixed(0.0), 1e-6, 0.7)];
+
+        let mut frozen = Network::new(nodes.clone(), lines.clone());
+        frozen.step(&[huge_supply], density, visc, 0.02);
+        assert_eq!(
+            frozen.nodes[0].pressure_pa, PRESSURE_BRACKET_HI_PA,
+            "sanity check: a frozen constant supply this large really does pin to the bracket ceiling"
+        );
+
+        let mut implicit = Network::new(nodes, lines);
+        // A toy "compensator": full `huge_supply` up to 100 psi, straight
+        // destroke to zero by 200 psi -- deliberately steep, to prove even
+        // a sharp cutoff stays inside the bracket once it is resolved
+        // implicitly rather than frozen.
+        let compensator = |p_i: f64| -> f64 {
+            let full = 100.0 * PSI_PA;
+            let zero = 200.0 * PSI_PA;
+            (huge_supply * (1.0 - (p_i - full) / (zero - full)).clamp(0.0, 1.0)).max(0.0)
+        };
+        let pressure_dependent: [Option<&dyn Fn(f64) -> f64>; 1] = [Some(&compensator)];
+        implicit.step_with_pressure_dependent(&[0.0], &pressure_dependent, density, visc, 0.02);
+        let p = implicit.nodes[0].pressure_pa;
+        assert!(p.is_finite());
+        assert!(p < 200.0 * PSI_PA + 1.0, "the implicit compensator must cap the node near its own destroke curve, not the solver's bracket: {p} Pa");
+        assert!(p > PRESSURE_BRACKET_LO_PA, "must not have undershot either: {p} Pa");
     }
 
     #[test]

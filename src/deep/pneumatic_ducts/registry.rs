@@ -74,8 +74,187 @@ pub fn register(r: &mut Registry) {
     register_wai_duct(r);
     register_engine_start_duct(r);
     register_hyd_reservoir_duct(r);
+    register_ecam_completeness_additions(r);
     register_odls(r);
     register_ecam(r);
+}
+
+/// ECAM completeness (`E:/fbw-debug/ecam/E-AIR-DESIGN.md`, ATA 21 AIR/
+/// PRESS): five independent LRU faults this area did not model before that
+/// pass, each a component that is broken or not with no threshold invented
+/// -- the same shape `fbw/ata24.rs`'s `ELEC_GEN_n_FAULT` uses. `ata` here
+/// is 21 (Air Conditioning/Pressurisation in FlyByWire's own numbering,
+/// which is what these five components physically belong to), a code this
+/// area had not used before (its own module doc: "ATA assignment: 36 ...
+/// and 30"), so `n` starts fresh at 1 with no collision risk.
+fn register_ecam_completeness_additions(r: &mut Registry) {
+    const ATA: u16 = 21;
+    for (n, pack) in [1u16, 2].into_iter().zip([1, 2]) {
+        let comp = format!("21_pneu.pack_{pack}_regulation_train");
+        let fid = failure_id(Area::PneumaticDucts, ATA, n);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} regulation train (bypass valve / water extractor / ram-air-door interlock)"),
+            params: vec![ParamDef { name: "fault".into(), meaning: "the regulation train itself broken, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} regulation train fault"),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.pack_regul_fault".into(),
+            magnitude: "0 healthy .. 1 fully faulted -- a component-broken flag, not a physical quantity".into(),
+            effect: "FlyByWire's own 211800015/016 PACK n REGUL FAULT; distinct from the already-wired FDAC BothChannelsFault (211800009/010) and from the FDAC channel-redundancy bridge (211800022) -- see E-AIR-DESIGN.md".into(),
+        });
+    }
+
+    {
+        let comp = "21_pneu.mixer_unit_press_regulator".to_string();
+        let fid = failure_id(Area::PneumaticDucts, ATA, 3);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Mixer unit pressure regulator".into(),
+            params: vec![ParamDef { name: "fault".into(), meaning: "the regulator failing to hold its own setpoint, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Mixer unit pressure regulator fault".into(),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.mixer_press_regul_fault".into(),
+            magnitude: "0 healthy .. 1 fully faulted".into(),
+            effect: "FlyByWire's own 211800034 MIXER PRESS REGUL FAULT; a380_systems acknowledges this exact real failure mode as an unimplemented TODO (full_digital_agu_controller.rs:287) rather than modelling it, so this is a real, sourced gap this port fills, not an invented one".into(),
+        });
+    }
+
+    for (n, pack) in [4u16, 5].into_iter().zip([1, 2]) {
+        let comp = format!("21_pneu.pack_{pack}_ram_air_door");
+        let fid = failure_id(Area::PneumaticDucts, ATA, n);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} ram-air inlet door"),
+            params: vec![ParamDef { name: "stuck".into(), meaning: "door frozen at whatever position it held when the fault engaged, independent of its own command, 0 healthy .. 1 fully stuck".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} ram-air door stuck"),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.ram_air_door_fault".into(),
+            magnitude: "0 healthy .. 1 stuck -- a component-broken flag; the door's real, already-published position (COND_PACK_n_RAM_AIR_DOOR_POSITION, air_cycle_machine.rs:177) always tracks its own command with no independent failure mode in a380_systems, so this fault is the independent failure mode itself rather than a numeric position-disagree threshold, which nothing sources".into(),
+            effect: "FlyByWire's own 211800037/038 COND RAM AIR n FAULT".into(),
+        });
+    }
+
+    {
+        let comp = "21_pneu.press_manual_control_path".to_string();
+        let fid = failure_id(Area::PneumaticDucts, ATA, 6);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Manual pressurisation control path (altitude/V-S selectors)".into(),
+            params: vec![ParamDef { name: "fault".into(), meaning: "the manual signal path itself broken, distinct from the automatic CPIOM channels, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Manual pressurisation control path fault".into(),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.press_man_ctl_fault".into(),
+            magnitude: "0 healthy .. 1 fully faulted".into(),
+            effect: "FlyByWire's own 213800010 CAB PRESS MAN CTL FAULT; distinct from the already-wired 213800005 AUTO CTL FAULT (the automatic channels)".into(),
+        });
+    }
+
+    {
+        let comp = "21_pneu.cabin_air_extract_valve".to_string();
+        let fid = failure_id(Area::PneumaticDucts, ATA, 7);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Cabin air extract valve (overhead CABIN AIR EXTRACT pushbutton's own valve)".into(),
+            params: vec![ParamDef { name: "fault".into(), meaning: "the valve itself broken, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Cabin air extract valve fault".into(),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.cabin_air_extract_vlv_fault".into(),
+            magnitude: "0 healthy .. 1 fully faulted".into(),
+            effect: "FlyByWire's own 213800018 COND CABIN AIR EXTRACT VLV FAULT; distinct from the FWD/BULK cargo isolation valves, which are cargo-hold ventilation, a different valve".into(),
+        });
+    }
+
+    for (n, pack) in [8u16, 9].into_iter().zip([1, 2]) {
+        let comp = format!("21_pneu.pack_{pack}_air_cycle_machine");
+        let fid = failure_id(Area::PneumaticDucts, ATA, n);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} air cycle machine (ACM)"),
+            params: vec![ParamDef { name: "overheat".into(), meaning: "the ACM's own cooling effectiveness lost, 0 healthy (cools fully to ambient) .. 1 no cooling at all (outlet = hot inlet air)".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} ACM overheat"),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.pack_acm_outlet_temp_c".into(),
+            magnitude: "0 healthy (outlet tracks ambient) .. 1 fully faulted (outlet tracks the pack's real, already-computed inlet temperature, DEEP_PNEU_PACK_n_SUPPLY_TEMPERATURE_C)".into(),
+            effect: "FlyByWire's own 211800013/014 AIR PACK n OVHT; the real trip point (95 C at the pack outlet) is cited in fbw/ata21_22_23.rs, FCOM PRO-ABN-ECAM p.4653 (E-AIR-FCOM.json), not invented -- this failure only degrades the modelled outlet temperature the trigger compares against it".into(),
+        });
+    }
+
+    for p in 1u16..=2 {
+        for v in 1u16..=2 {
+            let n = 10 + (p - 1) * 2 + (v - 1);
+            let comp = format!("21_pneu.pack_{p}_fcv_{v}");
+            let fid = failure_id(Area::PneumaticDucts, ATA, n);
+            r.component(ComponentDef {
+                id: comp.clone(),
+                area: Area::PneumaticDucts,
+                ata: ATA,
+                name: format!("Pack {p} flow control valve (FCV) {v}"),
+                params: vec![ParamDef { name: "fault".into(), meaning: "the valve itself broken (position disagree or its FDAC channels both down), 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+                failures: vec![fid],
+            });
+            r.failure(FailureDef {
+                id: fid,
+                area: Area::PneumaticDucts,
+                ata: ATA,
+                name: format!("Pack {p} FCV {v} fault"),
+                component: comp,
+                model_field: "pneumatic_ducts::live::PneumaticDuctsLive.pack_fcv_fault".into(),
+                magnitude: "0 healthy .. 1 fully faulted -- a component-broken flag, the same shape as ELEC_GEN_n_FAULT in fbw/ata24.rs".into(),
+                effect: format!(
+                    "FlyByWire's own 2118000{} AIR PACK {p} VLV {v} FAULT. The design sheet's plan to bridge FlyByWire's own already-computed FcvFault (full_digital_agu_controller.rs:310-394) is not buildable without adding a write() line in fbw-aircraft, which this worktree's hard rules forbid touching; this is this area's own real FCV component instead, no threshold invented.",
+                    match (p, v) { (1,1) => 17, (1,2) => 18, (2,1) => 19, _ => 20 }
+                ),
+            });
+        }
+    }
 }
 
 /// The IP tap / HP valve / PR (shutoff) valve stage added upstream of the

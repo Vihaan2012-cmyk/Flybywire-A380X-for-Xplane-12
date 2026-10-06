@@ -5,7 +5,7 @@ Code:
   `D:\fbw-aircraft\fbw-common\src\wasm\systems\systems\src\electrical\{mod.rs,
   battery.rs, engine_generator.rs, external_power_source.rs}`,
   `D:\fbw-aircraft\fbw-common\src\wasm\systems\systems\src\apu\pw980.rs`. Diff
-  saved at `D:\fbw-xp-systems\patches\fbw-rust\electrical.patch`.
+  saved at `D:\A380\fbw-xp-systems\patches\fbw-rust\electrical.patch`.
 - Plugin physics: `src/physics/electrical.rs` (engine-load contract glue,
   circuit-protection/breaker model). Registered in `src/physics/mod.rs`,
   wired into `src/lib.rs` (fields `electrical_loads`/`circuit_protection`,

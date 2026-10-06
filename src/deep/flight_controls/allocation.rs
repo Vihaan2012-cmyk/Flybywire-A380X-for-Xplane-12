@@ -70,8 +70,10 @@ impl ComputerHealth {
 
 /// This tick's hydraulic/electric power availability, as fractions (e.g.
 /// from a hydraulic circuit pressure model or an `ElectricMotorPump`); a
-/// source counts as usable above 50% of nominal.
-#[derive(Clone, Copy, Debug)]
+/// source counts as usable above 50% of nominal. `Default` is all-zero (no
+/// power at all), the "dropout"/"nothing available" case the tests below
+/// build off of with `..PowerAvailability::default()`.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PowerAvailability {
     pub green: f64,
     pub yellow: f64,
@@ -90,6 +92,59 @@ impl PowerAvailability {
             PowerSource::Eha => self.eha,
         };
         frac > 0.5
+    }
+}
+
+/// Consecutive ticks a power source must read available (`> 50%`, the same
+/// threshold [`PowerAvailability::available`] itself uses) before
+/// [`PowerDebounce`] reports it available for *mode selection*. Three ticks
+/// is comfortably past `deep::plugin::MAX_DT_S` (0.2 s) worth of a single
+/// glitchy tick (a numerically unstable hydraulic solve during pump
+/// spin-up, or any other one-frame glitch in the upstream `Truth` reading)
+/// while staying well under a second at any real frame rate -- imperceptible
+/// next to how long a real battery/APU/engine start actually takes.
+const POWER_DEBOUNCE_TICKS: u8 = 3;
+
+/// Debounces one power source's `available()` decision against a
+/// single-tick pressure/voltage blip, so a marginal or briefly-wrong
+/// reading can never hand an actuator `Active` authority for even one
+/// tick. This matters because once an actuator is driven `Active` and then
+/// drops back to `Damping`, the surface freezes wherever it got to
+/// (`Damping` applies exactly zero torque at zero rate by design -- a
+/// genuinely unpowered surface must free-float, not spring back), so a
+/// spurious `Active` tick that never gets a chance to servo all the way to
+/// the real command leaves a permanent, wrong position behind with no
+/// restoring force at zero airspeed.
+///
+/// Only gates *mode selection* (`mode_for_surface`). The continuous
+/// fraction (`PowerAvailability.green`/`yellow`/`eha`) still reaches
+/// `FlightControlsLive::pressures` undebounced -- an already-`Active`
+/// actuator's rate limit must track real supply pressure instantly, this
+/// only guards the one-shot decision to grant `Active` in the first place.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PowerDebounce {
+    green_ticks: u8,
+    yellow_ticks: u8,
+    eha_ticks: u8,
+}
+
+impl PowerDebounce {
+    fn step_one(ticks: &mut u8, available_now: bool) -> bool {
+        if available_now {
+            *ticks = ticks.saturating_add(1);
+        } else {
+            *ticks = 0;
+        }
+        *ticks >= POWER_DEBOUNCE_TICKS
+    }
+
+    /// This tick's debounced view of `power`, for `mode_for_surface` only.
+    pub fn step(&mut self, power: &PowerAvailability) -> PowerAvailability {
+        PowerAvailability {
+            green: if Self::step_one(&mut self.green_ticks, power.green > 0.5) { power.green } else { 0.0 },
+            yellow: if Self::step_one(&mut self.yellow_ticks, power.yellow > 0.5) { power.yellow } else { 0.0 },
+            eha: if Self::step_one(&mut self.eha_ticks, power.eha > 0.5) { power.eha } else { 0.0 },
+        }
     }
 }
 
@@ -276,5 +331,39 @@ mod tests {
             let (modes, _) = mode_for_surface(&allocs, &ComputerHealth::all_healthy(), &PowerAvailability::all_available());
             assert_eq!(modes.iter().filter(|&&m| m == ActuatorMode::Active).count(), 1);
         }
+    }
+
+    #[test]
+    fn a_single_glitchy_tick_of_pressure_never_reaches_debounced_availability() {
+        let mut debounce = PowerDebounce::default();
+        let one_tick_spike = PowerAvailability { green: 1.0, yellow: 0.0, eha: 0.0 };
+        let out = debounce.step(&one_tick_spike);
+        assert!(!out.available(PowerSource::Green), "one glitchy tick must not grant Active authority");
+        // The spike ends; a real, sustained loss of pressure follows.
+        let out = debounce.step(&PowerAvailability::default());
+        assert!(!out.available(PowerSource::Green));
+    }
+
+    #[test]
+    fn losing_power_mid_ramp_resets_the_debounce_count() {
+        let mut debounce = PowerDebounce::default();
+        let up = PowerAvailability { green: 1.0, ..PowerAvailability::default() };
+        debounce.step(&up); // 1
+        debounce.step(&up); // 2
+        debounce.step(&PowerAvailability::default()); // dropout resets to 0
+        let out = debounce.step(&up); // 1 again, not 3
+        assert!(!out.available(PowerSource::Green));
+    }
+
+    #[test]
+    fn sustained_power_becomes_available_after_the_debounce_window() {
+        let mut debounce = PowerDebounce::default();
+        let up = PowerAvailability { green: 1.0, ..PowerAvailability::default() };
+        let mut out = debounce.step(&up);
+        for _ in 1..POWER_DEBOUNCE_TICKS {
+            out = debounce.step(&up);
+        }
+        assert!(out.available(PowerSource::Green), "three consecutive healthy ticks must grant availability");
+        assert_eq!(out.green, 1.0, "the granted fraction still carries the real pressure, for rate-limit scaling");
     }
 }

@@ -35,6 +35,17 @@ pub fn gear_deploy(center: f64, left: f64, right: f64, door_center: f64, door_le
 pub const ACF_FLAP_DETENT_DEG: [f64; 6] = [0., 0.01, 8., 17., 26., 32.];
 /// `acf/_slat1_dn_max_deg` = `acf/_slat2_dn_max_deg`.
 pub const ACF_SLAT_MAX_DEG: f64 = 23.;
+/// The converted .acf's slat detents (X-Plane's leading-edge flap fractions,
+/// `acf/_slat1_dn/0..5` = `acf/_slat2_dn/0..5`, acf.rs:735-741). The installed
+/// .acf carries flight_model.cfg's `[FLAPS.2]` leading-edge table (confirmed
+/// from the installed `_slat1_dn/0..5` ratios and `_slat1_dn_max_deg=23.01`),
+/// not the systems' own repeated-degree table: FlyByWire's A380X slats only
+/// ever sit at 0, 20 or 23 physical degrees (sfcc/slats_channel.rs
+/// `demanded_slats_fppu_angle_from_conf`, hydraulic/mod.rs:1756-1760
+/// `SLAT_FPPU_TO_SURFACE_ANGLE_DEGREES`), so those exact values never land in
+/// the table's tiny 20.00-20.02 or 23.00-23.01 sub-steps and the ratio this
+/// produces is the same either way.
+pub const ACF_SLAT_DETENT_DEG: [f64; 6] = [0., 20.00, 20.01, 20.02, 23.00, 23.01];
 
 /// X-Plane's flap ratio for a flap angle: the inverse of X-Plane's detent
 /// table, taking deflection as linear in the ratio between detents. Angles
@@ -53,9 +64,18 @@ pub fn flap_ratio_for_angle(deg: f64, detents: &[f64]) -> f64 {
     1.
 }
 
-/// X-Plane's slat ratio for a slat angle.
+/// X-Plane's slat ratio for a slat angle: the same detent-index inverse as
+/// `flap_ratio_for_angle`, against the slat's own (flatter) detent table.
+/// `slat1_deploy_ratio` is not itself a physical deployment fraction: X-Plane
+/// looks it up BY INDEX into `acf/_slat1_dn`, which already holds the
+/// physical fraction (`ACF_SLAT_DETENT_DEG[i] / ACF_SLAT_MAX_DEG`) at that
+/// index. Scaling linearly by `deg / ACF_SLAT_MAX_DEG` conflated the two
+/// scales: at FlyByWire's first slat stop (20 deg, detent index 1 of 5, the
+/// correct ratio is 0.2) the old code wrote `20./23. = 0.87`, landing between
+/// detents 4 and 5 (both 23 deg, ratio 1.0) and reporting the slats as fully
+/// deployed at their very first, partial extension.
 pub fn slat_ratio_for_angle(deg: f64) -> f64 {
-    (deg / ACF_SLAT_MAX_DEG).clamp(0., 1.)
+    flap_ratio_for_angle(deg, &ACF_SLAT_DETENT_DEG)
 }
 
 /// FlyByWire's steering actuators' travel (a380_systems hydraulic/mod.rs:1792,
@@ -157,8 +177,16 @@ mod tests {
     #[test]
     fn slat_angles_are_a_share_of_the_acf_maximum() {
         // hydraulic/mod.rs:1744-1745: slats 20 then 23 degrees.
-        assert!((slat_ratio_for_angle(20.) - 20. / 23.).abs() < 1e-12);
-        assert_eq!(slat_ratio_for_angle(23.), 1.);
+        // Detent index 1 of 5 (FlyByWire's first real slat stop, 20 deg):
+        // ratio 0.2, not 20./23. (the old, buggy linear scale).
+        assert!((slat_ratio_for_angle(20.) - 0.2).abs() < 1e-12);
+        // Mid-transit between 0 deg (index 0) and 20 deg (index 1).
+        assert!((slat_ratio_for_angle(10.) - 0.1).abs() < 1e-12);
+        // Detent index 3 (20 deg) to index 4 (23 deg, ratio 0.8): equivalent
+        // to full deployment since index 4 and 5 are both 23 deg (ratio 1.0)
+        // in acf/_slat1_dn, so X-Plane interpolates flat from here to 1.0.
+        assert!((slat_ratio_for_angle(23.) - 0.8).abs() < 1e-12);
+        assert_eq!(slat_ratio_for_angle(24.), 1.);
         assert_eq!(slat_ratio_for_angle(-1.), 0.);
     }
 

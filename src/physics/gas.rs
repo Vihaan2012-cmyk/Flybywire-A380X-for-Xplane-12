@@ -93,13 +93,39 @@ pub fn o2_mass_flow_kg_s(standard_liters_per_min: f64) -> f64 {
 /// AC 61-107, "physiological training"), not a specific A380 regulator
 /// calibration curve (proprietary), flagged as such.
 const FULL_O2_ALTITUDE_FT: f64 = 34_000.;
+
+/// The ramp both diluter-demand functions below share: how far
+/// `cabin_altitude_ft` sits through the 0-`FULL_O2_ALTITUDE_FT` range,
+/// clamped at the pressure-breathing changeover.
+fn full_o2_ramp_ratio(cabin_altitude_ft: f64) -> f64 {
+    (cabin_altitude_ft.max(0.) / FULL_O2_ALTITUDE_FT).clamp(0., 1.)
+}
+
 pub fn diluter_demand_o2_fraction(cabin_altitude_ft: f64) -> f64 {
     const SEA_LEVEL_O2_FRACTION: f64 = 0.21;
     if cabin_altitude_ft <= 0. {
         return SEA_LEVEL_O2_FRACTION;
     }
-    let ratio = (cabin_altitude_ft / FULL_O2_ALTITUDE_FT).clamp(0., 1.);
-    SEA_LEVEL_O2_FRACTION + (1. - SEA_LEVEL_O2_FRACTION) * ratio
+    SEA_LEVEL_O2_FRACTION + (1. - SEA_LEVEL_O2_FRACTION) * full_o2_ramp_ratio(cabin_altitude_ft)
+}
+
+/// (W209) How much of the altitude-equivalent gap a diluter-demand
+/// regulator closes for the person wearing the mask: 0 at/below sea level
+/// (no gap to close), ramping to 1.0 (fully compensated) by
+/// `FULL_O2_ALTITUDE_FT`, the same ramp [`diluter_demand_o2_fraction`]
+/// mixes its oxygen blend against. Used by `oxygen.rs` to derive X-Plane's
+/// `sim/cockpit2/oxygen/indicators/pilot_felt_altitude_ft` -- the SDK's own
+/// doc for that dataref: "pressure altitude felt by the pilot's body ...
+/// Will be lower than cabin pressure altitude when on oxygen. This is what
+/// triggers the hypoxia black-out effect" -- from the real cabin altitude
+/// `oxygen.rs` already reads, instead of leaving it to X-Plane's own
+/// independent stock pressurization schedule. Not a claim that 100% oxygen
+/// fully protects above the pressure-breathing regime (it does not, in
+/// reality); this stops at the same ramp `diluter_demand_o2_fraction` does,
+/// a simplification flagged like the others in this module's and
+/// `oxygen.rs`'s own doc comments.
+pub fn diluter_demand_protection_fraction(cabin_altitude_ft: f64) -> f64 {
+    full_o2_ramp_ratio(cabin_altitude_ft)
 }
 
 #[cfg(test)]
@@ -154,5 +180,14 @@ mod tests {
         assert_eq!(diluter_demand_o2_fraction(40_000.), 1.0); // clamped
         let mid = diluter_demand_o2_fraction(17_000.);
         assert!(mid > 0.21 && mid < 1.0);
+    }
+
+    #[test]
+    fn diluter_demand_protection_ramps_from_none_to_full() {
+        assert_eq!(diluter_demand_protection_fraction(0.), 0.);
+        assert_eq!(diluter_demand_protection_fraction(34_000.), 1.0);
+        assert_eq!(diluter_demand_protection_fraction(40_000.), 1.0); // clamped
+        let mid = diluter_demand_protection_fraction(17_000.);
+        assert!(mid > 0. && mid < 1.0);
     }
 }

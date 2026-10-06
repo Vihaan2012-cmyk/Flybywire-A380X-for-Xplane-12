@@ -1,6 +1,6 @@
 # Wiring -- progress
 
-Directory: `D:\fbw-xp-systems\src\deep\wiring\`. Self-contained (no dependency on
+Directory: `D:\A380\fbw-xp-systems\src\deep\wiring\`. Self-contained (no dependency on
 `crate::breakers`/`crate::circuits`/`crate::physics`/other `deep::*` areas' code --
 this push's hard rule 2); `breakers.rs`/`circuits.rs` were read in full for context
 (real bus assignments, consumer descriptions, the 265-breaker catalogue's own ids)

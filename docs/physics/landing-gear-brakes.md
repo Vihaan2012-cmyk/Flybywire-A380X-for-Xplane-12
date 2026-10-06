@@ -5,7 +5,7 @@ autobrake/BTV, nose and body wheel steering, LGCIU/proximity sensors) against
 FlyByWire's own `a380_systems` crate (`D:\fbw-aircraft\fbw-a380x\...\hydraulic\
 mod.rs`, `landing_gear.rs`, `nose_steering.rs`, `brake.rs`, `brake_circuit.rs`,
 `autobrakes.rs`), which the plugin runs unmodified as a path dependency
-(`D:\fbw-xp-systems\Cargo.toml`).
+(`D:\A380\fbw-xp-systems\Cargo.toml`).
 
 ## What is already real (audited, no fix needed)
 

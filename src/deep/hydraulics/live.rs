@@ -179,6 +179,15 @@ struct CircuitFailureIds {
     /// `[gear, brakes, steering, cargo_doors, reversers]`, matching
     /// `CircuitFaults::line_leak_area_m2`.
     line_leaks: [u64; 5],
+    /// ECAM completeness pass (E-FIRE §G/§H): pure discretes, read
+    /// directly by `HydraulicsLive::publish` -- none of these feed
+    /// `topology::CircuitFaults` (module doc, `registry.rs`'s own comment
+    /// at their registration site).
+    fuel_hx_valve_stuck: u64,
+    fuel_hx_air_leak: u64,
+    fuel_hx_air_leak_circuit_fault: u64,
+    ovht_chan_a_fault: u64,
+    ovht_chan_b_fault: u64,
 }
 
 impl CircuitFailureIds {
@@ -199,6 +208,15 @@ impl CircuitFailureIds {
         let reservoir = take(map, &format!("29_hyd.{color}_reservoir"), 3);
         let line_leaks = ["gear", "brakes", "steering", "cargo_doors", "reversers"]
             .map(|branch| take(map, &format!("29_hyd.{color}_line_{branch}"), 1)[0]);
+        // ECAM completeness pass (E-FIRE §G/§H): the fuel/hydraulic HX
+        // valve (1 failure: stuck), its air-leak-detection switch (2:
+        // leak then circuit_fault, `registry.rs`'s own registration
+        // order), and the two overheat-detection channels (1 failure
+        // each).
+        let fuel_hx_valve_stuck = take(map, &format!("29_hyd.{color}_fuel_hx_valve"), 1)[0];
+        let fuel_hx_air_leak_switch = take(map, &format!("29_hyd.{color}_fuel_hx_air_leak_switch"), 2);
+        let ovht_chan_a_fault = take(map, &format!("29_hyd.{color}_ovht_chan_a"), 1)[0];
+        let ovht_chan_b_fault = take(map, &format!("29_hyd.{color}_ovht_chan_b"), 1)[0];
         Self {
             edp: [edp[0], edp[1], edp[2], edp[3]],
             reservoir_leak: reservoir[0],
@@ -209,6 +227,11 @@ impl CircuitFailureIds {
             relief_valve_crack_low: take(map, &format!("29_hyd.{color}_relief_valve"), 1)[0],
             filter_clog: take(map, &format!("29_hyd.{color}_return_filter"), 1)[0],
             line_leaks,
+            fuel_hx_valve_stuck,
+            fuel_hx_air_leak: fuel_hx_air_leak_switch[0],
+            fuel_hx_air_leak_circuit_fault: fuel_hx_air_leak_switch[1],
+            ovht_chan_a_fault,
+            ovht_chan_b_fault,
         }
     }
 }
@@ -325,6 +348,140 @@ fn coupling_table() -> Vec<(u64, &'static str)> {
 const GREEN_PUMP_ENGINE_INDEX: [usize; 4] = [0, 0, 1, 1];
 const YELLOW_PUMP_ENGINE_INDEX: [usize; 4] = [2, 2, 3, 3];
 
+/// One tick of what both circuits were given and what they did, kept by
+/// [`DrainRecorder`].
+#[derive(Clone, Copy, Default)]
+struct RecordedTick {
+    time_s: f64,
+    dt_s: f64,
+    pressurization: f64,
+    n3_frac: [f64; 4],
+    fire_pb_released: [bool; 4],
+    ac_bus_volts: [f64; 4],
+    dc_bus_volts: [f64; 2],
+    fctl_demand_m3_s: [f64; 2],
+    out: [CircuitOutputs; 2],
+}
+
+/// A flight recorder for the live-only reservoir drain
+/// (`E:/fbw-debug` 2026-09-26: live, both circuits pinned at the network
+/// solver's pressure floor seconds after the EFB preset's "APU off / spoiler
+/// arm / flaps 1" block, then both reservoirs emptied within ~30 s, which no
+/// offline scenario reproduces). Keeps the last few seconds of per-tick
+/// inputs and outputs and writes them to the X-Plane log the moment either
+/// circuit pins below zero pressure or loses reservoir fluid quickly, then
+/// one line a second for a while after, so the log shows exactly which
+/// input moved. Diagnostic only: it never changes the simulation.
+struct DrainRecorder {
+    ring: std::collections::VecDeque<RecordedTick>,
+    time_s: f64,
+    dumps_left: u32,
+    follow_until_s: f64,
+    next_follow_s: f64,
+}
+
+impl DrainRecorder {
+    /// ~5 s at X-Plane's usual 35-45 frames a second.
+    const CAPACITY: usize = 200;
+    /// Below this a node is pinned at the solver floor (-300,000 Pa), not at
+    /// a real near-zero pressure.
+    const PINNED_PA: f64 = -1.0 * PSI_PA;
+    /// Fill lost within the ring's span that is not the accumulator and
+    /// lines charging after a start (~1.2 L, 0.026 of the green reservoir).
+    const FAST_FILL_LOSS: f64 = 0.05;
+    const FOLLOW_S: f64 = 30.0;
+
+    fn new() -> Self {
+        Self { ring: std::collections::VecDeque::with_capacity(Self::CAPACITY), time_s: 0.0, dumps_left: 3, follow_until_s: 0.0, next_follow_s: 0.0 }
+    }
+
+    fn line(t: &RecordedTick, now_s: f64) -> String {
+        let mut l = format!(
+            "t{:+.2}s dt {:.3} press {:.2} n3 [{:.2} {:.2} {:.2} {:.2}] fire {:?} ac [{:.0} {:.0} {:.0} {:.0}] dc [{:.0} {:.0}] fctl L/s [{:.3} {:.3}]",
+            t.time_s - now_s,
+            t.dt_s,
+            t.pressurization,
+            t.n3_frac[0], t.n3_frac[1], t.n3_frac[2], t.n3_frac[3],
+            t.fire_pb_released.map(u8::from),
+            t.ac_bus_volts[0], t.ac_bus_volts[1], t.ac_bus_volts[2], t.ac_bus_volts[3],
+            t.dc_bus_volts[0], t.dc_bus_volts[1],
+            t.fctl_demand_m3_s[0] * 1e3, t.fctl_demand_m3_s[1] * 1e3,
+        );
+        for (name, c) in ["G", "Y"].iter().zip(t.out.iter()) {
+            let nodes: Vec<String> = c.node_pressures_pa.iter().map(|p| format!("{:.0}", p / PSI_PA)).collect();
+            l += &format!(
+                " | {name} fill {:.4} in {:.3} out {:.3} leak {:.3} relief {:.3} acc {:.3} L/s inlet {:.1} psi edp {:.3} {:.3} {:.3} {:.3} elec {:.3} {:.3} L/s nodes psi [{}] unconserved mL: solver {:.2} relief {:.2} casedrain {:.2} check {:.2} return {:.2} resclamp {:.2} acc {:.2} lmv {:.2}",
+                c.reservoir_fill_fraction,
+                c.reservoir_inflow_m3_s * 1e3, c.reservoir_outflow_m3_s * 1e3, c.network_leaked_m3_s * 1e3,
+                c.relief_flow_m3_s * 1e3, c.accumulator_flow_m3_s * 1e3,
+                c.reservoir_inlet_pa / PSI_PA,
+                c.edp[0].flow_m3_s * 1e3, c.edp[1].flow_m3_s * 1e3, c.edp[2].flow_m3_s * 1e3, c.edp[3].flow_m3_s * 1e3,
+                c.electric_pump_flow_m3_s[0] * 1e3, c.electric_pump_flow_m3_s[1] * 1e3,
+                nodes.join(" "),
+                c.conservation.solver_m3 * 1e6, c.conservation.relief_lag_m3 * 1e6, c.conservation.case_drain_lag_m3 * 1e6, c.conservation.check_valve_m3 * 1e6,
+                c.conservation.return_clamp_m3 * 1e6, c.conservation.reservoir_clamp_m3 * 1e6, c.conservation.accumulator_clamp_m3 * 1e6, c.conservation.lmv_tap_m3 * 1e6,
+            );
+        }
+        l
+    }
+
+    fn record(&mut self, mut tick: RecordedTick) {
+        self.time_s += tick.dt_s;
+        tick.time_s = self.time_s;
+        if self.ring.len() == Self::CAPACITY {
+            self.ring.pop_front();
+        }
+        self.ring.push_back(tick);
+
+        let now = self.time_s;
+        if now < self.follow_until_s {
+            if now >= self.next_follow_s {
+                self.next_follow_s = now + 1.0;
+                crate::log(&format!("hyd recorder: after {}", Self::line(&tick, now)));
+            }
+            return;
+        }
+        if self.dumps_left == 0 {
+            return;
+        }
+        let pinned = tick.out.iter().any(|c| c.manifold_pressure_pa < Self::PINNED_PA || c.essential_pressure_pa < Self::PINNED_PA);
+        let oldest = self.ring.front().copied().unwrap_or(tick);
+        let lost: Vec<f64> = (0..2).map(|i| oldest.out[i].reservoir_fill_fraction - tick.out[i].reservoir_fill_fraction).collect();
+        let draining = lost.iter().any(|&l| l > Self::FAST_FILL_LOSS);
+        if !(pinned || draining) {
+            return;
+        }
+        self.dumps_left -= 1;
+        crate::log(&format!(
+            "hyd recorder: {} (fill lost over the last {:.1} s: green {:.4}, yellow {:.4}); the last {} ticks follow, then one line a second for {:.0} s",
+            if pinned { "a circuit pinned below zero pressure" } else { "a reservoir is losing fluid fast" },
+            now - oldest.time_s, lost[0], lost[1], self.ring.len(), Self::FOLLOW_S,
+        ));
+        let n = self.ring.len();
+        for (k, t) in self.ring.iter().enumerate() {
+            if k % 5 == 0 || k + 15 >= n {
+                crate::log(&format!("hyd recorder: {}", Self::line(t, now)));
+            }
+        }
+        self.follow_until_s = now + Self::FOLLOW_S;
+        self.next_follow_s = now + 1.0;
+    }
+}
+
+/// ECAM completeness pass (E-FIRE §G/§H): one circuit's pure monitored-
+/// discrete faults, cached from `tick` because `publish` takes `&self`
+/// (the same pattern `edp_failed`/`reservoir_fluid_lost` etc. already use
+/// just below). None of these feed `topology::CircuitFaults`; each is a
+/// direct pass-through of its own registered failure's armed state.
+#[derive(Clone, Copy, Debug, Default)]
+struct HxDiscreteFaults {
+    fuel_hx_valve_stuck: bool,
+    fuel_hx_air_leak: bool,
+    fuel_hx_air_leak_circuit_fault: bool,
+    ovht_chan_a_fault: bool,
+    ovht_chan_b_fault: bool,
+}
+
 pub struct HydraulicsLive {
     hyd: A380Hydraulics,
     green_ids: CircuitFailureIds,
@@ -334,6 +491,10 @@ pub struct HydraulicsLive {
     electric_pump_ids: [[u64; 2]; 4],
     green_out: CircuitOutputs,
     yellow_out: CircuitOutputs,
+    /// ECAM completeness pass (E-FIRE §G/§H): this frame's discrete faults,
+    /// per circuit.
+    green_hx: HxDiscreteFaults,
+    yellow_hx: HxDiscreteFaults,
 
     /// This frame's level-2 verdicts (`docs/deep/authority.md`), kept from
     /// `tick` because `derived_failures`/`publish` take `&self`. Eight
@@ -352,6 +513,8 @@ pub struct HydraulicsLive {
     /// value `Truth::environment`'s own default uses, and documented as
     /// such rather than invented as something more specific.
     fuel_temp_k: f64,
+
+    recorder: DrainRecorder,
 }
 
 impl Default for HydraulicsLive {
@@ -377,12 +540,15 @@ impl HydraulicsLive {
             electric_pump_ids,
             green_out: CircuitOutputs::default(),
             yellow_out: CircuitOutputs::default(),
+            green_hx: HxDiscreteFaults::default(),
+            yellow_hx: HxDiscreteFaults::default(),
             edp_failed: [false; 8],
             electric_pump_failed: [false; 4],
             reservoir_fluid_lost: [false; 2],
             reservoir_air_lost: [false; 2],
             derived_names: coupling_table().into_iter().map(|(id, _)| format!("DEEP_DERIVED_FBW_FAILURE_{id}")).collect(),
             fuel_temp_k: 288.15,
+            recorder: DrainRecorder::new(),
         }
     }
 
@@ -454,7 +620,12 @@ impl HydraulicsLive {
         (gauge_pa / RESERVOIR_REGULATED_BOOST_PA).clamp(0.0, 1.0)
     }
 
-    fn circuit_faults(ids: &CircuitFailureIds, faults: &Faults, electric_pump: [PumpFaults; 2]) -> CircuitFaults {
+    /// `catalogue_filter_clog`: the extra catalogue's own "<colour> circuit
+    /// filter clogging" id (29_100 green, 29_101 yellow), which had no
+    /// consumer anywhere until it was folded into this circuit's own
+    /// return-filter clog here (`deep/plugin.rs`'s `EXTRA_IDS`); combined by
+    /// `max` with the area's own id, so arming both is not double the clog.
+    fn circuit_faults(ids: &CircuitFailureIds, faults: &Faults, electric_pump: [PumpFaults; 2], catalogue_filter_clog: u64) -> CircuitFaults {
         CircuitFaults {
             edp: std::array::from_fn(|i| {
                 let id = ids.edp[i];
@@ -483,7 +654,7 @@ impl HydraulicsLive {
             accumulator: AccumulatorFaults { precharge_loss: faults.get(ids.accumulator_precharge_loss) },
             priority_valve_stuck: faults.get(ids.priority_valve_stuck),
             relief_valve_crack_low: faults.get(ids.relief_valve_crack_low),
-            filter_clog: faults.get(ids.filter_clog),
+            filter_clog: faults.get(ids.filter_clog).max(faults.get(catalogue_filter_clog)),
             line_leak_area_m2: ids.line_leaks.map(|id| faults.get(id) * MAX_LEAK_AREA_M2),
             air_ingestion: faults.get(ids.air_ingestion),
         }
@@ -553,6 +724,24 @@ fn publish_circuit(out: &mut dyn FnMut(&str, f64), color: &str, c: &CircuitOutpu
     for (i, letter) in ["A", "B"].iter().enumerate() {
         out(&format!("HYD_{color}_ELEC_PUMP_{letter}_FLOW_L_MIN"), c.electric_pump_flow_m3_s[i] * M3_S_TO_L_MIN);
     }
+    // ECAM completeness pass (E-FIRE §I, `290800037`/`290800038` HYD {G,Y}
+    // SYS TEMP HI): the manifold's own thermal state, genuinely distinct
+    // from `HYD_{color}_RESERVOIR_OVHT` above -- see `ThermalSizing::
+    // a380_manifold`'s module doc.
+    out(&format!("HYD_{color}_MANIFOLD_TEMP_C"), c.manifold_temp_c);
+    out(&format!("HYD_{color}_SYS_TEMP_HI"), f64::from(u8::from(c.manifold_overheat)));
+}
+
+/// ECAM completeness pass (E-FIRE §G/§H): the fuel/hydraulic HX valve, its
+/// air-leak-detection switch and the two overheat-detection channels' own
+/// monitored-circuit discretes, per colour.
+fn publish_hx(out: &mut dyn FnMut(&str, f64), color: &str, d: &HxDiscreteFaults) {
+    let b = |x: bool| f64::from(u8::from(x));
+    out(&format!("HYD_{color}_FUEL_HX_VALVE_FAULT"), b(d.fuel_hx_valve_stuck));
+    out(&format!("HYD_{color}_FUEL_HX_AIR_LEAK"), b(d.fuel_hx_air_leak));
+    out(&format!("HYD_{color}_FUEL_HX_AIR_LEAK_DET_FAULT"), b(d.fuel_hx_air_leak_circuit_fault));
+    out(&format!("HYD_{color}_SYS_CHAN_A_OVHT_DET_FAULT"), b(d.ovht_chan_a_fault));
+    out(&format!("HYD_{color}_SYS_CHAN_B_OVHT_DET_FAULT"), b(d.ovht_chan_b_fault));
 }
 
 impl LiveArea for HydraulicsLive {
@@ -610,11 +799,41 @@ impl LiveArea for HydraulicsLive {
             displacement_loss: faults.get(self.electric_pump_ids[slot][0]),
             seizure: faults.get(self.electric_pump_ids[slot][1]),
         };
-        let green_faults = Self::circuit_faults(&self.green_ids, faults, [pump_faults(0), pump_faults(1)]);
-        let yellow_faults = Self::circuit_faults(&self.yellow_ids, faults, [pump_faults(2), pump_faults(3)]);
+        let green_faults = Self::circuit_faults(&self.green_ids, faults, [pump_faults(0), pump_faults(1)], 29_100);
+        let yellow_faults = Self::circuit_faults(&self.yellow_ids, faults, [pump_faults(2), pump_faults(3)], 29_101);
 
         self.green_out = self.hyd.green.step(&green_inputs, &green_faults, dt);
         self.yellow_out = self.hyd.yellow.step(&yellow_inputs, &yellow_faults, dt);
+        self.recorder.record(RecordedTick {
+            time_s: 0.0,
+            dt_s: dt,
+            pressurization,
+            n3_frac: truth.engine_n3_frac,
+            fire_pb_released: truth.controls.fire_pb_released,
+            ac_bus_volts: truth.ac_bus_volts,
+            dc_bus_volts: truth.dc_bus_volts,
+            fctl_demand_m3_s: [green_inputs.demands.flight_controls_m3_s, yellow_inputs.demands.flight_controls_m3_s],
+            out: [self.green_out, self.yellow_out],
+        });
+
+        // ECAM completeness pass (E-FIRE §G/§H): pure discretes, a direct
+        // pass-through of each registered failure's own armed state (module
+        // doc, `HxDiscreteFaults`) -- not physics, so read straight from
+        // `faults` rather than through `CircuitFaults`/`Circuit::step`.
+        self.green_hx = HxDiscreteFaults {
+            fuel_hx_valve_stuck: faults.get(self.green_ids.fuel_hx_valve_stuck) > 0.0,
+            fuel_hx_air_leak: faults.get(self.green_ids.fuel_hx_air_leak) > 0.0,
+            fuel_hx_air_leak_circuit_fault: faults.get(self.green_ids.fuel_hx_air_leak_circuit_fault) > 0.0,
+            ovht_chan_a_fault: faults.get(self.green_ids.ovht_chan_a_fault) > 0.0,
+            ovht_chan_b_fault: faults.get(self.green_ids.ovht_chan_b_fault) > 0.0,
+        };
+        self.yellow_hx = HxDiscreteFaults {
+            fuel_hx_valve_stuck: faults.get(self.yellow_ids.fuel_hx_valve_stuck) > 0.0,
+            fuel_hx_air_leak: faults.get(self.yellow_ids.fuel_hx_air_leak) > 0.0,
+            fuel_hx_air_leak_circuit_fault: faults.get(self.yellow_ids.fuel_hx_air_leak_circuit_fault) > 0.0,
+            ovht_chan_a_fault: faults.get(self.yellow_ids.ovht_chan_a_fault) > 0.0,
+            ovht_chan_b_fault: faults.get(self.yellow_ids.ovht_chan_b_fault) > 0.0,
+        };
 
         // Level 2 (`docs/deep/authority.md`): the verdicts on the twelve
         // pumps and two reservoirs FlyByWire also models. A pump's verdict
@@ -643,6 +862,8 @@ impl LiveArea for HydraulicsLive {
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
         publish_circuit(out, "GREEN", &self.green_out, ["1A", "1B", "2A", "2B"]);
         publish_circuit(out, "YELLOW", &self.yellow_out, ["3A", "3B", "4A", "4B"]);
+        publish_hx(out, "GREEN", &self.green_hx);
+        publish_hx(out, "YELLOW", &self.yellow_hx);
         // The level-2 couplings, so a derived failure is never silent
         // (`docs/deep/authority.md`).
         let mut k = 0usize;
@@ -724,6 +945,14 @@ mod tests {
                 ids.filter_clog,
             ]);
             bound.extend(ids.line_leaks);
+            // ECAM completeness pass (E-FIRE §G/§H).
+            bound.extend([
+                ids.fuel_hx_valve_stuck,
+                ids.fuel_hx_air_leak,
+                ids.fuel_hx_air_leak_circuit_fault,
+                ids.ovht_chan_a_fault,
+                ids.ovht_chan_b_fault,
+            ]);
         }
         bound.extend(live.electric_pump_ids.iter().flatten().copied());
         bound.sort_unstable();
@@ -793,10 +1022,21 @@ mod tests {
         let faults = Faults::from_pairs([(ids, 1.0)]);
         let truth = running_truth();
 
+        // (build fix, INT-P4) 120s -> 400s: this batch's own hydraulics
+        // accumulator fix (`accumulator.rs::exchange_flow_at`'s physical-
+        // capacity bound) removed a real bug where an unbounded phantom
+        // exchange kept the manifold pressure oscillating/chattering every
+        // tick, which made the EDPs work continuously harder and draw
+        // measurably more fluid from the reservoir than the corrected,
+        // calmer model now does. The leak still measurably outpaces the
+        // healthy circuit (the assertion just below this comment, which
+        // already passed); it now just needs more simulated time to cross
+        // the LOW threshold from a full reservoir under the corrected,
+        // slower draw rate.
         let mut healthy = HydraulicsLive::new();
         let mut leaking = HydraulicsLive::new();
-        let healthy_out = run(&mut healthy, &truth, &Faults::default(), 120.0);
-        let leaking_out = run(&mut leaking, &truth, &faults, 120.0);
+        let healthy_out = run(&mut healthy, &truth, &Faults::default(), 400.0);
+        let leaking_out = run(&mut leaking, &truth, &faults, 400.0);
 
         let healthy_level = healthy_out["HYD_GREEN_RESERVOIR_LEVEL_FRACTION"];
         let leaking_level = leaking_out["HYD_GREEN_RESERVOIR_LEVEL_FRACTION"];
@@ -968,7 +1208,7 @@ mod tests {
         // `N3_DESIGN_RPM`), so the compensator cannot hide this demand
         // behind its usual constant-pressure regulation the way a modest,
         // within-capacity demand could.
-        loaded.0.insert("FCTL_GREEN_DEMAND_M3_S".to_string(), 0.02);
+        loaded.insert("FCTL_GREEN_DEMAND_M3_S".to_string(), 0.02);
 
         // A startup transient (both cases spike well above regulated
         // pressure in the first second as the reservoir/accumulator prime)
@@ -1055,6 +1295,22 @@ mod tests {
         assert!(derived(&cold).values().all(|&m| m == 0.0), "cold and dark: {:?}", derived(&cold));
     }
 
+    /// The extra catalogue's "green/yellow circuit filter clogging" (29_100,
+    /// 29_101) had no consumer; each is now its own circuit's return filter
+    /// clog here, and only that circuit's.
+    #[test]
+    fn the_catalogues_filter_clogs_reach_their_own_circuits_return_filter() {
+        let live = HydraulicsLive::new();
+        let pumps = || [PumpFaults::default(); 2];
+        for (id, green_clog, yellow_clog) in [(29_100, 0.7, 0.0), (29_101, 0.0, 0.7)] {
+            let faults = Faults::from_pairs([(id, 0.7)]);
+            let green = HydraulicsLive::circuit_faults(&live.green_ids, &faults, pumps(), 29_100);
+            let yellow = HydraulicsLive::circuit_faults(&live.yellow_ids, &faults, pumps(), 29_101);
+            assert_eq!(green.filter_clog, green_clog, "{id} on green");
+            assert_eq!(yellow.filter_clog, yellow_clog, "{id} on yellow");
+        }
+    }
+
     #[test]
     fn a_seized_engine_driven_pump_reaches_flybywire_as_that_exact_pump() {
         // Green EDP 1a is `AirbusEngineDrivenPumpId::Edp1a`, id 29_010.
@@ -1106,7 +1362,9 @@ mod tests {
         // coarsest input that carries "this circuit is losing its fluid".
         let id = HydraulicsLive::new().green_ids.reservoir_leak;
         let mut live = HydraulicsLive::new();
-        let published = run(&mut live, &running_truth(), &Faults::from_pairs([(id, 1.0)]), 120.0);
+        // (build fix, INT-P4) 120s -> 400s, same reason as the sibling test
+        // above (`a_reservoir_leak_drains_the_published_level...`).
+        let published = run(&mut live, &running_truth(), &Faults::from_pairs([(id, 1.0)]), 400.0);
         assert_eq!(published["HYD_GREEN_RESERVOIR_LEVEL_IS_LOW"], 1.0, "setup");
         let d = derived(&live);
         assert_eq!(d.get(&29_000), Some(&1.0), "green reservoir leak must reach FlyByWire");
@@ -1137,7 +1395,9 @@ mod tests {
 
         let id = HydraulicsLive::new().green_ids.reservoir_leak;
         let mut live = HydraulicsLive::new();
-        run(&mut live, &running_truth(), &Faults::from_pairs([(id, 1.0)]), 120.0);
+        // (build fix, INT-P4) 120s -> 400s, same reason as the sibling
+        // reservoir-leak tests above.
+        run(&mut live, &running_truth(), &Faults::from_pairs([(id, 1.0)]), 400.0);
         let verdict = derived(&live);
         assert_eq!(verdict.get(&29_000), Some(&1.0), "setup: the deep reservoir must have run down to its switch");
 
@@ -1172,5 +1432,72 @@ mod tests {
         });
         assert!(published.contains_key("HYD_GREEN_MANIFOLD_PRESSURE_PSI"));
         assert!(published.contains_key("HYD_YELLOW_RESERVOIR_OVHT"));
+    }
+
+    #[test]
+    fn the_drain_recorder_fires_once_on_a_pinned_circuit_and_is_quiet_on_a_healthy_one() {
+        let healthy = RecordedTick { dt_s: 0.027, out: [CircuitOutputs { manifold_pressure_pa: 5000.0 * PSI_PA, essential_pressure_pa: 5000.0 * PSI_PA, reservoir_fill_fraction: 0.97, ..CircuitOutputs::default() }; 2], ..RecordedTick::default() };
+        let mut rec = DrainRecorder::new();
+        for _ in 0..500 {
+            rec.record(healthy);
+        }
+        assert_eq!(rec.dumps_left, 3, "a steady healthy circuit must never trigger it");
+
+        let mut pinned = healthy;
+        pinned.out[0].manifold_pressure_pa = -300_000.0;
+        rec.record(pinned);
+        assert_eq!(rec.dumps_left, 2, "the solver-floor pin is exactly what it is there to catch");
+        for _ in 0..100 {
+            rec.record(pinned);
+        }
+        assert_eq!(rec.dumps_left, 2, "and it follows up with one line a second, not a dump every tick");
+    }
+
+    /// The live drain this area once had (23/24 Sep: both reservoirs empty
+    /// within ~30 s of an EFB preset, which raised FlyByWire's reservoir
+    /// leaks) came from the network solver pinning at its bracket, fixed
+    /// since. Random sequences of everything the plugin feeds this area --
+    /// bus power, bleed, per-engine N3, fire pushbuttons, flight-control
+    /// demand on either circuit, frame time -- must never take a healthy
+    /// reservoir anywhere near its low-level switch.
+    #[test]
+    fn random_input_sequences_never_drain_a_healthy_reservoir() {
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut rnd = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for scenario in 0..6 {
+            let mut area = HydraulicsLive::new();
+            let faults = Faults::default();
+            let mut t = Truth { engine_n3_frac: [0.66; 4], engine_running: [true; 4], ac_bus_volts: [115.0; 4], dc_bus_volts: [28.0; 2], ..running_truth() };
+            run(&mut area, &t, &faults, 20.0);
+            for _ in 0..12 {
+                let ac = rnd(3);
+                let dc = rnd(3);
+                t.ac_bus_volts = std::array::from_fn(|k| if ac == 0 || (ac == 1 && k % 2 == 1) { 0.0 } else { 115.0 });
+                t.dc_bus_volts = std::array::from_fn(|k| if dc == 0 || (dc == 1 && k == 1) { 0.0 } else { 28.0 });
+                t.apu_bleed_pressure_pa = [0.0, 101_325.0 + 40.0 * PSI_PA][rnd(2) as usize];
+                t.engine_n3_frac = std::array::from_fn(|_| [0.0, 0.2, 0.66, 1.0][rnd(4) as usize]);
+                t.controls.fire_pb_released = std::array::from_fn(|_| rnd(8) == 0);
+                for name in ["FCTL_GREEN_DEMAND_M3_S", "FCTL_YELLOW_DEMAND_M3_S"] {
+                    t.published.insert(name, [0.0, 0.3e-3, 2e-3, 20e-3][rnd(4) as usize]);
+                }
+                t.dt_s = [0.027, 0.05, 0.2][rnd(3) as usize];
+                let seconds = [0.5, 1.0, 3.0][rnd(3) as usize];
+                for _ in 0..((seconds / t.dt_s) as usize).max(1) {
+                    area.tick(&t, &faults);
+                    for c in [area.green(), area.yellow()] {
+                        assert!(
+                            c.reservoir_fill_fraction > 0.8 && !c.reservoir_low_level_warning,
+                            "scenario {scenario}: a healthy circuit lost fluid it has no way to lose: fill {:.4}",
+                            c.reservoir_fill_fraction
+                        );
+                    }
+                }
+            }
+        }
     }
 }

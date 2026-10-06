@@ -14,7 +14,7 @@
 //! to flight phase ("the watts in this function are all provided by komp").
 //! A breaker pull, a chafed wire, a seized motor or a bus tie transient has
 //! nothing individual to act on there. This module is that missing layer:
-//! every one of `D:\fbw-xp-systems\src\breakers.rs`'s ~130 named ATA-grouped
+//! every one of `D:\A380\fbw-xp-systems\src\breakers.rs`'s ~130 named ATA-grouped
 //! consumers (`loads.rs`'s catalogue cites each one back to its `breakers.rs`
 //! entry) plus the major loads it does not enumerate (galleys, IFE, fuel
 //! pumps, window/probe heat, lighting feeders, ...) becomes its own

@@ -1439,7 +1439,7 @@ defers to "the lead" — but **as written today, a `cargo build` right now
 would compile almost none of this session's work**, because nothing
 pulls these module trees into their crate:
 
-1. **`D:\fbw-xp-systems\src\deep\mod.rs`** only contains `pub mod api;`.
+1. **`D:\A380\fbw-xp-systems\src\deep\mod.rs`** only contains `pub mod api;`.
    None of the 18 area directories (`apu, avionics_network, breakers,
    cabin, ecam, electrical, engine_accessories, environment, fire_ice,
    flight_controls, fuel, gear_structure, hydraulics, integration,
@@ -1452,7 +1452,7 @@ pulls these module trees into their crate:
    compile cleanly (module-structure-wise; individual physics/logic bugs
    are tracked separately above and were all resolved during this
    session's live sweeps).
-2. **`D:\fbw-xp-systems\emulator\src\lib.rs`** declares only `pub mod
+2. **`D:\A380\fbw-xp-systems\emulator\src\lib.rs`** declares only `pub mod
    controls; pub mod presets; pub mod work;` — no `pub mod flight_model;`.
    The entire new 6-DOF flight-model tree (11 files: `actuator,
    aerodynamics, atmosphere, geometry, landing_gear, mass, math,

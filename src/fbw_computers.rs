@@ -39,7 +39,9 @@ extern "C" {
     fn fbw_prim_discrete_outputs(prim: *mut RawPrim, out: *mut BasePrimDiscreteOutputs);
     fn fbw_prim_analog_outputs(prim: *mut RawPrim, out: *mut BasePrimAnalogOutputs);
     fn fbw_prim_flare_law(prim: *mut RawPrim, out: *mut ApRawLawsFlare);
+    fn fbw_prim_fctl_logic_outputs(prim: *mut RawPrim, out: *mut BasePrimFctlLogicOutputs);
     fn fbw_prim_diagnostics(prim: *mut RawPrim, out: *mut f64);
+    fn fbw_prim_health_diagnostics(prim: *mut RawPrim, out: *mut bool);
 
     fn fbw_sec_create(unit: i32) -> *mut RawSec;
     fn fbw_sec_destroy(sec: *mut RawSec);
@@ -121,6 +123,17 @@ impl PrimComputer {
         unsafe { fbw_prim_flare_law(self.raw, &mut out) };
         out
     }
+
+    /// `getDebugOutputs().fctl_logic`: the real per-channel avail/engaged
+    /// discretes, aileron droop/anti-droop and sidestick disabled/priority-
+    /// locked bits this PRIM instance's compiled Simulink already computes
+    /// every tick (E-FCTL, ECAM completeness pass; see `prim_shim.h`'s own
+    /// doc comment on `fbw_prim_fctl_logic_outputs`).
+    pub fn fctl_logic_outputs(&mut self) -> BasePrimFctlLogicOutputs {
+        let mut out = BasePrimFctlLogicOutputs::default();
+        unsafe { fbw_prim_fctl_logic_outputs(self.raw, &mut out) };
+        out
+    }
 }
 
 /// Internal flags of a PRIM's last step (`fbw_prim_diagnostics`).
@@ -167,6 +180,28 @@ impl PrimComputer {
             alpha_floor_condition: b(v[14]),
             v_ias_kn: v[15],
         }
+    }
+}
+
+/// Self-monitoring state behind `prim_healthy` (`fbw_prim_health_diagnostics`,
+/// Prim.h `isSelfTestInProgress`/`isMonitoringHealthy`/`isPowerSupplyFault`).
+/// None of `PrimDiagnostics` above (triple ADR/IR/SFCC/RA loss, speed-scale-
+/// lost) feeds `prim_healthy`; this struct is what actually does (W104).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PrimHealthDiagnostics {
+    /// The self test after a power interruption/button press hasn't finished
+    /// yet: `prim_healthy` legitimately toggles with the FAULT test-light
+    /// blink pattern during this window, which is not itself a fault.
+    pub self_test_in_progress: bool,
+    pub monitoring_healthy: bool,
+    pub power_supply_fault: bool,
+}
+
+impl PrimComputer {
+    pub fn health_diagnostics(&mut self) -> PrimHealthDiagnostics {
+        let mut v = [false; 3];
+        unsafe { fbw_prim_health_diagnostics(self.raw, v.as_mut_ptr()) };
+        PrimHealthDiagnostics { self_test_in_progress: v[0], monitoring_healthy: v[1], power_supply_fault: v[2] }
     }
 }
 

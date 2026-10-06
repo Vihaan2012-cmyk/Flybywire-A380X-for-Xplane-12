@@ -166,6 +166,7 @@ struct Ids {
     waste_valve_stuck_open: [u64; Zone::COUNT],
     waste_valve_stuck_closed: [u64; Zone::COUNT],
     ife_seat: [u64; Zone::COUNT],
+    ife_smoke_fault: [u64; Zone::COUNT],
     ife_server: [u64; N_SERVERS],
     galley_bus: [u64; Zone::COUNT],
     galley_oven: [u64; Zone::COUNT],
@@ -176,6 +177,14 @@ struct Ids {
     latch_sensor: u64,
     cargo_jam: u64,
     cargo_hydraulic: u64,
+    /// E-ELEC Phase 2: `520800027`-`032`, one per upper door in
+    /// `UPPER_DOOR_POS` order.
+    upper_door_latch: [u64; 6],
+    purser_temp_sel_fault: u64,
+    ife_bay_isol_fault: u64,
+    ife_bay_vent_fault: u64,
+    lav_galley_extract_fault: u64,
+    secondary_cabin_fan: [u64; 4],
 }
 
 /// The one failure whose registered `model_field` contains `fragment`,
@@ -198,6 +207,7 @@ impl Ids {
         let mut waste_valve_stuck_open = [0u64; Zone::COUNT];
         let mut waste_valve_stuck_closed = [0u64; Zone::COUNT];
         let mut ife_seat = [0u64; Zone::COUNT];
+        let mut ife_smoke_fault = [0u64; Zone::COUNT];
         let mut galley_bus = [0u64; Zone::COUNT];
         let mut galley_oven = [0u64; Zone::COUNT];
         let mut galley_chiller = [0u64; Zone::COUNT];
@@ -208,6 +218,7 @@ impl Ids {
             waste_valve_stuck_open[i] = fid(&reg, &format!("38_wst.flush_valve_{z}"), &format!("valve_stuck_open[{i}]"));
             waste_valve_stuck_closed[i] = fid(&reg, &format!("38_wst.flush_valve_{z}"), &format!("valve_stuck_closed[{i}]"));
             ife_seat[i] = fid(&reg, &format!("44_ife.seat_wiring_{z}"), &format!("seat_fault[{i}]"));
+            ife_smoke_fault[i] = fid(&reg, &format!("44_ife.seat_wiring_{z}"), &format!("smoke_detector_fault[{i}]"));
             galley_bus[i] = fid(&reg, &format!("25_gal.bus_{z}"), &format!("bus_fault[{i}]"));
             galley_oven[i] = fid(&reg, &format!("25_gal.oven_{z}"), &format!("oven_overheat[{i}]"));
             galley_chiller[i] = fid(&reg, &format!("25_gal.chiller_{z}"), &format!("chiller_fault[{i}]"));
@@ -236,6 +247,7 @@ impl Ids {
             waste_valve_stuck_open,
             waste_valve_stuck_closed,
             ife_seat,
+            ife_smoke_fault,
             ife_server,
             galley_bus,
             galley_oven,
@@ -246,9 +258,21 @@ impl Ids {
             latch_sensor: fid(&reg, "52_dr.latch_sensor", "latch_sensor_fault"),
             cargo_jam: fid(&reg, "52_dr.cargo_actuator", "actuator_jam"),
             cargo_hydraulic: fid(&reg, "52_dr.cargo_actuator", "hydraulic_loss"),
+            upper_door_latch: std::array::from_fn(|i| fid(&reg, &format!("52_dr.door_upper_{}_latch_sensor", UPPER_DOOR_POS[i]), "upper_door_latch_fault")),
+            purser_temp_sel_fault: fid(&reg, "21_vent.purser_temp_sel_panel", "purser_temp_sel_fault"),
+            ife_bay_isol_fault: fid(&reg, "21_vent.ife_bay_ventilation", "ife_bay_isol_fault"),
+            ife_bay_vent_fault: fid(&reg, "21_vent.ife_bay_ventilation", "ife_bay_vent_fault"),
+            lav_galley_extract_fault: fid(&reg, "21_vent.lav_galley_extract_fan", "lav_galley_extract_fault"),
+            secondary_cabin_fan: std::array::from_fn(|i| fid(&reg, &format!("21_vent.secondary_cabin_fan_{}", i + 1), "secondary_cabin_fan_failed")),
         }
     }
 }
+
+/// E-ELEC Phase 2: `520800027`-`032 DOOR UPPER 1L/1R/2L/2R/3L/3R NOT
+/// CLOSED`, in the same order as [`crate::deep::live::DOOR_NAMES`]' own six
+/// upper-door entries (indices 5..=10).
+const UPPER_DOOR_POS: [&str; 6] = ["1L", "1R", "2L", "2R", "3L", "3R"];
+const UPPER_DOOR_TRUTH_INDEX: [usize; 6] = [5, 6, 7, 8, 9, 10];
 
 // ---------------------------------------------------------------------------
 // The live system.
@@ -280,8 +304,23 @@ pub struct CabinLive {
     /// because `publish` only ever sees `&self`, never `Truth`.
     cargo_door_commanded_percent: f64,
 
+    /// E-ELEC Phase 2: this tick's real upper-door open percent (0..100,
+    /// from `Truth::door_open_fraction` at [`UPPER_DOOR_TRUTH_INDEX`]) and
+    /// each door's own not-latched-sensor fault magnitude, cached because
+    /// `publish` only ever sees `&self`.
+    upper_door_open_percent: [f64; 6],
+    upper_door_latch_fault: [f64; 6],
+
     /// Inputs `Truth` does not carry; see [`CabinCommands`].
     pub commands: CabinCommands,
+
+    // ---- ECAM-completeness additions (E-AIR-DESIGN.md, ATA 21 AIR/VENT).
+    // This tick's magnitude of each new LRU fault.
+    purser_temp_sel_fault: f64,
+    ife_bay_isol_fault: f64,
+    ife_bay_vent_fault: f64,
+    lav_galley_extract_fault: f64,
+    secondary_cabin_fan_failed: [f64; 4],
 }
 
 impl Default for CabinLive {
@@ -308,7 +347,14 @@ impl CabinLive {
             galley_bus_fault: [false; Zone::COUNT],
             new_calls: Vec::new(),
             cargo_door_commanded_percent: 0.0,
+            upper_door_open_percent: [0.0; 6],
+            upper_door_latch_fault: [0.0; 6],
             commands: CabinCommands::default(),
+            purser_temp_sel_fault: 0.0,
+            ife_bay_isol_fault: 0.0,
+            ife_bay_vent_fault: 0.0,
+            lav_galley_extract_fault: 0.0,
+            secondary_cabin_fan_failed: [0.0; 4],
         }
     }
 
@@ -384,6 +430,7 @@ impl crate::deep::live::Area for CabinLive {
         let ife_faults = IfeFaults {
             seat_fault: std::array::from_fn(|i| faults.get(self.ids.ife_seat[i])),
             server_fault: std::array::from_fn(|i| faults.get(self.ids.ife_server[i])),
+            smoke_detector_fault: std::array::from_fn(|i| faults.get(self.ids.ife_smoke_fault[i])),
         };
         let ife_inputs = IfeInputs { commercial_power_available: commercial_power, seat_power_on: self.commands.seat_power_on };
         let (ife_out, _ife_events) = self.ife.step(&ife_inputs, &ife_faults, dt);
@@ -447,6 +494,15 @@ impl crate::deep::live::Area for CabinLive {
         // loss had no travel to cap (`deep::integration::failure_audit`'s
         // sweep found exactly this).
         self.cargo_door_commanded_percent = (truth.controls.cargo_door_commanded_open[0] * 100.0).clamp(0.0, 100.0);
+
+        // E-ELEC Phase 2: `520800027`-`032` read the six upper doors' own
+        // real interactive-point travel directly (`Truth::door_open_
+        // fraction`, now that `DOOR_NAMES`/`DOOR_POINTS` carry all six, not
+        // just U1L) plus each door's own not-latched-sensor fault.
+        for i in 0..6 {
+            self.upper_door_open_percent[i] = (truth.door_open_fraction[UPPER_DOOR_TRUTH_INDEX[i]] * 100.0).clamp(0.0, 100.0);
+            self.upper_door_latch_fault[i] = faults.get(self.ids.upper_door_latch[i]);
+        }
         let door_inputs = DoorSlideInputs {
             door_open_percent: self.commands.door_open_percent,
             cabin_diff_pressure_pa: cabin_diff_pa,
@@ -480,6 +536,16 @@ impl crate::deep::live::Area for CabinLive {
             cockpit_call_pressed: self.commands.cockpit_call_pressed,
         };
         self.new_calls = self.crew_calls.step(&call_inputs, &snapshot, dt);
+
+        // ---- ECAM-completeness additions (E-AIR-DESIGN.md, ATA 21 AIR/
+        // VENT). Independent LRU faults, not part of any existing cabin
+        // subsystem's own step -- the same shape `fbw/ata24.rs`'s
+        // `ELEC_GEN_n_FAULT` uses.
+        self.purser_temp_sel_fault = faults.get(self.ids.purser_temp_sel_fault);
+        self.ife_bay_isol_fault = faults.get(self.ids.ife_bay_isol_fault);
+        self.ife_bay_vent_fault = faults.get(self.ids.ife_bay_vent_fault);
+        self.lav_galley_extract_fault = faults.get(self.ids.lav_galley_extract_fault);
+        self.secondary_cabin_fan_failed = std::array::from_fn(|i| faults.get(self.ids.secondary_cabin_fan[i]));
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -518,6 +584,9 @@ impl crate::deep::live::Area for CabinLive {
             out(&format!("CABIN_IFE_ZONE_OVERHEAT:{n}"), b(self.ife_out.zone_temp_c[i] >= ife::OVERHEAT_TEMP_C));
             out(&format!("CABIN_IFE_ZONE_TEMP_C:{n}"), self.ife_out.zone_temp_c[i]);
             out(&format!("CABIN_IFE_ZONE_TRIPPED:{n}"), b(self.ife_out.zone_tripped[i]));
+            // ECAM completeness pass (E-FIRE, cross-area addition for
+            // `260800032` SMOKE IFE BAY DET FAULT).
+            out(&format!("CABIN_IFE_ZONE_SMOKE_FAULT:{n}"), b(self.ife_out.zone_smoke_detector_fault[i]));
         }
         for i in 0..N_SERVERS {
             let n = i + 1;
@@ -547,6 +616,14 @@ impl crate::deep::live::Area for CabinLive {
         out("CABIN_SLIDE_DEPLOYED:1", b(self.door_out.slide_deployed));
         out("CABIN_CARGO_DOOR_JAMMED:1", b(self.door_out.cargo_door_jammed));
         out("CABIN_CARGO_DOOR_PERCENT:1", self.door_out.cargo_door_percent);
+
+        // E-ELEC Phase 2: `520800027`-`032` DOOR UPPER 1L/1R/2L/2R/3L/3R NOT
+        // CLOSED -- real door position plus each door's own latch-sensor
+        // fault (see `UPPER_DOOR_POS`'s own doc).
+        for (i, pos) in UPPER_DOOR_POS.iter().enumerate() {
+            out(&format!("CABIN_DOOR_UPPER_{pos}_OPEN_PERCENT"), self.upper_door_open_percent[i]);
+            out(&format!("CABIN_DOOR_UPPER_{pos}_LATCH_SENSOR_FAULT"), b(self.upper_door_latch_fault[i] >= 0.5));
+        }
         out("CABIN_CARGO_DOOR_CMD:1", self.cargo_door_commanded_percent);
 
         // ---- Crew calls ----------------------------------------------------
@@ -557,6 +634,18 @@ impl crate::deep::live::Area for CabinLive {
         });
         out("CABIN_CREW_CALL_PRIORITY", priority);
         out("CABIN_CREW_CALL_NEW_COUNT", self.new_calls.len() as f64);
+
+        // ---- ECAM-completeness additions (E-AIR-DESIGN.md).
+        out("DEEP_CABIN_PURSER_TEMP_SEL_FAULT", self.purser_temp_sel_fault);
+        out("DEEP_CABIN_IFE_BAY_ISOL_FAULT", self.ife_bay_isol_fault);
+        out("DEEP_CABIN_IFE_BAY_VENT_FAULT", self.ife_bay_vent_fault);
+        out("DEEP_CABIN_LAV_GALLEY_EXTRACT_FAULT", self.lav_galley_extract_fault);
+        // 212800012/013 (E-AIR-DESIGN.md): the count of the four secondary
+        // (recirculation) fans this port's own model has failed (>= 0.5 of
+        // full failure, matching every other `> 0`-style binary-fault read
+        // elsewhere in this port).
+        let failed_count = self.secondary_cabin_fan_failed.iter().filter(|&&m| m >= 0.5).count();
+        out("DEEP_CABIN_SECONDARY_FANS_FAILED_COUNT", failed_count as f64);
     }
 }
 
@@ -893,18 +982,25 @@ mod tests {
             ids.latch_sensor,
             ids.cargo_jam,
             ids.cargo_hydraulic,
+            ids.purser_temp_sel_fault,
+            ids.ife_bay_isol_fault,
+            ids.ife_bay_vent_fault,
+            ids.lav_galley_extract_fault,
         ];
+        consumed.extend(ids.secondary_cabin_fan);
         consumed.extend(ids.water_heater);
         consumed.extend(ids.mast_heater);
         consumed.extend(ids.waste_level_sensor);
         consumed.extend(ids.waste_valve_stuck_open);
         consumed.extend(ids.waste_valve_stuck_closed);
         consumed.extend(ids.ife_seat);
+        consumed.extend(ids.ife_smoke_fault);
         consumed.extend(ids.ife_server);
         consumed.extend(ids.galley_bus);
         consumed.extend(ids.galley_oven);
         consumed.extend(ids.galley_chiller);
         consumed.extend(ids.galley_boiler);
+        consumed.extend(ids.upper_door_latch);
         consumed.sort_unstable();
         consumed.dedup();
 

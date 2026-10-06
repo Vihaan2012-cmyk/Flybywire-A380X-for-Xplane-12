@@ -20,7 +20,7 @@ Port the remaining FBW A380X FlyByWireInterface parts marked MISSING in docs/sys
 6. **updatePerformanceMonitoring** (`A32NX_PERFORMANCE_WARNING_ACTIVE`).
 
 ## Tests
-Add tests for each item. Keep the full suite green; use CARGO_TARGET_DIR=D:\fbw-build\target-fbwiface. Fix your own build errors first (for example the ambiguous float `to_radians`). Update docs/systems-coverage.md, and mark the fuel pump `CIRCUIT CONNECTION ON:n` row fixed.
+Add tests for each item. Keep the full suite green; use CARGO_TARGET_DIR=D:\A380\fbw-build\target-fbwiface. Fix your own build errors first (for example the ambiguous float `to_radians`). Update docs/systems-coverage.md, and mark the fuel pump `CIRCUIT CONNECTION ON:n` row fixed.
 
 ## Report
 Per item, with evidence, plus your lib.rs lines.

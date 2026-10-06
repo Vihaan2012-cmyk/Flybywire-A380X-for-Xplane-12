@@ -51,19 +51,94 @@ thread_local! {
 ///
 /// A machine that cannot spare the video memory turns it back on in the
 /// settings, which now works. Read from the process arguments rather than
-/// any shared state because CEF asks this before anything else is built,
-/// and defaults to *on* if the aircraft path is not known, since that is
-/// the safe direction when nothing can be read.
+/// any shared state because CEF asks this before anything else is built --
+/// `window::SHARED` is not populated until after `execute_process()` (which
+/// is what fires this) returns in `main.rs` -- and defaults to *on* if the
+/// X-Plane root is not known, since that is the safe direction when nothing
+/// can be read.
+///
+/// The root has to be `--xp-root=`, not `--aircraft=`: the settings page
+/// (`web.rs`) and the crash reporter (`crash.rs`) both read/write this same
+/// setting via `shared.xplane_root`, and `settings_files::app_settings_path`
+/// resolves `xphfbw.json` under *that* root's `Output/preferences`, not the
+/// converted aircraft's own folder.
 fn force_cpu_rendering() -> bool {
-    let aircraft = std::env::args().find_map(|a| a.strip_prefix("--aircraft=").map(std::path::PathBuf::from));
-    let Some(aircraft) = aircraft else { return true };
-    let settings = crate::settings::load(&aircraft);
+    let xp_root = xp_root_arg(std::env::args());
+    let Some(xp_root) = xp_root else { return true };
+    let settings = crate::settings::load(&xp_root);
     match settings.get("xphfbw.forceCpuRendering") {
         Some(v) => {
             let text = v.as_str().map(str::trim).unwrap_or("");
             text.eq_ignore_ascii_case("true") || text == "1" || v.as_bool() == Some(true)
         }
         None => false,
+    }
+}
+
+/// The `--xp-root=` value from a process's own arguments, exactly how
+/// `main.rs` parses it for `Shared::xplane_root` -- split out so
+/// `force_cpu_rendering` can be tested without a real process command line.
+fn xp_root_arg(mut args: impl Iterator<Item = String>) -> Option<std::path::PathBuf> {
+    args.find_map(|a| a.strip_prefix("--xp-root=").map(std::path::PathBuf::from))
+}
+
+/// The value-less Chromium switches for the chosen rendering mode.
+///
+/// On the GPU, DirectComposition is switched off. Every instrument is an
+/// offscreen (windowless) view that CEF hands back as a pixel buffer, so
+/// nothing here ever presents through Windows' compositor -- but Chromium
+/// still sets DirectComposition up for its output surfaces, and on this
+/// machine that killed the GPU process the moment the first view asked it
+/// for a context (exit 0x80000003, three times in a row, every launch;
+/// cef-debug.log 2026-09-26). After the third crash Chromium gives up on the
+/// GPU for the rest of the session (`--use-gl=disabled`,
+/// `--disable-gpu-compositing` on every renderer), which is the same
+/// software rasterising that holds every screen to a few frames a second.
+/// A/B on the same machine, same profile: with this switch the GPU process
+/// stays up on the hardware; without it, it crashes three times and falls
+/// back to software.
+fn gpu_mode_switches(force_cpu: bool) -> &'static [&'static str] {
+    if force_cpu {
+        &["disable-gpu", "disable-gpu-compositing"]
+    } else {
+        &["disable-direct-composition"]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_gpu_path_turns_direct_composition_off_and_never_disables_the_gpu() {
+        let gpu = gpu_mode_switches(false);
+        assert!(gpu.contains(&"disable-direct-composition"), "offscreen views never present through DirectComposition, and setting it up crashed the GPU process");
+        assert!(!gpu.iter().any(|s| s.starts_with("disable-gpu")), "the GPU path must not switch the GPU off");
+        assert_eq!(gpu_mode_switches(true), &["disable-gpu", "disable-gpu-compositing"], "the safe-mode setting still forces software rendering");
+    }
+
+    #[test]
+    fn force_cpu_rendering_keys_off_the_xp_root_flag_not_the_aircraft_flag() {
+        let argv = [
+            "XPHFBW.exe".to_string(),
+            "sometag".to_string(),
+            "--aircraft=D:/Steam Games/steamapps/common/X-Plane 12/Aircraft/FlyByWire A380X".to_string(),
+            "--xp-root=D:/Steam Games/steamapps/common/X-Plane 12".to_string(),
+        ];
+        let xp_root = xp_root_arg(argv.into_iter()).expect("--xp-root= is parsed");
+        assert_eq!(xp_root, std::path::PathBuf::from("D:/Steam Games/steamapps/common/X-Plane 12"));
+
+        // The whole point of the fix: this is the exact file the settings
+        // page (web.rs) and the crash reporter (crash.rs) read and write,
+        // because both key off `shared.xplane_root`, which is this same
+        // `--xp-root=` value -- not `--aircraft=`.
+        assert_eq!(
+            fbw_a380_systems::settings_files::app_settings_path(&xp_root),
+            std::path::PathBuf::from("D:/Steam Games/steamapps/common/X-Plane 12")
+                .join("Output")
+                .join("preferences")
+                .join("xphfbw.json"),
+        );
     }
 }
 
@@ -75,9 +150,31 @@ wrap_app! {
             // The browser process decides for all.
             let is_browser = process_type.map_or(true, |t| t.to_string().is_empty());
             if let (true, Some(cl)) = (is_browser, command_line) {
-                if force_cpu_rendering() {
-                    cl.append_switch(Some(&CefString::from("disable-gpu")));
-                    cl.append_switch(Some(&CefString::from("disable-gpu-compositing")));
+                for switch in gpu_mode_switches(force_cpu_rendering()) {
+                    cl.append_switch(Some(&CefString::from(*switch)));
+                }
+                if !force_cpu_rendering() {
+                    // cef-debug.log (2026-09-25 12:40 run) caught the GPU
+                    // process crashing three times at startup, exit
+                    // 0x80000003 (a Chromium CHECK failure), the third one
+                    // logging "Failed to create shared context for
+                    // virtualization" (gpu_channel_manager.cc) -- a failure
+                    // inside ANGLE's own backend selection / context-sharing
+                    // setup, not a sandbox violation: `--disable-gpu-sandbox`
+                    // would be a no-op here, since `main.rs`'s CEF `Settings`
+                    // already sets `no_sandbox: 1` for every subprocess,
+                    // GPU included. The same exe worked eighty minutes
+                    // earlier with nothing else different, which is what a
+                    // flaky backend probe at startup looks like. Pin the
+                    // ANGLE backend so Chromium does not re-probe/re-select
+                    // its GL/D3D implementation on every launch; d3d11 is
+                    // already what it settles on on this hardware (it has
+                    // been Chromium's preferred ANGLE backend on Windows for
+                    // years), so this removes a source of run-to-run
+                    // variance in startup without changing what actually
+                    // renders once it is up. Only meaningful when the GPU is
+                    // drawing at all, hence the `else`.
+                    cl.append_switch_with_value(Some(&CefString::from("use-angle")), Some(&CefString::from("d3d11")));
                 }
                 // Diagnostics only, never set by the plugin: Chromium's
                 // DevTools protocol on this local port, to inspect a view.

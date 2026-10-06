@@ -27,6 +27,7 @@
 //! |---|---|---|
 //! | CONTACT POINT COMPRESSION, :1..:4 | flightmodel2/gear/tire_vertical_deflection_mtr[0..4] | m -> ft, / max compression (flight_model.cfg col 9), percent |
 //! | GEAR ANIMATION POSITION:1..4 | flightmodel2/gear/deploy_ratio[1..4] | x100 |
+//! | GEAR POSITION:0/1/2, (bare) | flightmodel2/gear/deploy_ratio[0], min([1],[3]), min([2],[4]), min of all three | x100 (see [`gear_side_position_percent`]) |
 //! | WHEEL RPM:1, :2 | flightmodel2/gear/tire_rotation_speed_rad_sec[1], [2] | rad/s -> rpm |
 //! | GPS GROUND TRUE TRACK | flightmodel/position/hpath | [0, 360) |
 //! | GPS GROUND MAGNETIC TRACK | hpath + (mag_psi - psi) | [0, 360) |
@@ -67,6 +68,15 @@ pub fn contact_point_compression_percent(deflection_m: f64, max_compression_ft: 
         return 0.;
     }
     (deflection_m * M_TO_FT / max_compression_ft * 100.).clamp(0., 100.)
+}
+
+/// MSFS's `GEAR POSITION:1`/`:2` (left/right), read by the converted
+/// cockpit's overhead AUTO BRK/LDG GEAR legends (main.lua:23026-23155): a
+/// side's body and wing legs extend together but not in perfect lockstep,
+/// so the side only reads "down" (>= 90, the SEQ2 threshold those legends
+/// use) once the slower of its two legs is, not the faster one.
+pub fn gear_side_position_percent(body_deploy: f32, wing_deploy: f32) -> f64 {
+    body_deploy.min(wing_deploy) as f64 * 100.
 }
 
 /// WHEEL RPM, read as an AngularVelocity in revolutions per minute
@@ -444,6 +454,8 @@ pub struct Sensors {
     // Variables.
     compression: [VariableIdentifier; 5],
     gear_animation: [VariableIdentifier; 4],
+    gear_position_leg: [VariableIdentifier; 3],
+    gear_position: VariableIdentifier,
     wheel_rpm: [VariableIdentifier; 2],
     center_wheel_rotation_angle: VariableIdentifier,
     kohlsman_mb_3: VariableIdentifier,
@@ -483,6 +495,10 @@ impl Sensors {
             vars.get("CONTACT POINT COMPRESSION:4".into()),
         ];
         let gear_animation = [1, 2, 3, 4].map(|n| vars.get(format!("GEAR ANIMATION POSITION:{n}")));
+        // GEAR POSITION:0/1/2 (nose/left/right) and the bare aggregate: see
+        // the module doc table and `gear_side_position_percent`.
+        let gear_position_leg = [0, 1, 2].map(|n| vars.get(format!("GEAR POSITION:{n}")));
+        let gear_position = vars.get("GEAR POSITION".into());
         // hydraulic/mod.rs:2074-2100: WHEEL RPM:1 and :2 are the left and right
         // body gear (FBW notes the wing gear should be :3 and :4).
         let wheel_rpm = [1, 2].map(|n| vars.get(format!("WHEEL RPM:{n}")));
@@ -556,6 +572,8 @@ impl Sensors {
             ground_speed: xplm.find("sim/flightmodel/position/groundspeed"),
             compression,
             gear_animation,
+            gear_position_leg,
+            gear_position,
             wheel_rpm,
             center_wheel_rotation_angle,
             kohlsman_mb_3,
@@ -606,6 +624,19 @@ impl Sensors {
             for i in 0..4 {
                 vars.write_from_xplane(&self.gear_animation[i], deploy[i + 1] as f64 * 100.);
             }
+            // GEAR POSITION:0/1/2 (nose, left, right) for the overhead AUTO
+            // BRK/LDG GEAR legends, and the bare aggregate (the minimum of
+            // all three) for the "gear fully down" bus-shed gate
+            // (main.lua:33546-33555). `deploy`'s own index order is this
+            // module's documented one: nose 0, left body 1, right body 2,
+            // left wing 3, right wing 4.
+            let nose = deploy[0] as f64 * 100.;
+            let left = gear_side_position_percent(deploy[1], deploy[3]);
+            let right = gear_side_position_percent(deploy[2], deploy[4]);
+            vars.write_from_xplane(&self.gear_position_leg[0], nose);
+            vars.write_from_xplane(&self.gear_position_leg[1], left);
+            vars.write_from_xplane(&self.gear_position_leg[2], right);
+            vars.write_from_xplane(&self.gear_position, nose.min(left).min(right));
         }
         if let Some(speed) = floats(self.tire_speed) {
             for i in 0..2 {
@@ -909,6 +940,19 @@ mod tests {
         // 7.3 mm on a main gear.
         assert!(contact_point_compression_percent(0.0074, 2.4) > 1.);
         assert!(contact_point_compression_percent(0.0072, 2.4) < 1.);
+    }
+
+    #[test]
+    fn gear_side_position_is_the_slower_of_its_two_legs() {
+        // (build fix, INT-P4) `assert_eq!` -> a small tolerance: this
+        // function returns a value that has been through an f32 round trip
+        // somewhere in its own real-hardware-precision modelling, so an
+        // exact 40.0 can legitimately come back as 40.00000059604645 --
+        // unrelated to the slower-leg logic this test actually checks.
+        assert!((gear_side_position_percent(1.0, 1.0) - 100.).abs() < 1e-4);
+        assert!((gear_side_position_percent(1.0, 0.4) - 40.).abs() < 1e-4);
+        assert!((gear_side_position_percent(0.0, 1.0) - 0.).abs() < 1e-4);
+        assert!((gear_side_position_percent(0.9, 0.899_999) - 0.899_999 * 100.).abs() < 1e-4);
     }
 
     #[test]

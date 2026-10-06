@@ -357,7 +357,142 @@ enum Target {
     StaticInverter,
     Rat,
     Gpu,
+    /// One of [`MISC_FAULTS`]' own indices -- a computer-health/monitoring/
+    /// lubrication-leak channel this area registers with no `network::`
+    /// primitive of its own behind it. See [`MiscFault`].
+    Misc(usize),
 }
+
+/// Named indices into [`MISC_FAULTS`]/`ElectricalLive::misc_fault`: the ECAM
+/// alerts this pass adds that are a boolean (or, for the two drive-oil-leak
+/// channels, continuous) computer/monitoring/lubrication-leak fault with no
+/// separate `network::Load`/`Contactor`/`Source` behind it -- see each
+/// entry's own FlyByWire id in [`MISC_FAULTS`]'s doc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(super) enum MiscFault {
+    Enmu1 = 0,
+    Enmu2 = 1,
+    Elmu = 2,
+    TrMonitoring1 = 3,
+    TrMonitoring2 = 4,
+    TrMonitoringEss = 5,
+    FctlActuatorPwr = 6,
+    Psc1 = 7,
+    Psc2 = 8,
+    ApuBat = 9,
+    DriveDiscFault1 = 10,
+    DriveDiscFault2 = 11,
+    DriveDiscFault3 = 12,
+    DriveDiscFault4 = 13,
+    DriveOilLeak1 = 14,
+    DriveOilLeak2 = 15,
+    DriveOilLeak3 = 16,
+    DriveOilLeak4 = 17,
+    /// `240800019 ELEC BUS TIE OFF` -- FCOM p.4879: "The BUS TIE pb-sw is
+    /// abnormally set to OFF." No MSFS `L:` var exists for this A380-specific
+    /// maintenance/overhead pushbutton (unlike the four generator
+    /// pushbuttons, which `src/aspects.rs:612-618` already copies from a real
+    /// MSFS event every frame), so this is armed from the Study panel like a
+    /// failure rather than read from a live switch -- the same simplification
+    /// `240800073` below uses for the same reason.
+    BusTieOff = 18,
+    /// `240800022`/`023 ELEC CABIN L(R) SUPPLY CENTER OVHT` -- FCOM p.4882:
+    /// "The overheat detectors have detected an overheat in one cabin supply
+    /// center." A boolean "the detector has tripped" fault, per the FCOM's
+    /// own wording (the detector's own trip, not a thermal derivation this
+    /// port would have to build from scratch).
+    CabinOvhtL = 19,
+    CabinOvhtR = 20,
+    /// `240800024`/`025` -- the detector's own health, independent of
+    /// whether it has tripped (same split as `240800020`/`054`).
+    CabinOvhtDetL = 21,
+    CabinOvhtDetR = 22,
+    /// `240800074`-`079` ELEC SECONDARY SUPPLY CENTER 1(2) DEGRADED/FAULT/
+    /// REDUND LOST -- re-read against the FCOM (p.4955/4956/4958) rather
+    /// than E-ELEC-DESIGN.md's own contactor-pair guess: the three ids are
+    /// three *independent* real conditions, not three readings of one
+    /// two-contactor state --
+    /// - DEGRADED: "communication is degraded between SEPDC and CPIOM E /
+    ///   other aircraft systems" (a data-bus health fault);
+    /// - FAULT: "some systems are no longer supplied by the secondary supply
+    ///   center ... may not be any operational impact" (a supply-loss fault);
+    /// - REDUND LOST: "the redundancy of some system electrical supply is
+    ///   lost. No operational impact." (a backup-path fault).
+    /// Three unrelated booleans per centre, matching the FCOM's own wording
+    /// exactly, rather than one shared two-contactor model.
+    Ssc1CommDegraded = 23,
+    Ssc2CommDegraded = 24,
+    Ssc1SupplyFault = 25,
+    Ssc2SupplyFault = 26,
+    Ssc1RedundLost = 27,
+    Ssc2RedundLost = 28,
+    /// `240800056`-`059 ELEC EXT PWR n FAULT` -- FCOM p.4943: "The external
+    /// power unit, or its associated GGPCU, is failed," a boolean unit/GGPCU
+    /// health fault, not the AC-voltage-band comparison E-ELEC-DESIGN.md
+    /// guessed before this pass had the FCOM's own, simpler wording.
+    ExtPwr1Fault = 29,
+    ExtPwr2Fault = 30,
+    ExtPwr3Fault = 31,
+    ExtPwr4Fault = 32,
+}
+
+pub(super) const MISC_FAULT_COUNT: usize = 33;
+
+/// `(component id suffix after "24_elec.misc.", display name, what the fault
+/// means)`, in [`MiscFault`]'s own index order. Shared by `registry::register`
+/// (which registers one component + one boolean/continuous failure per
+/// entry, using this same suffix and name) and [`route_failures`] (which
+/// resolves the failure back onto the matching [`MiscFault`] index), so the
+/// two cannot drift apart.
+///
+/// Every one of these is a real component the E-ELEC design sheet
+/// (`E:/fbw-debug/ecam/E-ELEC-DESIGN.md`) identifies the aircraft as having
+/// but this area not yet modelling in detail (an ENMU/ELMU computer, a TR's
+/// own monitoring circuit, a supply centre's own health, an F/CTL actuator
+/// power-conditioning unit, the APU's dedicated battery, a generator drive's
+/// disconnect-detection circuit) -- a boolean "is this computer/monitor
+/// reporting correctly" fault, per that sheet's own no-numeric-threshold
+/// convention for this class of component, not a modelled physical quantity
+/// with a number to invent. The two drive-oil-leak entries are the one
+/// continuous exception: they feed `apu::oil::OilFaults::leak` for
+/// [`ElectricalLive::drive_oil`], the same 0..1 leak-severity fraction
+/// `apu::oil.rs` itself already uses.
+pub(super) const MISC_FAULTS: [(&str, &str, &str); MISC_FAULT_COUNT] = [
+    ("enmu-1", "ENMU 1", "Electrical Network Management Unit 1 (owns the GEN 1+2 tie/shed decision): the computer's own health, independent of the buses/contactors it drives (240800052)"),
+    ("enmu-2", "ENMU 2", "Electrical Network Management Unit 2 (GEN 3+4): the computer's own health (240800053)"),
+    ("elmu", "ELMU", "Electrical Load Management Unit (owns the GALLEY/COMMERCIAL shed decision this area's shedding.rs executes): the computer's own health (240800069)"),
+    ("tr-mon-1", "TR 1 MONITORING", "TR 1's own voltage/current monitoring circuit, independent of TR 1's own electrical verdict (240800084)"),
+    ("tr-mon-2", "TR 2 MONITORING", "TR 2's own monitoring circuit (240800085)"),
+    ("tr-mon-ess", "TR ESS MONITORING", "TR ESS's own monitoring circuit (240800086)"),
+    ("fctl-actuator-pwr", "F/CTL ACTUATOR PWR SUPPLY", "the power-conditioning unit feeding the flight-control EHA/EBHA backup actuators, independent of the AC/DC bus it draws from (240800060)"),
+    ("psc-1", "PRIMARY SUPPLY CENTER 1", "PSC1's own health as a distribution-centre unit, independent of the individual buses/contactors it groups (240800070)"),
+    ("psc-2", "PRIMARY SUPPLY CENTER 2", "PSC2's own health (240800071)"),
+    ("apu-bat", "APU BAT", "the APU's own dedicated start/standby battery, a third instance of this area's Battery-class hardware (240800013)"),
+    ("drive-disc-1", "DRIVE 1 DISC FAULT", "generator 1's mechanical drive-disconnect coupling's own fault-detection circuit, independent of the disconnect actually happening (240800032)"),
+    ("drive-disc-2", "DRIVE 2 DISC FAULT", "generator 2's drive-disconnect detection circuit (240800033)"),
+    ("drive-disc-3", "DRIVE 3 DISC FAULT", "generator 3's drive-disconnect detection circuit (240800034)"),
+    ("drive-disc-4", "DRIVE 4 DISC FAULT", "generator 4's drive-disconnect detection circuit (240800035)"),
+    ("drive-oil-1", "DRIVE 1 OIL LEAK", "generator 1's drive lubrication reservoir leak, 0..1 (feeds ELEC_DRIVE_1_OIL_LEVEL_FRAC/_OIL_TEMP_C/_OIL_LOW_PRESSURE_TRIPPED, 240800040/044/048)"),
+    ("drive-oil-2", "DRIVE 2 OIL LEAK", "generator 2's drive lubrication reservoir leak (240800041/045/049)"),
+    ("drive-oil-3", "DRIVE 3 OIL LEAK", "generator 3's drive lubrication reservoir leak (240800042/046/050)"),
+    ("drive-oil-4", "DRIVE 4 OIL LEAK", "generator 4's drive lubrication reservoir leak (240800043/047/051)"),
+    ("bus-tie-off", "BUS TIE OFF", "the BUS TIE pb-sw is abnormally set to OFF, FCOM p.4879 (240800019)"),
+    ("cabin-ovht-l", "CABIN L SUPPLY CENTER OVHT", "the overheat detector has detected an overheat in the left cabin supply center, FCOM p.4882 (240800022)"),
+    ("cabin-ovht-r", "CABIN R SUPPLY CENTER OVHT", "the overheat detector has detected an overheat in the right cabin supply center, FCOM p.4882 (240800023)"),
+    ("cabin-ovht-det-l", "CABIN L SUPPLY CENTER OVHT DET", "the left cabin supply center's own overheat detector health, independent of whether it has tripped (240800024)"),
+    ("cabin-ovht-det-r", "CABIN R SUPPLY CENTER OVHT DET", "the right cabin supply center's own overheat detector health (240800025)"),
+    ("ssc-1-comm-degraded", "SECONDARY SUPPLY CENTER 1 COMM DEGRADED", "communication is degraded between SSC1 and CPIOM E / other aircraft systems, FCOM p.4955 (240800074)"),
+    ("ssc-2-comm-degraded", "SECONDARY SUPPLY CENTER 2 COMM DEGRADED", "communication is degraded between SSC2 and CPIOM E / other aircraft systems, FCOM p.4955 (240800075)"),
+    ("ssc-1-supply-fault", "SECONDARY SUPPLY CENTER 1 SUPPLY FAULT", "some systems are no longer supplied by SSC1, FCOM p.4956 (240800076)"),
+    ("ssc-2-supply-fault", "SECONDARY SUPPLY CENTER 2 SUPPLY FAULT", "some systems are no longer supplied by SSC2, FCOM p.4956 (240800077)"),
+    ("ssc-1-redund-lost", "SECONDARY SUPPLY CENTER 1 REDUND LOST", "the redundancy of some system electrical supply from SSC1 is lost, no operational impact, FCOM p.4958 (240800078)"),
+    ("ssc-2-redund-lost", "SECONDARY SUPPLY CENTER 2 REDUND LOST", "the redundancy of some system electrical supply from SSC2 is lost (240800079)"),
+    ("ext-pwr-1-fault", "EXT PWR 1 FAULT", "the external power unit 1, or its associated GGPCU, is failed, FCOM p.4943 (240800056)"),
+    ("ext-pwr-2-fault", "EXT PWR 2 FAULT", "the external power unit 2, or its associated GGPCU, is failed (240800057)"),
+    ("ext-pwr-3-fault", "EXT PWR 3 FAULT", "the external power unit 3, or its associated GGPCU, is failed (240800058)"),
+    ("ext-pwr-4-fault", "EXT PWR 4 FAULT", "the external power unit 4, or its associated GGPCU, is failed (240800059)"),
+];
 
 /// Resolves `registry::register`'s own output into `(failure id, target)`
 /// pairs against a concrete network.
@@ -501,6 +636,14 @@ fn route_failures(net: &Network) -> (Vec<(u64, Target)>, Vec<String>) {
             ("deep::electrical::sources::StaticInverter", _) => Target::StaticInverter,
             ("deep::electrical::sources::Rat", _) => Target::Rat,
             ("deep::electrical::sources::GroundPower", _) => Target::Gpu,
+            ("deep::electrical::misc::Health", "fault") => {
+                let suffix = comp.strip_prefix("24_elec.misc.").unwrap_or(comp);
+                let Some(idx) = MISC_FAULTS.iter().position(|&(s, _, _)| s == suffix) else {
+                    unresolved.push(f.component.clone());
+                    continue;
+                };
+                Target::Misc(idx)
+            }
             _ => {
                 unresolved.push(f.model_field.clone());
                 continue;
@@ -741,6 +884,24 @@ struct Names {
     breaker_current: Vec<String>,
     breaker_closed: Vec<String>,
     load_powered: Vec<String>,
+    /// `DEEP_ELEC_{AC_1..4,DC_1,DC_2}_FBW_RAW_POTENTIAL` /
+    /// `_FBW_RAW_IS_POWERED` -- FlyByWire's own value for exactly the six
+    /// buses `Truth::ac_bus_volts`/`dc_bus_volts`/`ac_bus_powered`/
+    /// `dc_bus_powered` already carry, captured in `tick` (see
+    /// `ElectricalLive::fbw_raw_ac_potential`'s own doc) *before* the
+    /// `publish` loop below overwrites `ELEC_AC_{1..4}_BUS_POTENTIAL` etc.
+    /// with this area's own authoritative answer. Deliberately scoped to
+    /// just these six of the 17 `BusId`s -- the only tags this port's
+    /// `Truth` reads back as a real, single FlyByWire `ElectricalBusType`;
+    /// the other eleven either have no matching FlyByWire bus at all
+    /// (`DcApu`) or a name FlyByWire's own code says is presently
+    /// misassigned (`AcEss`/`AcEssShed`, see `alternating_current.rs`'s
+    /// own `// TODO:` comments), where a "raw" label would mislead rather
+    /// than inform.
+    fbw_raw_ac_potential: Vec<String>,
+    fbw_raw_dc_potential: Vec<String>,
+    fbw_raw_ac_powered: Vec<String>,
+    fbw_raw_dc_powered: Vec<String>,
     /// One per entry of [`coupling_table`], in that order: the magnitude
     /// this area is presently asserting on FlyByWire's own failure of that
     /// id. Published so that a derived failure is never invisible -- the
@@ -837,6 +998,58 @@ pub struct ElectricalLive {
     measured_apu_gen_load_w: [f64; 2],
     measured_tr_load_w: [f64; 4],
     measured_battery_current_a: [f64; 2],
+    /// The RAT's own real delivered power this tick, `source_delivered_w`
+    /// against `src_rat`/`contactor.rat_line` -- the same technique already
+    /// used for `measured_gen_load_w`/`measured_apu_gen_load_w`. Published
+    /// as `ELEC_EMER_GEN_LOAD` (a fraction of `sources::Rat::MAX_POWER_W`),
+    /// which `EmergencyGenerator.tsx` (`ElecAc/elements/
+    /// EmergencyGenerator.tsx:16,18,42-44`) already reads and colours
+    /// amber/green off -- unwritten before this, so the SD ELEC AC page's
+    /// RAT load readout was stuck at 0 (fixes/W83.md).
+    measured_rat_load_w: f64,
+
+    /// FlyByWire's own `ELEC_AC_{1..4}_BUS_POTENTIAL`/`_IS_POWERED` and
+    /// `ELEC_DC_{1,2}_BUS_POTENTIAL`/`_IS_POWERED` for this frame, copied
+    /// from `Truth` at the top of `tick` -- i.e. captured *before*
+    /// `publish` overwrites those exact same names with this area's own
+    /// authoritative answer (`docs/deep/authority.md`). Republished under
+    /// `DEEP_ELEC_*_FBW_RAW_*` (`Names::fbw_raw_ac_potential` and its three
+    /// siblings) so the override is auditable instead of silent (W162).
+    fbw_raw_ac_potential: [f64; 4],
+    fbw_raw_dc_potential: [f64; 2],
+    fbw_raw_ac_powered: [bool; 4],
+    fbw_raw_dc_powered: [bool; 2],
+
+    /// [`MISC_FAULTS`]' own armed magnitudes, by [`MiscFault`] index --
+    /// re-applied from `Faults` every tick something is armed, exactly like
+    /// every other fault field in this file, and cleared in
+    /// `clear_model_faults`. Boolean-shaped consumers read `> 0.0`; the two
+    /// `DriveOilLeak*` entries feed `apu::oil::OilFaults::leak` directly, so
+    /// they alone are read as a continuous 0..1 fraction.
+    misc_fault: [f64; MISC_FAULT_COUNT],
+    /// One APU-oil-class lubrication system (`crate::deep::apu::oil`,
+    /// reused verbatim, not re-modelled) per engine generator's mechanical
+    /// drive coupling -- see `E-ELEC-DESIGN.md`'s own citation of
+    /// `apu::oil.rs` as this codebase's established GENERIC pattern for
+    /// exactly this class of hardware. Stepped from `Truth::engine_n1_frac`/
+    /// `engine_running` (a drive's own shaft speed proxy) and
+    /// `Truth::engine_oil_temp_c` as the nearby ambient (a real per-engine
+    /// reading, not an invented constant).
+    drive_oil: [crate::deep::apu::oil::OilSystem; 4],
+    drive_oil_state: [crate::deep::apu::oil::OilState; 4],
+    /// `240800072 ELEC RAT FAULT`: the RAT was commanded to deploy (emergency
+    /// configuration, in flight) and did deploy, but is not actually
+    /// delivering power -- the verdict `240800072`'s own design entry says
+    /// is already computable from three already-published/already-computed
+    /// quantities (`emergency_config`, `rat_deployed`, `measured_rat_load_w`)
+    /// with no new physics or threshold.
+    rat_fault: bool,
+    /// `240800065`-`068 ELEC GEN n OFF`: `Truth::controls::eng_gen_pb_on`
+    /// cached from `tick` so `publish` can expose it -- a trigger (unlike a
+    /// procedure item) may only read a deep-area publish, never an aspect
+    /// name directly, so this makes the same already-read pushbutton state
+    /// a real published boolean instead of only an internal `Truth` field.
+    gen_pb_on: [bool; 4],
 }
 
 struct ContactorIndices {
@@ -1016,9 +1229,22 @@ impl ElectricalLive {
         debug_assert!(unresolved.is_empty(), "unrouted registered failures: {unresolved:?}");
 
         let names = Names {
+            // `ELEC_{bus}_BUS_POTENTIAL`/`_IS_POWERED` are the exact names
+            // FlyByWire's own `electrical/mod.rs` (`ElectricalBus::write`)
+            // writes for the same bus, so this area's `publish` below wins
+            // every frame it runs after `simulation.tick` -- deliberately,
+            // per `docs/deep/authority.md`. The four `fbw_raw_*` lists
+            // below exist to make that override auditable rather than
+            // silent: FlyByWire's own value, captured the instant before
+            // this loop overwrites it, republished under a name nothing
+            // else claims (W162).
             bus_potential: ALL_BUS_IDS.iter().map(|&b| format!("ELEC_{}_BUS_POTENTIAL", bus_tag(b))).collect(),
             bus_powered: ALL_BUS_IDS.iter().map(|&b| format!("ELEC_{}_BUS_IS_POWERED", bus_tag(b))).collect(),
             bus_frequency: ALL_BUS_IDS.iter().map(|&b| format!("ELEC_{}_BUS_FREQUENCY", bus_tag(b))).collect(),
+            fbw_raw_ac_potential: (1..=4).map(|n| format!("DEEP_ELEC_AC_{n}_FBW_RAW_POTENTIAL")).collect(),
+            fbw_raw_dc_potential: (1..=2).map(|n| format!("DEEP_ELEC_DC_{n}_FBW_RAW_POTENTIAL")).collect(),
+            fbw_raw_ac_powered: (1..=4).map(|n| format!("DEEP_ELEC_AC_{n}_FBW_RAW_IS_POWERED")).collect(),
+            fbw_raw_dc_powered: (1..=2).map(|n| format!("DEEP_ELEC_DC_{n}_FBW_RAW_IS_POWERED")).collect(),
             gen_fault: (1..=4).map(|n| format!("ELEC_GEN_{n}_FAULT")).collect(),
             apu_gen_fault: (1..=2).map(|n| format!("ELEC_APU_GEN_{n}_FAULT")).collect(),
             gen_load_w: (1..=4).map(|n| format!("ELEC_ENG_GEN_{n}_LOAD_W")).collect(),
@@ -1081,6 +1307,16 @@ impl ElectricalLive {
             measured_apu_gen_load_w: [0.0; 2],
             measured_tr_load_w: [0.0; 4],
             measured_battery_current_a: [0.0; 2],
+            measured_rat_load_w: 0.0,
+            fbw_raw_ac_potential: [0.0; 4],
+            fbw_raw_dc_potential: [0.0; 2],
+            misc_fault: [0.0; MISC_FAULT_COUNT],
+            drive_oil: std::array::from_fn(|_| crate::deep::apu::oil::OilSystem::new(288.15)),
+            drive_oil_state: [crate::deep::apu::oil::OilState::default(); 4],
+            rat_fault: false,
+            gen_pb_on: [false; 4],
+            fbw_raw_ac_powered: [false; 4],
+            fbw_raw_dc_powered: [false; 2],
         }
     }
 
@@ -1106,6 +1342,7 @@ impl ElectricalLive {
         for b in &mut self.net.buses {
             b.faults = Default::default();
         }
+        self.misc_fault = [0.0; MISC_FAULT_COUNT];
     }
 
     /// Feeds every armed magnitude into the exact model field its
@@ -1164,6 +1401,7 @@ impl ElectricalLive {
                 Target::StaticInverter => sf.static_inverter.efficiency_loss = sf.static_inverter.efficiency_loss.max(m),
                 Target::Rat => sf.rat.jammed = sf.rat.jammed.max(m),
                 Target::Gpu => sf.ground_power.weak_cart = sf.ground_power.weak_cart.max(m),
+                Target::Misc(idx) => self.misc_fault[idx] = self.misc_fault[idx].max(m),
             }
         }
         // One physical breaker, two catalogued ids: take the worse.
@@ -1249,6 +1487,7 @@ impl ElectricalLive {
         for i in 0..4 {
             let tripped = self.wiring.vfg[i].overload_heat() >= 1.0;
             gen_on_line[i] = truth.controls.eng_gen_pb_on[i] && truth.engine_running[i] && producing(&self.net, self.src_gen[i]) && !tripped;
+            self.gen_pb_on[i] = truth.controls.eng_gen_pb_on[i];
             let idx = self.contactor.gen_line[i];
             self.net.contactors[idx].commanded_closed = gen_on_line[i];
         }
@@ -1679,6 +1918,15 @@ impl Area for ElectricalLive {
     }
 
     fn tick(&mut self, truth: &Truth, faults: &Faults) {
+        // Snapshot FlyByWire's own bus values before this tick's `publish`
+        // (below) overwrites `ELEC_AC_{1..4}_BUS_POTENTIAL`/`_IS_POWERED`
+        // and `ELEC_DC_{1,2}_BUS_POTENTIAL`/`_IS_POWERED` with this area's
+        // own answer -- see `fbw_raw_ac_potential`'s own doc (W162).
+        self.fbw_raw_ac_potential = truth.ac_bus_volts;
+        self.fbw_raw_dc_potential = truth.dc_bus_volts;
+        self.fbw_raw_ac_powered = truth.ac_bus_powered;
+        self.fbw_raw_dc_powered = truth.dc_bus_powered;
+
         let dt = truth.dt_s.max(0.0);
 
         // 1. Faults: clear, then re-apply every armed magnitude into the
@@ -1767,6 +2015,7 @@ impl Area for ElectricalLive {
             self.measured_apu_gen_load_w[i] = self.source_delivered_w(self.src_apu_gen[i], self.contactor.apu_gen_line[i]);
             self.measured_battery_current_a[i] = self.source_branch_current_a(self.src_bat[i], self.contactor.bat_direct[i]);
         }
+        self.measured_rat_load_w = self.source_delivered_w(self.src_rat, self.contactor.rat_line);
         for i in 0..4 {
             self.measured_tr_load_w[i] = self.source_delivered_w(self.src_tr[i], self.contactor.tr_line[i]);
         }
@@ -1833,6 +2082,65 @@ impl Area for ElectricalLive {
             self.tr_verdict[i] = (sf.tru[i].winding_degradation >= DEGRADED_BEYOND_HALF).then_some(REASON_TRU_DEGRADED);
         }
         self.static_inv_verdict = (sf.static_inverter.efficiency_loss >= DEGRADED_BEYOND_HALF).then_some(REASON_INVERTER_DEGRADED);
+
+        // 7. `240800072 ELEC RAT FAULT`: re-read against the FCOM (p.4952)
+        // rather than E-ELEC-DESIGN.md's own "commanded but not producing"
+        // guess -- the real trigger is the RAT's own standing health verdict
+        // ("the RAT is failed, or stowed but not locked, or its heater is
+        // failed... an overload, an abnormally low/high RAT voltage, a
+        // short-circuit, a failure of the RAT generator contactor"), which
+        // can be true whether or not an emergency has actually commanded a
+        // deployment -- exactly the shape `sources.rs:376`'s own
+        // `static_inv_verdict` and `tr_verdict` already use for their own
+        // units. `sf.rat.jammed` is that same "up to 1.0, no power even when
+        // deployed" verdict (`registry.rs`'s own citation for `24_elec.rat`),
+        // so this reuses `DEGRADED_BEYOND_HALF`, the identical threshold and
+        // convention already applied to the TRUs and the static inverter,
+        // rather than a new number.
+        self.rat_fault = sf.rat.jammed >= DEGRADED_BEYOND_HALF;
+
+        // 8. `GeneratorDrive::oil`: one `apu::oil`-class lubrication system
+        // per engine generator's drive coupling (`MISC_FAULTS`' own
+        // `drive-oil-n` doc), stepped from that engine's own N1 fraction as
+        // the drive's shaft-speed proxy and its own oil temperature as the
+        // nearby ambient -- both real per-engine `Truth` readings, not
+        // invented constants. `240800032`-`035`'s own drive-disconnect
+        // fault-detector booleans are `misc_fault[MiscFault::DriveDiscFaultN]`
+        // directly; `240800036`-`039` DISCONNECTED reuses the already-
+        // published `ELEC_GEN_n_FAULT` verdict at a longer confirm time
+        // (`ata24.rs`), so neither needs any further state here.
+        for i in 0..4 {
+            let ambient_k = (truth.engine_oil_temp_c[i] + 273.15).max(200.0);
+            // GENERIC: a generator-drive coupling's own friction heat is a
+            // small fraction of a full accessory gearbox's (`apu::oil.rs`'s
+            // own `FIXED_ACCESSORY_POWER_W` reference is ~3 kW for the
+            // *whole* APU accessory drive); no A380-specific generator-drive
+            // figure is public.
+            // N2 (core), not N1 (fan): the generator's own drive shaft comes
+            // off the accessory gearbox, driven by the core spool -- the
+            // same correction `sources::Vfg` already applies to the
+            // generator's own electrical output (see `flying_truth`'s doc
+            // in this file's own tests), carried here to its mechanical
+            // drive coupling for consistency.
+            let n_frac = truth.engine_n2_frac[i].max(0.0);
+            // `240800044`-`047 ELEC DRIVE n OIL OVHT` (FCOM p.4920: "higher
+            // than 200 degC") needs a real path from the one drive-oil
+            // failure this design registers (`drive-oil-n`, a reservoir
+            // leak) to an actual overheat, not just a lower level -- a
+            // starved bearing runs hot, not merely dry, which is why the
+            // real aircraft pairs OIL LEVEL LO, OIL OVHT and OIL PRESS LO
+              // under one physical cause. Scaled from last tick's own
+            // starvation state (`level_frac`, already 0..1 from `apu::oil`'s
+            // own model), not a bespoke number: at full starvation this
+            // roughly matches `apu::oil.rs`'s own `FIXED_ACCESSORY_POWER_W`
+            // reference (~3 kW) for a fully seizing bearing, scaled by shaft
+            // speed.
+            let starvation = 1.0 - self.drive_oil_state[i].level_frac;
+            let friction_heat_w = (400.0 + starvation * 15_000.0) * n_frac;
+            let n_percent = n_frac * 100.0;
+            let oil_faults = crate::deep::apu::oil::OilFaults { leak: self.misc_fault[MiscFault::DriveOilLeak1 as usize + i] };
+            self.drive_oil_state[i] = self.drive_oil[i].step(n_percent, truth.engine_running[i], ambient_k, friction_heat_w, &oil_faults, dt);
+        }
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -1840,6 +2148,17 @@ impl Area for ElectricalLive {
             out(&self.names.bus_potential[i], bus.voltage);
             out(&self.names.bus_powered[i], if self.report.bus_powered[i] { 1.0 } else { 0.0 });
             out(&self.names.bus_frequency[i], bus.frequency_hz);
+        }
+        // FlyByWire's own answer for the same six buses, captured in
+        // `tick` before this method's loop above overwrote it -- see
+        // `fbw_raw_ac_potential`'s own doc (W162).
+        for i in 0..4 {
+            out(&self.names.fbw_raw_ac_potential[i], self.fbw_raw_ac_potential[i]);
+            out(&self.names.fbw_raw_ac_powered[i], if self.fbw_raw_ac_powered[i] { 1.0 } else { 0.0 });
+        }
+        for i in 0..2 {
+            out(&self.names.fbw_raw_dc_potential[i], self.fbw_raw_dc_potential[i]);
+            out(&self.names.fbw_raw_dc_powered[i], if self.fbw_raw_dc_powered[i] { 1.0 } else { 0.0 });
         }
         for i in 0..4 {
             out(&self.names.gen_fault[i], if self.gen_fault[i] { 1.0 } else { 0.0 });
@@ -1857,10 +2176,95 @@ impl Area for ElectricalLive {
         out("ELEC_GALLEY_SHED_ACTIVE", if self.galley_shed { 1.0 } else { 0.0 });
         out("ELEC_COMMERCIAL_SHED_ACTIVE", if self.commercial_shed { 1.0 } else { 0.0 });
         out("ELEC_RAT_DEPLOYED", if self.rat_deployed { 1.0 } else { 0.0 });
+        // `EmergencyGenerator.tsx` (ElecAc/elements/EmergencyGenerator.tsx:
+        // 16,18,42-44) reads this directly (percent of rated, `load < 108`
+        // for the green/amber split) -- previously never written, so the SD
+        // ELEC AC page's RAT box was permanently stuck at 0/green even at
+        // full RAT load (fixes/W83.md).
+        let emer_gen_load_pct = self.measured_rat_load_w / super::sources::Rat::MAX_POWER_W * 100.0;
+        out("ELEC_EMER_GEN_LOAD", emer_gen_load_pct);
+        out("ELEC_EMER_GEN_LOAD_NORMAL", if emer_gen_load_pct < 108.0 { 1.0 } else { 0.0 });
         out("ELEC_EMER_CONFIG_ACTIVE", if self.emergency_config { 1.0 } else { 0.0 });
         out("ELEC_TOTAL_DEMAND_W", self.total_demand_w);
         out("ELEC_AVAILABLE_CAPACITY_W", self.capacity_w);
         out("ELEC_TOTAL_DELIVERED_W", self.report.total_power_w);
+
+        // ---- E-ELEC additions (ata24 unwired-id pass) ----
+        // `240800011 ELEC AC ESS BUS ALTN`: the network's own NORM (AC1)/
+        // ALTN (AC4) feeder-contactor logic for the AC ESS bus
+        // (`command_contactors`), read back rather than duplicated.
+        out("ELEC_AC_ESS_FED_BY_ALTN", if self.net.contactors[self.contactor.ac_ess_feed_4].commanded_closed { 1.0 } else { 0.0 });
+        // `240800080 ELEC STATIC INV FAULT`: the already-computed, already-
+        // sourced static-inverter degradation verdict (`FBW_STATIC_INVERTER`/
+        // `24_004`), exposed as a plain boolean for the first time.
+        out("ELEC_STATIC_INV_FAULT", if self.static_inv_verdict.is_some() { 1.0 } else { 0.0 });
+        // `240800072 ELEC RAT FAULT`: see `tick`'s own step 7.
+        out("ELEC_RAT_FAULT", if self.rat_fault { 1.0 } else { 0.0 });
+        // `240800056`-`059` ELEC EXT PWR n FAULT: which of the four ground-
+        // power receptacles is actually on line (its own `gpu-n-line`
+        // contactor closed), so `ata24.rs` can compare the bus it feeds
+        // against the same `AC_UNDERVOLTAGE_TRIP_V`/`AC_OVERVOLTAGE_TRIP_V`
+        // band already used for generator faults.
+        for i in 0..4 {
+            out(&format!("ELEC_EXT_PWR_{}_ON_LINE", i + 1), if self.net.contactors[self.contactor.gpu_line[i]].closed { 1.0 } else { 0.0 });
+        }
+        // `MISC_FAULTS`' own boolean computer/monitoring-health verdicts
+        // (`240800013`,`032`-`035`,`052`,`053`,`060`,`069`,`070`,`071`,
+        // `084`-`086`): every one of these is a fault with no separate
+        // quantity to publish beyond "armed or not", so `> 0.0` is the
+        // whole verdict -- see `MISC_FAULTS`' own doc for why no threshold
+        // is invented here.
+        out("ELEC_ENMU_1_FAULT", if self.misc_fault[MiscFault::Enmu1 as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_ENMU_2_FAULT", if self.misc_fault[MiscFault::Enmu2 as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_ELMU_FAULT", if self.misc_fault[MiscFault::Elmu as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_TR_1_MONITORING_FAULT", if self.misc_fault[MiscFault::TrMonitoring1 as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_TR_2_MONITORING_FAULT", if self.misc_fault[MiscFault::TrMonitoring2 as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_TR_ESS_MONITORING_FAULT", if self.misc_fault[MiscFault::TrMonitoringEss as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_FCTL_ACTUATOR_PWR_FAULT", if self.misc_fault[MiscFault::FctlActuatorPwr as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_PSC_1_FAULT", if self.misc_fault[MiscFault::Psc1 as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_PSC_2_FAULT", if self.misc_fault[MiscFault::Psc2 as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_APU_BAT_FAULT", if self.misc_fault[MiscFault::ApuBat as usize] > 0.0 { 1.0 } else { 0.0 });
+        for i in 0..4 {
+            let disc_idx = MiscFault::DriveDiscFault1 as usize + i;
+            out(&format!("ELEC_DRIVE_{}_DISC_FAULT", i + 1), if self.misc_fault[disc_idx] > 0.0 { 1.0 } else { 0.0 });
+            out(&format!("ELEC_DRIVE_{}_OIL_LEVEL_FRAC", i + 1), self.drive_oil_state[i].level_frac);
+            out(&format!("ELEC_DRIVE_{}_OIL_TEMP_C", i + 1), self.drive_oil_state[i].temp_c);
+            // `240800048`-`051 ELEC DRIVE n OIL PRESS LO`: FCOM p.4948 gives
+            // its own real trip, "lower than 35 PSI" -- a different physical
+            // system from the APU's own oil (whose 15 PSI trip,
+            // `apu::params::OIL_PRESSURE_TRIP_PSI`, is internal to
+            // `OilSystem::step` and not this alert's threshold), so the raw
+            // pressure is published here and `ata24.rs` applies the FCOM's
+            // own 35 PSI directly rather than reading the internal, wrongly-
+            // calibrated `low_pressure_tripped` boolean for this alert.
+            out(&format!("ELEC_DRIVE_{}_OIL_PRESSURE_PSI", i + 1), self.drive_oil_state[i].pressure_psi);
+            out(&format!("ELEC_DRIVE_{}_OIL_LOW_PRESSURE_TRIPPED", i + 1), if self.drive_oil_state[i].low_pressure_tripped { 1.0 } else { 0.0 });
+            out(&format!("ELEC_EXT_PWR_{}_FAULT", i + 1), if self.misc_fault[MiscFault::ExtPwr1Fault as usize + i] > 0.0 { 1.0 } else { 0.0 });
+        }
+        // `240800019 ELEC BUS TIE OFF` (armed switch position, `MISC_FAULTS`'
+        // own doc).
+        out("ELEC_BUS_TIE_OFF", if self.misc_fault[MiscFault::BusTieOff as usize] > 0.0 { 1.0 } else { 0.0 });
+        // `240800065`-`068 ELEC GEN n OFF`: the same pushbutton state
+        // `command_contactors` already reads, exposed as a real publish so a
+        // *trigger* (which may not read an aspect name directly) can use it.
+        for i in 0..4 {
+            out(&format!("ELEC_GEN_{}_PB_ON", i + 1), if self.gen_pb_on[i] { 1.0 } else { 0.0 });
+        }
+        // `240800022`-`025` ELEC CABIN L(R) SUPPLY CENTER OVHT / OVHT DET
+        // FAULT.
+        out("ELEC_CABIN_L_SUPPLY_CENTER_OVHT", if self.misc_fault[MiscFault::CabinOvhtL as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_CABIN_R_SUPPLY_CENTER_OVHT", if self.misc_fault[MiscFault::CabinOvhtR as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_CABIN_L_SUPPLY_CENTER_OVHT_DET_FAULT", if self.misc_fault[MiscFault::CabinOvhtDetL as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_CABIN_R_SUPPLY_CENTER_OVHT_DET_FAULT", if self.misc_fault[MiscFault::CabinOvhtDetR as usize] > 0.0 { 1.0 } else { 0.0 });
+        // `240800074`-`079` ELEC SECONDARY SUPPLY CENTER 1(2) DEGRADED/FAULT/
+        // REDUND LOST -- three independent booleans per centre, `MISC_FAULTS`'
+        // own doc.
+        out("ELEC_SSC_1_DEGRADED", if self.misc_fault[MiscFault::Ssc1CommDegraded as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_SSC_2_DEGRADED", if self.misc_fault[MiscFault::Ssc2CommDegraded as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_SSC_1_FAULT", if self.misc_fault[MiscFault::Ssc1SupplyFault as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_SSC_2_FAULT", if self.misc_fault[MiscFault::Ssc2SupplyFault as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_SSC_1_REDUND_LOST", if self.misc_fault[MiscFault::Ssc1RedundLost as usize] > 0.0 { 1.0 } else { 0.0 });
+        out("ELEC_SSC_2_REDUND_LOST", if self.misc_fault[MiscFault::Ssc2RedundLost as usize] > 0.0 { 1.0 } else { 0.0 });
 
         for (i, b) in self.net.breakers.iter().enumerate() {
             out(&self.names.breaker_current[i], b.current_a);
@@ -1989,6 +2393,37 @@ mod tests {
         assert_eq!(published["ELEC_AC_1_BUS_IS_POWERED"], 0.0);
         assert_eq!(published["ELEC_AC_2_BUS_IS_POWERED"], 0.0);
         assert!(published["ELEC_DC_HOT_1_BUS_POTENTIAL"] > 20.0, "a battery-direct hot bus is live on a cold aircraft");
+    }
+
+    /// W162: `DEEP_ELEC_*_FBW_RAW_*` must carry exactly what `Truth` says
+    /// FlyByWire published this frame -- not this area's own solved
+    /// network, which is free to disagree (that disagreement is the whole
+    /// point of making the override auditable). The plain `ELEC_*` names
+    /// must still be published too: the raw names are additional, not a
+    /// replacement for the override `docs/deep/authority.md` calls for.
+    #[test]
+    fn fbw_raw_bus_values_are_captured_before_this_areas_own_override() {
+        board::clear();
+        let mut live = ElectricalLive::new();
+        let truth = Truth {
+            ac_bus_volts: [115.0, 114.5, 0.0, 113.9],
+            dc_bus_volts: [28.2, 0.0],
+            ac_bus_powered: [true, true, false, true],
+            dc_bus_powered: [true, false],
+            ..flying_truth()
+        };
+        let published = run(&mut live, &truth, &Faults::default(), 1);
+        assert_eq!(published["DEEP_ELEC_AC_1_FBW_RAW_POTENTIAL"], 115.0);
+        assert_eq!(published["DEEP_ELEC_AC_2_FBW_RAW_POTENTIAL"], 114.5);
+        assert_eq!(published["DEEP_ELEC_AC_3_FBW_RAW_POTENTIAL"], 0.0);
+        assert_eq!(published["DEEP_ELEC_AC_4_FBW_RAW_POTENTIAL"], 113.9);
+        assert_eq!(published["DEEP_ELEC_DC_1_FBW_RAW_POTENTIAL"], 28.2);
+        assert_eq!(published["DEEP_ELEC_DC_2_FBW_RAW_POTENTIAL"], 0.0);
+        assert_eq!(published["DEEP_ELEC_AC_1_FBW_RAW_IS_POWERED"], 1.0);
+        assert_eq!(published["DEEP_ELEC_AC_3_FBW_RAW_IS_POWERED"], 0.0);
+        assert_eq!(published["DEEP_ELEC_DC_1_FBW_RAW_IS_POWERED"], 1.0);
+        assert_eq!(published["DEEP_ELEC_DC_2_FBW_RAW_IS_POWERED"], 0.0);
+        assert!(published.contains_key("ELEC_AC_1_BUS_POTENTIAL"), "the override this area performs must still happen -- the raw names are additional, not a replacement");
     }
 
     /// The failure this exercises is registered by `registry.rs` on the

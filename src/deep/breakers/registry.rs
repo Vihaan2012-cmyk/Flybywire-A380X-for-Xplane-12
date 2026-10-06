@@ -25,6 +25,51 @@ pub fn register(r: &mut Registry) {
     for def in catalog::all() {
         register_one(r, def, &mut next_n);
     }
+    register_misc(r, &mut next_n);
+}
+
+/// Three armable conditions `E:/fbw-debug/ecam/E-ELEC-DESIGN.md`/
+/// `BRIEF-phase2-FCOM.md`'s Task B pass add: the two monitoring-*path*
+/// health verdicts for `240800020`/`054` (the computer that watches all 399
+/// trip units, and the emergency-configuration-specific channel, each
+/// independent of whether any individual breaker has actually tripped), and
+/// `240800073`'s maintenance-panel switch left ON. Unlike every other entry
+/// `register_one` above adds, none of these three is one of `catalog::all()`'s
+/// 399 real trip units, so they are registered directly here instead.
+fn register_misc(r: &mut Registry, next_n: &mut HashMap<u16, u16>) {
+    let entries: [(&str, &str, &str, &str); 3] = [
+        ("cb-monitoring", "C/B MONITORING computer", "C/B MONITORING FAULT", "the breaker-monitoring computer itself, independent of any individual breaker's real state (240800020)"),
+        ("emer-cb-monitoring", "EMER C/B MONITORING computer", "EMER C/B MONITORING FAULT", "the emergency-configuration-specific monitoring channel, active only once ELEC_EMER_CONFIG_ACTIVE is on (240800054)"),
+        (
+            "remote-cb-ctl",
+            "REMOTE C/B CTL maintenance panel pb",
+            "REMOTE C/B CTL LEFT ON",
+            "FCOM p.4954: maintenance personnel left the REMOTE C/B CTL pb (maintenance panel) set to ON; boolean switch position, not a failure (240800073)",
+        ),
+    ];
+    for (suffix, comp_name, failure_name, meaning) in entries {
+        let comp_id = format!("17_breakers.misc.{suffix}");
+        let n = take_n(next_n, 24);
+        let id = failure_id(Area::Breakers, 24, n);
+        r.component(ComponentDef {
+            id: comp_id.clone(),
+            area: Area::Breakers,
+            ata: 24,
+            name: comp_name.to_string(),
+            params: vec![ParamDef { name: "fault".into(), meaning: meaning.into(), healthy: 0.0 }],
+            failures: vec![id],
+        });
+        r.failure(FailureDef {
+            id,
+            area: Area::Breakers,
+            ata: 24,
+            name: failure_name.to_string(),
+            component: comp_id,
+            model_field: format!("deep::breakers::live::BreakersLive.misc.{suffix}"),
+            magnitude: "boolean: 0 healthy/normal, >0 faulted/mis-set".into(),
+            effect: meaning.to_string(),
+        });
+    }
 }
 
 fn take_n(next_n: &mut HashMap<u16, u16>, ata: u16) -> u16 {
@@ -101,8 +146,13 @@ mod tests {
     fn every_breaker_gets_its_own_component_and_exactly_two_failures() {
         let mut r = Registry::default();
         register(&mut r);
-        assert_eq!(r.components.len(), catalog::all().len());
-        assert_eq!(r.failures.len(), catalog::all().len() * 2);
+        // `register_misc`'s 3 computer-health/switch-position entries
+        // (`240800020`/`054`/`073`) are not one of the 399 real trip units,
+        // and carry one failure each rather than two.
+        const MISC_COMPONENTS: usize = 3;
+        const MISC_FAILURES: usize = 3;
+        assert_eq!(r.components.len(), catalog::all().len() + MISC_COMPONENTS);
+        assert_eq!(r.failures.len(), catalog::all().len() * 2 + MISC_FAILURES);
     }
 
     #[test]

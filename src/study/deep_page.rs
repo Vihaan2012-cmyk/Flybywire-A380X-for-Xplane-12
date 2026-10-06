@@ -44,6 +44,8 @@ pub(crate) const AREA_LIST: &[(Area, &str)] = &[
     (Area::ThermalZones, "Thermal Zones"),
     (Area::Wiring, "Wiring"),
     (Area::Integration, "Integration"),
+    (Area::AutoFlight, "Auto Flight"),
+    (Area::Communications, "Communications"),
 ];
 
 /// The whole `deep` registry, built once for this process (it is several
@@ -89,9 +91,11 @@ pub(crate) fn alerts_of(area: Area) -> Vec<&'static EcamAlert> {
 fn live_names_uncached(area: Area) -> Vec<String> {
     let sys: Option<Box<dyn crate::deep::live::Area>> = match area {
         Area::Apu => Some(crate::deep::apu::live::live_system()),
+        Area::AutoFlight => Some(crate::deep::autoflight::live::live_system()),
         Area::AvionicsNetwork => Some(crate::deep::avionics_network::live::live_system()),
         Area::Breakers => Some(crate::deep::breakers::live::live_system()),
         Area::Cabin => Some(crate::deep::cabin::live::live_system()),
+        Area::Communications => Some(crate::deep::communications::live::live_system()),
         Area::Electrical => Some(crate::deep::electrical::live::live_system()),
         Area::EngineAccessories => Some(crate::deep::engine_accessories::live::live_system()),
         Area::Environment => Some(crate::deep::environment::live::live_system()),
@@ -204,7 +208,9 @@ mod tests {
 
     #[test]
     fn eighteen_areas_one_of_which_integration_publishes_nothing() {
-        assert_eq!(AREA_LIST.len(), 18);
+        // 18 + AutoFlight + Communications (E-AIR-DESIGN.md's ECAM-
+        // completeness pass, ATA 22/23).
+        assert_eq!(AREA_LIST.len(), 20);
         assert!(live_names(Area::Integration).is_empty(), "integration has no live.rs of its own");
         assert!(!live_names(Area::Apu).is_empty());
     }

@@ -21,7 +21,7 @@ FlyByWire's JavaScript instruments run on a worker thread (src/js_worker.rs). An
 3. **Triggers.** Evaluate sound.xml SimVarSounds/LocalVar triggers each tick from `Vars`. Continuous sounds loop while their condition holds; one-shots fire on entry. Leave out WwiseRTPC-driven entries and document that.
 4. **Named sounds.** Add `pub fn play_instrument_sound(name: &str)`, thread-safe, mapped per sound.xml AvionicSounds. Route `Coherent.call('PLAY_INSTRUMENT_SOUND', name)` to it with one line in `crate::js_bridge::direct_call`.
 5. **Wiring.** Add lib.rs slot lines for create, tick after the systems, and release. No `dead_code` allow, and no warnings in your files.
-6. **Tests.** Run `cargo +stable-x86_64-pc-windows-gnu test --release --features js` with CARGO_TARGET_DIR=D:\fbw-build\target-sound. Don't launch X-Plane.
+6. **Tests.** Run `cargo +stable-x86_64-pc-windows-gnu test --release --features js` with CARGO_TARGET_DIR=D:\A380\fbw-build\target-sound. Don't launch X-Plane.
 
 ## Report
 Events mapped, triggers, what is left out and why, memory and CPU, and your lib.rs lines.

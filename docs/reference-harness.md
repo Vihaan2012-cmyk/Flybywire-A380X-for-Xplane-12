@@ -6,8 +6,8 @@ native pipeline's software-raster PNGs. Code: `tools/reference/`.
 
 ## Commands
 
-From `D:\fbw-xp-systems\tools\reference` (`npm install` once; Chromium lives
-in `D:\fbw-build\browsers`, `npm run install-browser` fetches it):
+From `D:\A380\fbw-xp-systems\tools\reference` (`npm install` once; Chromium lives
+in `D:\A380\fbw-build\browsers`, `npm run install-browser` fetches it):
 
 | command | does |
 |---|---|
@@ -35,13 +35,13 @@ Screen names are panel.cfg texture names without `$`, the ids the renderer
 
 | path | written by |
 |---|---|
-| `D:\fbw-build\reference-png\<state>\<screen>.png` | `npm run reference` |
-| `D:\fbw-build\reference-png\<state>\<screen>.access.json` | same: every variable read (key, units, count, found), variables read but missing from the state (`missingInputs`), writes, storage keys, Coherent calls and listeners, errors, virtual clock stats |
-| `D:\fbw-build\reference-png\<state>\<screen>.console.log` | same: the page console |
-| `D:\fbw-build\reference-png\<state>\state.resolved.json` | same: the flat variable set used, with each value's `src` |
-| **`D:\fbw-build\display-snapshots\<state>\<screen>.png`** | **the native pipeline** (the input `npm run compare` expects) |
-| `D:\fbw-build\reference-report\index.html`, `report.json`, `<state>\<screen>.{ref,ours,diff,overlay,ssim}.png` | `npm run compare` |
-| `D:\fbw-build\reference-dom-usage\<state>.<screen>.json` | `npm run reference -- --record` |
+| `D:\A380\fbw-build\reference-png\<state>\<screen>.png` | `npm run reference` |
+| `D:\A380\fbw-build\reference-png\<state>\<screen>.access.json` | same: every variable read (key, units, count, found), variables read but missing from the state (`missingInputs`), writes, storage keys, Coherent calls and listeners, errors, virtual clock stats |
+| `D:\A380\fbw-build\reference-png\<state>\<screen>.console.log` | same: the page console |
+| `D:\A380\fbw-build\reference-png\<state>\state.resolved.json` | same: the flat variable set used, with each value's `src` |
+| **`D:\A380\fbw-build\display-snapshots\<state>\<screen>.png`** | **the native pipeline** (the input `npm run compare` expects) |
+| `D:\A380\fbw-build\reference-report\index.html`, `report.json`, `<state>\<screen>.{ref,ours,diff,overlay,ssim}.png` | `npm run compare` |
+| `D:\A380\fbw-build\reference-dom-usage\<state>.<screen>.json` | `npm run reference -- --record` |
 
 Snapshots for comparison must be:
 - the screen's full texture at panel.cfg `pixel_size` (another size is
@@ -126,7 +126,7 @@ DAY/MONTH/YEAR, ABSOLUTE TIME, SIMULATION TIME) are derived from `time.utc`.
    `/Pages/VCockpit/Instruments/A380X/...` from FBW's build output
    (`fbw-a380x/out/flybywire-aircraft-a380-842/html_ui`, the runtime
    engineer's build, docs/js-build.md; falls back to
-   `D:\fbw-build\reference-bundles`), `/Fonts`, `/Images`, `/JS/fbw-a380x`
+   `D:\A380\fbw-build\reference-bundles`), `/Fonts`, `/Images`, `/JS/fbw-a380x`
    from FBW's tracked base package, and `/JS/dataStorage.js` plus the host
    page from `tools/reference/host`. Lookups are case-insensitive like the
    MSFS VFS. No Asobo file is served or copied.

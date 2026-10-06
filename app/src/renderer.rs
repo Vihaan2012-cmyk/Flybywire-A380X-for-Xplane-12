@@ -19,6 +19,7 @@ mod wmm;
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -65,6 +66,14 @@ struct ViewState {
     game_strings: RefCell<HashMap<String, String>>,
     game_requested: RefCell<HashSet<String>>,
     strings: RefCell<HashMap<String, String>>,
+    /// Every variable this view has asked for, by name and unit, and the
+    /// shared slot it lives in. `SlotTable::register` takes the table's
+    /// cross-process mutex and walks every slot comparing names, which cost
+    /// about 2 ms a call; a gauge makes hundreds of reads a frame, so every
+    /// view spent ~98% of its time there and the PFD drew 2 frames a
+    /// second. Slots are append-only (never renumbered or removed), so a
+    /// name's slot never changes once found.
+    slot_cache: RefCell<HashMap<(String, String), u32>>,
     /// Downlink records drained while `gameString` waited for its answer,
     /// handed out by the next `poll()` in their original order (rule 4).
     stash: RefCell<Vec<Downlink>>,
@@ -85,6 +94,7 @@ impl ViewState {
             game_strings: RefCell::new(HashMap::new()),
             game_requested: RefCell::new(HashSet::new()),
             strings: RefCell::new(HashMap::new()),
+            slot_cache: RefCell::new(HashMap::new()),
             stash: RefCell::new(Vec::new()),
         }
     }
@@ -98,7 +108,9 @@ thread_local! {
 /// Reads `--xphfbw-tag`/`--xp-root`/`--aircraft` from this process's own
 /// command line (set by the browser process before spawning it) and opens
 /// the bridge session, once per process; every view in this process shares
-/// the result.
+/// the result. [`open_session_with_retry`] absorbs the one part of this
+/// that can lose a race with the plugin, so what gets memoized below is a
+/// final, not merely a first, outcome.
 fn process_info() -> Option<Rc<ProcessInfo>> {
     PROCESS.with(|cell| cell.get_or_init(load_process_info).clone())
 }
@@ -108,8 +120,57 @@ fn load_process_info() -> Option<Rc<ProcessInfo>> {
     let tag = switch_value(&cl, "xphfbw-tag")?;
     let xp_root = PathBuf::from(switch_value(&cl, "xp-root")?);
     let aircraft_dir = PathBuf::from(switch_value(&cl, "aircraft")?);
-    let session = Session::open(&tag)?;
+    let session = open_session_with_retry(&tag)?;
     Some(Rc::new(ProcessInfo { xp_root, aircraft_dir, session: Rc::new(session) }))
+}
+
+/// How many times, and how far apart, to retry [`Session::open`] before
+/// giving up on it. The plugin creates a session's shared objects in
+/// sequence (`Session::create`: the slot table, the uplink ring, one
+/// downlink ring per view, the input ring -- several named-object creates),
+/// after it has already started this app; a renderer whose first gauge
+/// view is created while that is still in flight used to see
+/// `Session::open` fail exactly once and, because [`process_info`]
+/// memoizes the result in a `thread_local` `OnceCell`, that renderer
+/// process never got a working bridge again for the rest of its life --
+/// silently, since renderer subprocesses never call `logging::init`
+/// (main.rs's `is_browser_process` branch: only the browser process opens
+/// the app's log file, so `crate::logging::log` is a no-op from here). 2 s
+/// (20 x 100 ms) is generous for what should only ever be the last few
+/// `OpenFileMappingW`/`OpenMutexW` calls of a session the browser process
+/// has already confirmed exists (`views.rs`'s own retry gates creating any
+/// gauge browser on that) -- unlike `views.rs`'s ~75 s retry for the first,
+/// full systems-boot wait, this one cannot be made asynchronous: it runs
+/// inside `on_browser_created`, which must return before `on_context_created`
+/// can install `window.__xphfbw` in time for the gauge page's one-shot
+/// "do I have a bridge, or fall back to QuickJS" check.
+const SESSION_OPEN_ATTEMPTS: u32 = 20;
+const SESSION_OPEN_RETRY_DELAY_MS: u64 = 100;
+
+fn open_session_with_retry(tag: &str) -> Option<Session> {
+    for attempt in 1..=SESSION_OPEN_ATTEMPTS {
+        if let Some(session) = Session::open(tag) {
+            return Some(session);
+        }
+        if attempt == SESSION_OPEN_ATTEMPTS {
+            log_process_info_failure(tag, attempt);
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(SESSION_OPEN_RETRY_DELAY_MS));
+    }
+    None
+}
+
+/// The visible failure signal for a [`Session::open`] that never succeeded:
+/// `crate::logging::log` silently drops everything written from a renderer
+/// process (see [`open_session_with_retry`]'s doc comment), so this opens
+/// and appends to a small file of its own, in the same log directory,
+/// instead.
+fn log_process_info_failure(tag: &str, attempts: u32) {
+    let path = crate::logging::dir().join("renderer-process-info-failures.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "pid={} tag={tag} attempts={attempts}: Session::open never succeeded", std::process::id());
+    }
 }
 
 fn switch_value(cl: &CommandLine, name: &str) -> Option<String> {
@@ -153,8 +214,19 @@ fn ensure_snapshot(view: &ViewState) {
     }
 }
 
+/// A variable's shared slot, registering it the first time this view asks.
+fn slot_for(view: &ViewState, name: &str, unit: &str) -> Option<u32> {
+    let key = (name.to_owned(), unit.to_owned());
+    if let Some(&slot) = view.slot_cache.borrow().get(&key) {
+        return Some(slot);
+    }
+    let slot = view.session.slots.register(name, unit)?;
+    view.slot_cache.borrow_mut().insert(key, slot);
+    Some(slot)
+}
+
 fn get_var(view: &ViewState, name: &str, unit: &str) -> f64 {
-    let Some(slot) = view.session.slots.register(name, unit) else {
+    let Some(slot) = slot_for(view, name, unit) else {
         return 0.0; // The slot table is full.
     };
     ensure_snapshot(view);
@@ -167,7 +239,7 @@ fn get_var(view: &ViewState, name: &str, unit: &str) -> f64 {
 }
 
 fn set_var(view: &ViewState, name: &str, unit: &str, value: f64) {
-    let Some(slot) = view.session.slots.register(name, unit) else { return };
+    let Some(slot) = slot_for(view, name, unit) else { return };
     view.session.uplink.push(&Uplink::Write { slot, value }.encode());
     let frame_at_write = view.snapshot.borrow().as_ref().map(|s| s.frame).unwrap_or_else(|| view.session.slots.header().frame.load(Ordering::Acquire));
     view.overlay.borrow_mut().set(slot, value, frame_at_write);
@@ -251,9 +323,11 @@ fn game_string(view: &ViewState, name: &str) -> String {
     }
     view.session.uplink.push(&Uplink::GameString { view: view.view, name: name.to_string() }.encode());
     // MSFS answers GAME strings synchronously, and FlyByWire reads some once
-    // at start-up (MsfsBackend's FLIGHT NAVDATA DATE RANGE): wait for the
-    // plugin's answer, a frame or two, keeping whatever else arrives
-    // meanwhile for the next poll().
+    // at start-up (MsfsBackend's FLIGHT NAVDATA DATE RANGE) with no retry if
+    // that one ask comes back empty (W154): wait for the plugin's answer,
+    // keeping whatever else arrives meanwhile for the next poll(). The wait
+    // has to clear a real stall, not just "a frame or two" -- see
+    // `GAME_STRING_WAIT_MS`.
     let Some(ring) = view.session.downlinks.get(view.view as usize) else { return String::new() };
     let until = std::time::Instant::now() + std::time::Duration::from_millis(GAME_STRING_WAIT_MS);
     while std::time::Instant::now() < until {
@@ -272,7 +346,25 @@ fn game_string(view: &ViewState, name: &str) -> String {
 }
 
 /// How long `gameString` waits for a value it has never seen.
-const GAME_STRING_WAIT_MS: u64 = 250;
+/// How long `gameString` waits for a value it has never seen: FlyByWire's
+/// `MsfsBackend` reads `FLIGHT NAVDATA DATE RANGE` exactly once at start-up
+/// and never retries (`Msfs.ts`'s `getDatabaseIdent`), so whatever this
+/// returns on that single call is what FBW keeps forever (W154). 250 ms was
+/// not long enough: the plugin's own flight-loop tick can legitimately go
+/// quiet well past that during early boot -- W63 measured a single
+/// `FBW_LOG_ALL` registry-generation re-dump costing ~1.6 s on one tick, and
+/// boot logs show several such bumps inside the first two seconds, right
+/// where every navdata-consuming view's `MsfsBackend` is constructed -- so a
+/// request made just before or during one of those ticks timed out here and
+/// came back permanently empty, even though the plugin's navdata provider
+/// (registered well before this point; `NavData::header_cycle` reads
+/// earth_nav.dat's header synchronously at `NavData::load`) had the real
+/// answer ready the whole time. 5 s clears that stall with margin for more
+/// than one in a row, while staying far under `xphfbw_host.rs`'s own
+/// `GAME_STRING_FRAMES` (~a minute) patience for a provider that is
+/// genuinely not ready yet -- so a name with no real answer still resolves
+/// in bounded time instead of hanging the view.
+const GAME_STRING_WAIT_MS: u64 = 5_000;
 
 // ---------------------------------------------------------------------------
 // readFile — html_ui-relative or /VFS/ paths, from the aircraft dir.
@@ -321,7 +413,50 @@ fn arg_f64_array(args: &[Option<V8Value>], i: usize) -> Vec<f64> {
 // Dispatch: one V8Handler for every `__xphfbw` function, matched by name.
 // ---------------------------------------------------------------------------
 
+/// Every native call's cost, per view and per call, flushed to
+/// `native-timing.log` every 10 s: a page whose frames each take half a
+/// second shows exactly which bridge call they are waiting in, which a
+/// DevTools profile cannot (it files every native callback under one name).
+/// These calls run in Chromium's renderer processes, which do not share the
+/// app's own log file, hence a file of their own, one line per view and call.
 fn dispatch(name: &str, args: &[Option<V8Value>]) -> Result<Option<V8Value>, String> {
+    use std::collections::HashMap as Map;
+    thread_local! {
+        static TIMES: RefCell<(Map<(u32, String), (u64, f64, f64)>, Option<std::time::Instant>)> = RefCell::new((Map::new(), None));
+    }
+    let started = std::time::Instant::now();
+    let result = dispatch_inner(name, args);
+    let ms = started.elapsed().as_secs_f64() * 1000.;
+    let view = current_view().map_or(u32::MAX, |v| v.view);
+    TIMES.with(|t| {
+        let mut t = t.borrow_mut();
+        let e = t.0.entry((view, name.to_string())).or_insert((0, 0., 0.));
+        e.0 += 1;
+        e.1 += ms;
+        e.2 = e.2.max(ms);
+        let now = std::time::Instant::now();
+        let last = *t.1.get_or_insert(now);
+        if now.duration_since(last).as_secs_f64() >= 10. {
+            let mut lines = String::new();
+            let mut rows: Vec<_> = t.0.iter().collect();
+            rows.sort_by(|a, b| b.1 .1.partial_cmp(&a.1 .1).unwrap_or(std::cmp::Ordering::Equal));
+            for ((v, n), (count, total, max)) in rows {
+                lines.push_str(&format!("pid {} view {v} {n}: {count} calls, {total:.0} ms total, max {max:.1} ms
+", std::process::id()));
+            }
+            let dir = std::env::var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir()).join("XPHFBW").join("logs");
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("native-timing.log")) {
+                use std::io::Write;
+                let _ = f.write_all(lines.as_bytes());
+            }
+            t.0.clear();
+            t.1 = Some(now);
+        }
+    });
+    result
+}
+
+fn dispatch_inner(name: &str, args: &[Option<V8Value>]) -> Result<Option<V8Value>, String> {
     // magVar is a pure function: no session, no view needed.
     if name == "magVar" {
         let lat = arg_f64(args, 0);
@@ -529,7 +664,20 @@ pub fn append_child_switches(command_line: Option<&mut CommandLine>) {
 
 #[cfg(test)]
 mod tests {
-    use super::read_file;
+    use super::{open_session_with_retry, read_file, Session, GAME_STRING_WAIT_MS};
+
+    #[test]
+    fn game_string_wait_clears_the_worst_known_boot_stall() {
+        // W63: a single FBW_LOG_ALL registry-generation re-dump can stall
+        // the plugin's flight-loop tick for ~1.6 s during early boot, which
+        // is exactly when FlyByWire's MsfsBackend makes its one-shot,
+        // never-retried GAME string reads (W154). This wait has to clear
+        // that stall with real margin, not just barely outlast it.
+        assert!(
+            GAME_STRING_WAIT_MS >= 5_000,
+            "GAME_STRING_WAIT_MS = {GAME_STRING_WAIT_MS}ms must clear the ~1.6s W63 stall with margin"
+        );
+    }
 
     #[test]
     fn read_file_maps_paths_like_coui() {
@@ -542,5 +690,40 @@ mod tests {
         assert_eq!(read_file(&dir, "/VFS/panel/panel.cfg").as_deref(), Some("cfg"));
         assert_eq!(read_file(&dir, "/Pages/../../panel/panel.cfg"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The race this fix targets: by the time this thread's first attempt
+    /// runs, the session does not exist yet; it appears shortly after
+    /// (like the plugin finishing `Session::create` a beat behind a
+    /// renderer subprocess's first gauge view). The retry must still find
+    /// it, well inside the 2 s budget.
+    #[test]
+    fn open_session_with_retry_waits_out_a_late_session() {
+        let tag = format!(
+            "renderer_retry_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()
+        );
+        let created_tag = tag.clone();
+        let handle = std::thread::spawn(move || {
+            // Longer than one retry interval (100 ms) so this is genuinely
+            // exercising the wait, not just finding an already-open session.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let session = Session::create(&created_tag).expect("create");
+            // Keep every handle (and so every named object) alive until the
+            // retrying side is done with them.
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            session
+        });
+        assert!(open_session_with_retry(&tag).is_some(), "must pick up a session that appears mid-retry");
+        handle.join().unwrap();
+    }
+
+    /// A tag nobody ever creates for (a genuine misconfiguration, not a
+    /// race) must still give up -- bounded, not hang the renderer forever.
+    #[test]
+    fn open_session_with_retry_gives_up_on_a_tag_nobody_creates() {
+        let tag = format!("renderer_retry_missing_{}", std::process::id());
+        assert!(open_session_with_retry(&tag).is_none());
     }
 }

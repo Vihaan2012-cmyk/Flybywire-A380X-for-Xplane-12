@@ -1,0 +1,14 @@
+[package]
+name = "deep_systems"
+version = "0.1.0"
+edition = "2021"
+description = "Every A380 deep area (the X-Plane plugin's src/deep), for FlyByWire's MSFS systems module"
+publish = false
+
+# No dependencies beyond std, so FlyByWire's workspace can vendor it as is.
+
+[lib]
+# The area files' own unit tests belong to the X-Plane plugin, which
+# compiles the same files against its full host and runs them there.
+test = false
+doctest = false

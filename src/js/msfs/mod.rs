@@ -173,17 +173,12 @@ impl CockpitOptions {
     }
 }
 
-/// A change to a script as it loads: in the file at `path` (under html_ui),
-/// the text `find`, which must occur exactly once, becomes `replace`. A
-/// patch that does not match is reported and the file runs unchanged.
-#[derive(Clone, Debug)]
-pub struct SourcePatch {
-    pub path: String,
-    pub find: String,
-    pub replace: String,
-    /// Why, for the log.
-    pub reason: String,
-}
+/// See [`crate::source_patch::SourcePatch`] (moved there, unconditionally
+/// compiled, so XPHFBW's separate `coui://` handler -- `app/src/scheme.rs`,
+/// built without the `js` feature -- can apply the same patches to the
+/// bundles it serves; `read_file` below is one of two callers of
+/// `crate::source_patch::apply` now, not the only one).
+pub use crate::source_patch::SourcePatch;
 
 /// What one view costs.
 #[derive(Clone, Debug, Default)]
@@ -795,19 +790,12 @@ impl Host for ViewHost<'_> {
                 p => full.push(p),
             }
         }
-        let mut text = std::fs::read_to_string(&full).map_err(|e| format!("{path} ({}): {e}", full.display()))?;
-        for patch in self.shared.patches.iter().filter(|p| p.path.eq_ignore_ascii_case(clean)) {
-            let found = text.matches(patch.find.as_str()).count();
-            if found == 1 {
-                text = text.replacen(patch.find.as_str(), &patch.replace, 1);
-                self.outer.log(LogLevel::Info, &format!("MSFS runtime: {}: {}", patch.path, patch.reason));
-            } else {
-                self.outer.log(
-                    LogLevel::Error,
-                    &format!("MSFS runtime: {}: the patch ({}) matches {found} times, not once; the file runs unchanged", patch.path, patch.reason),
-                );
-            }
-        }
+        let text = std::fs::read_to_string(&full).map_err(|e| format!("{path} ({}): {e}", full.display()))?;
+        let patches = &self.shared.patches;
+        let outer = &mut self.outer;
+        let text = crate::source_patch::apply(patches, clean, text, |ok, msg| {
+            outer.log(if ok { LogLevel::Info } else { LogLevel::Error }, &format!("MSFS runtime: {msg}"));
+        });
         Ok(text)
     }
 

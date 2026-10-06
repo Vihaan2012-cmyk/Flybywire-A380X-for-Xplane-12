@@ -371,6 +371,237 @@ pub fn register(r: &mut Registry) {
     ];
     let ground_spoiler_ids = register_component(r, &mut ids, "27_fctl.gnd_splr_logic", "Ground spoiler deploy/retract logic", ground_spoiler_fields);
 
+    // ---- E-ELEC Phase 2 (2026-09-27): `340800056`-`058 NAV RA SYS A(B)(C)
+    // LOST BY PRIM` -- a minimal PRIM computer-health flag, no control-law
+    // model. The PRIMs are real, redundant consumers of the three radio
+    // altimeter systems; this area models surfaces/actuators/jams but has
+    // no PRIM component at all today, which is exactly the gap
+    // `E-ELEC-DESIGN.md`'s Group E designs: three new failure ids, boolean
+    // (no numeric threshold -- a computer is using a given RA system or it
+    // is not), one PRIM own health fault dropping that PRIM's own use of
+    // one RA system (PRIM 1 <-> RA A, PRIM 2 <-> RA B, PRIM 3 <-> RA C --
+    // the simplest sourced mapping without inventing a fuller
+    // redundancy-management matrix this port does not otherwise model).
+    for (n, letter) in [(1, "A"), (2, "B"), (3, "C")] {
+        let prim_fields = vec![field(
+            "ra_link_fault",
+            "0 healthy (uses all three RA systems) .. 1 (drops its own RA link)",
+            &format!("PRIM {n} RA {letter} link fault"),
+            format!("flight_controls::prim::Prim{n}.ra_link_fault"),
+            "boolean: 0 healthy, >0 faulted -- a PRIM either has a working link to that RA system or it does not",
+            &format!("PRIM {n} stops using RA system {letter}, per 340800056/057/058"),
+        )];
+        register_component(r, &mut ids, &format!("27_fctl.prim_{n}"), &format!("PRIM {n} (RA link health only, no control-law model)"), prim_fields);
+    }
+    // ---- Cockpit input transducers (E-FCTL, ECAM completeness pass,
+    // `E-FCTL-DESIGN.md` section 3.2): the captain's sidestick pitch/roll
+    // axis and the rudder pedal axis, each modelled as the same
+    // `sensors::DualTransducer` two-channel shape as every surface's own
+    // position monitor above, applied to the raw command input instead of a
+    // surface position. Unlike a surface's monitor (registry.rs's existing
+    // `surface_fields`, which only arms channel A -- channel B is always
+    // healthy there), both channels here get their own failure fields,
+    // because "the whole stick/pedal is lost" needs both channels failable
+    // independently. There is no F.O.-side sidestick component: this port
+    // has no live, independently-driven F.O. stick axis to model a
+    // transducer against (`Truth::capt_sidestick_pitch_raw`'s own doc), so
+    // `271800026`/`271800028` stay unsourced rather than watching a value
+    // nothing ever moves.
+    fn input_sensor_fields(model_path: &str) -> Vec<FieldSpec> {
+        vec![
+            field(
+                "chan_a_open",
+                "0 healthy .. 1 fully open circuit (no signal)",
+                "channel A open circuit",
+                format!("sensors::PositionTransducer feeding {model_path}: TransducerFaults.open_circuit (channel A)"),
+                "0 healthy .. 1 fully open",
+                "channel A's signal is lost (rails to zero, not a frozen value); the computer must rely on channel B alone",
+            ),
+            field(
+                "chan_a_drift",
+                "0 healthy .. 1 drifting at the modelled maximum rate",
+                "channel A drift",
+                format!("sensors::PositionTransducer feeding {model_path}: TransducerFaults.drift (channel A)"),
+                "0 healthy .. 1 drifting at the modelled maximum rate",
+                "channel A slowly diverges from channel B, eventually tripping the dual-channel disagreement monitor",
+            ),
+            field(
+                "chan_b_open",
+                "0 healthy .. 1 fully open circuit (no signal)",
+                "channel B open circuit",
+                format!("sensors::PositionTransducer feeding {model_path}: TransducerFaults.open_circuit (channel B)"),
+                "0 healthy .. 1 fully open",
+                "channel B's signal is lost; the computer must rely on channel A alone",
+            ),
+            field(
+                "chan_b_drift",
+                "0 healthy .. 1 drifting at the modelled maximum rate",
+                "channel B drift",
+                format!("sensors::PositionTransducer feeding {model_path}: TransducerFaults.drift (channel B)"),
+                "0 healthy .. 1 drifting at the modelled maximum rate",
+                "channel B slowly diverges from channel A, eventually tripping the dual-channel disagreement monitor",
+            ),
+        ]
+    }
+    let input_sensors = [
+        ("27_fctl.l_sidestick_pitch", "Captain's sidestick pitch transducer"),
+        ("27_fctl.l_sidestick_roll", "Captain's sidestick roll transducer"),
+        ("27_fctl.rudder_pedal", "Rudder pedal position transducer"),
+    ];
+    for (id, name) in input_sensors {
+        register_component(r, &mut ids, id, name, input_sensor_fields("flight_controls::live::FlightControlsLive (cockpit input transducer)"));
+    }
+
+    // ---- PRIM/SEC software/pin-programming identity (E-FCTL, ECAM
+    // completeness pass, `E-FCTL-DESIGN.md` section 3.3): a discrete
+    // agree/disagree check across the three configured units, not a
+    // continuous quantity, so "never invent a threshold" does not apply --
+    // the comparison is binary. Genuinely new modelling (this port's own
+    // compiled PRIM/SEC logic carries no per-unit version/pin-prog identity
+    // to disagree, confirmed by grepping every `A380{Prim,Sec}Computer*_
+    // types.h` for "version"/"standard"/"part_number"/"identific": no hits),
+    // built on the same kind of config-pin concept this port already uses
+    // elsewhere (`BaseFcuDiscreteInputs::pin_prog_qfe_avail`).
+    let pin_prog_fields = |unit: &str| {
+        vec![field(
+            "mismatch",
+            "0 all three units' configured identity tags agree .. 1 one unit's overwritten",
+            "configuration identity mismatch",
+            format!("flight_controls::live::FlightControlsLive (new {unit} pin-programming component, E-FCTL ECAM completeness pass)"),
+            "boolean in practice: 0 agree, 1 disagree",
+            "a maintenance-style fault (a unit swapped in with the wrong software standard or pin strap), not a flight-control-law degradation -- this port models no in-flight effect from a version/pin-prog mismatch alone, matching real Airbus practice (a despatch/maintenance item)",
+        )]
+    };
+    let prim_pin_prog_ids = register_component(r, &mut ids, "27_fctl.prim_pin_prog", "PRIM software/pin-programming identity", pin_prog_fields("PRIM"));
+    let sec_pin_prog_ids = register_component(r, &mut ids, "27_fctl.sec_pin_prog", "SEC software/pin-programming identity", pin_prog_fields("SEC"));
+    debug_assert_eq!(prim_pin_prog_ids.len(), 1);
+    debug_assert_eq!(sec_pin_prog_ids.len(), 1);
+
+    // ---- Rate gyros (E-FCTL, coordinator follow-up 2026-09-27,
+    // `271800018` F/CTL TWO GYROMETERs FAULT): the coordinator asked
+    // whether a real body-rate quantity already exists in this port rather
+    // than leaving this unsourced for lack of a live gyro input. It does:
+    // `src/physics/adirs.rs` runs a real strapdown-IRS simulation per
+    // ADIRU, with its own gyro bias/failure model, and writes its *sensed*
+    // (not X-Plane-truth) body rate back over the native `BODY_ROTATION_
+    // RATE_X/Y/Z` datarefs (`adirs.rs:1502-1504`) -- the same datarefs
+    // `SimReadings::body_rotation_velocity_rad_s` reads
+    // (`prim.rs:64-90`'s own doc), which is in turn what the real compiled
+    // PRIM/SEC flight-control laws consume as their own rate input. So
+    // `Truth::body_rate_{pitch,roll,yaw}_raw` (fed from that same read, see
+    // `prim.rs`'s new publish) is a real, already-modelled, already-
+    // failable quantity, not an invented one. FlyByWire's own compiled
+    // Fctl bus additionally carries six discrete `rate_gyro_*_bus` fields
+    // (`A380PrimComputerFctl_types.h:781-786`) that would need extending
+    // `BasePrimFctlLogicOutputs`'s exact C ABI layout for a purely cosmetic
+    // gain (the value is already the same one this model uses); this pass
+    // reads the underlying real quantity through the sensors this port
+    // already runs instead.
+    let rate_gyros = [
+        ("27_fctl.rate_gyro_pitch", "Pitch rate gyro pair feeding the flight control laws"),
+        ("27_fctl.rate_gyro_roll", "Roll rate gyro pair feeding the flight control laws"),
+        ("27_fctl.rate_gyro_yaw", "Yaw rate gyro pair feeding the flight control laws"),
+    ];
+    for (id, name) in rate_gyros {
+        register_component(r, &mut ids, id, name, input_sensor_fields("flight_controls::live::FlightControlsLive (rate gyro pair, fed from physics::adirs's real sensed body rate)"));
+    }
+
+    // ---- F.O. sidestick (E-FCTL, coordinator follow-up, `271800026`/
+    // `271800028`): the coordinator's point stands -- the F.O. sidestick is
+    // a real physical transducer pair in the real aircraft even though this
+    // port's cockpit has no independent input device moving it. Modelling
+    // it exactly like the captain's (section 3.2) but against a fixed
+    // neutral "true angle" is honest: the FCOM's own triggering text for
+    // both the generic and the captain's-side procedure ("The left (right)
+    // sidestick is failed" / "Two, or three PRIMs detect that one sidestick
+    // sensor is failed", `E-FCTL-FCOM.json` ids 271800026/271800028) never
+    // requires the stick to be *moved*, only that its transducer(s) are
+    // failed or disagree -- exactly what a transducer sitting at a real,
+    // physical rest position can still do.
+    let r_sidesticks = [
+        ("27_fctl.r_sidestick_pitch", "F.O.'s sidestick pitch transducer"),
+        ("27_fctl.r_sidestick_roll", "F.O.'s sidestick roll transducer"),
+    ];
+    for (id, name) in r_sidesticks {
+        register_component(r, &mut ids, id, name, input_sensor_fields("flight_controls::live::FlightControlsLive (cockpit input transducer, F.O. side, held at a fixed neutral position)"));
+    }
+
+    // ---- Per-PRIM elevator/rudder command channel and sidestick-sensor
+    // monitor (E-FCTL, coordinator follow-up, `271800033`-`271800035`/
+    // `271800039`-`271800041`/`271800042`-`271800044`). Reading the FCOM's
+    // own triggering text (`E-FCTL-FCOM.json`): "PRIM 1(2)(3) has lost the
+    // capacity to control an elevator/rudder actuator" and "PRIM 1(2)(3)
+    // detects that one sidestick sensor is failed" -- both describe a
+    // fault *internal to that one PRIM's own command or monitoring
+    // circuitry*, not "which hydraulic system backs the actuator" (the
+    // quantity `A380PrimComputerFctl.cpp`'s `elevator_n_avail`/rudder-mode-
+    // avail bits actually carry, confirmed the first pass through this
+    // chapter -- see `ata27.rs`'s module doc). FlyByWire's compiled model
+    // does not expose a sub-unit "this PRIM's own elevator/rudder output
+    // stage" or "this PRIM's own sidestick input monitor" health bit
+    // (grepped `A380PrimComputer*_types.h` again for anything narrower than
+    // whole-unit `prim_healthy`/the actuator-wide avail bits: none), so this
+    // is genuinely new modelling -- a real, plausible LRU failure mode (an
+    // internal output driver or input-monitoring stage failing while the
+    // rest of the unit stays healthy) built as its own component per the
+    // user's "model missing causes as real components" rule, gated on that
+    // PRIM's own overall health (`Truth::prim_healthy`) so the whole-unit
+    // failure (already covered by FlyByWire's own wired `271800036`-`038`)
+    // is never double-counted.
+    fn prim_channel_field(kind: &str) -> Vec<FieldSpec> {
+        vec![field(
+            "channel_fault",
+            "0 healthy .. 1 that PRIM's own command/monitoring channel failed",
+            &format!("{kind} channel fault"),
+            format!("flight_controls::live::FlightControlsLive (new per-PRIM {kind} channel component, E-FCTL coordinator follow-up)"),
+            "boolean in practice: 0 healthy, 1 failed",
+            "that PRIM alone loses this one function while its overall health (and every other PRIM) is unaffected -- gated on Truth::prim_healthy so the whole-unit failure is not double counted",
+        )]
+    }
+    for n in 1..=3u16 {
+        register_component(r, &mut ids, &format!("27_fctl.prim_{n}_elevator_channel"), &format!("PRIM {n} elevator command channel"), prim_channel_field("elevator command"));
+        register_component(r, &mut ids, &format!("27_fctl.prim_{n}_rudder_channel"), &format!("PRIM {n} rudder command channel"), prim_channel_field("rudder command"));
+        register_component(r, &mut ids, &format!("27_fctl.prim_{n}_sidestick_monitor"), &format!("PRIM {n} sidestick-sensor monitor"), prim_channel_field("sidestick-sensor monitor"));
+    }
+
+    // ---- Load alleviation function (E-FCTL, coordinator follow-up,
+    // `271800029`): the FCOM's own triggering text (`E-FCTL-FCOM.json`)
+    // gives a real, sourced, discrete condition -- "The load alleviation
+    // function (LAF) is failed... Two out of three accelerometers used for
+    // the LAF are failed in one wing" -- which this pass models literally:
+    // three accelerometers per wing (six total), 2-of-3 voting per wing.
+    // This does not require modelling the aerodynamic envelope the function
+    // itself operates in (the earlier objection): the FCOM's own FAULT
+    // condition is the accelerometer-voting failure, not "the function
+    // failed to engage when it should have".
+    let laf_fields = vec![
+        field("left_accel_1_fail", "0 healthy .. 1 failed", "left wing accelerometer 1 failure", "flight_controls::live::FlightControlsLive (new load-alleviation-function component, E-FCTL coordinator follow-up)".to_string(), "boolean in practice: 0 healthy, 1 failed", "one of the left wing's three LAF accelerometers reads invalid; the 2-of-3 vote still passes alone"),
+        field("left_accel_2_fail", "0 healthy .. 1 failed", "left wing accelerometer 2 failure", "flight_controls::live::FlightControlsLive (same component)".to_string(), "boolean in practice: 0 healthy, 1 failed", "same as accelerometer 1, left wing"),
+        field("left_accel_3_fail", "0 healthy .. 1 failed", "left wing accelerometer 3 failure", "flight_controls::live::FlightControlsLive (same component)".to_string(), "boolean in practice: 0 healthy, 1 failed", "same as accelerometer 1, left wing"),
+        field("right_accel_1_fail", "0 healthy .. 1 failed", "right wing accelerometer 1 failure", "flight_controls::live::FlightControlsLive (same component)".to_string(), "boolean in practice: 0 healthy, 1 failed", "one of the right wing's three LAF accelerometers reads invalid; the 2-of-3 vote still passes alone"),
+        field("right_accel_2_fail", "0 healthy .. 1 failed", "right wing accelerometer 2 failure", "flight_controls::live::FlightControlsLive (same component)".to_string(), "boolean in practice: 0 healthy, 1 failed", "same as accelerometer 1, right wing"),
+        field("right_accel_3_fail", "0 healthy .. 1 failed", "right wing accelerometer 3 failure", "flight_controls::live::FlightControlsLive (same component)".to_string(), "boolean in practice: 0 healthy, 1 failed", "same as accelerometer 1, right wing"),
+    ];
+    register_component(r, &mut ids, "27_fctl.load_alleviation", "Load alleviation function accelerometers", laf_fields);
+
+    // ---- Flap lever CSU communication (E-FCTL, `272800014`/`272800015`
+    // F/CTL FLAPS LEVER SYS 1/2 FAULT): FCOM PRO-ABN-ECAM p.5112
+    // (`E-FCTL-FCOM.json`) gives the real condition literally --
+    // "Communication between the FLAPS lever and SFCC 1(2) is lost" -- a
+    // discrete per-channel comm-loss fault, not a position-accuracy one.
+    // `272800013` (FLAPS LEVER OUT OF DETENT) is deliberately not built on
+    // this component: FlyByWire's own `0.18°`/`6.69°` SFCC thresholds
+    // (section 3.4) apply to a continuous lever *angle* this port's cockpit
+    // input does not have (`Truth::flap_lever_handle_index` is a discrete
+    // detent index, always exactly on a detent, by this port's own design)
+    // -- see the UNSOURCED note against that id rather than inventing an
+    // index-to-degree conversion factor nothing sources.
+    let flap_lever_fields = vec![
+        field("chan_1_comm_lost", "0 healthy .. 1 communication with SFCC 1 lost", "SFCC 1 communication loss", "flight_controls::live::FlightControlsLive (new flap-lever-CSU component, E-FCTL)".to_string(), "boolean in practice: 0 healthy, 1 lost", "SFCC 1 can no longer read the flap lever's own position"),
+        field("chan_2_comm_lost", "0 healthy .. 1 communication with SFCC 2 lost", "SFCC 2 communication loss", "flight_controls::live::FlightControlsLive (same component)".to_string(), "boolean in practice: 0 healthy, 1 lost", "SFCC 2 can no longer read the flap lever's own position"),
+    ];
+    register_component(r, &mut ids, "27_fctl.flap_lever_csu", "Flap lever CSU communication", flap_lever_fields);
+
     register_ecam(
         r,
         &ailerons,
@@ -550,13 +781,33 @@ mod tests {
             "27_fctl.droop_l",
             "27_fctl.droop_r",
             "27_fctl.gnd_splr_logic",
+            // E-FCTL, ECAM completeness pass (sections 3.2/3.3).
+            "27_fctl.l_sidestick_pitch",
+            "27_fctl.l_sidestick_roll",
+            "27_fctl.rudder_pedal",
+            "27_fctl.prim_pin_prog",
+            "27_fctl.sec_pin_prog",
+            // Coordinator follow-up, 2026-09-27.
+            "27_fctl.rate_gyro_pitch",
+            "27_fctl.rate_gyro_roll",
+            "27_fctl.rate_gyro_yaw",
+            "27_fctl.r_sidestick_pitch",
+            "27_fctl.r_sidestick_roll",
+            "27_fctl.prim_1_elevator_channel",
+            "27_fctl.prim_3_rudder_channel",
+            "27_fctl.prim_2_sidestick_monitor",
+            "27_fctl.load_alleviation",
+            "27_fctl.flap_lever_csu",
         ] {
             assert!(ids.contains(&expected), "missing component {expected}");
         }
         // 6 ailerons + 4 elevators + 2 rudders + 16 spoilers + 1 THS + 1
         // rudder trim + 6 high-lift lines (flap/slat/droop nose x2 sides)
-        // + 1 ground-spoiler logic = 37 components.
-        assert_eq!(r.components.len(), 37);
+        // 37 real surface/actuator components, plus E-ELEC Phase 2's 3 PRIM
+        // RA-link components (`27_fctl.prim_n`), plus E-FCTL's 21 (cockpit input
+        // transducers, rate gyros, per-PRIM channels, load alleviation, flap
+        // lever CSU) = 61.
+        assert_eq!(r.components.len(), 61);
     }
 
     #[test]

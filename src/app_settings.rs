@@ -31,6 +31,9 @@
 //! - `coldStartGroundPower`: next aircraft load. `efb.rs`'s cold-start
 //!   block runs exactly once, on the first `Efb::update` after
 //!   `Efb::new` (i.e. once per aircraft load).
+//! - `cabinVisible`: live. `cabin_option.rs`'s `CabinOption::update`
+//!   pushes it into `fbw/options/cabin_visible` (the dataref the converted
+//!   cabin objects' `ANIM_show` reads) every tick it changes.
 //! - `systemsOutOfProcess`: next aircraft load. [`systems_out_of_process`]
 //!   is read by `start_systems` (lib.rs, agent A), which only runs once,
 //!   at `Plugin::new`.
@@ -69,6 +72,8 @@ pub struct AppSettings {
     pub state_dumps: bool,
     pub state_dump_frames: u64,
     pub state_dump_keep: usize,
+    /// The EFB's "Passenger cabin" switch (Settings > Aircraft).
+    pub cabin_visible: bool,
 }
 
 impl Default for AppSettings {
@@ -82,6 +87,7 @@ impl Default for AppSettings {
             state_dumps: false,
             state_dump_frames: crate::state_dump::DEFAULT_EVERY_TICKS,
             state_dump_keep: crate::state_dump::DEFAULT_KEEP_PER_SESSION,
+            cabin_visible: true,
         }
     }
 }
@@ -118,6 +124,7 @@ fn parse(map: &Map<String, Value>) -> AppSettings {
         state_dumps: as_bool(map, "stateDumps", defaults.state_dumps),
         state_dump_frames: (as_f64(map, "stateDumpFrames", defaults.state_dump_frames as f64) as u64).clamp(1, 1_000_000),
         state_dump_keep: (as_f64(map, "stateDumpKeep", defaults.state_dump_keep as f64) as u64).clamp(1, 1_000_000) as usize,
+        cabin_visible: as_bool(map, "cabinVisible", defaults.cabin_visible),
     }
 }
 
@@ -298,6 +305,16 @@ mod tests {
         assert!(!s.state_dumps);
         assert_eq!(s.state_dump_frames, 50);
         assert_eq!(s.state_dump_keep, 10);
+    }
+
+    /// The EFB's "Passenger cabin" switch: shown unless the pilot turns it
+    /// off, and a string from an older writer reads the same as a bool.
+    #[test]
+    fn the_cabin_is_shown_unless_switched_off() {
+        assert!(parse(&Map::new()).cabin_visible);
+        assert!(!parse(&map(&[("cabinVisible", Value::Bool(false))])).cabin_visible);
+        assert!(!parse(&map(&[("cabinVisible", Value::String("false".into()))])).cabin_visible);
+        assert!(parse(&map(&[("cabinVisible", Value::Bool(true))])).cabin_visible);
     }
 
     #[test]

@@ -83,6 +83,88 @@ pub(crate) fn thrust_trim(error_fraction: f64, integral: f64, delta: f64) -> (f6
     (integral, trim)
 }
 
+/// A sensor or valve reading that degrades exactly like
+/// `deep::sensors::engine_sensors::VibrationPickup::step` freezes one (this
+/// crate's own already-tested pattern): `stuck_fraction` is the failure's
+/// own continuous magnitude (`failures::magnitude`, whose doc comment calls
+/// it "a physical perturbation fraction ... e.g. 'stuck at 37% open'"). At
+/// `1.0` the reading never updates again (fully seized/frozen); at `0.0` it
+/// tracks `true_value` exactly every tick, so a healthy engine is
+/// bit-for-bit unaffected by this function existing; in between it lags
+/// toward `true_value` a little less each tick than a healthy instrument
+/// would -- a partially seized pickup or valve, not a step change at some
+/// threshold. Used for the 77_000/77_004/77_008/77_012 sensor faults, the
+/// 76_000 throttle resolver and the 73_004 fuel metering valve below.
+fn stuck_reading(true_value: f64, stuck_fraction: f64, held: &mut f64) -> f64 {
+    let stuck = stuck_fraction.clamp(0.0, 1.0);
+    *held = true_value * (1.0 - stuck) + *held * stuck;
+    *held
+}
+
+/// 80_000+i "starter valve stuck": the pneumatic starter air valve sticks
+/// where it is -- shut, so the engine cannot be motored or started, or
+/// open, so the starter keeps driving after the start. A partial fault is
+/// a sluggish valve (`stuck_reading`'s lag).
+fn starter_valve(commanded: bool, stuck_fraction: f64, held: &mut f64) -> bool {
+    stuck_reading(commanded as i32 as f64, stuck_fraction, held) > 0.5
+}
+
+/// 74_000+i "ignition fault": the igniters no longer light the combustor
+/// once the fault is complete (this crate's "fully failed" threshold,
+/// 0.98). There is no sourced figure for how much longer a weak spark
+/// takes to light, so a partial fault changes nothing rather than invent
+/// one.
+fn ignition_available(fault_magnitude: f64) -> bool {
+    fault_magnitude < 0.98
+}
+
+/// The 73_000+i "FADEC channel fault": "one EEC channel fails; the engine
+/// reverts to its remaining channel." This crate's compiled FADEC model
+/// (`fbw_controllers.rs`'s `AthrInput`/`AthrData`) has no per-channel A/B
+/// select to hook a true channel swap into, but a real dual-channel EEC's
+/// own cross-channel monitor is exactly what normally catches one channel's
+/// N1 tach or TLA resolver going stuck or biased and keeps commanding off
+/// the healthy channel's number -- the real reason a single channel fault
+/// reads to the crew as "reverted to the other channel" rather than as a
+/// control problem. Healthy (`channel_fault_magnitude < 0.98`, the same
+/// "fully failed" threshold this crate's other faults use), that monitor
+/// caps how much of a single stuck/biased pickup can reach the FADEC or the
+/// cockpit; with the channel fault armed there is no second channel left to
+/// catch it, and the pickup's own registered magnitude reaches the
+/// FADEC/cockpit in full. `MONITOR_CAP` is GENERIC (no public figure exists
+/// for this monitor's own threshold): chosen well below where a single
+/// stuck pickup could meaningfully bias what the crew or the EEC sees,
+/// while still letting a mild miscompare through the way a real monitor
+/// tolerates noise rather than snapping to exactly zero.
+fn channel_fault_gate(channel_fault_magnitude: f64, raw_fault_magnitude: f64) -> f64 {
+    const MONITOR_CAP: f64 = 0.15;
+    if channel_fault_magnitude.clamp(0.0, 1.0) >= 0.98 {
+        raw_fault_magnitude
+    } else {
+        raw_fault_magnitude.min(MONITOR_CAP)
+    }
+}
+
+/// The 78_000+i "thrust reverser lock fault": "fails to lock stowed, or
+/// fails to deploy on command." A mechanical jam, not a drifting sensor, so
+/// unlike `stuck_reading` this snapshots the commanded state once -- the
+/// tick the fault first reaches the same ">=0.98 seized" convention this
+/// crate's own sensor catalogue uses for its stuck-rotor/blocked entries
+/// (`deep/sensors/registry.rs`) -- and holds exactly that value, whichever
+/// position (stowed or deployed) the reverser happened to be commanded to
+/// at that instant, for as long as the fault stays armed. Below the
+/// threshold the reverser is free and tracks the FADEC's own commanded
+/// state exactly, so a healthy engine is unaffected.
+fn reverser_indicated(commanded_in_reverse: bool, magnitude: f64, locked: &mut Option<bool>) -> f64 {
+    if magnitude.clamp(0.0, 1.0) >= 0.98 {
+        let held = *locked.get_or_insert(commanded_in_reverse);
+        held as i32 as f64
+    } else {
+        *locked = None;
+        commanded_in_reverse as i32 as f64
+    }
+}
+
 struct EngineIds {
     tla: VariableIdentifier,
     tla_n1: VariableIdentifier,
@@ -95,6 +177,10 @@ struct EngineIds {
     igniter: VariableIdentifier,
     state: VariableIdentifier,
     timer: VariableIdentifier,
+    // MSFS's own `ENG FAILED:n`/`ENG COMBUSTION:n`, derived from `state`
+    // and `master` each tick (W131): see `eng_failed`/`eng_combustion`.
+    eng_failed: VariableIdentifier,
+    eng_combustion: VariableIdentifier,
     // The simulator-facing engine Vars `fadec.rs` also writes (this
     // module's writes happen later in the tick and take precedence, see
     // module docs) plus, for N2 (the IP spool), a real value where
@@ -192,6 +278,24 @@ pub struct EngineCommands {
     thrust_integral: [f64; 4],
     /// Each engine's damageable components (`components.rs`).
     damage: [DamageHandles; 4],
+    /// Frozen/lagged readings for the ATA 73/76/77 component failures
+    /// (`stuck_reading`): one persisted snapshot per engine per sensor or
+    /// valve, so a partial fault lags toward the truth instead of jumping,
+    /// and a healthy engine (magnitude 0.0 every tick) never diverges from
+    /// what these Vars held before this fix.
+    tla_resolver_held: [f64; 4],
+    n1_tach_held: [f64; 4],
+    egt_probe_held: [f64; 4],
+    oil_press_sensor_held: [f64; 4],
+    fuel_flow_sensor_held: [f64; 4],
+    fuel_metering_held: [f64; 4],
+    /// 78_000+i "thrust reverser lock fault": which way (stowed/deployed)
+    /// the reverser is mechanically jammed, `None` while free
+    /// (`reverser_indicated`).
+    reverser_locked_at: [Option<bool>; 4],
+    /// 80_000+i "starter valve stuck": the valve's position (0 shut .. 1
+    /// open) as `stuck_reading` last held it.
+    starter_valve_held: [f64; 4],
     /// `FBW_ENG_STATS` only.
     stats_at: Option<std::time::Instant>,
     /// `AIRCRAFT_PRESET_QUICK_MODE`: set while a preset is being applied in
@@ -223,21 +327,30 @@ pub struct EngineCommands {
     pack_1: VariableIdentifier,
 }
 
-/// FlyByWire's own idle N3 at this altitude and Mach: the speed its FADEC
-/// declares a start complete at, and so the speed a quick-mode engine has
-/// to be at for the rest of the aeroplane to agree it is running.
+/// FlyByWire's own idle N3 at this altitude, Mach and ambient temperature:
+/// the actual (theta-corrected) speed its FADEC declares a start complete
+/// at -- `fadec::next_state`'s Starting/Restarting -> On gate compares real
+/// N3 against this same `fadec::idle_n1_n3` figure via `ENGINE_IDLE_N3` --
+/// so the speed a quick-mode engine has to be at for the rest of the
+/// aeroplane to agree it is running. This used to return Table1502's raw
+/// ISA-referred corrected N3 with no temperature correction, which only
+/// matched the gate at ISA (15 degC); on a hot day the gate's actual idle
+/// sat above the uncorrected value quick mode snapped to, so a
+/// quick-started engine could sit below idle forever, stuck in Starting.
 fn fbw_idle_n3(inputs: &EngineInputs) -> f64 {
     let alt_ft = (1.0 - (inputs.ambient_pressure_pa / crate::physics::engine::params::P_REF_PA).powf(0.190_284)) * 145_366.45;
-    crate::fadec::table1502::icn3(alt_ft, inputs.mach)
+    crate::fadec::idle_n1_n3(alt_ft, inputs.mach, inputs.ambient_temp_k - 273.15).1
 }
 
 /// The three spool speeds a settled ground idle sits at, from FlyByWire's
 /// own idle tables rather than from a figure of this model's own, so a
-/// quick-started engine lands where a real start would have left it.
+/// quick-started engine lands where a real start would have left it. Shares
+/// `fadec::idle_n1_n3` with `fbw_idle_n3` above and with
+/// `Fadec::generate_idle_parameters`, so all three agree on the same
+/// theta-corrected idle at any ambient temperature.
 fn idle_speeds(inputs: &EngineInputs) -> (f64, f64, f64) {
     let alt_ft = (1.0 - (inputs.ambient_pressure_pa / crate::physics::engine::params::P_REF_PA).powf(0.190_284)) * 145_366.45;
-    let n1 = crate::fadec::table1502::icn1(alt_ft, inputs.mach, inputs.ambient_temp_k - 273.15);
-    let n3 = crate::fadec::table1502::icn3(alt_ft, inputs.mach);
+    let (n1, n3) = crate::fadec::idle_n1_n3(alt_ft, inputs.mach, inputs.ambient_temp_k - 273.15);
     // The IP spool has no published idle table; it sits between the other
     // two, and the gas path pulls it to its own equilibrium within a second
     // either way.
@@ -249,6 +362,25 @@ fn stats_on() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("FBW_ENG_STATS").is_ok_and(|v| v.trim() != "0" && !v.trim().is_empty()))
+}
+
+/// MSFS's `ENG COMBUSTION:n`: real combustion is happening, not just
+/// windmilling or mid-start. FlyByWire's state machine (`fadec::next_state`)
+/// only reports `On` once it has actually settled there.
+fn eng_combustion(state: fadec::EngineState) -> bool {
+    matches!(state, fadec::EngineState::On)
+}
+
+/// MSFS's `ENG FAILED:n`: the crew commanded this engine to run (its master
+/// switch, i.e. the LP fuel valve, is open) but the state machine could not
+/// sustain `On` and fell back to `Shutting` -- a real flameout the crew has
+/// not answered yet (`fadec::next_state`'s `On => if starter {On} else
+/// {Shutting}`, and `Shutting` only returns to `On` through `Restarting`,
+/// which needs the ignition selector at IGN/START). A *commanded* shutdown
+/// reaches `Shutting` too, but with `master` already false by then, so it
+/// never matches this.
+fn eng_failed(master: bool, state: fadec::EngineState) -> bool {
+    master && matches!(state, fadec::EngineState::Shutting)
 }
 
 impl EngineCommands {
@@ -270,6 +402,8 @@ impl EngineCommands {
             igniter: vars.get(format!("TURB ENG IGNITION SWITCH EX1:{n}")),
             state: vars.get(format!("ENGINE_STATE:{n}")),
             timer: vars.get(format!("ENGINE_TIMER:{n}")),
+            eng_failed: vars.get(format!("ENG FAILED:{n}")),
+            eng_combustion: vars.get(format!("ENG COMBUSTION:{n}")),
             n1: vars.get(format!("ENGINE_N1:{n}")),
             n2: vars.get(format!("ENGINE_N2:{n}")),
             n3: vars.get(format!("ENGINE_N3:{n}")),
@@ -330,6 +464,14 @@ impl EngineCommands {
             },
             thrust_integral: [0.; 4],
             damage: std::array::from_fn(|i| DamageHandles::register(i + 1)),
+            tla_resolver_held: [0.; 4],
+            n1_tach_held: [0.; 4],
+            egt_probe_held: [0.; 4],
+            oil_press_sensor_held: [0.; 4],
+            fuel_flow_sensor_held: [0.; 4],
+            fuel_metering_held: [0.; 4],
+            reverser_locked_at: [None; 4],
+            starter_valve_held: [0.0; 4],
             stats_at: None,
             preset_quick_mode: vars.get("AIRCRAFT_PRESET_QUICK_MODE".to_owned()),
             airspeed: vars.get("AIRSPEED INDICATED".into()),
@@ -467,9 +609,18 @@ impl EngineCommands {
 
             // The FADEC's sensed feedback is last tick's physics output
             // (see module docs): a real corrected N1, not an estimate.
+            // 77_004+i "N1 tachometer fault" corrupts this same reading
+            // (`n1_tach_held`, updated from this tick's real N1 down in the
+            // gauge-write block below) -- the FADEC's own N1 feedback and
+            // the cockpit N1 gauge are one physical VR pickup, not two.
+            // 73_000+i "FADEC channel fault" removes the healthy channel
+            // that would otherwise catch a single tach or resolver
+            // drifting (`channel_fault_gate`); `channel_fault` is reused
+            // below for the N1 gauge write.
             let last = self.last_out[i];
-            let actual = last.n1_pct;
-            let commanded = last.n1_pct / correction;
+            let channel_fault = crate::failures::magnitude(73_000 + i as u64);
+            let actual = self.n1_tach_held[i];
+            let commanded = actual / correction;
 
             let mut inputs = common;
             inputs.data.on_ground = on_ground as u8;
@@ -477,7 +628,12 @@ impl EngineCommands {
             inputs.data.engine_N1_percent = actual;
             inputs.data.engine_N2_percent = last.n3_pct; // A380's N3, see fadec.rs's own convention
             inputs.data.commanded_engine_N1_percent = commanded;
-            inputs.input.TLA_deg = vars.read(&self.engines[i].tla);
+            // 76_000+i "throttle resolver fault": the resolver reads a
+            // frozen or biased angle, so the FADEC itself sees the wrong
+            // lever position, not just some cockpit-only TLA indication.
+            let resolver_fault = channel_fault_gate(channel_fault, crate::failures::magnitude(76_000 + i as u64));
+            let true_tla_deg = vars.read(&self.engines[i].tla);
+            inputs.input.TLA_deg = stuck_reading(true_tla_deg, resolver_fault, &mut self.tla_resolver_held[i]);
 
             let out = self.models[i].step(&inputs);
             eec[i] = out.fadec_bus_output; // cpp:3001
@@ -485,7 +641,16 @@ impl EngineCommands {
             let e = &self.engines[i];
             let (tla_n1, reverse, n1_commanded) = (e.tla_n1, e.reverse, e.n1_commanded);
             vars.write(&tla_n1, o.N1_TLA_percent);
-            vars.write(&reverse, o.is_in_reverse as f64);
+            // 78_000+i "thrust reverser lock fault": fails to lock stowed,
+            // or fails to deploy on command. `AUTOTHRUST_REVERSE:n` is what
+            // the EWD's REV indication and its reverser-door animation
+            // actually read; the net deceleration itself comes from
+            // FlyByWire's own `ReverserForce`, which runs inside the
+            // compiled `Simulation<A380>` off its own internal state, out
+            // of this crate's reach (module docs above, "The lever to
+            // X-Plane's engine").
+            let reverser_reading = reverser_indicated(o.is_in_reverse != 0, crate::failures::magnitude(78_000 + i as u64), &mut self.reverser_locked_at[i]);
+            vars.write(&reverse, reverser_reading);
             vars.write(&n1_commanded, o.N1_c_percent);
             if i == 0 {
                 vars.write(&self.limit_type, o.thrust_limit_type as f64);
@@ -503,10 +668,14 @@ impl EngineCommands {
             let igniter = vars.read(&e.igniter).round() as i32;
             let state = fadec::EngineState::from(vars.read(&e.state));
             let timer = vars.read(&e.timer);
-            let starter_engaged = master
+            let starter_commanded = master
                 && igniter == 2
                 && matches!(state, fadec::EngineState::Starting | fadec::EngineState::Restarting)
                 && timer >= 1.7;
+            // 80_000+i "starter valve stuck": the valve holds where it stuck.
+            let starter_engaged = starter_valve(starter_commanded, crate::failures::magnitude(80_000 + i as u64), &mut self.starter_valve_held[i]);
+            vars.write(&e.eng_failed, eng_failed(master, state) as i32 as f64);
+            vars.write(&e.eng_combustion, eng_combustion(state) as i32 as f64);
 
             let phys_inputs = EngineInputs {
                 ambient_pressure_pa,
@@ -516,6 +685,8 @@ impl EngineCommands {
                 target_n1_corrected_pct: ground_n1_protection(o.N1_c_percent, on_ground, common.data.V_gnd_kn),
                 fuel_valve_open: master,
                 starter_engaged,
+                // 74_000+i "ignition fault".
+                ignition_available: ignition_available(crate::failures::magnitude(74_000 + i as u64)),
                 // No shared variable yet carries cross-bleed/APU/ground-cart
                 // starter supply pressure (see the workstream report); full
                 // nameplate starter performance is assumed until one does.
@@ -566,7 +737,15 @@ impl EngineCommands {
             // Real spool speeds, EGT, fuel flow and oil state, overwriting
             // `fadec.rs`'s polynomial estimate of the same Vars from
             // earlier this tick (module docs).
-            vars.write(&e.n1, phys.n1_pct);
+            // 77_004+i again: this tick's real N1 becomes next tick's
+            // sensed reading through the same `n1_tach_held` the FADEC
+            // feedback earlier this tick already read (see the comment
+            // there). A healthy sensor (`n1_tach_fault == 0.0`) makes this
+            // exactly `phys.n1_pct`, unchanged from before this fix
+            // (`stuck_reading`'s own doc comment proves this algebraically).
+            let n1_tach_fault = channel_fault_gate(channel_fault, crate::failures::magnitude(77_004 + i as u64));
+            let n1_indicated = stuck_reading(phys.n1_pct, n1_tach_fault, &mut self.n1_tach_held[i]);
+            vars.write(&e.n1, n1_indicated);
             vars.write(&e.n2, phys.n2_pct);
             vars.write(&e.n3, phys.n3_pct);
             // The EEC's TGT trim (EASA.E.012 Note 16): the cockpit, and
@@ -579,7 +758,13 @@ impl EngineCommands {
             let ambient_c = ambient_temp_k - 273.15;
             let egt_displayed = (phys.egt_c - trim).max(phys.egt_c.min(ambient_c));
             vars.write(&e.egt_untrimmed, phys.egt_c);
-            vars.write(&e.egt, egt_displayed);
+            // 77_000+i "EGT probe fault": the thermocouple reads a frozen
+            // or biased temperature -- what the crew's EGT gauge (and
+            // anything reading `ENGINE_EGT:n`) sees, never the engine's own
+            // measured TGT above, which everything `physics/damage.rs`
+            // arms an overtemperature failure from stays real.
+            let egt_indicated = stuck_reading(egt_displayed, crate::failures::magnitude(77_000 + i as u64), &mut self.egt_probe_held[i]);
+            vars.write(&e.egt, egt_indicated);
             vars.write(&e.ip_port_pressure, phys.ip_port_pressure_pa);
             vars.write(&e.ip_port_temp, phys.ip_port_temp_k);
             vars.write(&e.hp_port_pressure, phys.hp_port_pressure_pa);
@@ -623,10 +808,25 @@ impl EngineCommands {
                     ));
                 }
             }
-            vars.write(&e.ff, phys.fuel_flow_kg_s * 3600.); // ENGINE_FF:n is kg/h
+            // 73_004+i "fuel metering valve stuck": the valve sits upstream
+            // of the fuel flow transmitter and physically decouples the
+            // fuel the engine actually burns from what the FADEC
+            // scheduled, so it has to reach `fuel_demand_kg_s` below (what
+            // the fuel workstream actually draws from the tanks), not just
+            // a gauge.
+            let fuel_metered = stuck_reading(phys.fuel_flow_kg_s, crate::failures::magnitude(73_004 + i as u64), &mut self.fuel_metering_held[i]);
+            // 77_012+i "fuel flow sensor fault": the transmitter downstream
+            // of the valve only corrupts what the crew's FF gauge reads.
+            let fuel_flow_indicated = stuck_reading(fuel_metered, crate::failures::magnitude(77_012 + i as u64), &mut self.fuel_flow_sensor_held[i]);
+            vars.write(&e.ff, fuel_flow_indicated * 3600.); // ENGINE_FF:n is kg/h
             vars.write(&e.oil_temp, phys.oil_temp_c);
-            vars.write(&e.oil_press, phys.oil_press_psi);
-            vars.write(&e.fuel_demand_kg_s, phys.fuel_flow_kg_s);
+            // 77_008+i "oil pressure sensor fault": the transducer reads a
+            // frozen or biased pressure -- the crew's gauge only, never
+            // `oil_pressure_fraction` below (the real physical fraction
+            // `physics/damage.rs` and the oil model itself run on).
+            let oil_press_indicated = stuck_reading(phys.oil_press_psi, crate::failures::magnitude(77_008 + i as u64), &mut self.oil_press_sensor_held[i]);
+            vars.write(&e.oil_press, oil_press_indicated);
+            vars.write(&e.fuel_demand_kg_s, fuel_metered);
 
             if let Some(d) = self.refs.n1 {
                 xplm.set_vf_at(d, i, phys.n1_pct as f32);
@@ -783,6 +983,195 @@ mod tests {
         assert!(frames_to_cross.unwrap() < 100, "trim took {:?} frames to follow a reversed error", frames_to_cross);
         assert!((trim + TRIM_LIMIT).abs() < 1e-9);
     }
+
+    // ---- `stuck_reading`: shared by 73_004 (fuel metering valve), 76_000
+    // (throttle resolver), 77_000 (EGT probe), 77_004 (N1 tachometer),
+    // 77_008 (oil pressure sensor) and 77_012 (fuel flow sensor).
+
+    #[test]
+    fn stuck_reading_tracks_truth_when_healthy() {
+        let mut held = 0.0;
+        for true_value in [10.0, 55.0, 3.0, 90.0] {
+            assert_eq!(stuck_reading(true_value, 0.0, &mut held), true_value);
+        }
+    }
+
+    #[test]
+    fn stuck_reading_freezes_when_fully_stuck() {
+        let mut held = 0.0;
+        assert_eq!(stuck_reading(42.0, 0.0, &mut held), 42.0);
+        // Now stuck: the true value keeps moving, the reading must not.
+        assert_eq!(stuck_reading(99.0, 1.0, &mut held), 42.0);
+        assert_eq!(stuck_reading(0.0, 1.0, &mut held), 42.0);
+    }
+
+    /// 80_000+i: stuck where it was -- open keeps motoring, shut never starts.
+    #[test]
+    fn a_stuck_starter_valve_holds_the_position_it_stuck_in() {
+        let mut held = 0.0;
+        assert!(starter_valve(true, 0.0, &mut held), "healthy: follows the command");
+        assert!(starter_valve(false, 1.0, &mut held), "stuck open: still open after the start ends");
+        let mut held = 0.0;
+        assert!(!starter_valve(true, 1.0, &mut held), "stuck shut: the start never motors");
+        let mut held = 1.0;
+        assert!(!starter_valve(false, 0.0, &mut held), "healthy again: closes");
+    }
+
+    /// 74_000+i: only a complete fault takes ignition away.
+    #[test]
+    fn ignition_is_lost_only_to_a_complete_ignition_fault() {
+        assert!(ignition_available(0.0));
+        assert!(ignition_available(0.5));
+        assert!(!ignition_available(1.0));
+    }
+
+    #[test]
+    fn stuck_reading_lags_when_partially_stuck() {
+        let mut held = 0.0;
+        let out = stuck_reading(100.0, 0.5, &mut held);
+        // Halfway from 0 toward 100 on the first tick, not a jump to 100
+        // and not stuck at 0.
+        assert!((out - 50.0).abs() < 1e-9, "{out}");
+        let out2 = stuck_reading(100.0, 0.5, &mut held);
+        assert!(out2 > out && out2 < 100.0, "{out2}");
+    }
+
+    // ---- `channel_fault_gate`: 73_000 (FADEC channel fault) gating 76_000
+    // and 77_004.
+
+    #[test]
+    fn channel_fault_gate_caps_a_single_pickup_fault_while_the_other_channel_is_healthy() {
+        // A fully-failed tach/resolver (raw magnitude 1.0) must not reach
+        // the FADEC/cockpit at full strength while the redundant channel
+        // is still healthy -- that is the whole point of a dual-channel
+        // EEC.
+        let gated = channel_fault_gate(0.0, 1.0);
+        assert!(gated < 1.0 && gated > 0.0, "{gated}");
+    }
+
+    #[test]
+    fn channel_fault_gate_lets_the_full_fault_through_once_the_channel_is_lost() {
+        let gated = channel_fault_gate(1.0, 1.0);
+        assert_eq!(gated, 1.0);
+        // A healthy pickup must never be fabricated a fault by the channel
+        // loss alone.
+        assert_eq!(channel_fault_gate(1.0, 0.0), 0.0);
+    }
+
+    // ---- `reverser_indicated`: 78_000 (thrust reverser lock fault).
+
+    #[test]
+    fn reverser_indicated_tracks_command_when_free() {
+        let mut locked = None;
+        assert_eq!(reverser_indicated(false, 0.0, &mut locked), 0.0);
+        assert_eq!(reverser_indicated(true, 0.0, &mut locked), 1.0);
+        assert!(locked.is_none());
+    }
+
+    #[test]
+    fn reverser_indicated_locks_whichever_state_it_was_commanded_to_when_the_fault_armed() {
+        let mut locked = None;
+        // Commanded to deploy the instant the lock jams: it fails to stow
+        // afterwards even though the crew commands stow.
+        assert_eq!(reverser_indicated(true, 1.0, &mut locked), 1.0);
+        assert_eq!(reverser_indicated(false, 1.0, &mut locked), 1.0, "should have failed to stow");
+        assert_eq!(reverser_indicated(false, 1.0, &mut locked), 1.0);
+    }
+
+    #[test]
+    fn reverser_indicated_releases_once_the_fault_clears() {
+        let mut locked = None;
+        reverser_indicated(true, 1.0, &mut locked);
+        assert!(locked.is_some());
+        assert_eq!(reverser_indicated(false, 0.0, &mut locked), 0.0);
+        assert!(locked.is_none());
+    }
+
+    #[test]
+    fn eng_combustion_is_true_only_while_the_state_machine_says_on() {
+        use fadec::EngineState::*;
+        for s in [Off, Starting, Restarting, Shutting] {
+            assert!(!eng_combustion(s), "{s:?} must not read as combustion");
+        }
+        assert!(eng_combustion(On));
+    }
+
+    #[test]
+    fn eng_failed_flags_a_flameout_with_the_master_still_on_but_not_a_commanded_shutdown() {
+        use fadec::EngineState::*;
+        // A real flameout: the master never came off, but the state machine
+        // could not sustain `On` and fell back to `Shutting`.
+        assert!(eng_failed(true, Shutting));
+        // A commanded shutdown: by the time `Shutting` is reached the master
+        // is already false.
+        assert!(!eng_failed(false, Shutting));
+        // Every other state is never a failure, master on or off.
+        for s in [Off, On, Starting, Restarting] {
+            assert!(!eng_failed(true, s));
+            assert!(!eng_failed(false, s));
+        }
+    }
+
+    /// `fbw_idle_n3` and `idle_speeds` must land on the same *actual*
+    /// (theta-corrected) idle that `fadec::next_state`'s Starting -> On gate
+    /// compares real N3 against, not Table1502's raw ISA-referred corrected
+    /// value -- or a quick-started engine on a non-ISA day snaps below the
+    /// gate and never clears it. 35 degC is far enough off ISA (15 degC)
+    /// that `ratios::theta`/`theta2` are not near 1, so a missing
+    /// correction would actually move the numbers, and the expected values
+    /// below are computed independently of `fadec::idle_n1_n3` (from the
+    /// same table + ratio calls `Fadec::generate_idle_parameters` makes) so
+    /// this would have failed against the old uncorrected code.
+    #[test]
+    fn idle_speeds_matches_the_fadec_state_machines_actual_idle_at_a_hot_ambient() {
+        let ambient_temp_c = 35.0;
+        let inputs = EngineInputs {
+            ambient_pressure_pa: crate::physics::engine::params::P_REF_PA,
+            ambient_temp_k: ambient_temp_c + 273.15,
+            mach: 0.0,
+            true_airspeed_m_s: 0.0,
+            target_n1_corrected_pct: 0.0,
+            fuel_valve_open: true,
+            starter_engaged: false,
+            starter_supply_fraction: 1.0,
+            ignition_available: true,
+            bleed_extraction_kg_s: 0.0,
+            bleed_from_ip_port: false,
+            gearbox_elec_load_w: 0.0,
+            gearbox_hyd_load_w: 0.0,
+            compressor_efficiency_loss_fraction: 0.0,
+            compressor_flow_capacity_loss_fraction: 0.0,
+            turbine_efficiency_loss_fraction: 0.0,
+            bearing_friction_extra_fraction: 0.0,
+            oil_pressure_fraction: 1.0,
+            fuel_temp_k: ambient_temp_c + 273.15,
+            oil_faults: Default::default(),
+            dt_s: 0.02,
+        };
+
+        // Sea-level ambient pressure -> 0 ft, same as `fbw_idle_n3`/
+        // `idle_speeds`'s own altitude derivation below.
+        let alt_ft = 0.0;
+        let corrected_n1 = fadec::table1502::icn1(alt_ft, inputs.mach, ambient_temp_c);
+        let corrected_n3 = fadec::table1502::icn3(alt_ft, inputs.mach);
+        let expected_n1 = corrected_n1 * ratios::theta2(0., ambient_temp_c).sqrt();
+        let expected_n3 = corrected_n3 * ratios::theta(ambient_temp_c).sqrt();
+        assert!(
+            (expected_n3 - corrected_n3).abs() > 0.5,
+            "35 degC must be far enough off ISA for the correction to matter, got expected_n3 {expected_n3} vs uncorrected {corrected_n3}"
+        );
+
+        assert!(
+            (fbw_idle_n3(&inputs) - expected_n3).abs() < 1e-9,
+            "fbw_idle_n3 must be the theta-corrected actual idle N3 ({expected_n3}), got {}",
+            fbw_idle_n3(&inputs)
+        );
+
+        let (n1, n2, n3) = idle_speeds(&inputs);
+        assert!((n3 - expected_n3).abs() < 1e-9, "idle_speeds N3 {n3} != expected {expected_n3}");
+        assert!((n1 - expected_n1).abs() < 1e-9, "idle_speeds N1 {n1} != expected {expected_n1}");
+        assert!((n2 - 0.5 * (expected_n1 + expected_n3)).abs() < 1e-9, "idle_speeds N2 {n2} not the midpoint of the corrected N1/N3");
+    }
 }
 
 use crate::components::{self, Combine, FailureDef, Handle, ParamSpec, Perturbation};
@@ -881,9 +1270,15 @@ struct EngineDamage {
     bearing_friction: f64,
 }
 
+/// HP compressor destruction: compression and flow gone, imbalance on the
+/// bearings. 72_012 itself, and what an ingested walkaround inlet cover
+/// (72_024, `physics/damage.rs`'s `arm_fod`) does to the core.
+const HP_COMPRESSOR_DESTROYED: EngineDamage =
+    EngineDamage { compressor_efficiency_loss: 1.0, compressor_flow_capacity_loss: 0.9, turbine_efficiency_loss: 0.0, bearing_friction: 0.3 };
+
 /// Each engine failure (by its base id; engine n is base + n - 1) and the
 /// physical quantities it moves at full magnitude.
-const EXOTIC: [(u64, EngineDamage); 6] = [
+const EXOTIC: [(u64, EngineDamage); 7] = [
     // Bearing *wear* (`failures.rs`: "a main shaft bearing wears, raising
     // vibration and running clearances"), not a seizure. This was 1.0 --
     // a parasitic drag equal to the HP turbine's entire design torque,
@@ -902,15 +1297,61 @@ const EXOTIC: [(u64, EngineDamage); 6] = [
     (72_000, EngineDamage { bearing_friction: 0.03, compressor_efficiency_loss: 0.0, compressor_flow_capacity_loss: 0.0, turbine_efficiency_loss: 0.0 }),
     (72_004, EngineDamage { compressor_efficiency_loss: 1.0, compressor_flow_capacity_loss: 1.0, turbine_efficiency_loss: 0.0, bearing_friction: 0.0 }),
     (72_008, EngineDamage { turbine_efficiency_loss: 1.0, compressor_efficiency_loss: 0.0, compressor_flow_capacity_loss: 0.0, bearing_friction: 0.0 }),
-    // HP compressor destruction: compression and flow gone, imbalance on
-    // the bearings.
-    (72_012, EngineDamage { compressor_efficiency_loss: 1.0, compressor_flow_capacity_loss: 0.9, turbine_efficiency_loss: 0.0, bearing_friction: 0.3 }),
+    (72_012, HP_COMPRESSOR_DESTROYED),
     // HP turbine blade release: most turbine work gone, imbalance on the
     // bearings.
     (72_016, EngineDamage { turbine_efficiency_loss: 0.8, bearing_friction: 0.5, compressor_efficiency_loss: 0.0, compressor_flow_capacity_loss: 0.0 }),
     // Main bearing seizure: more friction than the HP turbine's design torque.
     (72_020, EngineDamage { bearing_friction: 1.5, compressor_efficiency_loss: 0.0, compressor_flow_capacity_loss: 0.0, turbine_efficiency_loss: 0.0 }),
+    // An inlet cover left on through engine start: pulled into the fan and
+    // down the core. Before this entry the FOD failure moved nothing the
+    // engine model reads (only `damage.rs`'s display-only efficiency number).
+    (72_024, HP_COMPRESSOR_DESTROYED),
 ];
+
+#[cfg(test)]
+mod fod_tests {
+    use super::*;
+
+    /// An ingested inlet cover acts on the engine's own components, with
+    /// the same destruction as 72_012, on every engine's own id.
+    #[test]
+    fn an_ingested_inlet_cover_destroys_the_hp_compressor() {
+        for id in 72_024..=72_027 {
+            assert!(is_engine_component_failure(id), "{id} must reach the engine model");
+        }
+        let fod = EXOTIC.iter().find(|(b, _)| *b == 72_024).map(|(_, d)| *d).expect("72_024 in EXOTIC");
+        let destroyed = EXOTIC.iter().find(|(b, _)| *b == 72_012).map(|(_, d)| *d).unwrap();
+        assert_eq!(fod.compressor_efficiency_loss, destroyed.compressor_efficiency_loss);
+        assert_eq!(fod.compressor_flow_capacity_loss, destroyed.compressor_flow_capacity_loss);
+        assert_eq!(fod.bearing_friction, destroyed.bearing_friction);
+        assert_eq!(fod.compressor_efficiency_loss, 1.0);
+    }
+
+    /// End to end through the component registry: arming engine 3's FOD id
+    /// (the channel `Damage::arm_fod` writes) moves engine 3's own HP
+    /// compressor -- the values `EngineInputs` is built from -- and no
+    /// other engine's.
+    #[test]
+    fn arming_fod_moves_that_engines_compressor_the_gas_path_reads() {
+        let _g = crate::failures::tests::serial();
+        crate::components::reset_all();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let e2 = DamageHandles::register(2);
+        let e3 = DamageHandles::register(3);
+        crate::components::tick(0.0);
+        assert_eq!(crate::components::value(e3.hpc_efficiency_loss), 0.0);
+        crate::failures::set_active(72_026, true);
+        crate::components::tick(0.0);
+        assert_eq!(crate::components::value(e3.hpc_efficiency_loss), 1.0);
+        assert!((crate::components::value(e3.hpc_flow_capacity_loss) - 0.9).abs() < 1e-9);
+        assert!((crate::components::value(e3.bearing_friction) - 0.3).abs() < 1e-9);
+        assert_eq!(crate::components::value(e2.hpc_efficiency_loss), 0.0, "engine 2 untouched");
+        crate::failures::replace([]);
+        crate::components::reset_all();
+    }
+}
 
 /// The EEC's ground protections, EASA.E.012 §IV.3: on the ground below
 /// 60 kt it prevents stabilised operation at 64-72% N1 (the keep-out zone;

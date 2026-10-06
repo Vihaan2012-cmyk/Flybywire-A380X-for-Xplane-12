@@ -198,6 +198,47 @@ struct CircuitPower {
     id: systems::simulation::VariableIdentifier,
 }
 
+/// One RMP's DC-bus-gated outputs (see [`rmp_green_led_on`] and
+/// [`rmp_screen_brightness`]): the green STANDBY LED, and the CDS screen's
+/// own backlight potentiometer.
+struct RmpGreenLed {
+    /// The RMP's own DC bus (`A32NX_ELEC_DC_ESS_BUS_IS_POWERED` for RMP 1/2,
+    /// `A32NX_ELEC_DC_1_BUS_IS_POWERED` for RMP 3 -- the same buses
+    /// `display/screens.rs`'s `RMPS` dimming already gates its screen on).
+    dc_power_src: VariableIdentifier,
+    /// `A380X_RMP_<n>_BRIGHTNESS_KNOB`: the RMP's own screen brightness
+    /// knob (cockpit_variables.txt; the cockpit's physical knob writes it).
+    brightness_src: VariableIdentifier,
+    /// `A380X_RMP_<n>_GREEN_LED`: what this module now writes.
+    out: VariableIdentifier,
+    /// `LIGHT POTENTIOMETER:<80|81|82>` (`display/screens.rs`'s
+    /// `SCREEN_DU_RMP_1/2/3` dimming; `RmpStateController.ts`'s own
+    /// `screenPotentiometer` 80/81/82): the RMP's CDS screen backlight.
+    /// Nothing else writes it in this port (W143 finding 10) other than
+    /// `extra_backend/lighting_presets.rs` while a lighting preset is
+    /// actively loading -- see `update`'s `preset_load_active` guard.
+    screen_pot: VariableIdentifier,
+}
+
+/// One of MSFS's own indexed light-circuit booleans (`LIGHT PANEL:n`/`LIGHT
+/// PANEL ON:n`, `LIGHT CABIN:n`/`LIGHT CABIN ON:n`, `LIGHT PEDESTRAL`/`LIGHT
+/// PEDESTRAL ON`) that the converted cockpit's own RPN reads directly
+/// (main.lua's pedestal/cabin/panel-knob emissives), rather than through
+/// `LIGHT CIRCUIT POWERED:n` (W131: this plugin had no writer for any of
+/// them, so they sat at whatever `cockpit_variables.txt`'s start value left
+/// them). `circuit_numbers` is systems.cfg's `Type:CIRCUIT_LIGHT_<TYPE>:n`
+/// index resolved to that type's actual circuit number(s) -- every circuit
+/// of the type for the bare (unindexed) MSFS name, MSFS's own "any circuit
+/// of this type" convention, or just the one circuit for an indexed name.
+/// Both `plain` and `on` get the same value (see the edit's WHY): the
+/// circuit's power state is the only real signal upstream of the
+/// potentiometer this port has for either one.
+struct MsfsLight {
+    plain: VariableIdentifier,
+    on: VariableIdentifier,
+    circuit_numbers: Vec<usize>,
+}
+
 pub struct Lights {
     // X-Plane exterior light datarefs.
     beacon_on: Option<DataRef>,
@@ -241,6 +282,42 @@ pub struct Lights {
     wiper_right: Group,
 
     circuit_power: Vec<CircuitPower>,
+    msfs_lights: Vec<MsfsLight>,
+
+    rmp_green_led: [RmpGreenLed; 3],
+
+    // Storm light (W143 finding 10, W197): A380_Cockpit_Behavior.xml:107-
+    // 130's Component "VARIABLE_MAPPING" has no NODE_ID, so the converter
+    // never binds its Update RPN to anything -- the switch's own L:var
+    // moves only its own geometry. The MIP flood/pedestal knobs the XML
+    // block would otherwise gate are unaffected: bind.rs's
+    // FBW_Stepless_Potentiometer handling already drives
+    // `LIGHT POTENTIOMETER:83`/`:7` straight from those two knobs' own
+    // manipulator commands (installed main.lua:5268-5312, 5358-5392),
+    // bypassing the XML's A380X_PED_LIGHTING_*_KNOB/_LEVEL indirection
+    // entirely -- only the storm override itself (XML:121-127's `if`
+    // branch, "flood lights to max") is missing.
+    storm_lt_src: VariableIdentifier,
+    mip_flood_pot: VariableIdentifier,
+    ambient_pot: VariableIdentifier,
+
+    // `A32NX_LIGHTING_PRESET_LOAD` (the exact variable
+    // extra_backend/lighting_presets.rs's own `load_request` field already
+    // registers by name -- Vars::add is idempotent by name, so this is the
+    // same slot, not a duplicate). extra_backend/lighting_presets.rs's
+    // `LIGHTS` table (lines 55-63) writes these SAME five potentiometers
+    // (80/81/82/83/7) while a preset is actively loading; without this
+    // guard this module's per-tick write would reset `current` back to the
+    // knob/storm value on every tick that isn't itself a load step, which
+    // stops `load_lighting_preset`'s `converge_value` from ever getting
+    // closer than one step and hangs the load's `finished` check forever
+    // for these five lights specifically (see the report's "INTERACTION
+    // RESOLVED" section). `self.extra_backend.update` runs after
+    // `self.lights.update` in the tick (lib.rs:1714 vs :1750), so it always
+    // has the last word for the indices it actually steps; this module
+    // simply stays out of its way for the whole load instead of relying on
+    // write order.
+    preset_load_active: VariableIdentifier,
 }
 
 /// The circuit numbers of every circuit of one type, from the general model.
@@ -278,6 +355,29 @@ impl Lights {
             .filter(|c| c.type_name.starts_with("CIRCUIT_LIGHT_"))
             .map(|c| CircuitPower { number: c.number, id: vars.get(format!("LIGHT CIRCUIT POWERED:{}", c.number)) })
             .collect();
+        // W131: MSFS's own LIGHT PANEL/CABIN/PEDESTRAL booleans the cockpit
+        // reads directly. `msfs_index` is the type-relative SIMVAR_INDEX
+        // (systems.cfg); `None` is the bare/unindexed name, MSFS's own "any
+        // circuit of this type" aggregate.
+        let msfs_light = |vars: &mut Vars, msfs_type: &str, cfg_type: &str, msfs_index: Option<usize>| {
+            let suffix = msfs_index.map(|n| format!(":{n}")).unwrap_or_default();
+            let numbers = match msfs_index {
+                Some(n) => circuit_numbers_where(circuits, cfg_type, n, false),
+                None => circuit_numbers(circuits, cfg_type),
+            };
+            MsfsLight {
+                plain: vars.get(format!("{msfs_type}{suffix}")),
+                on: vars.get(format!("{msfs_type} ON{suffix}")),
+                circuit_numbers: numbers,
+            }
+        };
+        let msfs_lights = vec![
+            msfs_light(vars, "LIGHT PANEL", "CIRCUIT_LIGHT_PANEL", None),
+            msfs_light(vars, "LIGHT PANEL", "CIRCUIT_LIGHT_PANEL", Some(2)),
+            msfs_light(vars, "LIGHT PANEL", "CIRCUIT_LIGHT_PANEL", Some(4)),
+            msfs_light(vars, "LIGHT CABIN", "CIRCUIT_LIGHT_CABIN", Some(1)),
+            msfs_light(vars, "LIGHT PEDESTRAL", "CIRCUIT_LIGHT_PEDESTAL", None),
+        ];
         Self {
             beacon_on: find("beacon_on"),
             navigation_lights_on: find("navigation_lights_on"),
@@ -349,6 +449,36 @@ impl Lights {
             wiper_right: Group::new(circuit_number_named(circuits, "WipersRIght")),
 
             circuit_power,
+            msfs_lights,
+
+            // RMP 1/2 share the DC ESS bus (RmpStateController.ts's own
+            // `dcPowerVar` for `rmpIndex` 1 and 2); RMP 3 is on DC 1.
+            // Potentiometer indices match `display/screens.rs`'s
+            // `SCREEN_DU_RMP_1/2/3` dimming (80/81/82), the same ones
+            // `RmpStateController.ts`'s own `screenPotentiometer` uses.
+            rmp_green_led: [1, 2, 3].map(|n| RmpGreenLed {
+                dc_power_src: vars.get(if n == 3 { "ELEC_DC_1_BUS_IS_POWERED" } else { "ELEC_DC_ESS_BUS_IS_POWERED" }.to_string()),
+                brightness_src: vars.register_named(&format!("A380X_RMP_{n}_BRIGHTNESS_KNOB")),
+                out: vars.register_named(&format!("A380X_RMP_{n}_GREEN_LED")),
+                screen_pot: vars.get(format!("LIGHT POTENTIOMETER:{}", match n { 1 => 80, 2 => 81, _ => 82 })),
+            }),
+
+            // Storm light: A380X_OVHD_STORM_LT is not a simulator variable
+            // (register_named, not vars.get -- see fixes/W119.md's report
+            // for why vars.get would double-prefix a non-simulator name).
+            // The two potentiometers use vars.get, matching
+            // extra_backend/lighting_presets.rs:155's own established use
+            // of the same "LIGHT POTENTIOMETER:n" simulator-variable name.
+            storm_lt_src: vars.register_named("A380X_OVHD_STORM_LT"),
+            mip_flood_pot: vars.get("LIGHT POTENTIOMETER:83".to_string()),
+            ambient_pot: vars.get("LIGHT POTENTIOMETER:7".to_string()),
+
+            // Same slot extra_backend/lighting_presets.rs's own
+            // `load_request` registers (extra_backend/mod.rs's `named()` is
+            // `vars.get(name.to_string())`, identical to this call) --
+            // Vars::add is idempotent by name, so this returns the existing
+            // identifier whichever module constructs first.
+            preset_load_active: vars.get("LIGHTING_PRESET_LOAD".to_string()),
         }
     }
 
@@ -413,6 +543,54 @@ impl Lights {
             let on = circuits.powered(vars, c.number) as i32 as f64;
             vars.write(&c.id, on);
         }
+        for l in &self.msfs_lights {
+            let on = circuits.any_powered(vars, &l.circuit_numbers) as i32 as f64;
+            vars.write(&l.plain, on);
+            vars.write(&l.on, on);
+        }
+
+        // RMP green STANDBY LEDs (see `rmp_green_led_on`'s doc comment):
+        // this port's RMP screens are their own CEF/JS instrument views
+        // (`display/screens.rs`'s `SCREEN_DU_RMP_1/2/3`), and FBW's own
+        // `A380xRmpStateController.ts` (the real, only, writer of
+        // `L:A380X_RMP_<n>_GREEN_LED`) runs inside that view, not in this
+        // plugin -- so the dataref SASL's lamp-test RPN reads
+        // (`fbw/A380X_RMP_<n>_GREEN_LED`) never moves whether or not that
+        // view happens to be running. Publishing the same formula here from
+        // data this module already has makes the LED work independent of
+        // that view. The same gap left the screen's own backlight
+        // (`LIGHT POTENTIOMETER:<80|81|82>`, `screen_pot`) permanently at
+        // its unwritten default (W143 finding 10): RmpStateController.ts's
+        // `screenBrightness` -> `LIGHT_POTENTIOMETER_SET` key event lives in
+        // the same never-confirmed-booting view, so it is republished here
+        // too, from the formula `rmp_screen_brightness` documents --
+        // skipped only while a lighting preset is actively loading (see the
+        // `preset_load_active` field doc), so this module never fights
+        // `extra_backend/lighting_presets.rs` for the same potentiometer.
+        let preset_loading = vars.read(&self.preset_load_active) != 0.;
+        for r in &self.rmp_green_led {
+            let dc_powered = vars.read(&r.dc_power_src) != 0.;
+            let brightness = vars.read(&r.brightness_src);
+            vars.write(&r.out, rmp_green_led_on(dc_powered, brightness) as i32 as f64);
+            if !preset_loading {
+                vars.write(&r.screen_pot, rmp_screen_brightness(dc_powered, brightness));
+            }
+        }
+
+        // Storm light (W143 finding 10, W197): forces the MIP flood and
+        // pedestal/ambient lights to full bright while the switch is on
+        // (XML:121-127), defeating their own knobs -- the knobs' own up/
+        // down commands already own these two potentiometers the rest of
+        // the time (main.lua:5268-5312, 5358-5392), so nothing is written
+        // when the switch is off; there is no state to hand back. Also
+        // skipped during an active lighting-preset load, same reason as
+        // `screen_pot` above.
+        if !preset_loading {
+            if let Some(v) = storm_light_potentiometer(on_state(vars.read(&self.storm_lt_src))) {
+                vars.write(&self.mip_flood_pot, v);
+                vars.write(&self.ambient_pot, v);
+            }
+        }
     }
 }
 
@@ -431,6 +609,52 @@ fn on_state(value: f64) -> bool {
 /// off), anything else means real heater load is flowing.
 fn probe_heat_on(load_w: f64) -> bool {
     load_w > 0.
+}
+
+/// Whether an RMP's green STANDBY LED should be lit, from FBW's own state
+/// machine (`instruments/src/RMP/Systems/RmpStateController.ts`'s
+/// `onUpdate`): powered, and the brightness knob at 0 (the screen dark but
+/// the panel alive) -- `RmpState.OffStandby`, the only state that writes
+/// `L:A380X_RMP_<n>_GREEN_LED` true. `failed` (the other input to FBW's own
+/// state machine) is left out: this port has no `A380Failure::
+/// RadioManagementPanel1/2/3` modelled anywhere (grep of failures.rs and
+/// breakers.rs for "RadioManagementPanel"/"RMP" finds nothing), so there is
+/// no signal in this plugin to gate it on -- equivalent to FBW's formula
+/// with `failed` always false, same simplification the LED already lived
+/// with when the RMP JS view itself was the only writer.
+fn rmp_green_led_on(dc_powered: bool, brightness_knob: f64) -> bool {
+    dc_powered && brightness_knob <= 0.
+}
+
+/// An RMP's own CDS screen backlight, from FlyByWire's own state machine
+/// (`RmpStateController.ts`'s `onUpdate`/`screenBrightness`): lit only when
+/// powered and the brightness knob is above 0 (the complementary condition
+/// to `rmp_green_led_on`'s `OffStandby`), and once lit, floored at 5 % so
+/// the screen stays legible even with the knob turned almost all the way
+/// down -- `failed` omitted, same simplification as `rmp_green_led_on`.
+/// `display/mod.rs`'s `screens::brightness` already multiplies this
+/// potentiometer by the RMP's DC bus power a second time for its one
+/// consumer (`SCREEN_DU_RMP_1/2/3`), so gating on `dc_powered` here too is
+/// redundant for that consumer specifically, but matches FBW's own formula
+/// exactly in case anything else (a bezel legend backlight) ever reads this
+/// potentiometer without separately checking the bus.
+fn rmp_screen_brightness(dc_powered: bool, brightness_knob: f64) -> f64 {
+    if dc_powered && brightness_knob > 0. {
+        brightness_knob.max(5.) / 100.
+    } else {
+        0.
+    }
+}
+
+/// The storm-light override (A380_Cockpit_Behavior.xml:121-127): `Some(1.)`
+/// (100 %, as the 0..1 fraction `LIGHT POTENTIOMETER:n` is kept in) while
+/// the switch is on, `None` while it is off -- deliberately not `Some(0.)`
+/// for "off", because off means "leave the knob-driven potentiometer alone"
+/// (the physical MIP flood/pedestal knobs already own `LIGHT
+/// POTENTIOMETER:83`/`:7` directly, see the struct field doc), not "force
+/// it dark".
+fn storm_light_potentiometer(storm_on: bool) -> Option<f64> {
+    storm_on.then_some(1.)
 }
 
 fn apply_bool(xplm: &Xplm, dataref: Option<DataRef>, value: bool) {
@@ -513,6 +737,34 @@ mod tests {
         assert!(!probe_heat_on(0.));
         assert!(probe_heat_on(150.)); // 2*PITOT_HEATER_W + TAT_HEATER_W's ballpark
         assert!(!probe_heat_on(-0.)); // still exactly zero
+    }
+
+    #[test]
+    fn rmp_green_led_matches_flybywires_offstandby_state() {
+        // Unpowered: never green (FBW's `state.set` never reaches
+        // OffStandby without `powerOn`).
+        assert!(!rmp_green_led_on(false, 0.));
+        assert!(!rmp_green_led_on(false, 80.));
+        // Powered, brightness knob up (screen lit, `RmpState::On`): not
+        // OffStandby, LED off.
+        assert!(!rmp_green_led_on(true, 80.));
+        // Powered, knob at 0 (screen dark but panel alive): OffStandby.
+        assert!(rmp_green_led_on(true, 0.));
+        assert!(rmp_green_led_on(true, -1.), "a knob reading that has drifted slightly negative is still \"at or below 0\"");
+    }
+
+    #[test]
+    fn rmp_screen_brightness_matches_flybywires_onstandby_floor() {
+        assert_eq!(rmp_screen_brightness(false, 80.), 0., "unpowered: never lit");
+        assert_eq!(rmp_screen_brightness(true, 0.), 0., "knob at 0: OffStandby, screen dark (the green LED covers this state instead)");
+        assert_eq!(rmp_screen_brightness(true, 80.), 0.8, "knob well above the 5% floor: passes straight through");
+        assert_eq!(rmp_screen_brightness(true, 2.), 0.05, "knob just above 0: floored at 5% so the screen stays legible");
+    }
+
+    #[test]
+    fn storm_light_forces_full_potentiometer_only_when_on() {
+        assert_eq!(storm_light_potentiometer(false), None, "off: leave the knob-driven potentiometer alone, don't force it dark");
+        assert_eq!(storm_light_potentiometer(true), Some(1.), "on: XML:122-123's 100 percent, as a 0..1 fraction");
     }
 
     #[test]

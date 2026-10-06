@@ -53,12 +53,15 @@ store `percent / 100` into `LIGHT POTENTIOMETER:<n>`.
   power from, the lighting channel an `instrument_brightness_ratio` index,
   and auto adjust a daylight boost. XPLMDisplay.h documents the brightness
   callback as setting "the absolute brightness of the device's screen" and
-  passes rheostat, ambient and bus ratio to it as inputs; it does not say
-  whether X-Plane also blanks a device whose buses are unpowered. `0 0 1`
-  is acceptable as written; `0 0 0` states the intent better (no X-Plane
-  daylight boost, FlyByWire decides power). Only X-Plane can confirm that a
-  bus bitfield of 0 does not blank the screen; if it does, use `1 0 0` and
-  keep X-Plane's bus 0 powered.
+  passes rheostat, ambient and bus ratio to it as inputs -- but it also says
+  of the callback field itself, "Set to NULL to use X-Plane's default
+  behaviour" (`XPLMCreateAvionics_t::brightnessCallback`). Ours is never
+  NULL (it returns 1 unconditionally, see Brightness above), so whatever
+  X-Plane's own bus/rheostat-driven default does with an unpowered bus is
+  exactly the behaviour a non-NULL callback replaces; the bus bitfield is
+  otherwise unused by the callback and has nothing left to blank. `0 0 0` is
+  correct as written: no X-Plane bus, no daylight boost, FlyByWire decides
+  power and brightness entirely.
 - Mouse: XPLMDisplay.h, "you must add a `ATTR_manip_device` manipulator on
   top of your screen in order to receive mouse events from the 3D cockpit".
   The converter writes none yet. Each screen mesh (both SCREEN_DU_MFD
@@ -169,6 +172,6 @@ not rasterised here: the DOM side sends SVG as drawing commands.
 `src/display/tests.rs`, with the software renderer `soft.rs` carrying out
 the same plan as the GL renderer (multisample positions, stencil,
 scissor, filtering, blending). Snapshots go to
-`D:\fbw-build\display-snapshots`: `shapes.png` (with `shapes-tiny-skia.png`
+`D:\A380\fbw-build\display-snapshots`: `shapes.png` (with `shapes-tiny-skia.png`
 and `shapes-diff.png`), `text.png`, `images.png`, `pfd-like.png`,
 `large.png`, `mfd-dimming.png`.

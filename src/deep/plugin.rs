@@ -36,6 +36,8 @@
 //! | `engine_n2_frac[i]`, `engine_n3_frac[i]` | `ENGINE_N2:n` / `ENGINE_N3:n`, divided by 100 -- the same `physics::engine` output as N1, written by `engine_commands.rs` right after it |
 //! | `engine_hp_port_pressure_pa[i]`, `engine_hp_port_temp_k[i]` | `ENGINE_HP_PORT_{PRESSURE_PA,TEMP_K}:n`, unconditionally (unlike `engine_bleed_*` above, which already picks IP8 or HP6 by which port is bled) |
 //! | `engine_fuel_flow_kg_s[i]` | `ENGINE_FUEL_DEMAND_KG_S:n`, `physics::engine`'s own `fuel_flow_kg_s` output in SI (the same number `ENGINE_FF:n` publishes ×3600 for the cockpit) |
+//! | `engine_tla_deg[i]` | `AUTOTHRUST_TLA:n`, degrees -- the same Var `fadec.rs` writes every tick from `throttle.rs`'s own lever reading, and the same one `controls.reverser_deploy_commanded[s]` (above) is already derived from |
+//! | `to_flex_temp_set` | `AIRLINER_TO_FLEX_TEMP != 0`, the same Var and test `FwsFlightPhases.ts:215`'s own `eng1TLAFTO` uses |
 //! | `gpu_plugged_in` | any of `A32NX_EXT_PWR_AVAIL:{1..4}` != 0, the same real, plugin-managed Var `efb.rs`'s ground-power control and cold-start setting already write |
 //! | `controls.*` | see [`Controls`]'s own doc for each field; sources are in this file's `Ids`/`Refs` construction below, grep for the field name |
 //! | `commanded_surfaces.*` | the 29 `HYD_*_DEFLECTION` Vars `flight_controls.rs::FlightControls::new` also resolves (`flight_controls.rs:260-269`), converted to degrees with that file's own public `aileron_or_elevator_down_deg`/`rudder_right_deg`/`spoiler_up_deg` -- read here *before* `flight_controls.rs`/`deep::flight_controls`'s own `SurfaceOverrideWriter` run this tick (`deep.tick` is called before `self.flight_controls.update` in `lib.rs`), so this is FlyByWire's own commanded position, not last tick's physical output |
@@ -49,6 +51,16 @@
 //! | `cabin_pressure_pa` | `environment.ambient_pressure_pa` + the ARINC 429 `A32NX_PRESS_CPC_1_CABIN_DELTA_PRESSURE` word (psi), FlyByWire's own primary cabin pressure controller |
 //! | `cabin_temp_k` | `A32NX_COND_MAIN_DECK_1_TEMP` (C) + 273.15: one representative cabin zone of the fifteen (`COND_{CKPT,MAIN_DECK_1..8,UPPER_DECK_1..7,CARGO_FWD,CARGO_BULK}_TEMP` all exist and are real; `Truth` carries one rather than fifteen, see `docs/deep/truth-requests.md` |
 //! | `sun_elevation_deg` | `sim/graphics/scenery/sun_pitch_degrees`, X-Plane's own sun position |
+//! | `fdac_channel_failure[fdac][ch]` | `COND_FDAC_{1,2}_CHANNEL_{1,2}_FAILURE`, FlyByWire's own `FullDigitalAgcController`'s per-channel failure discrete (`full_digital_agu_controller.rs:57-60`), read directly -- see `E-AIR-DESIGN.md` 211800022 |
+//! | `ocsm_channel_failure[ocsm][ch]` | `PRESS_OCSM_{1..4}_CHANNEL_{1,2}_FAILURE`, FlyByWire's own `OutflowValveControlModule`'s per-channel failure discrete (`outflow_valve_control_module.rs:80-82`), read directly -- see `E-AIR-DESIGN.md` 213800015 |
+//! | `vertical_speed_fpm` | `VERTICAL SPEED` (MSFS name, `sim/flightmodel/position/vh_ind_fpm`), X-Plane's own real exterior vertical speed -- see `E-AIR-DESIGN.md` 213800008 |
+//! | `landing_elevation_ft` | the ARINC 429 `A32NX_FM1_LANDING_ELEVATION` word (ft), FlyByWire's own FMS-computed landing elevation, already published for the SD PRESS page -- `0.0` when the word's SSM is not Normal Operation -- see `E-AIR-DESIGN.md` 213800008 |
+//! | `athr_status` | `A32NX_AUTOTHRUST_STATUS` (enum: 0 off, 1 armed, 2 engaged), FlyByWire's own aircraft-wide A/THR status (`FwsCore.ts:3121`) -- see `E-AIR-DESIGN.md` 220800009-012 |
+//! | `ap1_active`, `ap2_active` | `A32NX_AUTOPILOT_{1,2}_ACTIVE`, FlyByWire's own per-AP engagement discretes -- see `E-AIR-DESIGN.md` 220800002 |
+//! | `athr_eng_fault[n]` | **not yet written by FlyByWire**: `A32NX_AUTOTHRUST_ENG_FAULT:{1..4}` (the same colon-indexed convention as its siblings `A32NX_AUTOTHRUST_REVERSE:n`/`A32NX_AUTOTHRUST_N1_COMMANDED:n`), specified in `E:/fbw-debug/ecam/E-AIR-FBW-WRITES.md`; reads `false` until that write exists |
+//! | `pack_flow_insufficient_fwd_crg` | **not yet written by FlyByWire**: `A32NX_COND_PACK_FLOW_INSUFFICIENT_FWD_CRG`, specified in `E:/fbw-debug/ecam/E-AIR-FBW-WRITES.md`; reads `false` until that write exists |
+//! | `ir[n]` | the ARINC 429 `A32NX_ADIRS_IR_<n>_PITCH`/`_ROLL`/`_TRUE_HEADING`/`_FLIGHT_PATH_ANGLE` words FlyByWire's `adirs.rs` publishes from `physics::adirs`'s strapdown model; `None` unless Normal Operation |
+//! | `att_hdg_switching_knob` | `A32NX_ATT_HDG_SWITCHING_KNOB`, FlyByWire's own overhead ATT HDG selector |
 //!
 //! ### `Truth::controls`, field by field
 //!
@@ -58,7 +70,7 @@
 //! | `fire_pb_apu_released` | `A32NX_FIRE_BUTTON_APU`, ditto for the APU |
 //! | `fire_agent_pb_pressed[i][b]` | `A32NX_OVHD_FIRE_AGENT_{1,2}_ENG_{n}_IS_PRESSED`, each bottle's own `MomentaryPushButton` |
 //! | `fire_agent_pb_apu_pressed` | `A32NX_OVHD_FIRE_AGENT_1_APU_1_IS_PRESSED` |
-//! | *(cargo-bay fire/agent pushbuttons)* | **unsourced** -- `fire_and_smoke_protection.rs` models 8 engine bottles and 1 APU bottle only; no field added rather than one with nothing behind it |
+//! | `cargo_agent_pb_pressed[b]` | `A32NX_CARGOSMOKE_{FWD,AFT}_DISCHARGED`; no FBW system reads this name (FBW's own tooltip calls the button "(Inop.)"), but `deep::fire_ice`'s own cargo bottle model consumes it now (W194) |
 //! | `wing_anti_ice_selected` | `A32NX_BUTTON_OVHD_ANTI_ICE_WING_POSITION` != 0, the wing anti-ice pushbutton's own raw position (`pneumatic.rs`'s `WingAntiIcePushButton`) |
 //! | `nacelle_anti_ice_selected[i]` | `A32NX_BUTTON_OVHD_ANTI_ICE_ENG_{n}_POSITION` != 0 |
 //! | `engine_bleed_pb_auto[i]` | `A32NX_OVHD_PNEU_ENG_{n}_BLEED_PB_IS_AUTO` != 0 |
@@ -149,6 +161,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
+use crate::deep::flight_controls::live::SurfaceAngles;
+use crate::deep::integration::flight_control_surfaces::{PhysicalSurfaces, SurfaceOverrideWriter};
 use crate::deep::integration::weather_truth::{EnvironmentTruth, WeatherTruthReader};
 use crate::deep::weather::WeatherSource;
 use crate::deep::live::{CommandedSurfaces, Deep, Faults, Truth, DOOR_NAMES};
@@ -184,6 +198,37 @@ const SSM_NORMAL_OPERATION: u32 = 3;
 fn unpack_arinc(packed: f64) -> (f64, u32) {
     let bits = packed as u64;
     (f32::from_bits(bits as u32) as f64, ((bits >> 32) & 0b11) as u32)
+}
+
+/// Whether one gear leg should be believed on the ground this tick.
+///
+/// FBW's LGCIU1 gates every compressed discrete on `is_powered`
+/// (`fbw-common landing_gear/mod.rs`'s `LgciuSensorInputs::write`), and
+/// LGCIU1 loses power whenever DC ESS does -- which happens on every
+/// ordinary cold start before ground power connects, and repeatedly
+/// whenever it is lost again (W98/W159; kept logs show
+/// `A32NX_LGCIU_1_*_GEAR_COMPRESSED` cycling 0/1/0/1 three times over one
+/// cold start while `on_ground_now` never once reads false). Read
+/// literally, `compressed && on_ground_now` alone makes every one of those
+/// power cycles a full liftoff-then-touchdown of the leg: `gear_structure`
+/// unloads the strut to full extension and closes its open fatigue cycle
+/// on the false edge, then captures a fresh "touchdown" sink speed on the
+/// next power-up -- even though the airframe never left the ground. The
+/// electrical supply to the *sensor* dropped, not the weight on the
+/// wheels.
+///
+/// `on_ground_now` (raw X-Plane `onground_any`, not routed through LGCIU
+/// power at all) is trusted as-is: it still forces the leg false the
+/// instant the airframe genuinely leaves the ground, regardless of
+/// `was_grounded`. Only while `on_ground_now` stays true does a momentary
+/// `compressed == false` get read as "still on the ground" via
+/// `was_grounded` rather than as a liftoff. A real bounce that closes a
+/// fatigue cycle while still on the ground is already handled inside
+/// `strut.rs` itself (`x_m <= CYCLE_EPS_M`, `structure.rs`'s
+/// `close_cycle` call), not by this flag, so nothing here relies on
+/// `leg_on_ground` toggling for that.
+fn leg_grounded(on_ground_now: bool, compressed: bool, was_grounded: bool) -> bool {
+    on_ground_now && (compressed || was_grounded)
 }
 
 /// `fadec.rs`'s `EngineState::On`: the core is turning and lit.
@@ -299,6 +344,9 @@ impl SurfaceIds {
 struct ControlIds {
     fire_pb_apu_released: VariableIdentifier,
     fire_agent_pb_apu_pressed: VariableIdentifier,
+    /// `A32NX_CARGOSMOKE_{FWD,AFT}_DISCHARGED`, `[fwd, aft]`. See
+    /// `Controls::cargo_agent_pb_pressed`'s own doc.
+    cargo_agent_pb_pressed: [VariableIdentifier; 2],
     wing_anti_ice_position: VariableIdentifier,
     apu_bleed_pb_on: VariableIdentifier,
     cross_bleed_selector: VariableIdentifier,
@@ -344,6 +392,15 @@ struct ControlIds {
     /// this resolves to the identical four `VariableIdentifier`s `fuel.rs`
     /// already registered, not four more that could disagree with them.
     crossfeed_switch: [VariableIdentifier; 4],
+    /// `A32NX_FCU_EFIS_{L,R}_DISPLAY_BARO_MODE`, FlyByWire's own raw EFIS
+    /// baro-reference-mode enum, `[CAPT, F.O]`. E-ELEC Phase 2:
+    /// `340800018 NAV CAPT AND F/O BARO REF DISAGREE` -- read only to
+    /// compare the two sides, not to decode which enum value is which mode.
+    baro_mode: [VariableIdentifier; 2],
+    /// `A32NX_AIRLINER_TO_FLEX_TEMP`, the same Var and the same `!= 0` test
+    /// `FwsFlightPhases.ts:215` uses for its own `eng1TLAFTO` ("is a flex
+    /// temp set?"), for `Truth::to_flex_temp_set`.
+    to_flex_temp: VariableIdentifier,
 }
 
 impl ControlIds {
@@ -351,6 +408,7 @@ impl ControlIds {
         Self {
             fire_pb_apu_released: vars.get("FIRE_BUTTON_APU".to_owned()),
             fire_agent_pb_apu_pressed: vars.get("OVHD_FIRE_AGENT_1_APU_1_IS_PRESSED".to_owned()),
+            cargo_agent_pb_pressed: ["FWD", "AFT"].map(|s| vars.get(format!("CARGOSMOKE_{s}_DISCHARGED"))),
             wing_anti_ice_position: vars.get("BUTTON_OVHD_ANTI_ICE_WING_POSITION".to_owned()),
             apu_bleed_pb_on: vars.get("OVHD_APU_BLEED_PB_IS_ON".to_owned()),
             cross_bleed_selector: vars.get("KNOB_OVHD_AIRCOND_XBLEED_Position".to_owned()),
@@ -369,6 +427,8 @@ impl ControlIds {
             fuel_jettison_switch: vars.get("FUEL JETTISON SWITCH".to_owned()),
             cargo_door_position: ["FWD", "AFT"].map(|s| vars.get(format!("{s}_DOOR_CARGO_POSITION"))),
             crossfeed_switch: [1, 2, 3, 4].map(|n| vars.get(format!("FUEL CROSSFEED SWITCH:{n}"))),
+            baro_mode: ["L", "R"].map(|s| vars.get(format!("FCU_EFIS_{s}_DISPLAY_BARO_MODE"))),
+            to_flex_temp: vars.get("AIRLINER_TO_FLEX_TEMP".to_owned()),
         }
     }
 }
@@ -380,11 +440,42 @@ struct Ids {
     apu_bleed_air_pressure: VariableIdentifier,
     ac_bus_potential: [VariableIdentifier; 4],
     dc_bus_potential: [VariableIdentifier; 2],
+    /// `ELEC_AC_{1..4}_BUS_IS_POWERED` / `ELEC_DC_{1,2}_BUS_IS_POWERED`,
+    /// FlyByWire's own electrical system, alongside `ac_bus_potential`/
+    /// `dc_bus_potential` above. See `Truth::ac_bus_powered`/
+    /// `dc_bus_powered`'s own doc.
+    ac_bus_powered: [VariableIdentifier; 4],
+    dc_bus_powered: [VariableIdentifier; 2],
     /// `A32NX_PRIM_{1,2,3}_HEALTHY` / `A32NX_SEC_{1,2,3}_HEALTHY`, written
     /// every tick by `src/prim.rs` from FlyByWire's own compiled Simulink
     /// discrete outputs. See `Truth::prim_healthy`/`sec_healthy`'s own doc.
     prim_healthy: [VariableIdentifier; 3],
     sec_healthy: [VariableIdentifier; 3],
+    /// `A32NX_PRIM_1_{LEFT,RIGHT}_SIDESTICK_{DISABLED,PRIORITY_LOCKED}` --
+    /// PRIM 1 stands in for all three (E-FCTL, ECAM completeness pass; see
+    /// `Truth::prim_left_sidestick_disabled`'s own doc for why one PRIM's
+    /// reading is enough).
+    prim_left_sidestick_disabled: VariableIdentifier,
+    prim_right_sidestick_disabled: VariableIdentifier,
+    prim_left_sidestick_priority_locked: VariableIdentifier,
+    prim_right_sidestick_priority_locked: VariableIdentifier,
+    /// `FLAPS_HANDLE_INDEX`, the same lever position `handling.rs`/
+    /// `engine_commands.rs` already read (E-FCTL, ECAM completeness pass).
+    flap_lever_handle_index: VariableIdentifier,
+    /// `A32NX_CAPT_SIDESTICK_PITCH_RAW`/`_ROLL_RAW`/`A32NX_RUDDER_PEDAL_RAW`,
+    /// written every tick by `src/prim.rs` from the same `SimReadings` the
+    /// real compiled PRIM/SEC laws consume (E-FCTL, ECAM completeness pass;
+    /// see `Truth::capt_sidestick_pitch_raw`'s own doc).
+    capt_sidestick_pitch_raw: VariableIdentifier,
+    capt_sidestick_roll_raw: VariableIdentifier,
+    rudder_pedal_raw: VariableIdentifier,
+    /// `A32NX_BODY_RATE_PITCH_RAW`/`_YAW_RAW`/`_ROLL_RAW`, the real sensed
+    /// body rate `src/prim.rs` reads from the same native datarefs
+    /// `physics::adirs` writes (coordinator follow-up, 2026-09-27; see
+    /// `Truth::body_rate_pitch_raw`'s own doc).
+    body_rate_pitch_raw: VariableIdentifier,
+    body_rate_yaw_raw: VariableIdentifier,
+    body_rate_roll_raw: VariableIdentifier,
     /// Green and yellow, in `Truth::hydraulic_pressure_pa`'s order.
     hydraulic_pressure_psi: [VariableIdentifier; 2],
     /// `TYRE_PRESSURE_PA:n`, which `physics::tyre` writes from its own
@@ -394,16 +485,46 @@ struct Ids {
     /// `INTERACTIVE POINT OPEN:p`, percent, one per [`DOOR_NAMES`] entry:
     /// where `src/doors.rs`'s own door model has that door this frame.
     door_open_percent: [VariableIdentifier; DOOR_NAMES.len()],
+    /// `FUEL_TANK_QUANTITY_1..11`, `src/fuel.rs`'s own `aspect_quantity`
+    /// (US gallons) -- see `Truth::fuel_tank_quantity_gal`'s own doc.
+    fuel_tank_quantity: [VariableIdentifier; 11],
+    /// `COND_FDAC_{1,2}_CHANNEL_{1,2}_FAILURE`. See `Truth::fdac_channel_failure`'s own doc.
+    fdac_channel_failure: [[VariableIdentifier; 2]; 2],
+    /// `PRESS_OCSM_{1..4}_CHANNEL_{1,2}_FAILURE`. See `Truth::ocsm_channel_failure`'s own doc.
+    ocsm_channel_failure: [[VariableIdentifier; 2]; 4],
+    /// `VERTICAL SPEED`. See `Truth::vertical_speed_fpm`'s own doc.
+    vertical_speed_fpm: VariableIdentifier,
+    /// `FM1_LANDING_ELEVATION` (ARINC 429). See `Truth::landing_elevation_ft`'s own doc.
+    landing_elevation_ft: VariableIdentifier,
+    /// `AUTOTHRUST_STATUS`. See `Truth::athr_status`'s own doc.
+    athr_status: VariableIdentifier,
+    /// `AUTOPILOT_{1,2}_ACTIVE`. See `Truth::ap1_active`/`ap2_active`'s own doc.
+    ap_active: [VariableIdentifier; 2],
+    /// `AUTOTHRUST_ENG_FAULT:{1..4}` (not yet written). See `Truth::athr_eng_fault`'s own doc.
+    athr_eng_fault: [VariableIdentifier; 4],
+    /// `COND_PACK_FLOW_INSUFFICIENT_FWD_CRG` (not yet written). See `Truth::pack_flow_insufficient_fwd_crg`'s own doc.
+    pack_flow_insufficient_fwd_crg: VariableIdentifier,
+    /// `ADIRS_IR_<n>_{PITCH,ROLL,TRUE_HEADING,FLIGHT_PATH_ANGLE}` (ARINC
+    /// 429). See `Truth::ir`'s own doc.
+    ir: [[VariableIdentifier; 4]; 3],
+    /// `ATT_HDG_SWITCHING_KNOB`. See `Truth::att_hdg_switching_knob`.
+    att_hdg_switching_knob: VariableIdentifier,
     surfaces: SurfaceIds,
     controls: ControlIds,
 }
 
 /// Which `flight_model.cfg` interactive point each [`DOOR_NAMES`] entry
 /// is, from `src/doors.rs`'s own `NAMES` table (M1L 0, M1R 1, M2L 2,
-/// M2R 3, ... U1L 10, ... cargo fwd 16, cargo aft 17) -- the same points
-/// `src/sensors.rs`'s doc comment already enumerates as the ones
-/// FlyByWire's own systems read.
-const DOOR_POINTS: [usize; DOOR_NAMES.len()] = [0, 2, 3, 6, 8, 10, 16, 17];
+/// M2R 3, ... U1L 10, U1R 11, U2L 12, U2R 13, U3L 14, U3R 15, cargo fwd 16,
+/// cargo aft 17) -- the same points `src/sensors.rs`'s doc comment already
+/// enumerates as the ones FlyByWire's own systems read.
+///
+/// E-ELEC Phase 2 (2026-09-27): extended from the original 8 entries (which
+/// carried only U1L among the six upper doors) to all six upper doors, so
+/// `520800027`-`032 DOOR UPPER 1L/1R/2L/2R/3L/3R NOT CLOSED` can read each
+/// door's own real interactive-point travel instead of the five without a
+/// name here reading as permanently shut.
+const DOOR_POINTS: [usize; DOOR_NAMES.len()] = [0, 2, 3, 6, 8, 10, 11, 12, 13, 14, 15, 16, 17];
 
 /// The thrust lever angle at or below which the A380's reverser control
 /// commands the doors open, degrees.
@@ -430,6 +551,13 @@ struct Refs {
     mass_kg: Option<DataRef>,
     /// `sim/flightmodel/position/theta`, degrees, positive nose up.
     pitch_deg: Option<DataRef>,
+    /// `sim/flightmodel/position/phi`, degrees, positive right wing down.
+    /// E-ELEC Phase 2: `340800017 NAV CAPT AND F/O ATT DISAGREE`'s own
+    /// minimal `InertialReference`.
+    roll_deg: Option<DataRef>,
+    /// `sim/flightmodel/position/psi`, degrees true. E-ELEC Phase 2:
+    /// `340800020 NAV CAPT AND F/O HDG DISAGREE`.
+    heading_true_deg: Option<DataRef>,
     /// `sim/flightmodel/position/groundspeed`, m/s.
     groundspeed_m_s: Option<DataRef>,
     /// `sim/flightmodel/position/alpha`, degrees.
@@ -526,6 +654,32 @@ pub struct DeepLayer {
     /// The sink speed captured at each leg's last such edge, held until it
     /// next lifts off. See `Truth::leg_touchdown_sink_speed_ms`.
     held_sink_speed_ms: [f64; 5],
+    /// `deep::integration::flight_control_surfaces::SurfaceOverrideWriter`,
+    /// constructed once here (`Frame cost`'s own rule: every write goes
+    /// through an id resolved once). Applied in `tick`, right after `deep`
+    /// has ticked `deep::flight_controls` and published this tick's
+    /// `SurfaceAngles` (W124/W125, `E:/fbw-debug/fixes/W124.md`).
+    surface_override: SurfaceOverrideWriter,
+}
+
+/// `deep.flight_control_surface_angles()`'s `SurfaceAngles` (angle + is-it-
+/// actually-faulted, per surface -- see that struct's own doc) turned into
+/// the `Option<f64>`-per-surface shape `SurfaceOverrideWriter::apply` wants:
+/// `Some(angle)` exactly where the paired active flag is `true`, `None`
+/// otherwise. Flap/slat/droop stay `None` unconditionally (`PhysicalSurfaces`'
+/// own doc: `deep::flight_controls::high_lift` has no calibrated travel
+/// range yet).
+fn physical_surfaces_from(a: &SurfaceAngles) -> PhysicalSurfaces {
+    let opt = |active: bool, deg: f64| if active { Some(deg) } else { None };
+    PhysicalSurfaces {
+        ailerons_deg: std::array::from_fn(|side| std::array::from_fn(|i| opt(a.ailerons_override_active[side][i], a.ailerons_deg[side][i]))),
+        elevators_deg: std::array::from_fn(|side| std::array::from_fn(|i| opt(a.elevators_override_active[side][i], a.elevators_deg[side][i]))),
+        rudders_deg: std::array::from_fn(|i| opt(a.rudders_override_active[i], a.rudders_deg[i])),
+        spoilers_deg: std::array::from_fn(|side| std::array::from_fn(|i| opt(a.spoilers_override_active[side][i], a.spoilers_deg[side][i]))),
+        ths_deg: opt(a.ths_override_active, a.ths_deg),
+        flap_deg: [None; 2],
+        slat_deg: [None; 2],
+    }
 }
 
 /// How often the weather/atmosphere read above is taken. See
@@ -548,11 +702,35 @@ impl DeepLayer {
             apu_bleed_air_pressure: vars.get("APU_BLEED_AIR_PRESSURE".to_owned()),
             ac_bus_potential: [1, 2, 3, 4].map(|n| vars.get(format!("ELEC_AC_{n}_BUS_POTENTIAL"))),
             dc_bus_potential: [1, 2].map(|n| vars.get(format!("ELEC_DC_{n}_BUS_POTENTIAL"))),
+            ac_bus_powered: [1, 2, 3, 4].map(|n| vars.get(format!("ELEC_AC_{n}_BUS_IS_POWERED"))),
+            dc_bus_powered: [1, 2].map(|n| vars.get(format!("ELEC_DC_{n}_BUS_IS_POWERED"))),
             prim_healthy: [1, 2, 3].map(|n| vars.get(format!("PRIM_{n}_HEALTHY"))),
             sec_healthy: [1, 2, 3].map(|n| vars.get(format!("SEC_{n}_HEALTHY"))),
+            prim_left_sidestick_disabled: vars.get("PRIM_1_LEFT_SIDESTICK_DISABLED".to_owned()),
+            prim_right_sidestick_disabled: vars.get("PRIM_1_RIGHT_SIDESTICK_DISABLED".to_owned()),
+            prim_left_sidestick_priority_locked: vars.get("PRIM_1_LEFT_SIDESTICK_PRIORITY_LOCKED".to_owned()),
+            prim_right_sidestick_priority_locked: vars.get("PRIM_1_RIGHT_SIDESTICK_PRIORITY_LOCKED".to_owned()),
+            flap_lever_handle_index: vars.get("FLAPS_HANDLE_INDEX".to_owned()),
+            capt_sidestick_pitch_raw: vars.get("CAPT_SIDESTICK_PITCH_RAW".to_owned()),
+            capt_sidestick_roll_raw: vars.get("CAPT_SIDESTICK_ROLL_RAW".to_owned()),
+            rudder_pedal_raw: vars.get("RUDDER_PEDAL_RAW".to_owned()),
+            body_rate_pitch_raw: vars.get("BODY_RATE_PITCH_RAW".to_owned()),
+            body_rate_yaw_raw: vars.get("BODY_RATE_YAW_RAW".to_owned()),
+            body_rate_roll_raw: vars.get("BODY_RATE_ROLL_RAW".to_owned()),
             hydraulic_pressure_psi: ["GREEN", "YELLOW"].map(|c| vars.get(format!("HYD_{c}_SYSTEM_1_SECTION_PRESSURE"))),
             tyre_pressure_pa: std::array::from_fn(|i| vars.get(format!("TYRE_PRESSURE_PA:{}", i + 1))),
             door_open_percent: DOOR_POINTS.map(|p| vars.get(format!("INTERACTIVE POINT OPEN:{p}"))),
+            fuel_tank_quantity: std::array::from_fn(|i| vars.get(format!("FUEL_TANK_QUANTITY_{}", i + 1))),
+            fdac_channel_failure: [1, 2].map(|n| [1, 2].map(|c| vars.get(format!("COND_FDAC_{n}_CHANNEL_{c}_FAILURE")))),
+            ocsm_channel_failure: [1, 2, 3, 4].map(|n| [1, 2].map(|c| vars.get(format!("PRESS_OCSM_{n}_CHANNEL_{c}_FAILURE")))),
+            vertical_speed_fpm: vars.get("VERTICAL SPEED".to_owned()),
+            landing_elevation_ft: vars.get("FM1_LANDING_ELEVATION".to_owned()),
+            athr_status: vars.get("AUTOTHRUST_STATUS".to_owned()),
+            ap_active: [1, 2].map(|n| vars.get(format!("AUTOPILOT_{n}_ACTIVE"))),
+            athr_eng_fault: std::array::from_fn(|i| vars.get(format!("AUTOTHRUST_ENG_FAULT:{}", i + 1))),
+            pack_flow_insufficient_fwd_crg: vars.get("COND_PACK_FLOW_INSUFFICIENT_FWD_CRG".to_owned()),
+            ir: [1, 2, 3].map(|n| ["PITCH", "ROLL", "TRUE_HEADING", "FLIGHT_PATH_ANGLE"].map(|p| vars.get(format!("ADIRS_IR_{n}_{p}")))),
+            att_hdg_switching_knob: vars.get("ATT_HDG_SWITCHING_KNOB".to_owned()),
             surfaces: SurfaceIds::new(vars),
             controls: ControlIds::new(vars),
         };
@@ -561,6 +739,8 @@ impl DeepLayer {
             on_ground: xplm.and_then(|x| x.find("sim/flightmodel/failures/onground_any")),
             mass_kg: xplm.and_then(|x| x.find("sim/flightmodel/weight/m_total")),
             pitch_deg: xplm.and_then(|x| x.find("sim/flightmodel/position/theta")),
+            roll_deg: xplm.and_then(|x| x.find("sim/flightmodel/position/phi")),
+            heading_true_deg: xplm.and_then(|x| x.find("sim/flightmodel/position/psi")),
             groundspeed_m_s: xplm.and_then(|x| x.find("sim/flightmodel/position/groundspeed")),
             alpha_deg: xplm.and_then(|x| x.find("sim/flightmodel/position/alpha")),
             radio_height_ft: xplm.and_then(|x| x.find("sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot")),
@@ -584,12 +764,23 @@ impl DeepLayer {
             // `Truth::default`'s own `leg_on_ground: [true; 5]`.
             prev_leg_on_ground: [true; 5],
             held_sink_speed_ms: [0.0; 5],
+            surface_override: SurfaceOverrideWriter::new(vars),
         }
     }
 
     /// The areas this layer was built with, for the startup log.
     pub fn area_names(&self) -> Vec<&'static str> {
         self.deep.area_names()
+    }
+
+    /// This tick's real X-Plane weather/atmosphere (`WEATHER_INTERVAL_S`'s
+    /// own doc for why this is held rather than read every call), for
+    /// `Plugin::apply_deep_xp_consequences` (lib.rs), which needs
+    /// `ambient_pressure_pa`/`sat_c`/`tas_ms` for `xp_consequences::
+    /// dynamic_pressure_pa` and has no other way to reach `deep/plugin.rs`'s
+    /// otherwise-private `environment` field.
+    pub fn environment(&self) -> EnvironmentTruth {
+        self.environment
     }
 
     /// This frame's armed deep failures.
@@ -599,8 +790,39 @@ impl DeepLayer {
     /// exactly `armed_magnitude(id)` over every deep id, without being
     /// thousands of locks.
     fn faults(&self) -> Faults {
+        // (build fix, INT-P4, on top of W108) `deep::live` areas only ever
+        // see this filtered set -- confirmed dead code elsewhere reaches
+        // the same conclusion (this file's own doc, `failure_audit.rs`'s
+        // module doc: "an area never depends on the failure system"
+        // outside `Faults`, and its `thread::scope` sweep workers rely on
+        // that to never touch `crate::failures`' process-wide, `serial()`-
+        // guarded state). W108 wired the legacy/flat catalogue's 49_002
+        // ("APU starter fault") into `deep::apu`'s own `starter_
+        // degradation`, but 49_002 is outside `deep::registry()` (a
+        // different id space entirely) so it never passed this filter --
+        // its own fix read `crate::failures::magnitude(49_002)` directly
+        // from area code instead, which is exactly the direct global touch
+        // the audit sweep's threading model assumes no area makes; its
+        // worker threads never call `crate::failures::tests::serial()`
+        // (only *this* frame-glue layer, which already touches
+        // `crate::failures` every frame in production, is expected to).
+        // Folding 49_002 in here, alongside the deep-registered ids, means
+        // `apu/live.rs::faults_from` can read it back through `faults.get`
+        // like any other id, restoring that invariant. Same reasoning for
+        // `pneumatic_ducts::live`'s own `EXTRA_PRECOOLER_FAULT_IDS`
+        // (36_004..36_007, the extra catalogue's per-engine precooler
+        // fouling ids) -- a pre-existing instance of the identical bug
+        // (W109), fixed the same way; literal here rather than importing
+        // that module-private const.
+        // Also 49_000/49_004 (APU turbine damage, oil leak -> `apu::live`)
+        // and 29_100/29_101 (green/yellow return filter clog ->
+        // `hydraulics::live`): catalogue failures that had no consumer.
+        const EXTRA_IDS: [u64; 9] = [49_002, 36_004, 36_005, 36_006, 36_007, 49_000, 49_004, 29_100, 29_101];
         Faults::from_pairs(
-            crate::failures::active_magnitudes().into_iter().filter(|(id, _)| self.failure_ids.contains(id)),
+            crate::failures::active_magnitudes()
+                .into_iter()
+                .filter(|(id, _)| self.failure_ids.contains(id))
+                .chain(EXTRA_IDS.into_iter().map(|id| (id, crate::failures::magnitude(id)))),
         )
     }
 
@@ -631,7 +853,10 @@ impl DeepLayer {
         let mut engine_bleed_temp_k = default.engine_bleed_temp_k;
         let mut engine_hp_port_pressure_pa = default.engine_hp_port_pressure_pa;
         let mut engine_hp_port_temp_k = default.engine_hp_port_temp_k;
+        let mut engine_ip_port_pressure_pa = default.engine_ip_port_pressure_pa;
+        let mut engine_ip_port_temp_k = default.engine_ip_port_temp_k;
         let mut engine_fuel_flow_kg_s = [0.0; 4];
+        let mut engine_tla_deg = [0.0; 4];
         let mut engine_oil_pressure_pa = default.engine_oil_pressure_pa;
         let mut engine_oil_temp_c = default.engine_oil_temp_c;
         let mut engine_oil_quantity_fraction = default.engine_oil_quantity_fraction;
@@ -696,7 +921,24 @@ impl DeepLayer {
             if hp_temp > 0.0 {
                 engine_hp_port_temp_k[i] = hp_temp;
             }
+            // The IP8 port unconditionally too (`Truth::engine_ip_port_
+            // pressure_pa`'s own doc, W91): `engine_bleed_pressure_pa`/
+            // `_temp_k` above already carry whichever of IP8/HP6 the
+            // switch just above picked for the customer bleed, so a
+            // consumer that specifically wants the real, unswitched IP8
+            // tap condition -- `deep::pneumatic_ducts`'s own upstream
+            // stage -- cannot be built from that pair. `t25_k` above is
+            // already an unconditional read of this same dataref; reuse it
+            // rather than reading `ENGINE_IP_PORT_TEMP_K:n` twice.
+            let ip_pressure = vars.read(&e.ip_port_pressure_pa);
+            if ip_pressure > 0.0 {
+                engine_ip_port_pressure_pa[i] = ip_pressure;
+            }
+            if t25_k > 0.0 {
+                engine_ip_port_temp_k[i] = t25_k;
+            }
             engine_fuel_flow_kg_s[i] = vars.read(&e.fuel_flow_demand_kg_s);
+            engine_tla_deg[i] = vars.read(&e.tla_deg);
 
             controls.fire_pb_released[i] = vars.read(&e.fire_pb_released) != 0.0;
             controls.fire_agent_pb_pressed[i] = e.fire_agent_pb_pressed.map(|id| vars.read(&id) != 0.0);
@@ -740,6 +982,7 @@ impl DeepLayer {
             let c = &self.ids.controls;
             controls.fire_pb_apu_released = vars.read(&c.fire_pb_apu_released) != 0.0;
             controls.fire_agent_pb_apu_pressed = vars.read(&c.fire_agent_pb_apu_pressed) != 0.0;
+            controls.cargo_agent_pb_pressed = c.cargo_agent_pb_pressed.map(|id| vars.read(&id) != 0.0);
             controls.wing_anti_ice_selected = vars.read(&c.wing_anti_ice_position) != 0.0;
             controls.apu_bleed_pb_on = vars.read(&c.apu_bleed_pb_on) != 0.0;
             controls.cross_bleed_selector = vars.read(&c.cross_bleed_selector);
@@ -752,6 +995,9 @@ impl DeepLayer {
             controls.bat_pb_auto = c.bat_pb_auto.map(|id| vars.read(&id) != 0.0);
             controls.apu_master_sw_on = vars.read(&c.apu_master_sw_on) != 0.0;
             controls.apu_start_pb_on = vars.read(&c.apu_start_pb_on) != 0.0;
+            // E-ELEC Phase 2: `340800018 NAV CAPT AND F/O BARO REF
+            // DISAGREE` -- see `ControlIds::baro_mode`'s own doc.
+            controls.baro_mode = c.baro_mode.map(|id| vars.read(&id));
             // `rain_removal_selected` has no real source in this port (see
             // this module's `Controls` sourcing table) and is left at
             // `default.controls`'s value, already copied in above.
@@ -792,18 +1038,31 @@ impl DeepLayer {
             f(self.refs.speedbrake_ratio).map_or(default.controls.ground_spoiler_lever_armed, |ratio| SimReadings::spoilers_from_xplane(ratio).0);
 
         let gpu_plugged_in = self.ids.controls.ext_pwr_avail.iter().any(|id| vars.read(id) != 0.0);
+        let to_flex_temp_set = vars.read(&self.ids.controls.to_flex_temp) != 0.0;
 
         let s = &self.ids.surfaces;
         let commanded_surfaces = CommandedSurfaces {
             ailerons_deg: s.ailerons.map(|side| side.map(|id| aileron_or_elevator_down_deg(vars.read(&id)))),
             elevators_deg: s.elevators.map(|side| side.map(|id| aileron_or_elevator_down_deg(vars.read(&id)))),
-            rudders_deg: s.rudders.map(|id| rudder_right_deg(vars.read(&id))),
+            // `rudder_right_deg` is the *mirrored* inverse of
+            // `flight_control_surfaces::normalized_rudder` for rudder
+            // specifically (that module's own round-trip test:
+            // `rudder_right_deg(normalized_rudder(order)) == -order`), not
+            // the true inverse `aileron_or_elevator_down_deg`/
+            // `spoiler_up_deg` are on the surrounding lines. `deep::
+            // flight_controls`'s own rudder model works in FlyByWire's body
+            // sign (`live.rs`'s `RUDDER_LIMIT_DEG` comment cites the same
+            // `(30 - deg) / 60` formula `normalized_rudder` uses), so the
+            // sign is flipped back here to match it (W84).
+            rudders_deg: s.rudders.map(|id| -rudder_right_deg(vars.read(&id))),
             spoilers_deg: s.spoilers.map(|side| side.map(|id| spoiler_up_deg(vars.read(&id)))),
             ths_deg: vars.read(&s.ths),
         };
 
         let aircraft_mass_kg = f(self.refs.mass_kg).filter(|m| *m > 0.0).unwrap_or(default.aircraft_mass_kg);
         let pitch_deg = f(self.refs.pitch_deg).unwrap_or(default.pitch_deg);
+        let roll_deg = f(self.refs.roll_deg).unwrap_or(default.roll_deg);
+        let heading_true_deg = f(self.refs.heading_true_deg).unwrap_or(default.heading_true_deg);
         let groundspeed_m_s = f(self.refs.groundspeed_m_s).unwrap_or(default.groundspeed_m_s);
         let angle_of_attack_deg = f(self.refs.alpha_deg).unwrap_or(default.angle_of_attack_deg);
         let radio_height_ft = f(self.refs.radio_height_ft).unwrap_or(default.radio_height_ft);
@@ -820,7 +1079,11 @@ impl DeepLayer {
             .unwrap_or(default.on_ground);
         let lc = &self.ids.controls.lgciu_gear_compressed;
         let (nose, left, right) = (vars.read(&lc[0]) != 0.0, vars.read(&lc[1]) != 0.0, vars.read(&lc[2]) != 0.0);
-        let leg_on_ground = [nose, left, right, left, right].map(|compressed| compressed && on_ground_now);
+        let compressed = [nose, left, right, left, right];
+        // See `leg_grounded`'s doc comment: a leg's own belief survives an
+        // LGCIU power dropout while `on_ground_now` stays true, so that
+        // dropout is not read as a liftoff-and-touchdown pair below.
+        let leg_on_ground = std::array::from_fn(|i| leg_grounded(on_ground_now, compressed[i], self.prev_leg_on_ground[i]));
 
         // Touchdown sink speed: capture the aircraft's own vertical speed
         // on the false -> true edge of each leg, hold it until that leg
@@ -859,6 +1122,34 @@ impl DeepLayer {
         let cabin_temp_k = if cabin_temp_c > -273.15 { cabin_temp_c + 273.15 } else { default.cabin_temp_k };
 
         let sun_elevation_deg = f(self.refs.sun_pitch_deg).unwrap_or(default.sun_elevation_deg);
+
+        // FlyByWire's own FMS-computed landing elevation: the same ARINC
+        // 429 decode as the cabin pressure word above, `0.0` (sea level)
+        // rather than a stale/default reading when no FMS destination is
+        // entered (SSM not Normal Operation) -- see `Truth::
+        // landing_elevation_ft`'s own doc.
+        let (landing_elevation_raw_ft, landing_elevation_ssm) = unpack_arinc(vars.read(&self.ids.landing_elevation_ft));
+        let landing_elevation_ft = if landing_elevation_ssm == SSM_NORMAL_OPERATION { landing_elevation_raw_ft } else { 0.0 };
+
+        // `Truth::fuel_tank_quantity_gal`'s own doc: `None` until every one
+        // of the eleven has actually been written at least once (a fresh
+        // `Vars` slot reads 0.0 unwritten, which is not a real "all tanks
+        // empty" reading), `Some` of the real values from then on. This
+        // reads `vars` directly rather than gating on `self.fuel` (that
+        // `Option<fuel::Fuel>` lives on the outer `Plugin`, not here),
+        // which is correct precisely because `fuel.update()` -- and its own
+        // `publish`, which writes these -- already ran earlier in this same
+        // frame: `lib.rs`'s own tick order runs "The fuel system after the
+        // systems" before "[slot tick-after-systems: deep]".
+        let mut all_tanks_written = true;
+        for i in 0..11 {
+            if vars.is_unwritten_named(&self.ids.fuel_tank_quantity[i]) {
+                all_tanks_written = false;
+                break;
+            }
+        }
+        let fuel_tank_quantity_gal =
+            if all_tanks_written { Some(std::array::from_fn(|i| vars.read(&self.ids.fuel_tank_quantity[i]))) } else { None };
 
         Truth {
             dt_s,
@@ -901,19 +1192,39 @@ impl DeepLayer {
             apu_bleed_pressure_pa,
             ac_bus_volts: std::array::from_fn(|i| vars.read(&self.ids.ac_bus_potential[i])),
             dc_bus_volts: std::array::from_fn(|i| vars.read(&self.ids.dc_bus_potential[i])),
+            ac_bus_powered: std::array::from_fn(|i| vars.read(&self.ids.ac_bus_powered[i]) != 0.0),
+            dc_bus_powered: std::array::from_fn(|i| vars.read(&self.ids.dc_bus_powered[i]) != 0.0),
             prim_healthy: std::array::from_fn(|i| vars.read(&self.ids.prim_healthy[i]) != 0.0),
             sec_healthy: std::array::from_fn(|i| vars.read(&self.ids.sec_healthy[i]) != 0.0),
+            prim_left_sidestick_disabled: vars.read(&self.ids.prim_left_sidestick_disabled) != 0.0,
+            prim_right_sidestick_disabled: vars.read(&self.ids.prim_right_sidestick_disabled) != 0.0,
+            prim_left_sidestick_priority_locked: vars.read(&self.ids.prim_left_sidestick_priority_locked) != 0.0,
+            prim_right_sidestick_priority_locked: vars.read(&self.ids.prim_right_sidestick_priority_locked) != 0.0,
+            flap_lever_handle_index: vars.read(&self.ids.flap_lever_handle_index),
+            capt_sidestick_pitch_raw: vars.read(&self.ids.capt_sidestick_pitch_raw),
+            capt_sidestick_roll_raw: vars.read(&self.ids.capt_sidestick_roll_raw),
+            rudder_pedal_raw: vars.read(&self.ids.rudder_pedal_raw),
+            body_rate_pitch_raw: vars.read(&self.ids.body_rate_pitch_raw),
+            body_rate_yaw_raw: vars.read(&self.ids.body_rate_yaw_raw),
+            body_rate_roll_raw: vars.read(&self.ids.body_rate_roll_raw),
             hydraulic_pressure_pa: std::array::from_fn(|i| vars.read(&self.ids.hydraulic_pressure_psi[i]) * PSI_TO_PA),
             engine_n2_frac,
             engine_n3_frac,
             engine_hp_port_pressure_pa,
             engine_hp_port_temp_k,
+            engine_ip_port_pressure_pa,
+            engine_ip_port_temp_k,
             engine_fuel_flow_kg_s,
+            engine_tla_deg,
+            to_flex_temp_set,
+            fuel_tank_quantity_gal,
             gpu_plugged_in,
             controls,
             commanded_surfaces,
             aircraft_mass_kg,
             pitch_deg,
+            roll_deg,
+            heading_true_deg,
             groundspeed_m_s,
             angle_of_attack_deg,
             radio_height_ft,
@@ -922,6 +1233,23 @@ impl DeepLayer {
             cabin_pressure_pa,
             cabin_temp_k,
             sun_elevation_deg,
+            fdac_channel_failure: std::array::from_fn(|i| std::array::from_fn(|c| vars.read(&self.ids.fdac_channel_failure[i][c]) != 0.0)),
+            ocsm_channel_failure: std::array::from_fn(|i| std::array::from_fn(|c| vars.read(&self.ids.ocsm_channel_failure[i][c]) != 0.0)),
+            vertical_speed_fpm: vars.read(&self.ids.vertical_speed_fpm),
+            landing_elevation_ft,
+            athr_status: vars.read(&self.ids.athr_status),
+            ap1_active: vars.read(&self.ids.ap_active[0]) != 0.0,
+            ap2_active: vars.read(&self.ids.ap_active[1]) != 0.0,
+            athr_eng_fault: std::array::from_fn(|i| vars.read(&self.ids.athr_eng_fault[i]) != 0.0),
+            pack_flow_insufficient_fwd_crg: vars.read(&self.ids.pack_flow_insufficient_fwd_crg) != 0.0,
+            ir: std::array::from_fn(|n| {
+                let mut word = |p: usize| {
+                    let (value, ssm) = unpack_arinc(vars.read(&self.ids.ir[n][p]));
+                    (ssm == SSM_NORMAL_OPERATION).then_some(value)
+                };
+                crate::deep::live::IrOutputs { pitch_deg: word(0), roll_deg: word(1), true_heading_deg: word(2), flight_path_angle_deg: word(3) }
+            }),
+            att_hdg_switching_knob: vars.read(&self.ids.att_hdg_switching_knob),
         }
     }
 
@@ -929,13 +1257,25 @@ impl DeepLayer {
     pub fn tick(&mut self, vars: &mut Vars, xplm: Option<&Xplm>, delta: f64) {
         let truth = self.truth(vars, xplm, delta);
         let faults = self.faults();
-        let Self { deep, publisher, .. } = self;
+        let Self { deep, publisher, surface_override, .. } = self;
         let mut at = 0usize;
         deep.tick(truth, &faults, &mut |name, value| {
             let (id, in_step) = publisher.resolve(vars, at, name);
             at += in_step as usize;
             vars.write(&id, value);
         });
+        // `deep::integration::flight_control_surfaces::SurfaceOverrideWriter`
+        // (W124/W125, `E:/fbw-debug/fixes/W124.md`): `deep::flight_controls`
+        // has just ticked, so `flight_control_surface_angles()` is this
+        // tick's real angles, not last tick's. `FBW_XP_WRITES=surfaces`
+        // already gates `flight_controls.rs::FlightControls::update`
+        // (`lib.rs`) -- the same knob gates this, since both write towards
+        // the same eventual X-Plane surface positions.
+        if !crate::xp_writes_skip("surfaces") {
+            if let Some(angles) = deep.flight_control_surface_angles() {
+                surface_override.apply(vars, &physical_surfaces_from(&angles));
+            }
+        }
 
         // Level 2 of `docs/deep/authority.md`: where a deep area has
         // concluded that a component FlyByWire *also* models has failed,
@@ -994,6 +1334,15 @@ mod tests {
         assert_eq!(unpack_arinc(0.0), (0.0, 0));
     }
 
+    #[test]
+    fn leg_grounded_holds_a_leg_through_an_lgciu_power_dropout() {
+        assert!(leg_grounded(true, false, true), "an LGCIU sensor power dropout must not read as a liftoff while the airframe is still on the ground");
+        assert!(leg_grounded(true, true, true));
+        assert!(leg_grounded(true, true, false), "a genuine touchdown edge must still register");
+        assert!(!leg_grounded(false, true, true), "on_ground_now=false must still force the leg off regardless of any sticky belief or stale sensor reading");
+        assert!(!leg_grounded(true, false, false), "no sensor report and no prior belief must not invent contact");
+    }
+
     /// A `Vars` off a do-nothing X-Plane binding, the same way
     /// `fadec.rs`'s own tests build one: `find` answers "no such dataref",
     /// so every `Refs` entry is `None` and every `Truth` field that has no
@@ -1008,6 +1357,26 @@ mod tests {
     fn set(vars: &mut Vars, name: &str, value: f64) {
         let id = vars.get(name.to_owned());
         vars.write(&id, value);
+    }
+
+    #[test]
+    fn rudder_command_keeps_flybywires_own_body_sign_not_xplanes_right_positive_one() {
+        // `flight_control_surfaces::normalized_rudder`/`rudder_right_deg`'s
+        // own round-trip test: `rudder_right_deg(normalized_rudder(order))
+        // == -order`. `deep::flight_controls` needs `order` (FlyByWire's
+        // body sign) back out of `commanded_surfaces.rudders_deg`, not its
+        // mirror image (W84).
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+        // `a380_systems`' actuator has driven the upper rudder toward
+        // `order = -30`: `normalized_rudder(-30.0) == 1.0`.
+        set(&mut vars, "HYD_UPPER_RUD_DEFLECTION", 1.0);
+        let t = layer.truth(&mut vars, Some(xplm), 0.02);
+        assert!(
+            (t.commanded_surfaces.rudders_deg[0] - (-30.0)).abs() < 1e-9,
+            "expected FlyByWire's own -30 deg body-sign order, got {}",
+            t.commanded_surfaces.rudders_deg[0]
+        );
     }
 
     #[test]
@@ -1032,6 +1401,8 @@ mod tests {
         assert_eq!(t.engine_running, [false; 4]);
         assert!(!t.apu_running);
         assert_eq!(t.ac_bus_volts, [0.0; 4]);
+        assert_eq!(t.ac_bus_powered, [false; 4]);
+        assert_eq!(t.dc_bus_powered, [false; 2]);
         assert_eq!(t.hydraulic_pressure_pa, [0.0; 2]);
         // No PRIM/SEC has published a healthy discrete yet: a cold aircraft
         // has no live computer, the same "not a gap" reasoning as
@@ -1060,6 +1431,43 @@ mod tests {
         let t = layer.truth(&mut vars, Some(xplm), 0.0);
         assert_eq!(t.prim_healthy, [true, false, true]);
         assert_eq!(t.sec_healthy, [true, true, false]);
+    }
+
+    #[test]
+    fn lgciu_losing_power_while_grounded_is_not_read_as_a_liftoff_and_touchdown() {
+        // W159: reproduces Log-keep-113715.txt's own cold-start sequence
+        // (lines 1354/1766/2360/3109) end to end through the real `Truth`
+        // builder. `on_ground_now` is pinned to `Truth::default`'s
+        // `on_ground: true` in this dummy-Xplm harness (`rig`'s own doc
+        // comment: `refs.on_ground` is always `None`), matching the
+        // parked-at-the-gate scenario in the logs.
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+
+        // Unpowered at the very first tick (cold and dark): the discrete's
+        // absent write reads 0, same as every kept log before ground
+        // power connects.
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert!(t.leg_on_ground[0], "the nose leg is still on the ground even though its LGCIU sensor has not reported yet");
+
+        // Ground power connects: the discrete correctly reports compressed=1.
+        set(&mut vars, "A32NX_LGCIU_1_NOSE_GEAR_COMPRESSED", 1.0);
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert!(t.leg_on_ground[0]);
+        assert_eq!(t.leg_touchdown_sink_speed_ms[0], 0.0, "no genuine touchdown happened; nothing should be captured as one");
+
+        // LGCIU1 loses power again (efb.rs's spawn-settle ground-power bug,
+        // or any other DC ESS blip): the discrete falls back to 0, but the
+        // airframe stays on the ground throughout.
+        set(&mut vars, "A32NX_LGCIU_1_NOSE_GEAR_COMPRESSED", 0.0);
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert!(t.leg_on_ground[0], "a sensor power dropout must not read as the leg lifting off while on_ground_now stays true");
+
+        // And repowers again: still no fresh "touchdown" should be recorded.
+        set(&mut vars, "A32NX_LGCIU_1_NOSE_GEAR_COMPRESSED", 1.0);
+        let t = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert!(t.leg_on_ground[0]);
+        assert_eq!(t.leg_touchdown_sink_speed_ms[0], 0.0, "still not a genuine touchdown");
     }
 
     #[test]
@@ -1201,6 +1609,32 @@ mod tests {
         set(&mut vars, "FUEL CROSSFEED SWITCH:1", 0.0);
         let t2 = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
         assert_eq!(t2.controls.crossfeed_valve_selected, [false, false, true, false], "deselecting valve 1 must not touch valve 3");
+    }
+
+    /// `Truth::fuel_tank_quantity_gal` (W216): `None` until every one of
+    /// the eleven `FUEL_TANK_QUANTITY_n` `src/fuel.rs` publishes has
+    /// actually been written once (not the unwritten-slot 0.0 every one of
+    /// them otherwise reads), `Some` of the real values from then on.
+    #[test]
+    fn fuel_tank_quantity_gal_is_none_until_every_tank_has_been_written_then_reflects_them() {
+        let (xplm, mut vars) = rig();
+        let mut layer = DeepLayer::new(&mut vars, Some(xplm));
+
+        let cold = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert_eq!(cold.fuel_tank_quantity_gal, None, "nothing published yet: must not be mistaken for eleven empty tanks");
+
+        // Ten of eleven written is still not enough: one unwritten tank
+        // must not be silently read as a real zero.
+        for i in 1..=10 {
+            set(&mut vars, &format!("FUEL_TANK_QUANTITY_{i}"), i as f64 * 100.0);
+        }
+        let partial = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        assert_eq!(partial.fuel_tank_quantity_gal, None, "one of eleven still unwritten: must stay None");
+
+        set(&mut vars, "FUEL_TANK_QUANTITY_11", 1100.0);
+        let full = layer.truth(&mut vars, Some(xplm), 1.0 / 60.0);
+        let expected: [f64; 11] = std::array::from_fn(|i| (i + 1) as f64 * 100.0);
+        assert_eq!(full.fuel_tank_quantity_gal, Some(expected), "all eleven written: must reflect the real reading");
     }
 
     /// The oil tank level reaches the areas, and a tank nobody has written

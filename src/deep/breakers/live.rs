@@ -116,6 +116,18 @@ pub struct BreakersLive {
     fault_tripped_count: f64,
     locked_out_count: f64,
     unprotected_count: f64,
+    /// `(failure id, index into `[cb_monitoring_fault, emer_cb_monitoring_
+    /// fault, remote_cb_ctl_on]`)` for the three `registry::register_misc`
+    /// entries -- see `240800020`/`054`/`073` in `ata24.rs`.
+    misc_routed: Vec<(u64, usize)>,
+    cb_monitoring_fault: f64,
+    emer_cb_monitoring_fault: f64,
+    /// `240800073 ELEC REMOTE C/B CTL ACTIVE` -- FCOM p.4954: "Maintenance
+    /// personnel left the REMOTE C/B CTL pb (on the maintenance panel) set
+    /// to ON." No MSFS `L:` var exists for this A380-specific maintenance
+    /// panel switch, so (like `240800019` in `deep::electrical`) it is armed
+    /// from the Study panel rather than read from a live switch.
+    remote_cb_ctl_on: f64,
     /// Units whose own circuit is, right now, drawing less than the
     /// smallest current that could ever open them -- so their registered
     /// `trip_calibration_drift` failure is armable but cannot act. See
@@ -171,7 +183,23 @@ impl BreakersLive {
             };
             routed.push((f.id, unit, channel));
         }
-        debug_assert_eq!(routed.len(), reg.failures.len(), "every registered breaker failure must route onto a unit");
+        // The two `registry::register_misc` entries: not one of the 399
+        // per-unit trip units, so `by_id.get` above never resolves them and
+        // the main loop's `continue` correctly leaves them out of `routed`
+        // -- resolved here instead, onto `misc_routed`'s own two-element
+        // state.
+        let mut misc_routed = Vec::new();
+        for f in &reg.failures {
+            let Some(suffix) = f.component.strip_prefix("17_breakers.misc.") else { continue };
+            let idx = match suffix {
+                "cb-monitoring" => 0,
+                "emer-cb-monitoring" => 1,
+                "remote-cb-ctl" => 2,
+                _ => continue,
+            };
+            misc_routed.push((f.id, idx));
+        }
+        debug_assert_eq!(routed.len() + misc_routed.len(), reg.failures.len(), "every registered breaker failure must route onto a unit or onto misc_routed");
 
         // The mirror of the same physical channel in `deep::electrical`.
         let mut elec = Registry::default();
@@ -188,7 +216,21 @@ impl BreakersLive {
         }
 
         let unprotected_count = units.iter().filter(|u| u.def.protected_load.is_none()).count() as f64;
-        Self { units, routed, welded_mirror, faults_were_armed: false, tripped_count: 0.0, fault_tripped_count: 0.0, locked_out_count: 0.0, unprotected_count, drift_inert_count: 0.0 }
+        Self {
+            units,
+            routed,
+            welded_mirror,
+            faults_were_armed: false,
+            tripped_count: 0.0,
+            fault_tripped_count: 0.0,
+            locked_out_count: 0.0,
+            unprotected_count,
+            drift_inert_count: 0.0,
+            misc_routed,
+            cb_monitoring_fault: 0.0,
+            emer_cb_monitoring_fault: 0.0,
+            remote_cb_ctl_on: 0.0,
+        }
     }
 
     /// Read-only access to one unit's live trip state, for tests and for
@@ -199,6 +241,19 @@ impl BreakersLive {
 
     pub fn breaker_mut(&mut self, id: &str) -> Option<&mut Breaker> {
         self.units.iter_mut().find(|u| u.def.id == id).map(|u| &mut u.breaker)
+    }
+
+    /// Every unit in catalogue order: its id, its trip unit and the current
+    /// it carried on the last tick (A; 0 for a unit whose consumer
+    /// `deep::electrical` does not model). The position here is the index
+    /// [`Self::breaker_at_mut`] takes, so a host driving all of them every
+    /// frame (the MSFS `CircuitProtection`) never searches by id.
+    pub fn units(&self) -> impl Iterator<Item = (&'static str, &Breaker, f64)> + '_ {
+        self.units.iter().map(|u| (u.def.id, &u.breaker, u.current_a))
+    }
+
+    pub fn breaker_at_mut(&mut self, index: usize) -> Option<&mut Breaker> {
+        self.units.get_mut(index).map(|u| &mut u.breaker)
     }
 }
 
@@ -236,6 +291,14 @@ impl Area for BreakersLive {
             }
         }
         self.faults_were_armed = armed;
+
+        let mut misc_state = [0.0f64; 3];
+        for &(id, idx) in &self.misc_routed {
+            misc_state[idx] = misc_state[idx].max(faults.get(id));
+        }
+        self.cb_monitoring_fault = misc_state[0];
+        self.emer_cb_monitoring_fault = misc_state[1];
+        self.remote_cb_ctl_on = misc_state[2];
 
         // No `Truth` field carries an equipment-bay/power-centre air
         // temperature, and a thermal breaker's trip point genuinely depends
@@ -308,6 +371,12 @@ impl Area for BreakersLive {
         // why the honest response is to report this rather than widen the
         // drift ceiling until it goes away.
         out("BREAKERS_DRIFT_INERT_COUNT", self.drift_inert_count);
+        // `240800020`/`054` ELEC C/B MONITORING FAULT / EMER C/B MONITORING
+        // FAULT: see `registry::register_misc`'s own doc.
+        out("BREAKERS_CB_MONITORING_FAULT", if self.cb_monitoring_fault > 0.0 { 1.0 } else { 0.0 });
+        out("BREAKERS_EMER_CB_MONITORING_FAULT", if self.emer_cb_monitoring_fault > 0.0 { 1.0 } else { 0.0 });
+        // `240800073 ELEC REMOTE C/B CTL ACTIVE`, see this struct's own doc.
+        out("BREAKERS_REMOTE_CTL_ACTIVE", if self.remote_cb_ctl_on > 0.0 { 1.0 } else { 0.0 });
 
         // The typed side of `BKR_<id>_OPEN`, which `deep::electrical` reads
         // back next frame to open the matching contacts.
@@ -327,6 +396,14 @@ impl Area for BreakersLive {
                 }
             }
         });
+    }
+
+    fn as_breakers(&self) -> Option<&BreakersLive> {
+        Some(self)
+    }
+
+    fn as_breakers_mut(&mut self) -> Option<&mut BreakersLive> {
+        Some(self)
     }
 }
 
@@ -356,9 +433,14 @@ mod tests {
         let live = BreakersLive::new();
         let mut reg = Registry::default();
         super::super::registry::register(&mut reg);
-        assert_eq!(live.routed.len(), reg.failures.len());
+        // `routed` covers the 399 real trip units (2 failures each);
+        // `registry::register_misc`'s 3 computer-health/switch-position
+        // entries (`240800020`/`054`/`073`, none of them one of those 399
+        // units) route separately onto `misc_routed` instead -- see this
+        // struct's own doc.
+        assert_eq!(live.routed.len() + live.misc_routed.len(), reg.failures.len());
         assert_eq!(live.units.len(), catalog::all().len());
-        assert_eq!(live.units.len(), 399, "the catalogue is the 399-breaker table this area's COUNTS.md documents");
+        assert_eq!(live.units.len(), 417, "the catalogue is COUNTS.md's 399-breaker table plus the 18 ATA31 indicating-group breakers");
     }
 
     #[test]
@@ -698,7 +780,7 @@ mod tests {
             published.insert(n.to_string(), v);
         });
         assert_eq!(deep.area_names(), vec!["electrical", "breakers"]);
-        assert_eq!(published["BREAKERS_TOTAL"], 399.0);
+        assert_eq!(published["BREAKERS_TOTAL"], 417.0);
         assert!(published.contains_key("BKR_cab-fan-1_STATUS"));
         board::clear();
     }
@@ -830,7 +912,7 @@ mod tests {
         );
     }
 
-    /// **168 of the 396** breakers protecting a modelled load: how many
+    /// **193 of the 414** breakers protecting a modelled load: how many
     /// registered `trip_calibration_drift` failures no state this crate
     /// models can act on, as measured by
     /// [`how_many_drift_failures_are_inert_by_construction`]. Pinned so
@@ -841,19 +923,19 @@ mod tests {
     /// carrying a real solved current -- and they fall into three clearly
     /// different groups, which the test prints in order:
     ///
-    /// * **42 at 0.984x or better**, i.e. within 2 % of tripping: `cvr`,
+    /// * **43 at 0.98x or better**, i.e. within 2 % of tripping: `cvr`,
     ///   `dfdr`, the VCMs, the OCSMs, the CPIOM-B cabin functions,
     ///   `acars-mu`, `interphone`, `xpdr-1/2`. These are pure
     ///   `catalog::standard_size` rounding: a 1.79 A recorder margins to
     ///   2.23 A, buys the real 3 A part, and lands 0.2 % under the 1.8 A
     ///   a fully drifted 3 A part would open at. Nothing is wrong with
     ///   them; they are simply on the wrong side of a manufactured step.
-    /// * **113 far inside** (0.08x .. 0.98x): the valve position
+    /// * **120 far inside** (0.07x .. 0.98x): the valve position
     ///   indicators, proximity sensors and radio-altimeter antenna
     ///   circuits, milliamp loads on the smallest part the AS39019 series
     ///   makes (1 A). A breaker with ten times the margin it needs
     ///   genuinely is impossible to nuisance-trip.
-    /// * **13 at 0.000x**: the second breakers (`lgciu-1-2nd-bkr`,
+    /// * **30 at 0.000x**: the second breakers (`lgciu-1-2nd-bkr`,
     ///   `adirs-*-2nd-bkr`, `tcas-2nd-bkr`), the gear and gear-door
     ///   actuators and the cargo-door actuator controls -- loads no
     ///   modelled state ever energises. Their drift failure is inert for
@@ -875,7 +957,12 @@ mod tests {
     /// no emergency-electrical configuration (in flight, all generation
     /// lost, RAT out), which is where they would genuinely carry current;
     /// adding one is the honest way to win that coverage back.
-    const DRIFT_INERT_IN_EVERY_STATE: usize = 184;
+    /// Was 184 until the ATA31 indicating group joined the catalogue
+    /// (`catalog::ata31_ind_group`): `hud`, `dfdau`, `video-multiplexer`
+    /// and the four EFIS panels are small DC ESS loads on the smallest
+    /// standard part, and the two ND second breakers carry no current
+    /// while their first feed is healthy.
+    const DRIFT_INERT_IN_EVERY_STATE: usize = 193;
 
     /// The live counterpart, and the cheap one: `BREAKERS_DRIFT_INERT_COUNT`
     /// reports the same thing for the state the aircraft is in right now,

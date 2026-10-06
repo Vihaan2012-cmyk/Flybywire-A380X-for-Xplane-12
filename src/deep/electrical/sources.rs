@@ -430,8 +430,10 @@ impl Rat {
     /// `ram_air_turbine.rs::PROPELLER_DIAMETER_M` (real, FBW-sourced).
     const PROPELLER_DIAMETER_M: f64 = 1.6256;
     /// `ram_air_turbine.rs::MAX_ALLOWED_POWER_MAP`'s own plateau (real,
-    /// FBW-sourced): 70 kW.
-    const MAX_POWER_W: f64 = 70_000.0;
+    /// FBW-sourced): 70 kW. `pub(crate)`: `live.rs`'s `publish()` divides
+    /// the RAT's measured delivered power by this to get the percent-of-
+    /// rated figure `ELEC_EMER_GEN_LOAD` publishes (fixes/W83.md).
+    pub(crate) const MAX_POWER_W: f64 = 70_000.0;
     /// GENERIC: a fixed-pitch emergency RAT is far from an optimised wind
     /// turbine's Betz-limit efficiency; a modest power coefficient is
     /// typical for this class of device (no A380-specific figure public).

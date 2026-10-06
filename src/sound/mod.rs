@@ -69,6 +69,7 @@
 //! applied, since they are rare in these banks and resolving their scope
 //! correctly needs more of Wwise's runtime state than this reader keeps.
 
+pub mod anim_triggers;
 pub mod triggers;
 pub mod vorbis;
 pub mod wwise;
@@ -79,10 +80,11 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use systems::simulation::SimulatorReaderWriter;
+use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
 use crate::xp;
 use crate::Vars;
+use anim_triggers::AnimTrigger;
 use triggers::{Action, SoundXml, TriggerState};
 use vorbis::Pcm;
 use wwise::{ActionKind, ContainerKind, Package, PlayNode};
@@ -186,6 +188,22 @@ fn find_sound_dir() -> Option<PathBuf> {
         .join("FlyByWire_A380_842")
         .join("sound");
     dir.is_dir().then_some(dir)
+}
+
+/// `sound_triggers.txt`, next to `cockpit_variables.txt` in the plugin's own
+/// directory (not the MSFS package): the converter's pairing of each
+/// `fbw/cockpit/<anim>` click-position dataref with the Wwise event(s) it
+/// should fire (see the `anim_triggers` module doc). Missing or unreadable
+/// is not an error: an older converter output, or `--asobo-behaviours` not
+/// given at convert time, simply means no click sounds — the same
+/// degrade-gracefully rule `Sound::new`'s missing-package case already
+/// follows for every other sound.
+fn load_anim_triggers() -> Vec<AnimTrigger> {
+    #[cfg(feature = "js")]
+    let path = crate::js_bridge::plugin_dir().map(|d| d.join("sound_triggers.txt"));
+    #[cfg(not(feature = "js"))]
+    let path: Option<PathBuf> = None;
+    path.and_then(|p| std::fs::read_to_string(p).ok()).map(|t| anim_triggers::parse(&t)).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +377,64 @@ struct PendingLeaf {
     media_id: u32,
     looped: bool,
     volume_db: f32,
+    outside_only: bool,
     since: Instant,
+}
+
+/// Which side of the cabin wall the camera is on, and every channel playing,
+/// so a change of view can silence or restore them.
+///
+/// X-Plane's interior bus does not follow the camera outside, so every
+/// flight-deck sound played on at full level from the ramp (the V1 and
+/// radio-altitude callouts heard from the outside view, 30 Sep). MSFS places
+/// them in the flight deck (sound.xml `NodeName`), where the fuselage cuts
+/// them off; with no 3D position to give `XPLMPlayPCMOnBus`, a flight-deck
+/// sound is silent outside here, and one sound.xml marks
+/// `ViewPoint="Outside"` (the APU's exhaust) is silent inside, as MSFS plays
+/// those.
+#[derive(Default)]
+struct ViewMix {
+    /// `CAMERA STATE`: lib.rs feeds it from `sim/graphics/view/
+    /// view_is_external`, 3 outside and 2 in the flight deck.
+    camera: Option<VariableIdentifier>,
+    outside: bool,
+    live: Vec<Live>,
+}
+
+/// A channel this plugin started.
+struct Live {
+    channel: xp::FmodChannel,
+    /// Its own level, before the view silences it.
+    gain: f32,
+    outside_only: bool,
+    /// When a one-shot has played out; `None` for a loop.
+    ends: Option<Instant>,
+}
+
+/// A sound's level for where the camera is: its own, or silent.
+fn audible(outside_only: bool, outside: bool) -> f32 {
+    if outside_only == outside {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+impl ViewMix {
+    /// Reads the camera, forgets channels that have played out, and
+    /// re-levels the rest when the camera has crossed the cabin wall.
+    fn follow(&mut self, vars: &mut Vars) {
+        let id = *self.camera.get_or_insert_with(|| vars.get("CAMERA STATE".to_owned()));
+        let outside = vars.read(&id) > 2.5;
+        let now = Instant::now();
+        self.live.retain(|l| l.ends.map_or(true, |e| e > now));
+        if outside != self.outside {
+            self.outside = outside;
+            for l in &self.live {
+                xp::set_audio_volume(l.channel, l.gain * audible(l.outside_only, outside));
+            }
+        }
+    }
 }
 
 /// How long a leaf sound waits for its decode before this plugin gives up on
@@ -395,6 +470,19 @@ pub struct Sound {
     pending: Vec<PendingLeaf>,
     rng_state: u64,
     logged_no_audio: bool,
+    /// Cockpit switch/button click sounds: `sound_triggers.txt` (the
+    /// converter's pairing of a `fbw/cockpit/<anim>` dataref with the Wwise
+    /// event it should fire — see the `anim_triggers` module doc). Read once
+    /// at startup from the plugin's own directory, not the MSFS package, so
+    /// it is available even before (or without) the sound package loading.
+    anim_triggers: Vec<AnimTrigger>,
+    anim_trigger_states: anim_triggers::States,
+    /// Every event fired since `fired_since`, with what fired it, logged in
+    /// one line every 10 s: a sound that keeps repeating (a trigger variable
+    /// chattering across its bound) names itself with a count.
+    fired: std::collections::BTreeMap<String, u32>,
+    fired_since: Option<std::time::Instant>,
+    view: ViewMix,
 }
 
 impl Sound {
@@ -407,7 +495,10 @@ impl Sound {
             crate::log("sound: no FlyByWire A380X package found (checked UserCfg.opt and Output/preferences/fbw_a380x_sound.ini); cockpit sounds are off");
         }
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0x9E37_79B9);
-        Self { load_rx, state: None, pending: Vec::new(), rng_state: seed | 1, logged_no_audio: false }
+        let anim_triggers = load_anim_triggers();
+        crate::log(&format!("sound: {} cockpit click/switch sound triggers (sound_triggers.txt)", anim_triggers.len()));
+        let anim_trigger_states = anim_triggers::fresh_states(&anim_triggers);
+        Self { load_rx, state: None, pending: Vec::new(), rng_state: seed | 1, logged_no_audio: false, anim_triggers, anim_trigger_states, fired: std::collections::BTreeMap::new(), fired_since: None, view: ViewMix::default() }
     }
 
     /// One tick: pick up the loaded package once it's ready, drain
@@ -415,9 +506,11 @@ impl Sound {
     /// sound still waiting on its decode. Main thread only: this is the only
     /// place that calls XPLM's audio functions.
     pub fn update(&mut self, vars: &mut Vars) {
+        self.view.follow(vars);
         self.poll_load();
         self.drain_instrument_queue();
         self.evaluate_triggers(vars);
+        self.evaluate_animation_triggers(vars);
         self.process_pending();
     }
 
@@ -433,6 +526,7 @@ impl Sound {
             state.active.clear();
         }
         self.pending.clear();
+        self.view.live.clear();
     }
 
     fn poll_load(&mut self) {
@@ -469,11 +563,13 @@ impl Sound {
             std::thread::spawn(move || decode_worker(package, cache, decode_pending, decode_errors, decode_rx));
         }
         crate::log(&format!(
-            "sound: {} banks, {} sound.xml triggers ({} left out for their WwiseRTPC), {} avionic sounds, main package {}",
+            "sound: {} banks, {} sound.xml triggers ({} left out for their WwiseRTPC), {} avionic sounds, {} animation sounds ({} wired from sound_triggers.txt), main package {}",
             loaded.package.banks.len(),
             loaded.sound_xml.triggers.len(),
             loaded.sound_xml.skipped_rtpc.len(),
             loaded.sound_xml.avionic_events.len(),
+            loaded.sound_xml.animation_events.len(),
+            self.anim_triggers.len(),
             loaded.main_package,
         ));
         let trigger_states = vec![TriggerState::default(); loaded.sound_xml.triggers.len()];
@@ -496,7 +592,7 @@ impl Sound {
             Err(_) => return,
         };
         for name in names {
-            self.fire_event(&name, None, None);
+            self.fire_event(&name, None, None, false);
         }
     }
 
@@ -511,10 +607,10 @@ impl Sound {
             let requires_hold = state.sound_xml.triggers[i].requires.iter().all(|r| r.holds(read_named(vars, &r.variable)));
             let action = state.trigger_states[i].step(&state.sound_xml.triggers[i], value, requires_hold);
             if action != Action::None {
-                actions.push((i, action, state.sound_xml.triggers[i].event.clone()));
+                actions.push((i, action, state.sound_xml.triggers[i].event.clone(), state.sound_xml.triggers[i].outside));
             }
         }
-        for (i, action, event) in actions {
+        for (i, action, event, outside) in actions {
             match action {
                 // Continuous="false": MSFS plays this to completion exactly
                 // once per entry, never looping, regardless of the Wwise
@@ -526,18 +622,80 @@ impl Sound {
                 // PlayOnce sounds pass no trigger index, `stop_trigger` could
                 // never reach it either — forcing non-looping is the only
                 // fix, not just tracking it to stop later.
-                Action::PlayOnce => self.fire_event(&event, Some(false), None),
-                Action::StartLoop => self.fire_event(&event, Some(true), Some(i)),
+                Action::PlayOnce => {
+                    *self.fired.entry(format!("{event} (sound.xml)")).or_insert(0) += 1;
+                    self.fire_event(&event, Some(false), None, outside)
+                }
+                Action::StartLoop => {
+                    *self.fired.entry(format!("{event} (sound.xml loop start)")).or_insert(0) += 1;
+                    self.fire_event(&event, Some(true), Some(i), outside)
+                }
                 Action::StopLoop => self.stop_trigger(i),
                 Action::None => {}
             }
         }
     }
 
+    /// Cockpit switch/button clicks: each `fbw/cockpit/<anim>` dataref
+    /// crossing the point in its travel `sound_triggers.txt` recorded fires
+    /// that click's Wwise event once, exactly like MSFS's own compiled
+    /// `<AnimationTriggers>` (see the `anim_triggers` module doc). Always
+    /// one-shot, never looping — MSFS's `<EventTrigger>` has no
+    /// continuous/stop half the way a `sound.xml` `SimVarSounds`
+    /// `Continuous="true"` entry does.
+    ///
+    /// Real bug (W177's review of this): steps nothing until `self.state`
+    /// exists, the same rule [`Self::evaluate_triggers`] already follows
+    /// for `sound.xml`'s own triggers just below (`let Some(state) =
+    /// &mut self.state else { return };`). `fire_event` itself silently
+    /// no-ops with no package loaded (`let Some(state) = &self.state else
+    /// { return };`), so without this guard a crossing evaluated during
+    /// the async load window would still advance
+    /// [`anim_triggers::AnimTriggerState`]'s own `last` reading —
+    /// permanently marking that specific click "already handled" — while
+    /// its sound never actually played, with no way to fire it once
+    /// loading finishes. Holding off means the first evaluation after load
+    /// sees the dataref's then-current value as its very first reading —
+    /// the same "must not fire on the first reading" rule `step` already
+    /// documents for cold spawn — instead of a falsely-consumed crossing.
+    fn evaluate_animation_triggers(&mut self, vars: &mut Vars) {
+        if self.state.is_none() {
+            return;
+        }
+        let mut fired = Vec::new();
+        for i in 0..self.anim_triggers.len() {
+            let value = read_named(vars, &self.anim_triggers[i].dataref);
+            if self.anim_trigger_states[i].step(&self.anim_triggers[i], value) {
+                fired.push((self.anim_triggers[i].event.clone(), self.anim_triggers[i].dataref.clone()));
+            }
+        }
+        for (event, dataref) in fired {
+            *self.fired.entry(format!("{event} <- {dataref}")).or_insert(0) += 1;
+            self.fire_event(&event, Some(false), None, false);
+        }
+        self.log_fired();
+    }
+
+    fn log_fired(&mut self) {
+        let now = std::time::Instant::now();
+        let since = *self.fired_since.get_or_insert(now);
+        if now.duration_since(since).as_secs_f64() < 10. {
+            return;
+        }
+        if !self.fired.is_empty() {
+            let mut list: Vec<(&String, &u32)> = self.fired.iter().collect();
+            list.sort_by(|a, b| b.1.cmp(a.1));
+            let text: Vec<String> = list.iter().take(12).map(|(k, n)| format!("{k} x{n}")).collect();
+            crate::log(&format!("sound: fired in the last 10 s: {}", text.join(", ")));
+        }
+        self.fired.clear();
+        self.fired_since = Some(now);
+    }
+
     /// Resolves a `sound.xml` `WwiseEvent` name to the bank event MSFS would
     /// post for it, and plays (or queues) every leaf sound its Play actions
     /// reach.
-    fn fire_event(&mut self, event_name: &str, force_loop: Option<bool>, trigger: Option<usize>) {
+    fn fire_event(&mut self, event_name: &str, force_loop: Option<bool>, trigger: Option<usize>, outside_only: bool) {
         let Some(state) = &self.state else { return };
         let event_id = wwise::msfs_event_id(&state.main_package, event_name);
         let Some(playback) = state.package.resolve_event(event_id) else { return };
@@ -550,7 +708,7 @@ impl Sound {
         }
         self.rng_state = rng;
         for leaf in leaves {
-            self.play_or_queue(leaf.media_id, leaf.looped, leaf.volume_db, trigger);
+            self.play_or_queue(leaf.media_id, leaf.looped, leaf.volume_db, trigger, outside_only);
         }
     }
 
@@ -558,20 +716,21 @@ impl Sound {
         self.pending.retain(|p| p.trigger != Some(trigger));
         if let Some(state) = self.state.as_mut() {
             if let Some(channels) = state.active.remove(&trigger) {
-                for channel in channels {
+                for &channel in &channels {
                     xp::stop_audio(channel);
                 }
+                self.view.live.retain(|l| !channels.contains(&l.channel));
             }
         }
     }
 
-    fn play_or_queue(&mut self, media_id: u32, looped: bool, volume_db: f32, trigger: Option<usize>) {
+    fn play_or_queue(&mut self, media_id: u32, looped: bool, volume_db: f32, trigger: Option<usize>, outside_only: bool) {
         if let Some(pcm) = self.cache_get(media_id) {
-            self.play_pcm(&pcm, looped, volume_db, trigger);
+            self.play_pcm(&pcm, looped, volume_db, trigger, outside_only);
             return;
         }
         self.request_decode(media_id);
-        self.pending.push(PendingLeaf { trigger, media_id, looped, volume_db, since: Instant::now() });
+        self.pending.push(PendingLeaf { trigger, media_id, looped, volume_db, outside_only, since: Instant::now() });
     }
 
     fn cache_get(&self, media_id: u32) -> Option<Arc<Pcm>> {
@@ -595,7 +754,7 @@ impl Sound {
             let media_id = self.pending[i].media_id;
             if let Some(pcm) = self.cache_get(media_id) {
                 let leaf = self.pending.remove(i);
-                self.play_pcm(&pcm, leaf.looped, leaf.volume_db, leaf.trigger);
+                self.play_pcm(&pcm, leaf.looped, leaf.volume_db, leaf.trigger, leaf.outside_only);
                 continue;
             }
             let errored = self.state.as_ref().is_some_and(|s| s.decode_errors.lock().is_ok_and(|e| e.contains_key(&media_id)));
@@ -609,7 +768,7 @@ impl Sound {
 
     /// The only place that calls `XPLMPlayPCMOnBus`: always the interior
     /// bus, main thread only.
-    fn play_pcm(&mut self, pcm: &Pcm, looped: bool, volume_db: f32, trigger: Option<usize>) {
+    fn play_pcm(&mut self, pcm: &Pcm, looped: bool, volume_db: f32, trigger: Option<usize>, outside_only: bool) {
         if !xp::has_pcm_audio() {
             if !self.logged_no_audio {
                 self.logged_no_audio = true;
@@ -621,7 +780,10 @@ impl Sound {
             return;
         };
         let gain = 10f32.powf(volume_db / 20.0);
-        xp::set_audio_volume(channel, gain);
+        xp::set_audio_volume(channel, gain * audible(outside_only, self.view.outside));
+        let frames = pcm.samples.len() as f64 / f64::from(pcm.channels.max(1));
+        let ends = (!looped).then(|| Instant::now() + Duration::from_secs_f64(frames / f64::from(pcm.sample_rate.max(1)) + 0.5));
+        self.view.live.push(Live { channel, gain, outside_only, ends });
         if let Some(trigger) = trigger {
             if let Some(state) = self.state.as_mut() {
                 state.active.entry(trigger).or_default().push(channel);
@@ -651,6 +813,17 @@ fn read_named(vars: &mut Vars, name: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real bug (X-Plane 12 session, 30 Sep): the callouts carried on at
+    /// full level from the outside view, since X-Plane's interior bus does
+    /// not follow the camera out of the aircraft.
+    #[test]
+    fn flight_deck_sounds_are_silent_outside_and_the_apus_exhaust_inside() {
+        assert_eq!(audible(false, false), 1.0, "a callout in the flight deck");
+        assert_eq!(audible(false, true), 0.0, "a callout from outside");
+        assert_eq!(audible(true, true), 1.0, "the APU's exhaust from outside");
+        assert_eq!(audible(true, false), 0.0, "the APU's exhaust in the flight deck");
+    }
 
     #[test]
     fn installed_packages_path_reads_usercfg_syntax() {
@@ -694,7 +867,7 @@ mod tests {
             return None;
         }
         let loaded = load(dir).expect("package loads");
-        let mut sound = Sound { load_rx: None, state: None, pending: Vec::new(), rng_state: 0xDEAD_BEEF_1234_5678, logged_no_audio: false };
+        let mut sound = Sound { load_rx: None, state: None, pending: Vec::new(), rng_state: 0xDEAD_BEEF_1234_5678, logged_no_audio: false, anim_triggers: Vec::new(), anim_trigger_states: Vec::new(), fired: std::collections::BTreeMap::new(), fired_since: None, view: ViewMix::default() };
         sound.install(loaded);
         Some(sound)
     }
@@ -782,5 +955,85 @@ mod tests {
         }
         let state = sound.state.as_ref().unwrap();
         assert!(!state.cache.lock().unwrap().entries.is_empty(), "no media decoded for new_retard");
+    }
+
+    /// The path W101 adds: a click position dataref crossing its trigger's
+    /// `NormalizedTime` must reach `fire_event` and decode media, exactly
+    /// like [`play_instrument_sound_resolves_decodes_and_caches`] already
+    /// proves for the `Coherent.call` path. `evaluate_animation_triggers`
+    /// itself needs a real `Vars` (unavailable in a unit test without XPLM);
+    /// this exercises the same state-machine-then-fire_event seam directly.
+    #[test]
+    fn an_animation_trigger_crossing_its_threshold_resolves_decodes_and_caches() {
+        let Some(mut sound) = test_sound() else { return };
+        let trig = anim_triggers::AnimTrigger {
+            dataref: "fbw/cockpit/TEST_SWITCH".into(),
+            direction: anim_triggers::Direction::Forward,
+            normalized_time: 0.1,
+            event: "new_retard".into(),
+        };
+        sound.anim_triggers = vec![trig];
+        sound.anim_trigger_states = anim_triggers::fresh_states(&sound.anim_triggers);
+
+        assert!(!sound.anim_trigger_states[0].step(&sound.anim_triggers[0], 0.0), "spawn state must not fire");
+        assert!(sound.anim_trigger_states[0].step(&sound.anim_triggers[0], 1.0), "0 -> 1 must cross 0.1 forward");
+        sound.fire_event("new_retard", Some(false), None, false);
+        assert!(!sound.pending.is_empty(), "new_retard should have queued a decode");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            sound.process_pending();
+            if sound.pending.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "decode did not finish in time");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let state = sound.state.as_ref().unwrap();
+        assert!(!state.cache.lock().unwrap().entries.is_empty(), "no media decoded for the animation-triggered new_retard");
+    }
+
+    /// Real bug (W177's review of fixes/W101.md), fixed by the guard on
+    /// `evaluate_animation_triggers` (W221): without the
+    /// `self.state.is_none()` guard, a crossing evaluated while no package
+    /// is loaded yet still advances the trigger's own state, permanently
+    /// losing that specific click's sound (`fire_event` has nothing to
+    /// resolve against either way, so nothing plays, but unlike before the
+    /// fix, nothing *records* that it happened either). Proven without
+    /// needing a loaded package at all: two ticks that cross the trigger's
+    /// threshold while `state` is `None` must leave the state machine
+    /// exactly as untouched as a fresh one -- checked by calling
+    /// `AnimTriggerState::step` directly afterward and confirming it still
+    /// reacts to the same 0 -> 1 move as if for the very first time.
+    #[test]
+    fn evaluate_animation_triggers_does_not_step_state_before_the_package_loads() {
+        let xplm: &'static xp::Xplm = Box::leak(Box::new(xp::Xplm::dummy()));
+        let mut vars = crate::Vars::new(xplm);
+        let id = vars.register_named("fbw/cockpit/TEST_SWITCH");
+
+        let trigger = anim_triggers::AnimTrigger {
+            dataref: "fbw/cockpit/TEST_SWITCH".into(),
+            direction: anim_triggers::Direction::Forward,
+            normalized_time: 0.1,
+            event: "new_retard".into(),
+        };
+        let states = anim_triggers::fresh_states(&[trigger.clone()]);
+        let mut sound = Sound { load_rx: None, state: None, pending: Vec::new(), rng_state: 0xDEAD_BEEF_1234_5678, logged_no_audio: false, anim_triggers: vec![trigger], anim_trigger_states: states, fired: std::collections::BTreeMap::new(), fired_since: None, view: ViewMix::default() };
+
+        // No package loaded (`state` stays `None` throughout). A real
+        // click happens: the dataref crosses 0.1 moving up.
+        vars.write(&id, 0.0);
+        sound.evaluate_animation_triggers(&mut vars);
+        vars.write(&id, 1.0);
+        sound.evaluate_animation_triggers(&mut vars);
+        assert!(sound.pending.is_empty(), "no package loaded: nothing could have been queued");
+
+        // Without the guard, the second call above would have called
+        // `step`, recording `last = Some(1.0)` -- this exact crossing
+        // "used up" with no sound ever played for it. With the guard,
+        // `last` is still `None` (never touched while `state` was `None`),
+        // so this behaves exactly like a brand new trigger: a baseline
+        // reading, then a real fire on the next crossing.
+        assert!(!sound.anim_trigger_states[0].step(&sound.anim_triggers[0], 0.0), "baseline reading must not fire");
+        assert!(sound.anim_trigger_states[0].step(&sound.anim_triggers[0], 1.0), "the state machine must not have already consumed this crossing while state was None");
     }
 }

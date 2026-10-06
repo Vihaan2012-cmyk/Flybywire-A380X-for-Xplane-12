@@ -307,6 +307,37 @@ fn page_json(index: usize, title: &str, kind: PageKind) -> Value {
             map.insert("tug".into(), buttons_json(&services::tug_buttons()));
             map.insert("groups".into(), groups_json(&services::ground_groups()));
         }
+        PageKind::Walkaround => {
+            // The same `crate::walkaround::ITEMS`/`GROUPS`/`TOGGLE_COMMANDS`
+            // this page's own XPLM-window draw (`walkaround.rs`) reads, so
+            // the web tab and the in-sim window can never drift apart.
+            map.insert("kind".into(), json!("walkaround"));
+            let items: Vec<Value> = crate::walkaround::ITEMS
+                .iter()
+                .enumerate()
+                .map(|(i, &id)| {
+                    json!({
+                        "id": id,
+                        "label": super::walkaround::label_for(id),
+                        "dataref": format!("fbw/walkaround/{id}"),
+                        "var": crate::walkaround::mirror_name(id),
+                        "toggleCommand": super::walkaround::TOGGLE_COMMANDS[i],
+                    })
+                })
+                .collect();
+            let groups: Vec<Value> = super::walkaround::GROUPS.iter().map(|(name, idx)| json!({ "name": name, "items": idx })).collect();
+            let causing: Vec<Value> = super::walkaround::PROBE_FAILURE_IDS
+                .iter()
+                .filter(|(id, _)| crate::failures::is_active(*id))
+                .map(|(id, name)| json!({ "failureId": id, "item": name }))
+                .collect();
+            map.insert("items".into(), json!(items));
+            map.insert("groups".into(), json!(groups));
+            map.insert("causingFailure".into(), json!(causing));
+            map.insert("anyInstalledDataref".into(), json!("fbw/walkaround/any_installed"));
+            map.insert("removeAllCommand".into(), json!("fbw/walkaround/remove_all"));
+            map.insert("installAllCommand".into(), json!("fbw/walkaround/install_all"));
+        }
         PageKind::Loadsheet => {
             // Its own kind rather than a plain group page: the panel gives
             // it a tab of its own, with the boarding and SimBrief buttons
@@ -894,6 +925,13 @@ pub(crate) fn apply_action(body: &str) -> Result<(), String> {
         "repairFailure" => {
             let id = v.get("id").and_then(Value::as_u64).ok_or("missing \"id\"")?;
             crate::mel::request_repair(id);
+            // An engine's own damage failures are re-armed every tick from
+            // its persisted wear record (an ingested cover stays ingested),
+            // so repairing the failure alone would last one tick: repair the
+            // engine too.
+            if let Some(engine) = crate::physics::damage::engine_of_damage_failure(id) {
+                crate::physics::damage::request_repair_engine(engine);
+            }
         }
         "toggleBreaker" => {
             let number = v.get("id").and_then(Value::as_u64).ok_or("missing \"id\"")?;

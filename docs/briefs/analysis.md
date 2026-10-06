@@ -5,7 +5,7 @@ This is a read-only analysis: don't edit any source file. Write only your report
 **Do not start sub-agents** (no Agent tool). Do the reading yourself, efficiently: grep and targeted reads, not whole-tree dumps.
 
 ## Context
-The FlyByWire A380X is being ported to X-Plane 12 as the plugin D:\fbw-xp-systems (Rust). Read docs/team.md.
+The FlyByWire A380X is being ported to X-Plane 12 as the plugin D:\A380\fbw-xp-systems (Rust). Read docs/team.md.
 - **What runs:**
   - FBW's Rust systems (D:\fbw-aircraft fbw-a380x/src/wasm/systems/a380_systems, fbw-common/src/wasm/systems/systems);
   - compiled FBW C++ computers (src/fbw_cpp);

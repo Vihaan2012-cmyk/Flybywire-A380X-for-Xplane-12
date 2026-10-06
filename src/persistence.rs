@@ -83,6 +83,16 @@ pub struct AirframeState {
     /// still worsening.
     #[serde(default)]
     pub components: Vec<crate::components::Direct>,
+    /// The exterior preflight walkaround (`walkaround.rs`): each item's
+    /// name (`walkaround::ITEMS`) to whether it is installed. Missing (an
+    /// older save file, or a fresh airframe) restores as an empty map,
+    /// which `Walkaround::new` reads as "no saved state" -- not as "every
+    /// item removed" -- so a cold-and-dark start with no save still gets
+    /// every item installed (the ground crew fitted them), matching a plain
+    /// missing key's `unwrap_or(&true)` fallback for a *present but
+    /// incomplete* map.
+    #[serde(default)]
+    pub walkaround_installed: std::collections::BTreeMap<String, bool>,
 }
 
 impl Default for AirframeState {
@@ -103,6 +113,7 @@ impl Default for AirframeState {
             wear: crate::wear::WearStore::default(),
             tech_log: Vec::new(),
             components: Vec::new(),
+            walkaround_installed: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -251,6 +262,32 @@ mod tests {
         assert!(reloaded.state.random_failures_config.enabled);
         assert_eq!(reloaded.state.random_failures_config.rate_multiplier, 2.5);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `walkaround_installed` was added after this save format was already
+    /// in use; an old file with no such key must still load (`#[serde(default)]`),
+    /// restoring an empty map -- `Walkaround::new` then reads that as "no
+    /// saved state", not as "every item removed" (see the field's own doc
+    /// comment).
+    #[test]
+    fn an_old_save_without_the_walkaround_field_still_loads() {
+        let dir = std::env::temp_dir().join(format!("fbw_persistence_old_walkaround_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Output").join("preferences")).unwrap();
+        let old = serde_json::to_string(&AirframeState { airframe_hours: 7.0, ..AirframeState::default() }).unwrap();
+        // Strip the field out, the way a file saved before it existed would
+        // never have had it, rather than assuming `serde_json::to_string`
+        // never reorders/omits it as the type evolves.
+        let without_field: serde_json::Value = {
+            let mut v: serde_json::Value = serde_json::from_str(&old).unwrap();
+            v.as_object_mut().unwrap().remove("walkaround_installed");
+            v
+        };
+        std::fs::write(dir.join("Output").join("preferences").join("fbw_a380x_airframe.json"), without_field.to_string()).unwrap();
+        let p = Persistence::new(&dir);
+        assert_eq!(p.state.airframe_hours, 7.0, "the rest of an old file must still load");
+        assert!(p.state.walkaround_installed.is_empty(), "a missing field defaults to an empty map");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -24,7 +24,7 @@ mod views;
 mod web;
 mod window;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -90,6 +90,22 @@ fn main() {
         .unwrap_or_default();
     fbw_a380_systems::study_json::set_xplane_root(xplane_root.clone());
     let aircraft_dir = argv.iter().find_map(|a| a.strip_prefix("--aircraft=").map(PathBuf::from)).unwrap_or_default();
+    // Every cockpit screen's gauge HTML is served from here
+    // (views.rs::gauge_url() -> coui://html_ui/Pages/VCockpit/Instruments/...,
+    // resolved straight to <aircraft>/html_ui/... by scheme.rs::resolve_coui).
+    // It is NOT written by the converter (msfs2xp-aircraft's html_ui output
+    // is Fonts/Images only); tools/install.sh has to merge it in from
+    // FlyByWire's own build. An install that skips that merge (2026-09-25's
+    // manual swap) leaves this file absent and every screen just stays
+    // black, with nothing in the log to say why until the first gauge 404s
+    // (scheme.rs's not_found, views.rs's ViewLoad) -- check for it here,
+    // once, as loudly as possible, before any of that.
+    if let Some(pfd) = missing_gauge_payload(&aircraft_dir) {
+        logging::log(&format!(
+            "app: FATAL: {} is missing -- this install's html_ui/ was never merged with FlyByWire's built instruments (tools/install.sh or docs/js-build.md). Every cockpit screen will be BLACK.",
+            pfd.display()
+        ));
+    }
     let shared = Arc::new(Shared {
         tag: tag.clone(),
         xplane_root,
@@ -200,4 +216,52 @@ fn main() {
     }
     run_message_loop();
     shutdown();
+}
+
+/// The cockpit's gauge HTML this app needs at start: any one file proves
+/// `<aircraft>/html_ui/` actually has FlyByWire's built instruments merged
+/// in (`tools/install.sh`), not just the converter's own Fonts/Images. Picks
+/// the PFD specifically since that is what `docs/briefs/debug.md`'s
+/// coordinator called out by name and what `P10-build-install.ps1`'s
+/// `Test-GaugesInstalled` already checks explicitly, so this mirrors an
+/// already-agreed single point of failure rather than inventing a new one.
+/// Returns `None` when `aircraft_dir` is empty (no `--aircraft=` given, e.g.
+/// a bare `--show` relaunch) since there is nothing installed to check yet,
+/// or when the file is present.
+fn missing_gauge_payload(aircraft_dir: &Path) -> Option<PathBuf> {
+    if aircraft_dir.as_os_str().is_empty() {
+        return None;
+    }
+    let pfd = aircraft_dir.join("html_ui/Pages/VCockpit/Instruments/A380X/PFD/pfd.html");
+    if pfd.exists() { None } else { Some(pfd) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_gauge_payload_is_none_with_no_aircraft_dir() {
+        assert_eq!(missing_gauge_payload(Path::new("")), None);
+    }
+
+    #[test]
+    fn missing_gauge_payload_names_the_missing_pfd_html() {
+        let dir = std::env::temp_dir().join("xphfbw-test-missing-gauge-payload");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            missing_gauge_payload(&dir),
+            Some(dir.join("html_ui/Pages/VCockpit/Instruments/A380X/PFD/pfd.html"))
+        );
+    }
+
+    #[test]
+    fn missing_gauge_payload_is_none_once_the_file_exists() {
+        let dir = std::env::temp_dir().join("xphfbw-test-missing-gauge-payload-present");
+        let pfd_dir = dir.join("html_ui/Pages/VCockpit/Instruments/A380X/PFD");
+        std::fs::create_dir_all(&pfd_dir).unwrap();
+        std::fs::write(pfd_dir.join("pfd.html"), "x").unwrap();
+        assert_eq!(missing_gauge_payload(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -20,9 +20,11 @@
 //! `window.__xphfbw` before it, per agent E's renderer.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use cef::wrapper::stream_resource_handler::StreamResourceHandler;
 use cef::*;
+use fbw_a380_systems::source_patch::SourcePatch;
 
 /// Injected as the first element of `<head>` of every `coui://` HTML
 /// response (agent F's runtime; see the module doc for why this placement
@@ -49,6 +51,16 @@ struct Roots {
     aircraft: PathBuf,
     /// `app/js`, installed as `XPHFBW/js` next to the exe.
     runtime: PathBuf,
+    /// The plugin's own `SourcePatch`es that need no live simulation state
+    /// (`fbw_a380_systems::static_source_patches`), applied to `coui://`
+    /// responses below the same way the plugin's fallback QuickJS
+    /// `Cockpit` applies them (`js/msfs/mod.rs`'s `read_file`) -- so the
+    /// fixes they carry (ECAM/FWS FIXMEs, the ECL's momentary buttons, the
+    /// deep-systems ECAM bridge, ...) reach the bundles XPHFBW actually
+    /// draws, not only the fallback engine
+    /// (`docs/deep/debug_screen_clicks.md`). Computed once in `install`,
+    /// not per request.
+    patches: Arc<Vec<SourcePatch>>,
 }
 
 wrap_scheme_handler_factory! {
@@ -74,7 +86,10 @@ wrap_scheme_handler_factory! {
                 "xphfbw" => resolve_under(&self.roots.runtime, &path),
                 _ => None,
             };
-            Some(serve(file))
+            // Only `coui://` serves FlyByWire's own bundles; `xphfbw://`
+            // serves this app's own runtime shim, which nothing patches.
+            let patches: &[SourcePatch] = if scheme == "coui" { self.roots.patches.as_slice() } else { &[] };
+            Some(serve(file, patches, &path))
         }
     }
 }
@@ -83,7 +98,8 @@ wrap_scheme_handler_factory! {
 /// (window.rs `on_context_initialized`). `aircraft_root` is the `--aircraft=`
 /// folder (panel/, html_ui/); `runtime_dir` is `app/js` next to the exe.
 pub fn install(aircraft_root: PathBuf, runtime_dir: PathBuf) {
-    let roots = Roots { html_ui: aircraft_root.join("html_ui"), aircraft: aircraft_root, runtime: runtime_dir };
+    let patches = Arc::new(fbw_a380_systems::static_source_patches());
+    let roots = Roots { html_ui: aircraft_root.join("html_ui"), aircraft: aircraft_root, runtime: runtime_dir, patches };
     let mut factory = Factory::new(roots);
     register_scheme_handler_factory(Some(&CefString::from("coui")), None, Some(&mut factory));
     register_scheme_handler_factory(Some(&CefString::from("xphfbw")), None, Some(&mut factory));
@@ -156,29 +172,63 @@ fn resolve_under(base: &Path, path: &str) -> Option<PathBuf> {
 // Serving a file (or a 404).
 // ---------------------------------------------------------------------------
 
-fn serve(file: Option<PathBuf>) -> ResourceHandler {
+// W142 note (integration adaptation): this report's own EDIT13/EDIT15 were
+// written against a pre-W02 `serve(file)`/`not_found()` (no path/url
+// argument at all). W02 landed first in this batch and added a `url`/
+// `clean` string to both, for its own 404 log line. Rather than carry two
+// separate strings (one for W02's log, one for W142's patch match) through
+// every call site, this merges them onto the one VFS-relative `clean` path
+// the call site already resolves (`url_path`) -- it serves W02's log
+// exactly as well as the full URL would (it is the same request, just
+// without the scheme/host), and it is the very string `SourcePatch::path`
+// needs to match against.
+fn serve(file: Option<PathBuf>, patches: &[SourcePatch], clean: &str) -> ResourceHandler {
     let Some(path) = file.filter(|p| p.is_file()) else {
-        return not_found();
+        return not_found(clean);
     };
     let Ok(bytes) = std::fs::read(&path) else {
-        return not_found();
+        return not_found(clean);
     };
     let mime = mime_of(&path);
-    let mut bytes = if mime == "text/html" {
+    let mut bytes = if mime == "text/html" || mime == "text/javascript" {
         match String::from_utf8(bytes) {
-            Ok(text) => inject_runtime_script(&text).into_bytes(),
+            Ok(text) => {
+                let text = fbw_a380_systems::source_patch::apply(patches, clean, text, |ok, msg| {
+                    crate::logging::log(&format!("coui: {}{msg}", if ok { "" } else { "ERROR: " }));
+                });
+                if mime == "text/html" { inject_runtime_script(&text).into_bytes() } else { text.into_bytes() }
+            }
             Err(e) => e.into_bytes(),
         }
     } else {
         bytes
     };
     let Some(stream) = stream_reader_create_for_data(bytes.as_mut_ptr(), bytes.len()) else {
-        return not_found();
+        return not_found(clean);
     };
     StreamResourceHandler::new_with_stream(mime.to_string(), stream)
 }
 
-fn not_found() -> ResourceHandler {
+/// A missing `coui://`/`xphfbw://` file used to 404 with nothing in the log
+/// to say which path was missing: today's lost `html_ui/Pages`+`JS` folder
+/// (S06) 404'd every gauge and left every screen simply black. Capped: one
+/// missing folder 404s every request a page makes (its HTML, then every
+/// `<script>`/`<link>`/`<img>` it references), not just the page's own load
+/// (that's `ViewLoad::on_load_end`, `app/src/views.rs`).
+const NOT_FOUND_LOG_CAP: u32 = 50;
+
+/// Whether the `n`th (1-based) 404 since this scheme handler was installed
+/// should still be logged, split out so the cap is testable without CEF.
+fn should_log_not_found(n: u32) -> bool {
+    n <= NOT_FOUND_LOG_CAP
+}
+
+fn not_found(url: &str) -> ResourceHandler {
+    static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if should_log_not_found(n) {
+        crate::logging::log(&format!("scheme: 404 {url}"));
+    }
     StreamResourceHandler::new(404, "Not Found".to_string(), "text/plain".to_string(), None, None)
 }
 
@@ -299,7 +349,7 @@ mod tests {
 
     #[test]
     fn resolve_coui_maps_vfs_to_the_aircraft_root_and_everything_else_under_html_ui() {
-        let roots = Roots { html_ui: PathBuf::from("/ac/html_ui"), aircraft: PathBuf::from("/ac"), runtime: PathBuf::from("/exe/js") };
+        let roots = Roots { html_ui: PathBuf::from("/ac/html_ui"), aircraft: PathBuf::from("/ac"), runtime: PathBuf::from("/exe/js"), patches: Arc::new(Vec::new()) };
         assert_eq!(resolve_coui(&roots, "/Pages/VCockpit/x.html"), Some(PathBuf::from("/ac/html_ui/Pages/VCockpit/x.html")));
         assert_eq!(resolve_coui(&roots, "/VFS/currentflight.json"), Some(PathBuf::from("/ac/currentflight.json")));
     }
@@ -311,5 +361,12 @@ mod tests {
         assert_eq!(safe_join(base, "a/../../b"), None);
         assert_eq!(safe_join(base, ""), None);
         assert_eq!(safe_join(base, "Pages/a.html"), Some(PathBuf::from("/ac/html_ui/Pages/a.html")));
+    }
+
+    #[test]
+    fn not_found_logging_is_capped() {
+        assert!(should_log_not_found(1));
+        assert!(should_log_not_found(NOT_FOUND_LOG_CAP));
+        assert!(!should_log_not_found(NOT_FOUND_LOG_CAP + 1));
     }
 }

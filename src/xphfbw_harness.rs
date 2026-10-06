@@ -7,7 +7,7 @@
 //! ```text
 //! XPHFBW_EXE=".../plugins/fbw_a380_systems/XPHFBW/XPHFBW.exe" \
 //! XPHFBW_AIRCRAFT=".../Aircraft/FlyByWire A380X" \
-//! XPHFBW_XP_ROOT=".../X-Plane 12" XPHFBW_OUT="D:/fbw-build/xphfbw-harness" \
+//! XPHFBW_XP_ROOT=".../X-Plane 12" XPHFBW_OUT="D:/A380/fbw-build/xphfbw-harness" \
 //! XPHFBW_SECONDS=90 cargo test --release --features js --lib xphfbw_harness -- --ignored --nocapture
 //! ```
 
@@ -71,7 +71,8 @@ fn xphfbw_harness() {
         eprintln!("harness: session {tag}");
         *host.borrow_mut() = Some(XphfbwHost::start(tag, xplm, &panel_cfg, None).ok_or("the bridge host did not start")?);
         for def in SCREENS {
-            match ScreenBlock::create(tag, def.id, def.width, def.height) {
+            let (dw, dh) = crate::xphfbw_bridge_views::device_size(def.id, def.width, def.height);
+            match ScreenBlock::create(tag, def.id, dw, dh) {
                 Some(b) => screens.borrow_mut().push((def.id, b)),
                 None => eprintln!("harness: could not create screen {}", def.id),
             }

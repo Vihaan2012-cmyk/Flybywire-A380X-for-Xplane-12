@@ -5,7 +5,7 @@ Code:
   model, plus the plumbing needed to feed it real bleed conditions): `D:\fbw-aircraft\fbw-a380x\
   src\wasm\systems\a380_systems\src\air_conditioning\{mod.rs, air_cycle_machine.rs}`,
   `...\a380_systems\src\pneumatic.rs`, `D:\fbw-aircraft\fbw-common\src\wasm\systems\systems\src\
-  shared\mod.rs`. Diff saved at `D:\fbw-xp-systems\patches\fbw-rust\air.patch`.
+  shared\mod.rs`. Diff saved at `D:\A380\fbw-xp-systems\patches\fbw-rust\air.patch`.
 - Plugin physics: `src/physics/air.rs` (the shared engine-load contract's bleed term only —
   everything else in this workstream is FBW-side). Registered in `src/physics/mod.rs`, wired
   into `src/lib.rs` (field `bleed_loads`, built after `circuit_protection`, updated after the
@@ -94,7 +94,7 @@ common layout, e.g. a two-pass ram matrix with a dividing wall).
 ## Tests
 
 New, in `air_cycle_machine.rs` (`cargo +stable-x86_64-pc-windows-gnu test -p a380_systems
---release`, `CARGO_TARGET_DIR=D:\fbw-build\target-phys-air`):
+--release`, `CARGO_TARGET_DIR=D:\A380\fbw-build\target-phys-air`):
 - `pack_off_has_no_outlet_flow` — mass conservation at zero flow.
 - `cruise_design_point_produces_cold_air_below_bleed_inlet_temperature` — design point (44 psi/
   200 °C bleed, -56.5 °C/238 hPa/Mach-0.85-equivalent ambient, coldest cabin selection): outlet
@@ -138,6 +138,27 @@ Per duct/valve, exposed as named variables the lead can wire into the Study pane
   (plugin contract name, same value).
 
 ## Limitations (honest gaps, per the brief's own reporting rule)
+
+> **Update 2026-09-30: Limitation 1 is resolved, and it had two causes, not one.**
+> 1. The water separator returned the latent heat of all moisture above saturation at the
+>    *dry* turbine discharge in one step, which warmed the air far past its own dew point:
+>    +42 K on a 24 C saturated day, a 33 C pack outlet from a -10 C turbine discharge. It now
+>    solves `t = t_dry + (w - w_sat(t)) L / cp`, whose single root lies between the dry
+>    discharge and the dew point (`the_water_separator_never_warms_the_air_past_its_own_dew_point`).
+>    That fixed 8 of the 11 tests. It affected the aircraft too, not just the test rig.
+> 2. The test rig's plenum (12 m^3, sized for FlyByWire's flow tests) sits near 23 psi. The real
+>    `A380Pneumatic`'s sits at about 50 psia, within 1 psi of its regulated supply (both packs,
+>    ground idle and 70% N1, measured). So the rig now hands the air cycle machine its regulated
+>    supply pressure, and the merge's 8 -> 800 m^3 source change is reverted.
+>    Shrinking the plenum to 2 m^3 instead starved the AMM flow tests.
+> 3. `knobs_dont_affect_duct_temperature_when_cpiom_unpowered` now compares two knob settings.
+>    Unpowering DC 1/2/ESS also stops the OCSMs, so the cabin pressurises on the ground and no
+>    turbine can expand into it.
+>
+> Result: all a380_systems tests pass in both trees.
+> `whole_aircraft_tests` (MSFS tree) flies the whole A380 from cold and dark through a climb to
+> an FL350 cruise, with no breaker trips and every main bus powered; the cabin holds 5,456 ft
+> at 8.55 psi.
 
 1. **Pack plenum pressure under the air_conditioning module's own test fixture.** The real
    `A380Pneumatic` regulates its PRV to ~40 psig (confirmed by its own
@@ -216,7 +237,7 @@ valve.rs` (diff: `patches/fbw-rust/air-orifice-flow.patch`, verified with
 - **Purely additive**: no existing method's behaviour changed, so all 43 shared-crate pneumatic
   tests and the full a380_systems suite are unaffected by this piece on its own. Verified:
   `cargo +stable-x86_64-pc-windows-gnu check -p a380_systems --release` clean (only pre-existing,
-  unrelated warnings), `CARGO_TARGET_DIR=D:\fbw-build\target-phys-air-second`.
+  unrelated warnings), `CARGO_TARGET_DIR=D:\A380\fbw-build\target-phys-air-second`.
 
 ### HP valve / PRV: now genuinely wired to compressible orifice flow
 

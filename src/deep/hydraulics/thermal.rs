@@ -42,6 +42,128 @@ impl ThermalSizing {
     pub fn a380_circuit() -> Self {
         Self { fluid_mass_kg: 60.0, ambient_loss_w_per_k: 40.0 }
     }
+
+    /// ECAM completeness pass (E-FIRE §I, `290800037`/`290800038` HYD
+    /// {G,Y} SYS TEMP HI): sizing for a **second**, small `ThermalState`
+    /// representing the manifold/pump-discharge fluid mass alone -- as
+    /// distinct from [`Self::a380_circuit`]'s ~60 kg figure above, which
+    /// lumps in the whole reservoir and every downstream line. **GENERIC**:
+    /// no public A380 figure exists for this narrower quantity either; the
+    /// mass is sized as a small fraction of the whole-circuit figure (the
+    /// manifold/pump-discharge volume genuinely is a small fraction of a
+    /// circuit's total trapped fluid), and the conductance is sized to the
+    /// physically meaningful order of magnitude at which sustained high
+    /// pump duty separates the manifold's temperature measurably from the
+    /// reservoir's own, while the two converge again at low flow --
+    /// exactly what closes the `RESERVOIR_OVHT`/`SYS_TEMP_HI` duplicate
+    /// this design sheet's own module doc records (before this, both ids
+    /// would have been the identical comparison on the identical lumped
+    /// state).
+    ///
+    /// The "ambient" this small mass exchanges with, at the call site
+    /// (`topology::Circuit::step`), is the reservoir's own current
+    /// temperature -- not true outside air -- so this conductance is a
+    /// manifold-to-reservoir figure, not a manifold-to-bay one.
+    pub fn a380_manifold() -> Self {
+        Self { fluid_mass_kg: 5.0, ambient_loss_w_per_k: 15.0 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ECAM completeness pass (E-FIRE §G/§H): pure monitored-discrete faults on
+// the fuel/hydraulic heat exchanger's own valve, its air-side leak-
+// detection switch, and the dual overheat-detection channels. None of
+// these change the heat balance above: each is "this monitored circuit
+// itself is known-faulted," a direct pass-through with no threshold
+// invented -- the same class of mapping `sensors::smoke_detector`'s own
+// `circuit_fault` field uses (module doc there), applied here to the three
+// classes of monitored hardware ATA 29-30's unwired procedures name.
+// ---------------------------------------------------------------------------
+
+/// The fuel/hydraulic heat exchanger's own valve health, independent of
+/// the `Hsmu`'s commanded open/closed decision above: `Hsmu` decides
+/// *when* the valve should open (a control law, already sourced from the
+/// FCOM); this is the valve's own monitored position/circuit, which can be
+/// known-faulted regardless of what the HSMU commands. `290800013`/
+/// `290800014` HYD {G,Y} FUEL HEAT EXCHANGER VLV FAULT.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HxValveFaults {
+    /// 0 healthy .. 1 (any nonzero) the valve's own monitored position/
+    /// circuit reports faulted.
+    pub stuck: f64,
+}
+impl HxValveFaults {
+    pub fn fault(&self) -> bool {
+        self.stuck > 0.0
+    }
+}
+
+/// The heat exchanger's air-side leak-detection switch. `leak` is the leak
+/// itself -- a registered fault's own armed state, pass-through, the same
+/// class of leak failure `thermal_zones`' own duct-leak faults already use
+/// elsewhere in this crate (`290800015`/`290800016` HYD {G,Y} HEAT
+/// EXCHANGER AIR LEAK). `circuit_fault` is the switch's *own* monitoring
+/// circuit, independent of whether a leak is actually present
+/// (`290800017`/`290800018` ... AIR LEAK DET FAULT).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AirLeakSwitchFaults {
+    pub leak: f64,
+    pub circuit_fault: f64,
+}
+impl AirLeakSwitchFaults {
+    pub fn leak_detected(&self) -> bool {
+        self.leak > 0.0
+    }
+    pub fn fault(&self) -> bool {
+        self.circuit_fault > 0.0
+    }
+}
+
+/// One overheat-detection channel (A or B): the same dual-channel/loop
+/// redundancy pattern this exact crate already uses for exactly this class
+/// of monitored quantity (`fire_and_smoke_protection.rs`'s A/B fire-
+/// detection loops, and this crate's own `ENG n IGN A/B FAULT` chain-fault
+/// pattern). When healthy, a channel reports the same `ThermalState::step`
+/// overheat verdict this file already computes (unchanged, still the
+/// Skydrol LD-4-sourced `OVERHEAT_K`); each channel independently carries
+/// its own `circuit_fault`, a monitored discrete orthogonal to that
+/// verdict (`290800023`..`290800026` ... SYS CHAN A/B OVHT DET FAULT).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OverheatChannelFaults {
+    pub circuit_fault: f64,
+}
+impl OverheatChannelFaults {
+    pub fn fault(&self) -> bool {
+        self.circuit_fault > 0.0
+    }
+}
+
+#[cfg(test)]
+mod discrete_fault_tests {
+    use super::*;
+
+    #[test]
+    fn hx_valve_fault_is_a_direct_pass_through() {
+        assert!(!HxValveFaults::default().fault());
+        assert!(HxValveFaults { stuck: 1.0 }.fault());
+        assert!(HxValveFaults { stuck: 0.3 }.fault(), "any nonzero magnitude raises the discrete, matching the smoke-detector circuit_fault convention");
+    }
+
+    #[test]
+    fn air_leak_switch_separates_the_leak_from_its_own_circuit_fault() {
+        let leaking = AirLeakSwitchFaults { leak: 1.0, circuit_fault: 0.0 };
+        assert!(leaking.leak_detected());
+        assert!(!leaking.fault(), "a real leak must not, by itself, raise the switch's own DET FAULT");
+        let switch_faulted = AirLeakSwitchFaults { leak: 0.0, circuit_fault: 1.0 };
+        assert!(!switch_faulted.leak_detected());
+        assert!(switch_faulted.fault());
+    }
+
+    #[test]
+    fn overheat_channel_fault_is_a_direct_pass_through() {
+        assert!(!OverheatChannelFaults::default().fault());
+        assert!(OverheatChannelFaults { circuit_fault: 1.0 }.fault());
+    }
 }
 
 /// GENERIC: no published specific heat for this fluid family; phosphate

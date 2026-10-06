@@ -104,6 +104,11 @@ pub struct EngineInputs {
     /// 1.0 (full nameplate starter performance) until one does; see the
     /// workstream report.
     pub starter_supply_fraction: f64,
+    /// Whether the igniters can light the combustor (74_000+n "ignition
+    /// fault" takes it away). Only lighting needs them: a burning flame
+    /// holds itself, so a running engine keeps running, but a start will
+    /// not light off and a flame that goes out will not relight.
+    pub ignition_available: bool,
     /// Shared-contract Vars, per the brief: bleed mass flow drawn from the
     /// HP compressor (kg/s), and gearbox shaft power extracted for
     /// generators and engine-driven hydraulic pumps (W, already divided by
@@ -500,6 +505,12 @@ pub struct Engine {
     /// the N1 governor owns the fuel until the flame goes out. See the
     /// handover in `step`.
     start_complete: bool,
+    /// The combustor's flame: lit by the igniters once fuel is flowing and
+    /// the core passes the combustion floor, then self-sustaining until it
+    /// goes out (flame-out, fuel off, or the core below the floor). With
+    /// ignition always available this relights the frame after it goes
+    /// out, which is exactly what the model did before it had a flame.
+    flame_lit: bool,
 }
 
 /// A healthy engine settled at ground idle, sea level ISA, reached by the
@@ -520,6 +531,7 @@ pub fn idle_engine() -> Engine {
             fuel_valve_open: true,
             starter_engaged: false,
             starter_supply_fraction: 1.0,
+            ignition_available: true,
             bleed_extraction_kg_s: 0.0,
             bleed_from_ip_port: false,
             gearbox_elec_load_w: 0.0,
@@ -672,6 +684,7 @@ impl Engine {
             oil: oil::OilSystem::new(T_REF_K),
             soaked: false,
             start_complete: false,
+            flame_lit: false,
         }
     }
 
@@ -701,6 +714,7 @@ impl Engine {
         // lighting off.
         self.start_complete = true;
         self.start_aborted = false;
+        self.flame_lit = true;
     }
 
     /// The calibrated design-point fuel flow, kg/s. Exposed for tests and
@@ -808,8 +822,25 @@ impl Engine {
         // instead of letting the N1 loop choose it. The latch clears on a
         // flame-out or a closed fuel valve (below), so the next light-off
         // goes through the start law again.
+        //
+        // The gate is FlyByWire's own *actual* idle N3 -- the same figure
+        // `fadec::idle_n1_n3` computes for `generate_idle_parameters` and
+        // for `engine_commands.rs`'s quick-mode snap -- not a second, local
+        // re-derivation: `table1502::icn3` already folds Mach into its
+        // referred idle N3 (it is tabulated against altitude *and* Mach,
+        // dividing by `sqrt(1 + 0.2*mach^2)`), so un-referring it with this
+        // module's own Mach-inclusive `correction` (the same ram-rise
+        // theta2 used above for corrected-% spool speeds) multiplied that
+        // same `sqrt(1 + 0.2*mach^2)` straight back in, cancelling icn3's
+        // own Mach term and inflating the gate ~0.9-2.5% over Mach 0.3-0.5
+        // -- enough to delay an in-flight relight's handover to the N1
+        // loop. `idle_n1_n3` un-refers icn3 with the static-only `theta`
+        // FlyByWire itself uses (no second Mach term), matching what
+        // `next_state`'s Starting -> On gate actually waits for. At Mach 0
+        // (every ground start) the two formulas agree exactly, so this only
+        // changes in-flight/windmill relight behaviour.
         let alt_ft = (1.0 - (ambient_p / P_REF_PA).powf(0.190_284)) * 145_366.45;
-        let fbw_idle_n3 = crate::fadec::table1502::icn3(alt_ft, inputs.mach) * correction;
+        let fbw_idle_n3 = crate::fadec::idle_n1_n3(alt_ft, inputs.mach, ambient_t - 273.15).1;
         if n3_pct >= fbw_idle_n3 {
             self.start_complete = true;
         }
@@ -818,7 +849,17 @@ impl Engine {
         // yet, and its output legitimately passes through zero whenever the
         // fan has run past its target, which it does repeatedly on the way
         // up. Using it as the gate dropped whole frames of start fuel.
-        let lit = Governor::combustion_floor_met(n1_corr, n3_corr);
+        let floor_met = Governor::combustion_floor_met(n1_corr, n3_corr);
+        if !inputs.fuel_valve_open || !floor_met {
+            self.flame_lit = false;
+        } else if !self.flame_lit && inputs.ignition_available {
+            self.flame_lit = true;
+        }
+        // Fuel and a combustible mixture with no flame: only ever the
+        // igniters' doing (with ignition available the flame lights the
+        // same frame), so a healthy engine fuels exactly as it did.
+        let ignition_blocked = inputs.fuel_valve_open && floor_met && !self.flame_lit;
+        let lit = self.flame_lit;
         self.update_start_protection(n3_pct, inputs.fuel_valve_open);
         let wf = if inputs.fuel_valve_open && lit && !self.start_complete {
             let idle_cn1 = crate::fadec::table1502::icn1(alt_ft, inputs.mach, ambient_t - 273.15);
@@ -844,7 +885,10 @@ impl Engine {
         // from the combustor plenum's own pressure; with no compression left
         // (a destroyed HP compressor, a stopped core) the flame goes out.
         let flame_out = self.gas.state.p3 / ambient_p < self.design.burner_pr_min || mdot_to_combustor <= 0.0;
-        let wf = if flame_out { 0.0 } else { wf };
+        if flame_out {
+            self.flame_lit = false;
+        }
+        let wf = if flame_out || ignition_blocked { 0.0 } else { wf };
         // A real flame-out -- not merely a frame where the governor asked
         // for no fuel -- un-latches the start, so the next light-off goes
         // through the start schedule again.
@@ -1011,6 +1055,7 @@ mod tests {
             fuel_valve_open: true,
             starter_engaged: false,
             starter_supply_fraction: 1.0,
+            ignition_available: true,
             bleed_extraction_kg_s: 0.0,
             bleed_from_ip_port: false,
             gearbox_elec_load_w: 0.0,
@@ -1093,6 +1138,7 @@ mod tests {
             fuel_valve_open: true,
             starter_engaged: false,
             starter_supply_fraction: 1.0,
+            ignition_available: true,
             bleed_extraction_kg_s: 0.5,
             bleed_from_ip_port: false,
             gearbox_elec_load_w: 60_000.0,
@@ -1287,6 +1333,46 @@ mod tests {
         assert!(
             worst > 1.0,
             "the HP compressor stalls on the way to take-off: margin fell to {worst:.2} at {worst_at:.0}% N3"
+        );
+    }
+
+    /// The IP compressor is not stalled anywhere on an ordinary
+    /// acceleration -- the same property
+    /// `the_compressor_never_stalls_accelerating_from_idle_to_take_off`
+    /// checks for the HP stage, mirrored onto the IP stage.
+    ///
+    /// Nothing asserted this before: `gas_path.rs` has computed
+    /// `ipc_stall_margin` since the HP-side fix (~1011) and it is already
+    /// printed by the ignored `where_the_power_goes` diagnostic, but no
+    /// pass/fail test ever read it -- exactly the gap that let the HP stage
+    /// run stalled through most of a take-off before that test existed.
+    /// This coverage matters now specifically: P08's proposed handling-
+    /// bleed recalibration would shift pressure ratio off the HP stage and
+    /// onto the IP stage, which is precisely the change that could stall
+    /// the IP stage first without this test, silently.
+    ///
+    /// Asserted on the engine's own working line, for the same reason as
+    /// the HP test: the working line is far from a flow-proportional-to-
+    /// speed probe placed by hand.
+    #[test]
+    fn the_ip_compressor_never_stalls_accelerating_from_idle_to_take_off() {
+        let mut engine = Engine::new();
+        run_to_steady_state(&mut engine, EngineInputs { target_n1_corrected_pct: IDLE_N1_PCT, ..isa_sea_level() }, 60.0);
+        let dt = 0.02;
+        let inputs = EngineInputs { target_n1_corrected_pct: 100.0, dt_s: dt, ..isa_sea_level() };
+        let (mut worst, mut worst_at) = (f64::MAX, 0.0);
+        let mut elapsed = 0.0;
+        while elapsed < 40.0 {
+            let out = engine.step(&inputs);
+            if engine.last_gas.ipc_stall_margin < worst {
+                worst = engine.last_gas.ipc_stall_margin;
+                worst_at = out.n3_pct;
+            }
+            elapsed += dt;
+        }
+        assert!(
+            worst > 1.0,
+            "the IP compressor stalls on the way to take-off: margin fell to {worst:.2} at {worst_at:.0}% N3"
         );
     }
 
@@ -1550,6 +1636,7 @@ mod tests {
             target_n1_corrected_pct: 25.0,
             starter_engaged: true,
             starter_supply_fraction: 0.03,
+            ignition_available: true,
             fuel_valve_open: true,
             ..isa_sea_level()
         };
@@ -1559,6 +1646,50 @@ mod tests {
         }
         assert!(out.n3_pct < params::MIN_N3_FOR_COMBUSTION_PCT, "hung start should stall below light-off, got {}", out.n3_pct);
         assert!(out.fuel_flow_kg_s.abs() < 1e-9, "no fuel should be introduced before light-off");
+    }
+
+    /// 74_000+n "ignition fault": the igniters only light the flame. A start
+    /// with none spins the core past light-off and hangs there, burning
+    /// nothing; an engine already burning keeps its flame; once that flame
+    /// goes out it cannot be relit.
+    #[test]
+    fn with_no_ignition_a_start_never_lights_but_a_burning_flame_holds_itself() {
+        let mut engine = Engine::new();
+        let mut inputs = EngineInputs { target_n1_corrected_pct: 18.6, ignition_available: false, ..isa_sea_level() };
+        let mut out = EngineOutputs::default();
+        for _ in 0..(120.0 / inputs.dt_s) as usize {
+            inputs.starter_engaged = out.n3_pct < starter::CUTOFF_N3_FRAC * 100.0;
+            out = engine.step(&inputs);
+        }
+        assert!(out.n3_pct >= params::MIN_N3_FOR_COMBUSTION_PCT, "the starter must still spin it past light-off: N3 {}", out.n3_pct);
+        assert!(out.fuel_flow_kg_s.abs() < 1e-9, "no flame, nothing burned: {} kg/s", out.fuel_flow_kg_s);
+        assert!(out.n3_pct < 50.0, "a hung start, not an engine accelerating on its own: N3 {}", out.n3_pct);
+
+        let mut running = Engine::new();
+        let mut inputs = EngineInputs { target_n1_corrected_pct: 18.6, ..isa_sea_level() };
+        let mut out = EngineOutputs::default();
+        for _ in 0..(150.0 / inputs.dt_s) as usize {
+            inputs.starter_engaged = out.n3_pct < starter::CUTOFF_N3_FRAC * 100.0;
+            out = running.step(&inputs);
+        }
+        let idle_n3 = out.n3_pct;
+        assert!(out.fuel_flow_kg_s > 0.0 && idle_n3 > 60.0, "a healthy start reaches idle: N3 {idle_n3}");
+        inputs.starter_engaged = false;
+        inputs.ignition_available = false;
+        for _ in 0..(60.0 / inputs.dt_s) as usize {
+            out = running.step(&inputs);
+        }
+        assert!(out.fuel_flow_kg_s > 0.0 && (out.n3_pct - idle_n3).abs() < 2.0, "a burning flame needs no igniter: N3 {} vs {idle_n3}", out.n3_pct);
+
+        inputs.fuel_valve_open = false;
+        for _ in 0..(2.0 / inputs.dt_s) as usize {
+            out = running.step(&inputs);
+        }
+        inputs.fuel_valve_open = true;
+        for _ in 0..(20.0 / inputs.dt_s) as usize {
+            out = running.step(&inputs);
+        }
+        assert!(out.fuel_flow_kg_s.abs() < 1e-9, "no relight without ignition: {} kg/s", out.fuel_flow_kg_s);
     }
 
     #[test]
@@ -1856,6 +1987,7 @@ mod idle_against_flybywire {
             fuel_valve_open: true,
             starter_engaged: false,
             starter_supply_fraction: 1.0,
+            ignition_available: true,
             bleed_extraction_kg_s: 0.0,
             bleed_from_ip_port: false,
             gearbox_elec_load_w: 0.0,
@@ -1882,6 +2014,94 @@ mod idle_against_flybywire {
         let ff_kg_h = out.fuel_flow_kg_s * 3600.0;
         assert!((ff_kg_h / idle_ff_kg_h - 1.0).abs() < 0.25, "idle fuel {ff_kg_h} kg/h vs FBW {idle_ff_kg_h}");
     }
+
+    /// W74: the latch's gate value used to be a second, local re-derivation
+    /// of FlyByWire's idle N3 -- `table1502::icn3(alt, mach)` (a referred
+    /// idle N3 the table itself already divides by Mach's ram term,
+    /// `sqrt(1 + 0.2*mach^2)`) multiplied by this module's own
+    /// Mach-inclusive `correction` (the same ram-rise theta2 used elsewhere
+    /// for corrected-% spool speeds). That multiplication cancelled icn3's
+    /// own division straight back out, silently dropping the schedule's
+    /// intended Mach dependence and inflating the gate the higher Mach
+    /// climbs -- late enough, at a Mach 0.3-0.5 in-flight relight, to delay
+    /// the handover from the open-loop start schedule to the N1 loop.
+    /// FlyByWire's actual formula (`fadec::idle_n1_n3`, W04) un-refers icn3
+    /// with the *static-only* `ratios::theta`, with no second Mach term.
+    /// Both figures below are recomputed independently of `idle_n1_n3`
+    /// itself, from the same table + ratio calls, so this would have failed
+    /// against the old code.
+    #[test]
+    fn the_start_complete_gate_does_not_double_count_mach_at_m0_4() {
+        let mach = 0.4;
+        let ambient_pressure_pa = 46_563.0; // ~20,000 ft ISA: a plausible in-flight relight altitude.
+        let ambient_temp_k = 248.5; // ~20,000 ft ISA.
+        let ambient_temp_c = ambient_temp_k - 273.15;
+        let alt_ft = (1.0 - (ambient_pressure_pa / P_REF_PA).powf(0.190_284)) * 145_366.45;
+
+        let icn3 = crate::fadec::table1502::icn3(alt_ft, mach);
+        let correct_idle_n3 = icn3 * crate::fadec::ratios::theta(ambient_temp_c).sqrt();
+        let old_buggy_idle_n3 = icn3 * (gas::total_temperature(ambient_temp_k, mach, GAMMA_AIR) / T_REF_K).sqrt();
+        assert!(
+            (old_buggy_idle_n3 / correct_idle_n3 - 1.0) > 0.01,
+            "M{mach} must meaningfully inflate the old double-counted gate for this test to be \
+             meaningful; old {old_buggy_idle_n3} vs correct {correct_idle_n3}"
+        );
+        let midpoint = (correct_idle_n3 + old_buggy_idle_n3) / 2.0;
+
+        let idle_n1 = crate::fadec::table1502::icn1(alt_ft, mach, ambient_temp_c);
+        let mut engine = Engine::new();
+        let mut inputs = EngineInputs {
+            ambient_pressure_pa,
+            ambient_temp_k,
+            mach,
+            true_airspeed_m_s: mach * (GAMMA_AIR * R_AIR * ambient_temp_k).sqrt(),
+            target_n1_corrected_pct: idle_n1,
+            fuel_valve_open: true,
+            starter_engaged: false,
+            starter_supply_fraction: 1.0,
+            ignition_available: true,
+            bleed_extraction_kg_s: 0.0,
+            bleed_from_ip_port: false,
+            gearbox_elec_load_w: 0.0,
+            gearbox_hyd_load_w: 0.0,
+            compressor_efficiency_loss_fraction: 0.0,
+            compressor_flow_capacity_loss_fraction: 0.0,
+            turbine_efficiency_loss_fraction: 0.0,
+            bearing_friction_extra_fraction: 0.0,
+            oil_pressure_fraction: 1.0,
+            fuel_temp_k: ambient_temp_k,
+            oil_faults: Default::default(),
+            dt_s: 0.05,
+        };
+        let mut out = EngineOutputs::default();
+        let mut latched_at_n3 = None;
+        for _ in 0..(180.0 / 0.05) as usize {
+            inputs.starter_engaged = out.n3_pct < starter::CUTOFF_N3_FRAC * 100.0;
+            let was_complete = engine.start_complete;
+            out = engine.step(&inputs);
+            if latched_at_n3.is_none() && !was_complete && engine.start_complete {
+                latched_at_n3 = Some(out.n3_pct);
+            }
+        }
+
+        let latched_at_n3 = latched_at_n3.unwrap_or_else(|| panic!("start never latched at M{mach}"));
+        // Closer to FlyByWire's real gate than to the old doubled-Mach one:
+        // robust to whatever small per-frame overshoot the start schedule
+        // has right at handover, while still failing against the old code
+        // (which would latch right at/near `old_buggy_idle_n3`, past this
+        // midpoint).
+        assert!(
+            latched_at_n3 < midpoint,
+            "start latched at N3 {latched_at_n3}, past the midpoint {midpoint} between FlyByWire's \
+             actual idle N3 {correct_idle_n3} and the old double-counted gate {old_buggy_idle_n3} -- \
+             looks like the latch is still using the doubled-up correction"
+        );
+        assert!(
+            latched_at_n3 >= correct_idle_n3 - 0.1,
+            "start latched at N3 {latched_at_n3}, below FlyByWire's actual idle N3 {correct_idle_n3} \
+             minus the gate's own margin"
+        );
+    }
 }
 
 /// The start schedule and its handover, tested as one piece: FlyByWire's own
@@ -1904,6 +2124,7 @@ mod start_and_handover {
             fuel_valve_open: true,
             starter_engaged: false,
             starter_supply_fraction: 1.0,
+            ignition_available: true,
             bleed_extraction_kg_s: 0.0,
             bleed_from_ip_port: false,
             gearbox_elec_load_w: 0.0,
@@ -1971,6 +2192,7 @@ mod total_compressor_loss {
             fuel_valve_open: true,
             starter_engaged: false,
             starter_supply_fraction: 1.0,
+            ignition_available: true,
             bleed_extraction_kg_s: 0.0,
             bleed_from_ip_port: false,
             gearbox_elec_load_w: 0.0,
@@ -2064,8 +2286,11 @@ mod accel_diagnostic {
     /// point instead of 1324 K, which is an engine idling rather than one
     /// running a take-off cycle at taxi thrust. The margin is asserted on
     /// the working line by
-    /// `the_compressor_never_stalls_accelerating_from_idle_to_take_off`, so
-    /// this diagnostic is for looking, not for guarding.
+    /// `the_compressor_never_stalls_accelerating_from_idle_to_take_off`, and
+    /// (since this diagnostic's `IPTkW`/`IPCkW`/`ipcsrp`/`ipcmrg` columns
+    /// were added) the IP stage's own margin is asserted the same way by
+    /// `the_ip_compressor_never_stalls_accelerating_from_idle_to_take_off`,
+    /// so this diagnostic is for looking, not for guarding.
     #[test]
     #[ignore]
     fn where_the_power_goes() {
@@ -2073,16 +2298,19 @@ mod accel_diagnostic {
         run_to_steady_state(&mut engine, EngineInputs { target_n1_corrected_pct: IDLE_N1_PCT, ..isa_sea_level() }, 60.0);
         let dt = 0.02;
         let inputs = EngineInputs { target_n1_corrected_pct: 100.0, dt_s: dt, ..isa_sea_level() };
-        println!("  t   N1   N3    wf    TET   TGT  core  bleed  HPTkW  HPCkW  surplus  margin  thrust");
+        println!("  t   N1   N3    wf    TET   TGT  core  bleed  IPTkW  IPCkW  ipcsrp  ipcmrg  HPTkW  HPCkW  surplus  margin  thrust");
         let mut t = 0.0;
         while t < 12.0 {
             let out = engine.step(&inputs);
             let g = &engine.last_gas;
             if ((t * 50.0_f64).round() as i64) % 25 == 0 {
                 println!(
-                    "{t:5.1} {:4.0} {:4.0} {:5.3} {:6.0} {:5.0} {:5.1} {:6.2} {:6.0} {:6.0} {:8.0} {:7.2} {:7.0}",
+                    "{t:5.1} {:4.0} {:4.0} {:5.3} {:6.0} {:5.0} {:5.1} {:6.2} {:6.0} {:6.0} {:8.0} {:7.2} {:6.0} {:6.0} {:8.0} {:7.2} {:7.0}",
                     out.n1_pct, out.n3_pct, out.fuel_flow_kg_s, g.tt4_k, out.egt_c, g.m_core,
                     engine.gas.state.m_hpc - g.m_core,
+                    g.ipt_power_w / 1000.0, g.ipc_power_w / 1000.0,
+                    (g.ipt_power_w - g.ipc_power_w) / 1000.0,
+                    g.ipc_stall_margin,
                     g.hpt_power_w / 1000.0, g.hpc_power_w / 1000.0,
                     (g.hpt_power_w - g.hpc_power_w) / 1000.0,
                     g.hpc_stall_margin, out.net_thrust_n / 1000.0

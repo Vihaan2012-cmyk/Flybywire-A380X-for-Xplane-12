@@ -61,6 +61,7 @@ pub fn register(r: &mut Registry) {
     register_rotor_dynamics(r);
     register_thrust_reverser(r);
     register_eec(r);
+    register_thrust_lever_channel_b(r);
     register_nacelle(r);
     // Further backlog items append their own register_x(r) calls here as
     // they are built.
@@ -101,17 +102,49 @@ fn register_fuel_system(r: &mut Registry) {
             "Throttles suction pressure; with hot fuel, drives NPSH below required and cavitates (flow and pressure both fall).",
         );
 
+        // ---- Fuel strainer (LP pump inlet, upstream of the fine filter):
+        // `fuel::strainer`, structurally identical to the filter below but
+        // its own component/failure (`E-ENG-DESIGN.md` Pattern 21) so the
+        // dedicated `ENG n FUEL STRAINER CLOGGED` alert has its own cause,
+        // distinct from the LP pump's own coarser `inlet_restriction`
+        // proxy above. The bypass-crack differential is FCOM-sourced (12
+        // psi, `FCOM PRO-ABN-ECAM p.5787`, "ENG 1(2)(3)(4) FUEL STRAINER
+        // CLOGGED": "The pressure drop across the fuel strainer is higher
+        // than 12 PSI") -- superseding Revision 3's own approximation
+        // (reusing the fine filter's 35 psi figure), which is no longer
+        // needed now a real, alert-specific number exists.
+        let strainer_id = format!("73_fuel.strainer_{eng}");
+        reg_component(
+            r, ATA, strainer_id.clone(), format!("Engine {eng} fuel strainer"),
+            vec![param("clog", "element blocked with debris, 0 clean .. 1 blocked; resistance grows as 1/(1-clog)^2", 0.0)],
+        );
+        reg_failure(
+            r, ATA, &mut n,
+            format!("Engine {eng} fuel strainer clog"),
+            &strainer_id, "fuel::strainer::StrainerFaults.clog", "0 clean .. 1 blocked",
+            "Differential pressure rises until the 12 psi bypass valve cracks (FCOM PRO-ABN-ECAM p.5787); beyond that, undelivered debris passes on to the fine filter downstream.",
+        );
+
         // ---- Fuel filter + bypass valve.
         let filter_id = format!("73_fuel.filter_{eng}");
         reg_component(
             r, ATA, filter_id.clone(), format!("Engine {eng} fuel filter"),
-            vec![param("clog", "element blocked with debris/wax, 0 clean .. 1 blocked; resistance grows as 1/(1-clog)^2", 0.0)],
+            vec![
+                param("clog", "element blocked with debris/wax, 0 clean .. 1 blocked; resistance grows as 1/(1-clog)^2", 0.0),
+                param("monitor_fault", "the differential-pressure monitor's own electronics/switch, 0 healthy .. 1 dead, independent of clog (`E-ENG-DESIGN.md` Pattern 16)", 0.0),
+            ],
         );
         let filter_clog = reg_failure(
             r, ATA, &mut n,
             format!("Engine {eng} fuel filter clog"),
             &filter_id, "fuel::filter::FilterFaults.clog", "0 clean .. 1 blocked",
             "Differential pressure rises until the 35 psi bypass valve cracks; beyond that, unfiltered fuel reaches the HP pump.",
+        );
+        reg_failure(
+            r, ATA, &mut n,
+            format!("Engine {eng} fuel filter monitor fault"),
+            &filter_id, "fuel::filter::FilterFaults.monitor_fault", "0 healthy .. 1 dead",
+            "The bypass-warning monitor itself reads faulted independent of the element's real clog state (`ENG n FUEL FILTER MONITORING FAULT`, FCOM PRO-ABN-ECAM p.5784: \"The fuel filter is no longer monitored\").",
         );
         r.alert(
             EcamAlert::new(&format!("ENG_{eng}_FUEL_FILTER_CLOG"), ATA, &format!("ENG {eng} FUEL FILTER CLOG"), Level::Advisory, var(&format!("A32NX_ENG_{eng}_FUEL_FILTER_IMPENDING_BYPASS")).on())
@@ -577,6 +610,7 @@ fn register_thrust_reverser(r: &mut Registry) {
                 param("lock_c_fails_to_hold", "tertiary (sleeve mechanical) lock cannot restrain, 0 healthy .. 1 total", 0.0),
                 param("lock_c_jam", "tertiary lock jammed engaged, 0 free .. 1 seized", 0.0),
                 param("actuator_jam", "actuator ram seized, 0 free .. 1 solid; blocks both deploy and stow", 0.0),
+                param("control_fault", "the reverser's own EEC-side control loop, 0 healthy .. 1 dead; leaves the actuator itself free but uncommandable, so the sleeve holds its last position (`E-ENG-DESIGN.md` Pattern 24)", 0.0),
             ],
         );
         let a_hold = reg_failure(r, ATA, &mut n, format!("Engine {eng} reverser primary lock fails to hold"), &id, "thrust_reverser::LockFaults.fails_to_hold (lock_a)", "0 healthy .. 1 total", "One of three independent restraints; alone, the other two still prevent deployment (an OR across all three).");
@@ -586,6 +620,7 @@ fn register_thrust_reverser(r: &mut Registry) {
         let c_hold = reg_failure(r, ATA, &mut n, format!("Engine {eng} reverser tertiary lock fails to hold"), &id, "thrust_reverser::LockFaults.fails_to_hold (lock_c)", "0 healthy .. 1 total", "Same redundancy logic; all three failing this way together is what an uncommanded deployment actually requires (thrust_reverser::ReverserState.uncommanded_deployment).");
         let c_jam = reg_failure(r, ATA, &mut n, format!("Engine {eng} reverser tertiary lock jam"), &id, "thrust_reverser::LockFaults.jam (lock_c)", "0 free .. 1 seized", "Blocks legitimate deployment, same as the other two locks' jams.");
         let act_jam = reg_failure(r, ATA, &mut n, format!("Engine {eng} reverser actuator jam"), &id, "thrust_reverser::ReverserFaults.actuator_jam", "0 free .. 1 solid", "Blocks both deploy and stow motion regardless of lock state -- the direct fails-to-deploy/fails-to-stow fault.");
+        reg_failure(r, ATA, &mut n, format!("Engine {eng} reverser control fault"), &id, "thrust_reverser::ReverserFaults.control_fault", "0 healthy .. 1 dead", "Freezes the sleeve at its last position, the same functional effect as `actuator_jam` from a control-loop (not physical) cause -- `ENG n REVERSER CTL FAULT` (`E-ENG-DESIGN.md` Pattern 24).");
 
         r.alert(
             EcamAlert::new(&format!("ENG_{eng}_REVERSER_UNLOCKED"), ATA, &format!("ENG {eng} REVERSER UNLOCKED"), Level::Warning, var(&format!("A32NX_ENG_{eng}_REV_UNCOMMANDED")).on())
@@ -627,6 +662,7 @@ fn register_eec(r: &mut Registry) {
             params.push(param(&format!("{p}_sensor_a"), "channel A sensor bias/frozen fault for this parameter, 0 healthy", 0.0));
             params.push(param(&format!("{p}_sensor_b"), "channel B sensor bias/frozen fault for this parameter, 0 healthy", 0.0));
         }
+        params.push(param("backup_oil_temp_probe_bias", "the EEC's own backup oil-temperature probe (trend/logging channel), 0 healthy .. 1 max bias, independent of the primary reading (`E-ENG-DESIGN.md` Pattern 23)", 0.0));
         reg_component(r, ATA, id.clone(), format!("Engine {eng} EEC (dual channel)"), params);
 
         let chan_a = reg_failure(r, ATA, &mut n, format!("Engine {eng} EEC channel A fault"), &id, "eec::EecFaults.channel_a_fault", "0 healthy .. 1 dead", "Hands control to channel B if it is healthy; both dead leaves no valid EEC channel (eec::ActiveChannel::None).");
@@ -658,6 +694,38 @@ fn register_eec(r: &mut Registry) {
                 .status_line(&format!("ENG {eng} EEC SENSORS"))
                 .raised_by(&sensor_failures),
         );
+
+        // `ENG n MINOR FAULT` (`E-ENG-DESIGN.md` Pattern 23). FCOM
+        // PRO-ABN-ECAM p.5793, "ENG 1(2)(3)(4) MINOR FAULT": "Some internal
+        // engine sensors or one FADEC channel are failed" -- a real,
+        // deferred-maintenance ("crew awareness", no aural/master light)
+        // condition, distinct from the controlling `EEC_CHANNEL_FAULT`
+        // (Pattern 5's own duplicate-of target, which *does* raise a
+        // caution). This model's own backup oil-temperature probe (a
+        // trend/logging-only channel) is a documented stand-in for "some
+        // internal sensor" that does not disturb any controlling channel --
+        // the FCOM's real text does not name which sensor, only that it is
+        // internal and non-controlling.
+        reg_failure(r, ATA, &mut n, format!("Engine {eng} EEC backup oil-temperature probe bias"), &id, "eec::EecFaults.backup_oil_temp_probe_bias", "0 healthy .. 1 max bias", "Biases the EEC's own backup (trend/logging) oil-temperature reading against the primary; a real, non-controlling internal-sensor fault, never fed back into thrust control.");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thrust lever channel B (ATA 76, Engine Controls): a second, independent
+// position transducer alongside FlyByWire's own single
+// `A32NX_AUTOTHRUST_TLA:n` channel (`E-ENG-DESIGN.md` Pattern 31).
+// ---------------------------------------------------------------------------
+
+fn register_thrust_lever_channel_b(r: &mut Registry) {
+    const ATA: u16 = 76;
+    let mut n: u16 = 1;
+    for eng in 1..=4u16 {
+        let id = format!("76_ctl.tla_channel_b_{eng}");
+        reg_component(
+            r, ATA, id.clone(), format!("Engine {eng} thrust lever position transducer, channel B"),
+            vec![param("bias", "channel B position bias against FlyByWire's own single TLA channel, 0 healthy .. 1 max bias", 0.0)],
+        );
+        reg_failure(r, ATA, &mut n, format!("Engine {eng} thrust lever channel B bias"), &id, "TlaChannelBFaults.bias", "0 healthy .. 1 max bias", "Biases the second (channel B) thrust-lever position reading against FlyByWire's own single channel; flagged once the disagreement exceeds THR_LEVER_DISAGREE_TOLERANCE_DEG (`ENG n THR LEVER FAULT`, `E-ENG-DESIGN.md` Pattern 31).");
     }
 }
 

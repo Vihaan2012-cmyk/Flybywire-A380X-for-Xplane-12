@@ -97,6 +97,7 @@ fn isa_sea_level() -> EngineInputs {
         fuel_valve_open: true,
         starter_engaged: false,
         starter_supply_fraction: 1.0,
+        ignition_available: true,
         bleed_extraction_kg_s: 0.0,
         bleed_from_ip_port: false,
         gearbox_elec_load_w: 0.0,

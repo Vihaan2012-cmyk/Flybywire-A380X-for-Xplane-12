@@ -25,7 +25,10 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::remote::win::{self, Shared};
 
 pub const MAGIC: u64 = 0x5850_4846_4257_4A53; // "XPHFBWJS"
-pub const VERSION: u32 = 1;
+/// Bumped for `SlotHeader::view_loaded` (app/src/views.rs's `watch_loaded`
+/// watchdog needs it; a session created by an old plugin binary simply fails
+/// `SlotTable::open`'s version check and the app waits for a fresh one).
+pub const VERSION: u32 = 2;
 
 /// Views (panel.cfg VCockpit sections, including the screenless hosts).
 pub const MAX_VIEWS: usize = 32;
@@ -458,6 +461,17 @@ pub struct SlotHeader {
     /// Slots the plugin has resolved so far (values valid below this).
     pub resolved: AtomicU32,
     pub _pad: AtomicU32,
+    /// Each view's last `Uplink::Loaded` report, indexed like
+    /// `Uplink::Loaded.view`/`Session.downlinks`: 0 not yet reported, 1
+    /// reported `ok: true`, 2 reported `ok: false`. Written by the plugin
+    /// (`xphfbw_host.rs`'s `apply_deferred`, mirroring the same report it
+    /// folds into `displays_active`) and read by the app's own UI thread
+    /// (`app/src/views.rs`'s `watch_loaded`) so it can tell a screen that
+    /// painted but whose page never finished FlyByWire's own bootstrap from
+    /// one that is still legitimately starting up, without draining the
+    /// `uplink` ring itself (only the plugin does that; a second drainer
+    /// would race it for records the plugin still needs).
+    pub view_loaded: [AtomicU32; MAX_VIEWS],
 }
 
 const SLOT_HEADER: usize = std::mem::size_of::<SlotHeader>();
@@ -717,6 +731,18 @@ mod tests {
         app.header().frame.fetch_add(1, Ordering::Relaxed);
         assert_eq!(&plugin.pixels()[..4], &[1, 2, 3, 4]);
         assert_eq!(plugin.header().frame.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn view_loaded_is_shared_between_the_plugin_and_the_app() {
+        let t = tag();
+        let plugin = Session::create(&t).unwrap();
+        let app = Session::open(&t).unwrap();
+        assert_eq!(app.slots.header().view_loaded[3].load(Ordering::Relaxed), 0, "not yet reported");
+        plugin.slots.header().view_loaded[3].store(1, Ordering::Relaxed);
+        assert_eq!(app.slots.header().view_loaded[3].load(Ordering::Relaxed), 1);
+        // Every other view stays untouched.
+        assert_eq!(app.slots.header().view_loaded[4].load(Ordering::Relaxed), 0);
     }
 
     #[test]

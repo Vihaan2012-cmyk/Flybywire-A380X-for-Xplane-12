@@ -163,6 +163,9 @@ pub struct GearSystemInputs {
     /// wheels), 0..1.
     pub brake_pedal_right: f64,
     pub parking_brake_set: bool,
+    /// `E-IND-DESIGN.md` 320800057/059: the nosewheel disconnect (towing)
+    /// lever selected.
+    pub nw_steer_disc_selected: bool,
 
     pub dt_s: f64,
 }
@@ -189,6 +192,19 @@ pub struct LegOutput {
     /// The leg's door position, 0 shut .. 1 fully open -- the interlock
     /// that has to clear before the leg itself can travel.
     pub door_position: f64,
+    /// `E-IND-DESIGN.md` 320800043 L/G OLEO PRESS MONITORING FAULT: this
+    /// leg's own strut pressure-monitoring BITE has failed, independent of
+    /// the real `GEAR_STRUT_GAS_CHARGE_FRACTION`.
+    pub gas_charge_sensor_fault: bool,
+    /// `E-IND-DESIGN.md` 320800046 L/G WEIGHT ON WHEELS FAULT: what this
+    /// leg's weight-on-wheels sensing *reports*, which `wow_sensing_fail`
+    /// can detach from the leg's true ground contact.
+    pub sensed_on_ground: bool,
+    /// `E-IND-DESIGN.md` 320800032: this leg's bogie-trim BITE, `true`
+    /// unless `bogie_trim_fail` is armed. Only meaningful on the two body
+    /// legs; always `true` on the nose/wing legs, which have no such
+    /// mechanism to fail.
+    pub bogie_trimmed: bool,
 }
 
 pub struct GearSystemOutputs {
@@ -216,6 +232,13 @@ pub struct GearSystemOutputs {
     pub nose_steer_shimmy_unstable: bool,
     pub body_steer_angle_deg: [f64; 2],
     pub body_steer_shimmy_unstable: [bool; 2],
+    /// `E-IND-DESIGN.md` 320800057/059: whether the nosewheel is currently
+    /// mechanically disconnected from its steering actuator.
+    pub nw_steer_disconnected: bool,
+    /// `E-IND-DESIGN.md` "BRAKE_APPLIED_FRACTION:n" -- a new publish of
+    /// `brakes::BrakeWheelOutputs::applied_fraction`, already computed
+    /// every tick by `BrakeWheel::step` below and previously discarded.
+    pub brake_wheel_applied_fraction: [f64; 16],
 }
 
 pub struct GearSystem {
@@ -309,6 +332,9 @@ impl GearSystem {
             sensed_uplocked: r.sensed_uplocked,
             sensed_downlocked: r.sensed_downlocked,
             door_position: r.door_position,
+            gas_charge_sensor_fault: s.gas_charge_sensor_fault,
+            sensed_on_ground: s.sensed_on_ground,
+            bogie_trimmed: r.bogie_trimmed,
         }
     }
 
@@ -405,15 +431,18 @@ impl GearSystem {
         self.note_leg_events("right body", &rb_s, &rb_r);
 
         // Steering.
-        let nose_steer_in = steering::SteeringInputs { commanded_angle_deg: inputs.nose_steering_command_deg, groundspeed_ms: inputs.groundspeed_ms, dt_s: dt };
+        let nose_steer_in = steering::SteeringInputs { commanded_angle_deg: inputs.nose_steering_command_deg, groundspeed_ms: inputs.groundspeed_ms, dt_s: dt, disconnect_selected: inputs.nw_steer_disc_selected };
         let nose_steer_out = self.nose_steering.step(&nose_steer_in, &faults.nose_steering);
         if nose_steer_out.shimmy_unstable {
             self.events.push("nose gear shimmy tendency active".to_string());
         }
         let body_command = steering::body_steering_angle_deg(nose_steer_out.base_angle_deg, inputs.groundspeed_ms);
-        let lb_steer_in = steering::SteeringInputs { commanded_angle_deg: body_command, groundspeed_ms: inputs.groundspeed_ms, dt_s: dt };
+        // The two body positions have no disconnect mechanism at all
+        // (`E-IND-DESIGN.md`'s own scope for 320800057/059 is nosewheel
+        // only), so they never select it.
+        let lb_steer_in = steering::SteeringInputs { commanded_angle_deg: body_command, groundspeed_ms: inputs.groundspeed_ms, dt_s: dt, disconnect_selected: false };
         let lb_steer_out = self.left_body_steering.step(&lb_steer_in, &faults.left_body_steering);
-        let rb_steer_in = steering::SteeringInputs { commanded_angle_deg: body_command, groundspeed_ms: inputs.groundspeed_ms, dt_s: dt };
+        let rb_steer_in = steering::SteeringInputs { commanded_angle_deg: body_command, groundspeed_ms: inputs.groundspeed_ms, dt_s: dt, disconnect_selected: false };
         let rb_steer_out = self.right_body_steering.step(&rb_steer_in, &faults.right_body_steering);
         for (name, out) in [("left body", &lb_steer_out), ("right body", &rb_steer_out)] {
             if out.shimmy_unstable {
@@ -436,8 +465,23 @@ impl GearSystem {
         let mut brake_fire = [false; 16];
         let mut brake_wear = [0.0_f64; 16];
         let mut brake_skidding = [false; 16];
+        let mut brake_applied_fraction = [0.0_f64; 16];
+        // `E-IND-DESIGN.md` 320800025/026 BRAKES RELEASED / RESIDUAL
+        // BRAKING: without this, `BRAKE_APPLIED_FRACTION` could never
+        // physically fall to zero under commanded braking no matter how
+        // thoroughly both hydraulic brake sources were failed, since
+        // `commanded` below used to reach `BrakeWheel::step` unthrottled.
+        // NORM is green, ALTN is yellow (the same assignment `fbw/ata32.rs`'s
+        // own BSC design uses), gated at the same GENERIC 30%-of-nominal
+        // `retraction::MIN_RELEASE_PRESSURE_FRACTION` convention already
+        // used throughout this design; the emergency (parking-brake
+        // accumulator) path is a separate physical circuit this simple
+        // per-wheel force model does not reroute pedal-commanded force
+        // through, a documented simplification.
+        let brake_hydraulics_available = inputs.green_hydraulic_fraction >= 0.3 || inputs.yellow_hydraulic_fraction >= 0.3;
         for (leg, wheels) in LEG_WHEEL_INDICES.iter().enumerate() {
-            let commanded = if leg % 2 == 0 { inputs.brake_pedal_left } else { inputs.brake_pedal_right };
+            let raw_commanded = if leg % 2 == 0 { inputs.brake_pedal_left } else { inputs.brake_pedal_right };
+            let commanded = if brake_hydraulics_available { raw_commanded } else { 0.0 };
             let on_ground = leg_on_ground[leg];
             let normal_load_n = if on_ground { (leg_force_n[leg] / leg_wheel_count[leg]).max(0.0) } else { 0.0 };
             for &wheel in wheels {
@@ -446,6 +490,7 @@ impl GearSystem {
                 brake_temps[wheel] = out.stack_temp_c;
                 brake_wear[wheel] = out.wear_fraction;
                 brake_skidding[wheel] = out.skidding;
+                brake_applied_fraction[wheel] = out.applied_fraction;
                 if out.fire {
                     brake_fire[wheel] = true;
                     self.events.push(format!("wheel {} brake fire", wheel + 1));
@@ -475,6 +520,8 @@ impl GearSystem {
             nose_steer_shimmy_unstable: nose_steer_out.shimmy_unstable,
             body_steer_angle_deg: [lb_steer_out.angle_deg, rb_steer_out.angle_deg],
             body_steer_shimmy_unstable: [lb_steer_out.shimmy_unstable, rb_steer_out.shimmy_unstable],
+            nw_steer_disconnected: nose_steer_out.disconnected,
+            brake_wheel_applied_fraction: brake_applied_fraction,
         }
     }
 
@@ -534,6 +581,7 @@ mod tests {
             brake_pedal_left: 0.0,
             brake_pedal_right: 0.0,
             parking_brake_set: false,
+            nw_steer_disc_selected: false,
             dt_s,
         }
     }

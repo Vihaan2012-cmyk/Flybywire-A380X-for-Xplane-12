@@ -39,6 +39,10 @@ lewton = { version = "0.10", default-features = false }
 [dev-dependencies]
 # A reference rasteriser and PNG writer for the display snapshot tests only.
 tiny-skia = "0.11"
+# The electrical areas as MSFS runs them, checked against this crate's own
+# (src/deep/electrical_crate_parity.rs). The crate compiles this crate's
+# src/deep files; the plugin itself never links it.
+deep_electrical = { path = "crates/deep_electrical" }
 
 [features]
 default = []
@@ -49,7 +53,7 @@ js = ["dep:rquickjs", "dep:oxc", "dep:lyon_tessellation", "dep:ab_glyph", "dep:p
 # Xplm::dummy) to `pub` and re-exports otherwise-private modules that are
 # already written to run offline (breakers/circuits/failures/wear/
 # invariants/mel/scripted_failures/random_failures/scenarios/physics/
-# aspects), so the out-of-tree `emulator` crate (D:\fbw-xp-systems\emulator)
+# aspects), so the out-of-tree `emulator` crate (D:\A380\fbw-xp-systems\emulator)
 # can drive the real plugin code with no live X-Plane process. Does not
 # change the plugin's own behaviour or its default/js build.
 test-support = []

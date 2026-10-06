@@ -272,6 +272,20 @@ struct Snapshot {
     /// every one of its destinations -- "how many paths does this virtual
     /// link actually have", against the two it is always designed for.
     vl_paths_up: Vec<f64>,
+    /// `E-IND-DESIGN.md` 314800001/005: CPIOM-C1's own FWS partition
+    /// rejected its loaded airline-customization / ATQC database at
+    /// startup, gated on the partition itself being available (the FWS
+    /// needs power to report on itself at all, matching `fws_unavailable`'s
+    /// own gate in `fbw/ata31_33.rs`).
+    fws_customization_db_rejected: bool,
+    fws_atqc_db_rejected: bool,
+    /// `E-IND-DESIGN.md` 311800001 CDS & AUTO FLT FCU SWITCHED OFF: a
+    /// direct mirror of `Truth::controls.fcu_switch_off`, not a fault --
+    /// carried through this area's own `Snapshot` the same way
+    /// `deep::gear_structure::live` already caches `gear_lever_down`/
+    /// `parking_brake_set`, since `Area::publish` gets no `Truth` of its
+    /// own to read it back from.
+    cds_fcu_switch_off: bool,
 }
 
 /// `Availability` as a published number: 2 normal (fully redundant),
@@ -315,6 +329,28 @@ pub struct LiveAvionicsNetwork {
     /// against an absolute time, so the area has to keep one.
     now_s: f64,
     snapshot: Snapshot,
+    /// 212800019/020/021 (E-AIR-DESIGN.md): each supplemental avionics
+    /// cooling *system* (the liquid loop + heat exchanger LRU, distinct
+    /// from the bay air-ventilation fans/valves above) gets an overheat
+    /// failure and its own protection-monitor failure. Real LRUs (FCOM
+    /// confirms both exist, p.4731/p.4733), no threshold invented: this
+    /// network has no cooling-loop thermal-cycle physics (like the pack ACM
+    /// in `pneumatic_ducts`, only cruder -- there is no real quantity here
+    /// to degrade at all, unlike the ACM's real inlet temperature), so both
+    /// are plain component-broken flags, the same shape `fbw/ata24.rs`'s
+    /// `ELEC_GEN_n_FAULT` uses.
+    coolg_overheat_id: [u64; 2],
+    coolg_prot_fault_id: [u64; 2],
+    /// This tick's magnitude of each, set in `tick` (which has `faults`)
+    /// and read back in `publish` (which does not).
+    coolg_overheat: [f64; 2],
+    coolg_prot_fault: [f64; 2],
+    /// `E-IND-DESIGN.md` 314800001/005: CPIOM-C1's own FWS partition, as
+    /// `(module index, partition index)` into `topology.end_systems`, and
+    /// the two failure ids its two database-validity checks resolved to.
+    fws_partition: (usize, usize),
+    fws_customization_db_rejected_id: u64,
+    fws_atqc_db_rejected_id: u64,
 }
 
 impl Default for LiveAvionicsNetwork {
@@ -434,6 +470,13 @@ impl LiveAvionicsNetwork {
         let trips = vec![OverheatTrip::default(); topology.end_systems.len()];
         let monitors = consequences::reference_function_monitors();
 
+        let coolg_overheat_id = [1, 2].map(|n| index.id(&format!("Avionics cooling system {n} overheat")));
+        let coolg_prot_fault_id = [1, 2].map(|n| index.id(&format!("Avionics cooling system {n} protection fault")));
+        let fws_module = topology.end_systems.iter().position(|es| es.name == "CPIOM-C1").expect("CPIOM-C1 module exists");
+        let fws_partition_idx = topology.end_systems[fws_module].partitions.iter().position(|&p| p == "FWS").expect("CPIOM-C1 hosts an FWS partition");
+        let fws_customization_db_rejected_id = index.id("CPIOM-C1 partition FWS customization database rejected");
+        let fws_atqc_db_rejected_id = index.id("CPIOM-C1 partition FWS ATQC database rejected");
+
         Self {
             topology,
             ids: Ids { switches, segments, modules, bays: bay_ids },
@@ -443,6 +486,13 @@ impl LiveAvionicsNetwork {
             module_bus,
             now_s: 0.0,
             snapshot: Snapshot::default(),
+            coolg_overheat_id,
+            coolg_prot_fault_id,
+            coolg_overheat: [0.0; 2],
+            coolg_prot_fault: [0.0; 2],
+            fws_partition: (fws_module, fws_partition_idx),
+            fws_customization_db_rejected_id,
+            fws_atqc_db_rejected_id,
         }
     }
 
@@ -539,7 +589,7 @@ impl LiveAvionicsNetwork {
                     partitions: m
                         .partitions
                         .iter()
-                        .map(|&id| PartitionFaults { failure: faults.get(id) })
+                        .map(|&id| PartitionFaults { failure: faults.get(id), ..PartitionFaults::default() })
                         .collect(),
                     // The catalogue entry's magnitude text describes the
                     // *model field*'s convention (0 unpowered, 1 powered);
@@ -621,7 +671,7 @@ impl Area for LiveAvionicsNetwork {
 
         // ---- Route both networks with this tick's fault set ------------
         let nf = self.network_faults(truth, faults);
-        let graph = NetworkGraph::new(&self.topology);
+        let graph = NetworkGraph::memoized(&self.topology);
 
         let module_available: Vec<bool> =
             (0..self.topology.end_systems.len()).map(|i| nf.module(i).is_available()).collect();
@@ -639,15 +689,24 @@ impl Area for LiveAvionicsNetwork {
         // from "exactly one pair does and everything else is isolated", and
         // it is that per-module answer a single cable or port fault
         // actually moves (see `Snapshot::module_network_reachable`).
+        //
+        // Each source's reach is one search (`NetworkGraph::reachable_ends`),
+        // made at most once per side this tick and shared with the virtual
+        // links below.
+        let end_count = self.topology.end_systems.len();
+        let mut reach: [Vec<Option<Vec<bool>>>; 2] = [vec![None; end_count], vec![None; end_count]];
+        let mut reach_from = |side: NetworkSide, a: usize| -> Vec<bool> {
+            reach[side.index()][a].get_or_insert_with(|| graph.reachable_ends(side, NodeId::End(a), &nf)).clone()
+        };
         let mut network_available = [false; 2];
-        let mut module_network_reachable = vec![[false; 2]; self.topology.end_systems.len()];
+        let mut module_network_reachable = vec![[false; 2]; end_count];
         for side in NetworkSide::BOTH {
             let s = side.index();
-            let up: Vec<usize> =
-                (0..self.topology.end_systems.len()).filter(|&i| module_available[i]).collect();
+            let up: Vec<usize> = (0..end_count).filter(|&i| module_available[i]).collect();
             for &a in &up {
+                let from_a = reach_from(side, a);
                 for &b in &up {
-                    if a != b && graph.reachable(side, NodeId::End(a), NodeId::End(b), &nf) {
+                    if a != b && from_a[b] {
                         network_available[s] = true;
                         module_network_reachable[a][s] = true;
                     }
@@ -691,6 +750,16 @@ impl Area for LiveAvionicsNetwork {
             .map(|(i, m)| m.partitions.iter().map(|&pid| module_available[i] && faults.get(pid) < 1.0).collect())
             .collect();
 
+        // ---- CPIOM-C1's own FWS partition: two database-validity BITE
+        // flags, gated on that one partition being available at all (module
+        // powered, module hardware healthy, and the FWS partition itself
+        // not otherwise down) -- an unavailable FWS reports nothing about
+        // itself, matching `fbw/ata31_33.rs`'s `fws_unavailable` gate. -----
+        let (fws_module, fws_part) = self.fws_partition;
+        let fws_partition_available = module_partition_available.get(fws_module).and_then(|v| v.get(fws_part)).copied().unwrap_or(false);
+        let fws_customization_db_rejected = fws_partition_available && faults.get(self.fws_customization_db_rejected_id) >= FULLY_FAILED;
+        let fws_atqc_db_rejected = fws_partition_available && faults.get(self.fws_atqc_db_rejected_id) >= FULLY_FAILED;
+
         // ---- Per-module egress port load: what a babbling transmitter
         // does to its own attachment port, visible even in a state where it
         // has not yet cost another virtual link a frame (`graph::PortLoad`
@@ -720,9 +789,8 @@ impl Area for LiveAvionicsNetwork {
                 NetworkSide::BOTH
                     .iter()
                     .filter(|&&side| {
-                        vl.destinations
-                            .iter()
-                            .all(|&d| graph.reachable(side, NodeId::End(vl.source), NodeId::End(d), &nf))
+                        let from_source = reach_from(side, vl.source);
+                        vl.destinations.iter().all(|&d| from_source.get(d).copied().unwrap_or(false))
                     })
                     .count() as f64
             })
@@ -759,11 +827,25 @@ impl Area for LiveAvionicsNetwork {
             module_port_load_frac,
             bay_fan_health_frac,
             vl_paths_up,
+            fws_customization_db_rejected,
+            fws_atqc_db_rejected,
+            cds_fcu_switch_off: truth.controls.fcu_switch_off,
         };
+
+        // 212800019/020/021 (E-AIR-DESIGN.md): see this struct's own doc on
+        // `coolg_overheat_id`/`coolg_prot_fault_id`.
+        for i in 0..2 {
+            self.coolg_overheat[i] = faults.get(self.coolg_overheat_id[i]);
+            self.coolg_prot_fault[i] = faults.get(self.coolg_prot_fault_id[i]);
+        }
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
         let s = &self.snapshot;
+        for i in 0..2 {
+            out(&format!("DEEP_AVNCS_COOLG_{}_OVHT", i + 1), self.coolg_overheat[i]);
+        }
+        out("DEEP_AVNCS_COOLG_PROT_FAULT", if self.coolg_prot_fault.iter().any(|&m| m > 0.0) { 1.0 } else { 0.0 });
 
         // --- the variables `registry.rs` triggers ECAM alerts on ---------
         out("AFDX_NETWORK_A_AVAILABLE", f64::from(s.network_available[0]));
@@ -875,6 +957,12 @@ impl Area for LiveAvionicsNetwork {
             out(&format!("AVNCS_VL_{key}_PATHS_UP"), s.vl_paths_up.get(i).copied().unwrap_or(0.0));
             out(&format!("AVNCS_VL_{key}_PATHS_DESIGNED"), NetworkSide::BOTH.len() as f64);
         }
+
+        // `E-IND-DESIGN.md` 314800001/005.
+        out("AVNCS_MODULE_CPIOM_C1_CUSTOMIZATION_DB_REJECTED", f64::from(s.fws_customization_db_rejected));
+        out("AVNCS_MODULE_CPIOM_C1_ATQC_DB_REJECTED", f64::from(s.fws_atqc_db_rejected));
+        // `E-IND-DESIGN.md` 311800001.
+        out("CDS_FCU_SWITCH_OFF", f64::from(s.cds_fcu_switch_off));
     }
 }
 
@@ -1336,7 +1424,7 @@ mod tests {
     #[test]
     fn module_power_follows_the_electrical_areas_solved_bus_not_the_raw_truth_field() {
         let mut truth = powered();
-        truth.published = PublishedFrame(BTreeMap::from([
+        truth.published = PublishedFrame::from(BTreeMap::from([
             ("ELEC_DC_1_BUS_POTENTIAL".to_string(), 0.0),
             ("ELEC_DC_2_BUS_POTENTIAL".to_string(), 0.0),
         ]));
@@ -1361,7 +1449,7 @@ mod tests {
     fn the_electrical_areas_solved_bus_also_wins_when_the_raw_field_is_the_pessimistic_one() {
         let mut truth = Truth { dt_s: 1.0 / 30.0, ..Truth::default() };
         assert_eq!(truth.dc_bus_volts, [0.0; 2], "setup: the raw field claims a dark aircraft");
-        truth.published = PublishedFrame(BTreeMap::from([
+        truth.published = PublishedFrame::from(BTreeMap::from([
             ("ELEC_AC_1_BUS_POTENTIAL".to_string(), 115.0),
             ("ELEC_AC_2_BUS_POTENTIAL".to_string(), 115.0),
             ("ELEC_AC_3_BUS_POTENTIAL".to_string(), 115.0),
@@ -1387,7 +1475,7 @@ mod tests {
     #[test]
     fn losing_one_solved_dc_main_takes_only_the_modules_on_that_bus() {
         let mut truth = powered();
-        truth.published = PublishedFrame(BTreeMap::from([
+        truth.published = PublishedFrame::from(BTreeMap::from([
             ("ELEC_DC_1_BUS_POTENTIAL".to_string(), 0.0),
             ("ELEC_DC_2_BUS_POTENTIAL".to_string(), 28.0),
         ]));
@@ -1468,5 +1556,60 @@ mod tests {
             shorted["AVNCS_MODULE_CPIOM_C1_AVAILABLE"], 0.0,
             "an armed electrical failure must reach the avionics module it really feeds"
         );
+    }
+
+    /// `E-IND-DESIGN.md` 314800001/005: the FWS partition's own two
+    /// database-validity BITE flags -- healthy silent, each fault armed
+    /// independently fires only its own flag, and an unpowered module
+    /// reports neither (it has no power to report on itself with at all).
+    #[test]
+    fn fws_database_rejected_flags_fire_independently_and_need_the_partition_powered() {
+        let index = FaultIndex::build();
+        let custom_id = index.id("CPIOM-C1 partition FWS customization database rejected");
+        let atqc_id = index.id("CPIOM-C1 partition FWS ATQC database rejected");
+        assert_ne!(custom_id, 0);
+        assert_ne!(atqc_id, 0);
+
+        let mut healthy_area = LiveAvionicsNetwork::new();
+        let healthy = run(&mut healthy_area, &powered(), &Faults::default(), 2.0);
+        assert_eq!(healthy["AVNCS_MODULE_CPIOM_C1_CUSTOMIZATION_DB_REJECTED"], 0.0);
+        assert_eq!(healthy["AVNCS_MODULE_CPIOM_C1_ATQC_DB_REJECTED"], 0.0);
+
+        let mut custom_area = LiveAvionicsNetwork::new();
+        let custom = run(&mut custom_area, &powered(), &Faults::from_pairs([(custom_id, 1.0)]), 2.0);
+        assert_eq!(custom["AVNCS_MODULE_CPIOM_C1_CUSTOMIZATION_DB_REJECTED"], 1.0, "the armed check must fire");
+        assert_eq!(custom["AVNCS_MODULE_CPIOM_C1_ATQC_DB_REJECTED"], 0.0, "the other check must stay quiet");
+
+        let mut atqc_area = LiveAvionicsNetwork::new();
+        let atqc = run(&mut atqc_area, &powered(), &Faults::from_pairs([(atqc_id, 1.0)]), 2.0);
+        assert_eq!(atqc["AVNCS_MODULE_CPIOM_C1_ATQC_DB_REJECTED"], 1.0);
+        assert_eq!(atqc["AVNCS_MODULE_CPIOM_C1_CUSTOMIZATION_DB_REJECTED"], 0.0);
+
+        // Cold and dark (no DC power at all): the module cannot report on
+        // itself, so both flags must stay down even with the fault armed.
+        let mut cold_area = LiveAvionicsNetwork::new();
+        let cold = run(&mut cold_area, &Truth::default(), &Faults::from_pairs([(custom_id, 1.0), (atqc_id, 1.0)]), 2.0);
+        assert_eq!(cold["AVNCS_MODULE_CPIOM_C1_AVAILABLE"], 0.0, "setup: the module must actually be unpowered");
+        assert_eq!(cold["AVNCS_MODULE_CPIOM_C1_CUSTOMIZATION_DB_REJECTED"], 0.0);
+        assert_eq!(cold["AVNCS_MODULE_CPIOM_C1_ATQC_DB_REJECTED"], 0.0);
+    }
+
+    /// `E-IND-DESIGN.md` 311800001 CDS & AUTO FLT FCU SWITCHED OFF: a
+    /// direct mirror of the switch position, not a fault -- on regardless
+    /// of power state (a guarded cockpit switch has a real position whether
+    /// or not the FWS is there to annunciate it), but only meaningful to a
+    /// crew once the network is alive, which `fbw/ata31_33.rs`'s own trigger
+    /// ANDs in separately.
+    #[test]
+    fn cds_fcu_switch_off_mirrors_truths_own_control_field() {
+        let mut off_area = LiveAvionicsNetwork::new();
+        let mut truth = powered();
+        truth.controls.fcu_switch_off = true;
+        let off = run(&mut off_area, &truth, &Faults::default(), 1.0);
+        assert_eq!(off["CDS_FCU_SWITCH_OFF"], 1.0);
+
+        let mut on_area = LiveAvionicsNetwork::new();
+        let on = run(&mut on_area, &powered(), &Faults::default(), 1.0);
+        assert_eq!(on["CDS_FCU_SWITCH_OFF"], 0.0);
     }
 }

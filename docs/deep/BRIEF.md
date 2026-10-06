@@ -1,7 +1,7 @@
 # Deep systems push — shared brief (read fully before starting)
 
 Project: FlyByWire A380X ported to X-Plane 12, study-level systems. Plugin crate:
-`D:\fbw-xp-systems` (Rust). FlyByWire's own systems (read-only reference, never edit):
+`D:\A380\fbw-xp-systems` (Rust). FlyByWire's own systems (read-only reference, never edit):
 `D:\fbw-aircraft\fbw-a380x\src\wasm\systems\a380_systems\src` and
 `D:\fbw-aircraft\fbw-common\src\wasm\systems\systems\src`.
 
@@ -42,7 +42,7 @@ scripted symptom. You are one of 20 agents working in parallel for a fixed time 
 
 ## Registering failures, components and ECAM alerts (every system agent, mandatory)
 
-Register everything in CODE through the API in `D:\fbw-xp-systems\src\deep\api.rs` (read it
+Register everything in CODE through the API in `D:\A380\fbw-xp-systems\src\deep\api.rs` (read it
 fully: `Registry`, `FailureDef`, `ComponentDef`, `ParamDef`, `EcamAlert`, `line(...)`, `var(...)`,
 `Cond`, `Level`, `Phase`, `failure_id`, `Area`). In your directory create `registry.rs` with
 
@@ -73,6 +73,6 @@ every area's `register` and runs `Registry::validate()`. This replaces CATALOGUE
 - Numerically safe at rest and at dt = 0: no NaN, no division by zero, exact exponential
   steps for first-order lags, sub-stepping where stiff.
 - Doc comments explain the physics and cite sources, matching the existing style in
-  `D:\fbw-xp-systems\src\physics\engine\oil.rs` and `hot_section.rs` (read those as examples).
+  `D:\A380\fbw-xp-systems\src\physics\engine\oil.rs` and `hot_section.rs` (read those as examples).
 - Aircraft: A380-800, 4 × Rolls-Royce Trent 972B-84 (EASA TCDS E.012 is public), 2 hydraulic
   systems (green/yellow, 5000 psi) plus electrical backup (EHA/EBHA), 4 VFGs, APU PW980.

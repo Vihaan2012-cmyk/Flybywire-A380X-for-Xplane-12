@@ -15,3 +15,4 @@ pub mod hp_pump;
 pub mod lp_pump;
 pub mod manifold;
 pub mod shutoff_valve;
+pub mod strainer;

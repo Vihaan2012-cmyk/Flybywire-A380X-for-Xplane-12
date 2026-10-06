@@ -2,7 +2,7 @@
 
 A component-level thermodynamic gas-turbine model for the A380X's engine,
 replacing the pressure-ratio-scaled thrust table and X-Plane's own generic
-spool dynamics. Code: `D:\fbw-xp-systems\src\physics\engine\` (`mod.rs` plus
+spool dynamics. Code: `D:\A380\fbw-xp-systems\src\physics\engine\` (`mod.rs` plus
 `params.rs`, `gas.rs`, `inlet.rs`, `compressor.rs`, `combustor.rs`,
 `turbine.rs`, `nozzle.rs`, `spool.rs`, `starter.rs`, `governor.rs`). Wired in
 from `src\engine_commands.rs`.

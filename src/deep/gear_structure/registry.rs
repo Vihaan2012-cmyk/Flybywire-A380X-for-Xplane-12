@@ -58,6 +58,10 @@ pub fn register(r: &mut Registry) {
     register_wheel_brakes(r);
     register_parking_brake(r);
     register_steering(r);
+    register_bscu(r);
+    register_brake_pedal_transducers(r);
+    register_steer_ctl(r);
+    register_steer_input_transducers(r);
     register_ecam(r);
 }
 
@@ -86,6 +90,31 @@ fn register_struts(r: &mut Registry) {
             effect: "oil_level_fraction depletes; orifice damping is lost, so a landing impact rebounds with far less energy absorbed, raising the peak reaction force for a given sink speed".into(),
         });
 
+        // `E-IND-DESIGN.md` 320800043/046: the strut's own pressure-
+        // monitoring BITE and its weight-on-wheels sensing, each an
+        // independent side channel from the real gas charge / true ground
+        // contact (see `strut::StrutFaults`'s own doc on each field).
+        let gas_charge_sensor_fail = r.failure(FailureDef {
+            id: failure_id(Area::GearStructure, ATA, next_id()),
+            area: Area::GearStructure,
+            ata: ATA,
+            name: format!("{} strut pressure-monitoring sensor failure", leg.name),
+            component: component_id.clone(),
+            model_field: "gear_structure::strut::StrutFaults.gas_charge_sensor_fail".into(),
+            magnitude: "inherently boolean (a BITE self-test either passes or fails): 0 healthy, >= 0.5 failed".into(),
+            effect: "the strut's own pressure-sensing/monitoring function reports failed, independent of the real gas_charge_fraction (320800043 L/G OLEO PRESS MONITORING FAULT)".into(),
+        });
+        let wow_sensing_fail = r.failure(FailureDef {
+            id: failure_id(Area::GearStructure, ATA, next_id()),
+            area: Area::GearStructure,
+            ata: ATA,
+            name: format!("{} weight-on-wheels sensor failure", leg.name),
+            component: component_id.clone(),
+            model_field: "gear_structure::strut::StrutFaults.wow_sensing_fail".into(),
+            magnitude: "0..1: >=0.5 the sensed ground-contact state is inverted from the true state (retraction::RetractionFaults::sensor_lies' own convention, applied to weight-on-wheels sensing)".into(),
+            effect: "weight-on-wheels sensing disagrees with this leg's true ground-contact state, independent of it (320800046 L/G WEIGHT ON WHEELS FAULT)".into(),
+        });
+
         r.component(ComponentDef {
             id: component_id,
             area: Area::GearStructure,
@@ -96,7 +125,7 @@ fn register_struts(r: &mut Registry) {
                 ParamDef { name: "oil_level_fraction".into(), meaning: "hydraulic damping oil remaining, 0 empty .. 1 full service".into(), healthy: 1.0 },
                 ParamDef { name: "life_fraction_consumed".into(), meaning: "Miner's-rule fatigue budget consumed by landing cycles, 0 new .. 1 budget exhausted".into(), healthy: 0.0 },
             ],
-            failures: vec![gas_leak, oil_leak],
+            failures: vec![gas_leak, oil_leak, gas_charge_sensor_fail, wow_sensing_fail],
         });
     }
 }
@@ -156,13 +185,34 @@ fn register_retractions(r: &mut Registry) {
             effect: "the cockpit indication disagrees with the leg's true lock state, independent of it".into(),
         });
 
+        let mut failures = vec![actuator_leak, uplock_jam, downlock_fail, door_jam, sensor_lies];
+
+        // `E-IND-DESIGN.md` 320800032 L/G BOGIE POSITION FAULT: only the
+        // two body legs carry a bogie-beam trim/levelling actuator (it
+        // levels the bogie before it retracts into the wheel well) --
+        // nose and wing legs have no such mechanism at all, so this
+        // failure is only registered for `l_body`/`r_body`.
+        if leg.key == "l_body" || leg.key == "r_body" {
+            let bogie_trim_fail = r.failure(FailureDef {
+                id: failure_id(Area::GearStructure, ATA, next_id()),
+                area: Area::GearStructure,
+                ata: ATA,
+                name: format!("{} bogie trim/levelling actuator failure", leg.name),
+                component: component_id.clone(),
+                model_field: "gear_structure::retraction::RetractionFaults.bogie_trim_fail".into(),
+                magnitude: "inherently boolean (a BITE self-test either passes or fails): 0 healthy, >= 0.5 failed to trim".into(),
+                effect: "the body-gear bogie fails to trim/level before retraction (320800032 L/G BOGIE POSITION FAULT)".into(),
+            });
+            failures.push(bogie_trim_fail);
+        }
+
         r.component(ComponentDef {
             id: component_id,
             area: Area::GearStructure,
             ata: ATA,
             name: format!("{} retraction/door/lock system", leg.name),
             params: Vec::new(),
-            failures: vec![actuator_leak, uplock_jam, downlock_fail, door_jam, sensor_lies],
+            failures,
         });
     }
 }
@@ -251,8 +301,159 @@ fn register_steering(r: &mut Registry) {
             effect: "the wheel tracks a commanded steering angle more slowly".into(),
         });
 
-        r.component(ComponentDef { id: component_id, area: Area::GearStructure, ata: ATA, name: format!("{name} steering"), params: Vec::new(), failures: vec![shimmy, actuator_leak] });
+        let mut failures = vec![shimmy, actuator_leak];
+
+        // `E-IND-DESIGN.md` 320800056/057/059: the angle-limit override and
+        // the disconnect (towing) mechanism exist only on the nosewheel.
+        if key == "nose" {
+            let disc_mechanism_fail = r.failure(FailureDef {
+                id: failure_id(Area::GearStructure, ATA, next_id()),
+                area: Area::GearStructure,
+                ata: ATA,
+                name: format!("{name} disconnect mechanism failure"),
+                component: component_id.clone(),
+                model_field: "gear_structure::steering::SteeringFaults.disc_mechanism_fail".into(),
+                magnitude: "0..1: >=0.5 the mechanism no longer responds to a new disconnect/reconnect selection".into(),
+                effect: "the nosewheel steering disconnect (towing) mechanism resists commanded release/engagement and freezes at its last state (320800057 STEER N/W STEER DISC FAULT, 320800059 STEER N/W STEER NOT DISC)".into(),
+            });
+            failures.push(disc_mechanism_fail);
+
+            let steer_overtravel_fail = r.failure(FailureDef {
+                id: failure_id(Area::GearStructure, ATA, next_id()),
+                area: Area::GearStructure,
+                ata: ATA,
+                name: format!("{name} steering angle limit override failure"),
+                component: component_id.clone(),
+                model_field: "gear_structure::steering::SteeringFaults.steer_overtravel_fail".into(),
+                magnitude: "0..1: >=0.5 defeats the nosewheel steering angle limit switch/software clamp".into(),
+                effect: "a runaway actuator or a miscalibrated limit switch lets the true nosewheel angle exceed MAX_NOSE_ANGLE_DEG, which this model's own healthy clamp otherwise prevents (320800056 STEER N/W STEER ANGLE LIMIT EXCEEDED)".into(),
+            });
+            failures.push(steer_overtravel_fail);
+        }
+
+        r.component(ComponentDef { id: component_id, area: Area::GearStructure, ata: ATA, name: format!("{name} steering"), params: Vec::new(), failures });
     }
+}
+
+/// `E-IND-DESIGN.md`'s new Brake System Controller (BSC): the two BSCU
+/// control channels, the normal/alternate pressure-monitoring pair, the
+/// autobrake function and the brake selector valve. Hydraulic-source
+/// availability itself is not modelled here at all -- it is read straight
+/// off `deep::hydraulics`'s own already-published
+/// `HYD_GREEN/YELLOW_MANIFOLD_PRESSURE_PSI` (and the existing parking-brake
+/// accumulator's `PARK_BRAKE_PRESS_PA`) directly in `fbw/ata32.rs`'s own
+/// trigger conditions, the same cross-area published-name read
+/// `fbw/ata31_33.rs` already uses for the FCDC loads -- no second copy of
+/// that state belongs in this area.
+fn register_bscu(r: &mut Registry) {
+    let component_id = "32_gear.bscu".to_string();
+    let mut failures = Vec::new();
+    let mut params = Vec::new();
+    let channels: [(&str, &str, &str); 6] = [
+        ("ctl_1_fail", "BSCU control channel 1 failure", "320800015 BRAKES CTL 1 FAULT"),
+        ("ctl_2_fail", "BSCU control channel 2 failure", "320800016 BRAKES CTL 2 FAULT"),
+        ("norm_press_sensor_fail", "BSCU normal brake pressure sensor failure", "320800021 BRAKES NORM BRK PRESS MONITORING FAULT"),
+        ("alt_press_sensor_fail", "BSCU alternate brake pressure sensor failure", "320800012 BRAKES ALTN BRK PRESS MONITORING FAULT"),
+        ("autobrake_fail", "BSCU autobrake function failure", "320800013 BRAKES AUTO BRK FAULT"),
+        ("sel_valve_jam", "BSCU brake selector valve jammed open", "320800027 BRAKES SEL VLV JAMMED OPEN"),
+    ];
+    for (field, desc, alert) in channels {
+        let id = r.failure(FailureDef {
+            id: failure_id(Area::GearStructure, ATA, next_id()),
+            area: Area::GearStructure,
+            ata: ATA,
+            name: desc.to_string(),
+            component: component_id.clone(),
+            model_field: format!("gear_structure::live::BscuFaults.{field}"),
+            magnitude: "inherently boolean (a BITE self-test/jam either applies or does not): 0 healthy, >= 0.5 failed".into(),
+            effect: format!("{alert}"),
+        });
+        failures.push(id);
+        params.push(ParamDef { name: field.into(), meaning: desc.into(), healthy: 0.0 });
+    }
+    r.component(ComponentDef { id: component_id, area: Area::GearStructure, ata: ATA, name: "Brake System Control Unit (BSCU)".into(), params, failures });
+}
+
+/// `E-IND-DESIGN.md` 320800024 BRAKES PEDAL BRAKING FAULT: the two brake
+/// pedal position transducers.
+fn register_brake_pedal_transducers(r: &mut Registry) {
+    let component_id = "32_gear.brake_pedal_transducers".to_string();
+    let sides = [("left", "Left brake pedal transducer failure"), ("right", "Right brake pedal transducer failure")];
+    let mut failures = Vec::new();
+    let mut params = Vec::new();
+    for (side, desc) in sides {
+        let id = r.failure(FailureDef {
+            id: failure_id(Area::GearStructure, ATA, next_id()),
+            area: Area::GearStructure,
+            ata: ATA,
+            name: desc.to_string(),
+            component: component_id.clone(),
+            model_field: format!("gear_structure::live::BrakePedalTransducerFaults.{side}"),
+            magnitude: "inherently boolean: 0 healthy, >= 0.5 failed".into(),
+            effect: "320800024 BRAKES PEDAL BRAKING FAULT".into(),
+        });
+        failures.push(id);
+        params.push(ParamDef { name: format!("pedal_sensor_fail_{side}"), meaning: desc.into(), healthy: 0.0 });
+    }
+    r.component(ComponentDef { id: component_id, area: Area::GearStructure, ata: ATA, name: "Brake pedal position transducers".into(), params, failures });
+}
+
+/// `E-IND-DESIGN.md`'s new Steering System Controller (SSC) control
+/// channels and selector valve. As with the BSCU above, hydraulic-source
+/// availability is read directly from `deep::hydraulics`'s own published
+/// pressures in `fbw/ata32.rs`, not modelled here.
+fn register_steer_ctl(r: &mut Registry) {
+    let component_id = "32_gear.steer_ctl".to_string();
+    let mut failures = Vec::new();
+    let mut params = Vec::new();
+    let channels: [(&str, &str, &str); 3] = [
+        ("ctl_1_fail", "Steering control channel 1 failure", "320800053 STEER CTL 1 FAULT"),
+        ("ctl_2_fail", "Steering control channel 2 failure", "320800054 STEER CTL 2 FAULT"),
+        ("sel_valve_jam", "Steering selector valve jammed open", "320800062 STEER SEL VLV JAMMED OPEN"),
+    ];
+    for (field, desc, alert) in channels {
+        let id = r.failure(FailureDef {
+            id: failure_id(Area::GearStructure, ATA, next_id()),
+            area: Area::GearStructure,
+            ata: ATA,
+            name: desc.to_string(),
+            component: component_id.clone(),
+            model_field: format!("gear_structure::live::SteerCtlFaults.{field}"),
+            magnitude: "inherently boolean: 0 healthy, >= 0.5 failed".into(),
+            effect: alert.to_string(),
+        });
+        failures.push(id);
+        params.push(ParamDef { name: field.into(), meaning: desc.into(), healthy: 0.0 });
+    }
+    r.component(ComponentDef { id: component_id, area: Area::GearStructure, ata: ATA, name: "Steering System Control Unit".into(), params, failures });
+}
+
+/// `E-IND-DESIGN.md` 320800051/052/061: the captain's and F/O's tiller
+/// transducers and the pedal-steering transducer.
+fn register_steer_input_transducers(r: &mut Registry) {
+    let component_id = "32_gear.steer_input_transducers".to_string();
+    let mut failures = Vec::new();
+    let mut params = Vec::new();
+    let channels: [(&str, &str, &str); 3] = [
+        ("capt_tiller_fail", "Captain's steering tiller transducer failure", "320800051 STEER CAPT STEER TILLER FAULT"),
+        ("fo_tiller_fail", "F/O's steering tiller transducer failure", "320800052 STEER FO STEER TILLER FAULT"),
+        ("pedal_steer_fail", "Pedal steering transducer failure", "320800061 STEER PEDAL STEER CTL FAULT"),
+    ];
+    for (field, desc, alert) in channels {
+        let id = r.failure(FailureDef {
+            id: failure_id(Area::GearStructure, ATA, next_id()),
+            area: Area::GearStructure,
+            ata: ATA,
+            name: desc.to_string(),
+            component: component_id.clone(),
+            model_field: format!("gear_structure::live::SteerInputTransducerFaults.{field}"),
+            magnitude: "inherently boolean: 0 healthy, >= 0.5 failed".into(),
+            effect: alert.to_string(),
+        });
+        failures.push(id);
+        params.push(ParamDef { name: field.into(), meaning: desc.into(), healthy: 0.0 });
+    }
+    r.component(ComponentDef { id: component_id, area: Area::GearStructure, ata: ATA, name: "Steering input transducers".into(), params, failures });
 }
 
 fn register_ecam(r: &mut Registry) {
@@ -269,7 +470,7 @@ fn register_ecam(r: &mut Registry) {
         ]))
         .confirm(1.0)
         .inhibit(&[Phase::LiftOff, Phase::Below800Ft])
-        .step(line("GEAR LEVER", "RECYCLE").done(var("GEAR_LEVER_POSITION_REQUEST").on()))
+        .step(line("GEAR LEVER", "RECYCLE").done(var("GEAR_LEVER_SELECTED_DOWN").on()))
         .status_line("L/G GEAR NOT DOWNLOCKED")
         .inop_sys("L/G NORMAL EXTENSION")
         .raised_by(&gear_faults),

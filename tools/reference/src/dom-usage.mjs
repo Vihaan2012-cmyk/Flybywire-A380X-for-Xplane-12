@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Merges the per-screen recordings of `npm run reference -- --record`
-// (D:/fbw-build/reference-dom-usage/<state>.<SCREEN>.json) into
+// (D:/A380/fbw-build/reference-dom-usage/<state>.<SCREEN>.json) into
 // docs/dom-usage-recorded.md, for the DOM engineer.
 //
 //   npm run dom-usage

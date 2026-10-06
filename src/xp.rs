@@ -861,9 +861,23 @@ pub fn remove_command_handler(command: CommandRef, handler: CommandHandler, befo
 impl Xplm {
     /// Fill `out` from the start of a byte array dataref (a string). Returns
     /// how many bytes X-Plane wrote.
+    ///
+    /// `XPLMGetDatab` is the one XPLM function this module looks up by name
+    /// on every call rather than once in `load`, like `find`/`get_f`/
+    /// `get_i`/`get_vf`/`get_vi`/... above do (they are resolved once and
+    /// kept as fields on `Xplm`). `radios.rs`'s `feed_variables` calls this
+    /// every frame for 6 idents (4 NAV + 2 ADF), so every frame was paying a
+    /// full `LoadLibraryA`+`GetProcAddress` round trip 6 times over --
+    /// measured as this plugin's entire "radios" per-frame cost (W40/W64).
+    /// Cache the resolved pointer after the first call, the same way
+    /// `magnetic_variation` below already does for a symbol also "looked up
+    /// on use rather than in `load`".
     pub fn get_vb(&self, dataref: DataRef, out: &mut [u8]) -> usize {
-        let Some(f) = Self::xplm_symbol("XPLMGetDatab") else { return 0 };
-        let f = unsafe { std::mem::transmute::<*mut c_void, GetDatabFn>(f) };
+        static SYMBOL: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        let Some(f) = *SYMBOL.get_or_init(|| Self::xplm_symbol("XPLMGetDatab").map(|p| p as usize)) else {
+            return 0;
+        };
+        let f = unsafe { std::mem::transmute::<usize, GetDatabFn>(f) };
         let n = unsafe { f(dataref, out.as_mut_ptr() as *mut c_void, 0, out.len() as c_int) };
         n.max(0) as usize
     }
@@ -946,6 +960,14 @@ pub struct AvionicsApi {
     /// it inside the simulator's window, where it covers the cockpit it is
     /// meant to be read beside.
     pub pop_out: unsafe extern "C" fn(AvionicsId),
+    /// XPLMSetAvionicsGeometryOS: sizes and positions a popped-out device's
+    /// operating-system window, in OS desktop pixel coordinates (left, top,
+    /// right, bottom). `pop_out` alone hands the window whatever geometry
+    /// X-Plane defaults to -- measured as a 198x1080 sliver regardless of
+    /// the device's own screen size (EFB 1430x1000, PFD/EWD 768x1024 all
+    /// came out identical) -- so this must be called right after `pop_out`
+    /// to give the window a size actually derived from the device.
+    pub set_geometry_os: unsafe extern "C" fn(AvionicsId, c_int, c_int, c_int, c_int),
     /// XPLMIsAvionicsPopupVisible / XPLMIsAvionicsPoppedOut: which state a
     /// device is in, asked of X-Plane rather than remembered here, so a
     /// window the user closed with its own chrome does not leave this
@@ -1001,6 +1023,10 @@ impl Xplm {
                 pop_out: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(AvionicsId)>(
                     Self::xplm_symbol("XPLMPopOutAvionics")?,
                 ),
+                set_geometry_os: std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn(AvionicsId, c_int, c_int, c_int, c_int),
+                >(Self::xplm_symbol("XPLMSetAvionicsGeometryOS")?),
                 is_popup_visible: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(AvionicsId) -> c_int>(
                     Self::xplm_symbol("XPLMIsAvionicsPopupVisible")?,
                 ),
@@ -1205,12 +1231,12 @@ pub fn magnetic_variation(lat: f64, lon: f64) -> Option<f32> {
 }
 
 // ----------------------------------------------------------------------
-// [wxr] X-Plane's weather API (XPLMWeather.h, XPLM400/420), for src/wxr.
+// X-Plane's weather API (XPLMWeather.h, XPLM400/420), for the deep layer's
+// weather (deep::weather, deep::integration::weather_truth).
 // Looked up on use, like the commands above. XPLMGetWeatherAtLocation's
 // header says "not intended to be used per-frame ... called only during
-// the pre-flight loop callback"; src/wxr budgets its calls (a handful per
-// tick, spread over many ticks) rather than calling it for every pixel,
-// and only from the main thread's own tick (docs/wxr.md).
+// the pre-flight loop callback"; the deep layer samples it every few
+// seconds, from the main thread's own tick.
 // ----------------------------------------------------------------------
 
 const WXR_WIND_LAYERS: usize = 13;
@@ -1282,12 +1308,26 @@ type GetWeatherAtLocationFn = unsafe extern "C" fn(f64, f64, f64, *mut WeatherIn
 // `deep::weather::CLOUD_LAYERS` exactly; both come from the same real SDK
 // struct.
 
+/// The resolved `XPLMGetWeatherAtLocation` pointer, cached after the first
+/// call the same way `magnetic_variation` above caches
+/// `XPLMGetMagneticVariation`: [`weather_at_location`] is called repeatedly
+/// over a flight, so
+/// re-running `xplm_symbol`'s `LoadLibraryA`+`GetProcAddress` round trip on
+/// every call was up to 12 full symbol resolutions a frame for one XPLM
+/// entry point -- the same shape of bug `fixes/W64.md` found and fixed for
+/// `XPLMGetDatab`/`radios.rs`. [`has_weather_api`] below shares this cache
+/// rather than resolving the same symbol a second, independent way.
+fn weather_symbol() -> Option<usize> {
+    static SYMBOL: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *SYMBOL.get_or_init(|| Xplm::xplm_symbol("XPLMGetWeatherAtLocation").map(|p| p as usize))
+}
+
 /// `XPLMGetWeatherAtLocation`: X-Plane's weather at a point (main thread
 /// only; see the module comment above). `None` if this X-Plane has no
 /// weather API (pre-12 SDKs) or the call is unavailable outside X-Plane.
 pub fn weather_at_location(lat: f64, lon: f64, alt_m: f64) -> Option<WeatherSample> {
-    let f = Xplm::xplm_symbol("XPLMGetWeatherAtLocation")?;
-    let f = unsafe { std::mem::transmute::<*mut c_void, GetWeatherAtLocationFn>(f) };
+    let f = weather_symbol()?;
+    let f = unsafe { std::mem::transmute::<usize, GetWeatherAtLocationFn>(f) };
     let mut raw: WeatherInfoRaw = unsafe { std::mem::zeroed() };
     raw.struct_size = std::mem::size_of::<WeatherInfoRaw>() as c_int;
     let detailed = unsafe { f(lat, lon, alt_m, &mut raw) } != 0;
@@ -1308,7 +1348,7 @@ pub fn weather_at_location(lat: f64, lon: f64, alt_m: f64) -> Option<WeatherSamp
 /// Whether this X-Plane has `XPLMGetWeatherAtLocation` (the weather API is
 /// `XPLM400`, X-Plane 12; absent in a build against an older SDK target).
 pub fn has_weather_api() -> bool {
-    Xplm::xplm_symbol("XPLMGetWeatherAtLocation").is_some()
+    weather_symbol().is_some()
 }
 
 /// `deep::weather::WeatherSource`, live: forwards to [`weather_at_location`]/
@@ -1328,16 +1368,71 @@ impl WeatherSource for Xplm {
 }
 
 // ----------------------------------------------------------------------
+// [navdata] XPLMGetMETARForAirport (XPLMWeather.h, XPLM400), for
+// src/navdata's GET_METAR_BY_IDENT/GET_METAR_BY_LATLON Coherent replies
+// (W156). There is no X-Plane TAF API at all, so navdata answers
+// GET_TAF_BY_IDENT/GET_TAF_BY_LATLON itself with an explicit "no report"
+// reply and never calls into this file for it.
+// ----------------------------------------------------------------------
+
+type GetMetarForAirportFn = unsafe extern "C" fn(*const c_char, *mut FixedString150);
+
+/// `XPLMFixedString150_t` (XPLMDefs.h): a 150-byte fixed buffer, not
+/// necessarily null-terminated if a report fills it exactly.
+#[repr(C)]
+struct FixedString150 {
+    buffer: [c_char; 150],
+}
+
+/// `XPLMGetMETARForAirport`: the last METAR X-Plane downloaded for
+/// `airport_id` (an X-Plane apt.dat ident, e.g. `navdata::apt::Airport::ident`),
+/// or `None` if it has none. The SDK returns an empty string both when
+/// real-weather mode is off and when no report has arrived yet for that
+/// airport; this turns either case into `None` rather than a fabricated
+/// report, matching `navdata::metar_json`'s "not found" contract. Main
+/// thread only, like `weather_at_location` above; the SDK docs also say
+/// "not intended to be used per-frame", so this should only be reached from
+/// a Coherent call, not a tick.
+pub fn metar_for_airport(airport_id: &str) -> Option<String> {
+    if !on_main_thread() {
+        return None;
+    }
+    let f = Xplm::xplm_symbol("XPLMGetMETARForAirport")?;
+    let f = unsafe { std::mem::transmute::<*mut c_void, GetMetarForAirportFn>(f) };
+    let id = CString::new(airport_id).ok()?;
+    let mut out = FixedString150 { buffer: [0; 150] };
+    unsafe { f(id.as_ptr(), &mut out) };
+    let len = out.buffer.iter().position(|&c| c == 0).unwrap_or(out.buffer.len());
+    let text = String::from_utf8_lossy(&out.buffer[..len].iter().map(|&c| c as u8).collect::<Vec<u8>>()).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+// ----------------------------------------------------------------------
 // [deep/integration/xp_consequences] The plugin-force/gear-deploy-ratio
 // host seam (`ForceSink`): read-add-write on the six `*_plug_acf`
 // datarefs (X-Plane zeroes them every frame -- see that module's own
-// doc), plus `sim/flightmodel2/gear/deploy_ratio`. Handles resolved once
+// doc), plus `sim/aircraft/parts/acf_gear_deploy`. Handles resolved once
 // in `XpForceSink::new`, like every other seam in this file.
+//
+// `sim/flightmodel2/gear/deploy_ratio` (what this targeted before W215,
+// `E:/fbw-debug/fixes/W215.md`) is read-only in this SDK: DataRefs.txt's
+// own writable column reads `n` for it and `y` for
+// `sim/aircraft/parts/acf_gear_deploy` (identical "0.0->1.0" semantics),
+// so a write here was previously a silent no-op. `handling.rs::Refs::
+// gear_deploy` already resolves and writes this same, correct dataref
+// for FlyByWire's own (undamaged) gear position every tick; lib.rs's
+// `Plugin::apply_deep_xp_consequences` call site now runs strictly after
+// `handling.after_systems` (W215, same fix), so this file's single-index
+// write lands on top of handling's just-written five-element array as a
+// deliberate override for a collapsed leg, never a same-tick race with it.
 // ----------------------------------------------------------------------
 
-/// The live [`ForceSink`]: the same six plug-force datarefs and the same
-/// `deploy_ratio` element `deep::integration::xp_consequences` always
-/// wrote, just resolved and cached here instead of inline in that file.
+/// The live [`ForceSink`]: the same six plug-force datarefs and
+/// `sim/aircraft/parts/acf_gear_deploy` -- the writable dataref
+/// `handling.rs` itself already uses for FlyByWire's own gear position,
+/// not the read-only `sim/flightmodel2/gear/deploy_ratio` this struct
+/// targeted before W215 -- resolved and cached here instead of inline in
+/// that file.
 pub struct XpForceSink<'a> {
     xplm: &'a Xplm,
     fside: Option<DataRef>,
@@ -1346,7 +1441,7 @@ pub struct XpForceSink<'a> {
     roll: Option<DataRef>,
     pitch: Option<DataRef>,
     yaw: Option<DataRef>,
-    gear_deploy_ratio: Option<DataRef>,
+    acf_gear_deploy: Option<DataRef>,
 }
 
 impl<'a> XpForceSink<'a> {
@@ -1359,7 +1454,10 @@ impl<'a> XpForceSink<'a> {
             roll: xplm.find("sim/flightmodel/forces/L_plug_acf"),
             pitch: xplm.find("sim/flightmodel/forces/M_plug_acf"),
             yaw: xplm.find("sim/flightmodel/forces/N_plug_acf"),
-            gear_deploy_ratio: xplm.find("sim/flightmodel2/gear/deploy_ratio"),
+            // Writable ("y" in DataRefs.txt): the same dataref
+            // `handling.rs::Refs::gear_deploy` already writes FlyByWire's
+            // own gear position to every tick (W215).
+            acf_gear_deploy: xplm.find("sim/aircraft/parts/acf_gear_deploy"),
         }
     }
 
@@ -1383,7 +1481,12 @@ impl ForceSink for XpForceSink<'_> {
     }
 
     fn set_gear_deploy_ratio(&self, index: usize, ratio: f32) {
-        if let Some(d) = self.gear_deploy_ratio {
+        // Only called (lib.rs) after `handling.after_systems` has already
+        // written this tick's five-element baseline array from
+        // FlyByWire's own gear position, so this single-index write is a
+        // deliberate override of handling's value for a collapsed leg,
+        // never a second, racing writer of the whole array (W215).
+        if let Some(d) = self.acf_gear_deploy {
             self.xplm.set_vf_at(d, index, ratio);
         }
     }
@@ -1395,8 +1498,8 @@ impl ForceSink for XpForceSink<'_> {
 // docs/physics/adirs.md). Looked up on use, like the weather API above; the
 // probe object itself is created once and reused, as the header recommends,
 // rather than per call. src/physics/adirs.rs budgets calls to this (a
-// throttled sample every few ticks), consistent with src/wxr's own note
-// that XPLM's per-frame terrain/weather APIs are not meant to be hammered.
+// throttled sample every few ticks): XPLM's per-frame terrain/weather APIs
+// are not meant to be hammered.
 // ----------------------------------------------------------------------
 
 /// `XPLMProbeInfo_t` (XPLMScenery.h); only the hit location is read.
@@ -1433,8 +1536,16 @@ pub fn probe_terrain_y(x: f64, y: f64, z: f64) -> Option<f64> {
         let probe = unsafe { create(0) }; // xplm_ProbeY
         (!probe.is_null()).then_some(probe as usize)
     }))?;
-    let f = Xplm::xplm_symbol("XPLMProbeTerrainXYZ")?;
-    let f = unsafe { std::mem::transmute::<*mut c_void, ProbeTerrainXyzFn>(f) };
+    // `XPLMProbeTerrainXYZ`'s own pointer, cached the same way as the probe
+    // handle above: unlike the handle (created once), this call used to
+    // re-resolve the symbol (`xplm_symbol` -> `LoadLibraryA`+
+    // `GetProcAddress`) on every probe, i.e. every `PROBE_EVERY_TICKS` (8th)
+    // tick for as long as the plugin runs (`physics/adirs.rs`'s
+    // `RadioAltimeterProbe::update`). Same fix as `weather_at_location`
+    // above and `fixes/W64.md`'s `XPLMGetDatab`.
+    static SYMBOL: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let f = (*SYMBOL.get_or_init(|| Xplm::xplm_symbol("XPLMProbeTerrainXYZ").map(|p| p as usize)))?;
+    let f = unsafe { std::mem::transmute::<usize, ProbeTerrainXyzFn>(f) };
     let mut info: ProbeInfoRaw = unsafe { std::mem::zeroed() };
     info.struct_size = std::mem::size_of::<ProbeInfoRaw>() as c_int;
     let result = unsafe { f(probe as *mut c_void, x as f32, y as f32, z as f32, &mut info) };

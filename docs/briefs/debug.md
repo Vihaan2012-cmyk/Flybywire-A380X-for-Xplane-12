@@ -1,8 +1,8 @@
 # Whole-aircraft debug pass (2026-09-17)
 
-The FBW A380X runs in X-Plane 12 through our plugin (D:\fbw-xp-systems, Rust,
-built with `CARGO_TARGET_DIR=/d/fbw-build/target-main cargo +stable-x86_64-pc-windows-gnu build --release --features js`)
-and a converted aircraft made by D:\msfs2xp-aircraft (OBJ8 cockpit, SASL Lua
+The FBW A380X runs in X-Plane 12 through our plugin (D:\A380\fbw-xp-systems, Rust,
+built with `CARGO_TARGET_DIR=/d/A380/fbw-build/target-main cargo +stable-x86_64-pc-windows-gnu build --release --features js`)
+and a converted aircraft made by D:\A380\msfs2xp-aircraft (OBJ8 cockpit, SASL Lua
 bindings, cockpit_bindings.txt). Installed aircraft:
 `D:/Steam Games/steamapps/common/X-Plane 12/Aircraft/FlyByWire A380X`.
 Latest sim log: `D:/Steam Games/steamapps/common/X-Plane 12/Log.txt`.
@@ -43,7 +43,7 @@ FBW sources: D:\fbw-aircraft (reference).
    be lifted 1.5 mm by lift_decals() in msfs2xp-aircraft/src/main.rs.
 
 ## Storage rules (added)
-- Build only with `CARGO_TARGET_DIR=/d/fbw-build/target-main cargo +stable-x86_64-pc-windows-gnu ...`
+- Build only with `CARGO_TARGET_DIR=/d/A380/fbw-build/target-main cargo +stable-x86_64-pc-windows-gnu ...`
   (one shared target dir). Never `cargo clean`, never make another target dir,
   never build the whole workspace with different feature sets.
 - Do not copy aircraft/scenery folders, textures or logs anywhere; read them in place.

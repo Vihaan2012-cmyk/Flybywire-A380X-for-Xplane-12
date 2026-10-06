@@ -13,7 +13,7 @@ use serde_json::Value as Json;
 use super::NavData;
 
 const XPLANE: &str = r"D:\Steam Games\steamapps\common\X-Plane 12";
-const SDK_TYPES: &str = r"D:\fbw-build\sdk\package\msfssdk.d.ts";
+const SDK_TYPES: &str = r"D:\A380\fbw-build\sdk\package\msfssdk.d.ts";
 
 #[link(name = "psapi")]
 extern "system" {
@@ -623,7 +623,10 @@ fn not_found_and_bad_calls() {
     // Not ready yet is its own error, for the runtime to ask again.
     let mut loading = NavData::load(Path::new(XPLANE)).unwrap();
     assert_eq!(loading.call("LOAD_VOR", r#"["VEG    BIG  "]"#).err().as_deref(), Some(super::NOT_READY));
-    assert!(nav.call("GET_METAR_BY_IDENT", r#"["EGLL"]"#).is_err());
+    // No metar_source wired up in this fixture (js_bridge.rs's start_navdata
+    // is what wires the real one, js_bridge.rs ~1319): the "not found" shape,
+    // not an error -- see metar_and_taf_calls below for the wired-up path.
+    assert_eq!(call(&mut nav, "GET_METAR_BY_IDENT", r#"["EGLL"]"#), serde_json::json!({"icao": "", "metarString": ""}));
     assert!(nav.call("SEARCH_NEAREST", "[9999, 0, 0, 1, 1]").is_err());
 }
 
@@ -650,6 +653,33 @@ fn magvar_source_sign_is_checked_against_localizers() {
     assert_eq!(nav.magvar_sign, Some(-1.));
     let (lat, lon, decl) = *published.iter().find(|p| p.2.abs() > 10.).unwrap();
     assert!((nav.magvar_at(lat, lon) - decl).abs() < 1e-9);
+}
+
+#[test]
+fn metar_and_taf_calls() {
+    if !Path::new(XPLANE).join("Resources").is_dir() {
+        return;
+    }
+    let mut nav = NavData::load(Path::new(XPLANE)).unwrap();
+    nav.wait_ready().unwrap();
+    // Stands in for js_bridge.rs's real source (crate::xp::metar_for_airport,
+    // XPLMGetMETARForAirport): EGLL has one, nothing else does -- the same
+    // "no report" shape a real airport with none gets from X-Plane's own
+    // empty-string answer.
+    nav.set_metar_source(Box::new(|icao| (icao == "EGLL").then(|| "EGLL 251550Z 24012KT 9999 FEW030 12/08 Q1015".to_string())));
+    let metar = call(&mut nav, "GET_METAR_BY_IDENT", r#"["egll"]"#);
+    assert_eq!(metar["icao"], "EGLL");
+    assert_eq!(metar["metarString"], "EGLL 251550Z 24012KT 9999 FEW030 12/08 Q1015");
+    let miss = call(&mut nav, "GET_METAR_BY_IDENT", r#"["ZZZZ"]"#);
+    assert_eq!(miss, serde_json::json!({"icao": "", "metarString": ""}));
+    // EGLL itself (51.4775, -0.4614): the nearest-airport search resolves to
+    // it and the same source answers.
+    let by_latlon = call(&mut nav, "GET_METAR_BY_LATLON", "[51.4775, -0.4614]");
+    assert_eq!(by_latlon["icao"], "EGLL");
+    // No X-Plane TAF source exists: always the "no report" shape, never
+    // Rejected and never a fabricated forecast.
+    assert_eq!(call(&mut nav, "GET_TAF_BY_IDENT", r#"["EGLL"]"#), serde_json::json!({"icao": "", "tafString": ""}));
+    assert_eq!(call(&mut nav, "GET_TAF_BY_LATLON", "[51.4775, -0.4614]"), serde_json::json!({"icao": "", "tafString": ""}));
 }
 
 /// `header_cycle` (used by `NavData::load` to answer `cycle()`/`date_range()`

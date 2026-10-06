@@ -342,6 +342,86 @@ pub fn detect<V: VariableRegistry + SimulatorReaderWriter>(xplm: &Xplm, vars: &m
     state
 }
 
+/// Whether X-Plane has put the aircraft somewhere real yet. Before it has,
+/// its height above ground reads garbage (millions of feet below ground),
+/// the same test `read_situation` uses.
+pub fn aircraft_placed(xplm: &Xplm) -> bool {
+    let agl_ft = xplm.find("sim/flightmodel/position/y_agl").map_or(f64::NAN, |d| xplm.get_f(d) as f64) * 3.280_84;
+    agl_ft.is_finite() && (-1_000.0..=100_000.0).contains(&agl_ft)
+}
+
+/// Whether a flight file variable is a cockpit control: an overhead
+/// pushbutton, knob or selector, a source-switching knob, or one of the
+/// `XMLVAR_` switch positions. Everything else in `[LocalVars.0]` -- payload
+/// and cargo, gear and engine speeds, the THS, seats, ISIS bugs, the start
+/// state itself -- this port models from its own sources, and some of it
+/// (payload) has crashed the aircraft when written from the wrong place.
+fn is_cockpit_control(name: &str) -> bool {
+    name.contains("OVHD")
+        || name.ends_with("_SWITCHING_KNOB")
+        || name.starts_with("XMLVAR_")
+        || name.starts_with("A32NX_SWITCH_")
+        || name.starts_with("A380X_SWITCH_")
+        || name == "A32NX_AUTOBRAKES_ARMED_MODE"
+}
+
+/// The cockpit controls FlyByWire's flight file for a spawn sets, as MSFS
+/// applies them when it loads that file: `[LocalVars.0]`'s `NAME=value`
+/// lines, the cockpit-control ones only (`is_cockpit_control`). This is
+/// what makes a runway start a ready aircraft -- IRs in NAV, batteries,
+/// packs, bleeds and pumps in AUTO -- where a cold start has them off.
+pub fn cockpit_controls_from_flight_file(flt: &str) -> Vec<(String, f64)> {
+    local_vars(flt).filter(|(name, _)| is_cockpit_control(name)).map(|(name, v)| (name.to_string(), v)).collect()
+}
+
+/// A flight file's `[LocalVars.0]` `NAME=value` lines with numeric values.
+fn local_vars(flt: &str) -> impl Iterator<Item = (&str, f64)> {
+    let mut in_local_vars = false;
+    flt.lines().filter_map(move |line| {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_local_vars = line.eq_ignore_ascii_case("[LocalVars.0]");
+            return None;
+        }
+        if !in_local_vars {
+            return None;
+        }
+        let (name, value) = line.split_once('=')?;
+        Some((name.trim(), value.trim().parse::<f64>().ok()?))
+    })
+}
+
+/// FlyByWire's gear lever input, as its flight files name it.
+pub const GEAR_LEVER_VAR: &str = "A32NX_GEAR_LEVER_POSITION_REQUEST";
+
+/// The gear lever position (1 down, 0 up) FlyByWire's flight file for a
+/// spawn selects, if it sets one. Unlike the cockpit controls, MSFS applies
+/// this for every start, cold or hot: nothing else sets the lever (only gear
+/// commands move it), so without it the lever starts selected up.
+pub fn gear_lever_from_flight_file(flt: &str) -> Option<f64> {
+    local_vars(flt).find(|(name, _)| *name == GEAR_LEVER_VAR).map(|(_, v)| v)
+}
+
+/// The `LIGHT POTENTIOMETER` index of every display the plugin draws
+/// (`display/screens.rs`): the OITs, FCU, PFDs, NDs, EWD, SD and MFDs. Not
+/// the radio management panels: their own brightness knob sets theirs
+/// every tick (`lights.rs`).
+pub const DISPLAY_POTENTIOMETERS: [u32; 11] = [78, 79, 87, 88, 89, 90, 91, 92, 93, 98, 99];
+
+pub fn display_potentiometers() -> Vec<u32> {
+    DISPLAY_POTENTIOMETERS.to_vec()
+}
+
+/// Every display starts at full brightness (the user's call; FlyByWire's
+/// flight files start them at 50%).
+pub const DISPLAY_START_BRIGHTNESS: f64 = 1.0;
+
+/// Whether a start state begins with the engines running (every state but
+/// Hangar and Apron -- see the module doc).
+pub fn engines_running_state(state: StartState) -> bool {
+    !matches!(state, StartState::Hangar | StartState::Apron)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,6 +669,71 @@ mod tests {
             sim.tick(std::time::Duration::from_millis(50), i as f64 * dt_s, &mut vars);
             aspects.post_tick(&mut vars);
             check_every_variable(&vars, "APU start");
+        }
+    }
+
+    #[test]
+    fn a_runway_flight_file_puts_the_irs_in_nav_and_never_touches_payload_or_gear() {
+        let flt = crate::fuel::flt_for_start_state(4.).expect("runway flight file");
+        let controls = cockpit_controls_from_flight_file(flt);
+        let get = |n: &str| controls.iter().find(|(k, _)| k == n).map(|(_, v)| *v);
+        for n in 1..=3 {
+            assert_eq!(get(&format!("A32NX_OVHD_ADIRS_IR_{n}_MODE_SELECTOR_KNOB")), Some(1.), "IR {n} in NAV on a runway start");
+        }
+        assert_eq!(get("A32NX_OVHD_ELEC_BAT_1_PB_IS_AUTO"), Some(1.));
+        assert!(controls.iter().all(|(k, _)| !k.contains("PAX_") && !k.contains("_DESIRED") && !k.contains("GEAR") && !k.contains("ENGINE_N") && k != "A32NX_START_STATE"));
+        // And a cold file keeps them off, so the same reading is right both ways.
+        let apron = cockpit_controls_from_flight_file(crate::fuel::flt_for_start_state(2.).unwrap());
+        assert!(apron.iter().any(|(k, v)| k == "A32NX_OVHD_ADIRS_IR_1_MODE_SELECTOR_KNOB" && *v == 0.));
+    }
+
+    /// The live crash (2026-09-26): nothing set the gear lever at spawn, so
+    /// it read 0 (selected up) and the gear retracted on the runway as soon
+    /// as the hydraulics came up. Every flight file on the ground selects it
+    /// down, as MSFS applies on load; the climb file selects it up.
+    #[test]
+    fn every_ground_flight_file_selects_the_gear_down_and_the_climb_file_up() {
+        let lever = |state: f64| gear_lever_from_flight_file(crate::fuel::flt_for_start_state(state).unwrap());
+        for (state, name) in [(1., "hangar"), (2., "apron"), (3., "taxi"), (4., "runway")] {
+            assert_eq!(lever(state), Some(1.), "{name} start must select the gear down");
+        }
+        assert_eq!(lever(5.), Some(0.), "climb start selects the gear up");
+    }
+
+    /// The user's call (2026-09-27): every display starts at full
+    /// brightness. The radio panels are left out -- their own brightness
+    /// knob drives their potentiometer every tick (`lights.rs`).
+    #[test]
+    fn every_display_but_the_radio_panels_starts_at_full_brightness() {
+        let pots = display_potentiometers();
+        for p in [87, 88, 89, 90, 91, 92, 93, 98, 99, 78, 79] {
+            assert!(pots.contains(&p), "LIGHT POTENTIOMETER:{p} missing from {pots:?}");
+        }
+        for p in [80, 81, 82] {
+            assert!(!pots.contains(&p), "RMP potentiometer {p} is its own knob's");
+        }
+    }
+
+    /// The list above against the screens the plugin actually draws.
+    #[cfg(feature = "js")]
+    #[test]
+    fn the_display_list_matches_every_dimmed_screen_but_the_radio_panels() {
+        let mut drawn: Vec<u32> = crate::display::screens::SCREENS
+            .iter()
+            .filter(|s| !s.id.starts_with("SCREEN_DU_RMP"))
+            .flat_map(|s| s.dimming.iter().map(|d| d.potentiometer))
+            .collect();
+        drawn.sort_unstable();
+        drawn.dedup();
+        assert_eq!(drawn, DISPLAY_POTENTIOMETERS.to_vec());
+    }
+
+    #[test]
+    fn only_hangar_and_apron_start_with_the_engines_off() {
+        assert!(!engines_running_state(StartState::Hangar));
+        assert!(!engines_running_state(StartState::Apron));
+        for s in [StartState::Taxi, StartState::Runway, StartState::Climb, StartState::Cruise, StartState::Approach, StartState::Final] {
+            assert!(engines_running_state(s));
         }
     }
 }

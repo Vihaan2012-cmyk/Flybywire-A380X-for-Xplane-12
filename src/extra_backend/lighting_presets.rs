@@ -219,7 +219,14 @@ impl LightingPresets {
         if let Some(keys) = self.ini.get(&format!("preset {preset}")) {
             for (loaded, (key, index)) in self.loaded.iter_mut().zip(LIGHTS.iter()) {
                 let default = if index.is_none() { 80. } else { 50. };
-                *loaded = keys.get(*key).and_then(|v| v.parse::<f64>().ok()).unwrap_or(default);
+                // W211: fbw_a380x_lighting_presets.ini is free text; every
+                // entry here is a percent (LIGHT POTENTIOMETER:n's own
+                // 0..100 convention, `scale` above, or the EFB brightness
+                // key) with nothing downstream to clamp it, unlike the
+                // fuel tanks (FuelNetwork::set_tank_gallons). A hand edit
+                // or corrupted line must not write e.g. -40 or 500
+                // straight to a live simvar.
+                *loaded = keys.get(*key).and_then(|v| v.parse::<f64>().ok()).map(|v| v.clamp(0.0, 100.0)).unwrap_or(default);
             }
         }
         let loaded = self.loaded;

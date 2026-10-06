@@ -108,6 +108,27 @@ const HYDRAULIC_NOMINAL_PA: f64 = 5000.0 * 6894.757;
 /// self-test, so half is where the BITE reports.
 const ANTISKID_BITE_THRESHOLD: f64 = 0.5;
 
+/// `E-IND-DESIGN.md` 320800048 STEER ALTN STEER SYS HOT: the ALTN
+/// nosewheel-steering circuit's own thermal law, the same static-heat/
+/// convective-loss structure `brakes.rs`'s own stack thermal model uses
+/// (module doc there), scaled down from a brake stack to a compact
+/// hydraulic control unit. **GENERIC** throughout (no public A380-specific
+/// figure exists for this circuit): heat input is reasoned as proportional
+/// to how far the nosewheel is held deflected (a real hydraulic steering
+/// valve has to keep flowing to hold a surface against airload/friction,
+/// not only while it is slewing), and the other two constants are sized
+/// only so a sustained, realistic deflection can plausibly cross the
+/// (also GENERIC) 100 C threshold below within a few minutes of simulated
+/// time -- an order-of-magnitude choice for a small underfloor unit, not a
+/// claimed precise figure.
+const ALTN_STEER_HEAT_PER_DEG_W: f64 = 20.0;
+const ALTN_STEER_CONVECTION_W_K: f64 = 8.0;
+const ALTN_STEER_THERMAL_CAPACITY_J_K: f64 = 5_000.0;
+/// `E-IND-DESIGN.md` 320800048's own threshold: "GENERIC hot threshold
+/// 100 C (order-of-magnitude below `brakes.rs`'s own `FIRE_TEMP_C` = 800 C,
+/// reasoned the same documented-but-generic way)".
+pub const ALTN_STEER_SYS_HOT_C: f64 = 100.0;
+
 /// Number of legs and braked wheels, in `LEGS`/`LEG_WHEEL_INDICES` order.
 const N_LEGS: usize = 5;
 const N_BRAKED_WHEELS: usize = 16;
@@ -164,6 +185,42 @@ struct Ids {
     parking_brake_leak: u64,
     shimmy: [u64; 3],
     steer_actuator_leak: [u64; 3],
+
+    /// `E-IND-DESIGN.md` 320800043/046: each strut's own pressure-
+    /// monitoring BITE and weight-on-wheels sensing.
+    strut_gas_charge_sensor_fail: [u64; N_LEGS],
+    strut_wow_sensing_fail: [u64; N_LEGS],
+    /// `E-IND-DESIGN.md` 320800032: the two body legs' own bogie-trim BITE.
+    /// `0` (never a real failure id, `Faults::get` returns 0.0 for it) on
+    /// the nose/wing legs, which have no such mechanism.
+    bogie_trim_fail: [u64; N_LEGS],
+    /// `E-IND-DESIGN.md` 320800056/057/059: the nosewheel-only disconnect
+    /// mechanism and angle-limit-override failures.
+    steer_disc_mechanism_fail: u64,
+    steer_overtravel_fail: u64,
+
+    /// `E-IND-DESIGN.md`'s new Brake System Controller (BSC): the two
+    /// control channels, the normal/alternate pressure-monitoring pair, the
+    /// autobrake function and the selector valve, in `registry.rs`'s own
+    /// `register_bscu` channel order.
+    bscu_ctl: [u64; 2],
+    bscu_norm_press_sensor_fail: u64,
+    bscu_alt_press_sensor_fail: u64,
+    bscu_autobrake_fail: u64,
+    bscu_sel_valve_jam: u64,
+    /// `E-IND-DESIGN.md` 320800024: the two brake pedal position
+    /// transducers, `[left, right]`.
+    brake_pedal_sensor_fail: [u64; 2],
+
+    /// `E-IND-DESIGN.md`'s new Steering System Controller (SSC): the two
+    /// control channels and the selector valve.
+    steer_ctl: [u64; 2],
+    steer_sel_valve_jam: u64,
+    /// `E-IND-DESIGN.md` 320800051/052/061: the tiller and pedal-steering
+    /// transducers.
+    capt_tiller_fail: u64,
+    fo_tiller_fail: u64,
+    pedal_steer_fail: u64,
 }
 
 /// The failures registered against `component`, in registration order.
@@ -178,24 +235,35 @@ impl Ids {
 
         let mut strut_gas_leak = [0u64; N_LEGS];
         let mut strut_oil_leak = [0u64; N_LEGS];
+        let mut strut_gas_charge_sensor_fail = [0u64; N_LEGS];
+        let mut strut_wow_sensing_fail = [0u64; N_LEGS];
         let mut actuator_leak = [0u64; N_LEGS];
         let mut uplock_jam = [0u64; N_LEGS];
         let mut downlock_fail = [0u64; N_LEGS];
         let mut door_jam = [0u64; N_LEGS];
         let mut sensor_lies = [0u64; N_LEGS];
+        let mut bogie_trim_fail = [0u64; N_LEGS];
         for (i, key) in LEG_KEY.iter().enumerate() {
             let strut = fids(&reg, &format!("32_gear.{key}_strut"));
-            assert_eq!(strut.len(), 2, "each strut registers a gas and an oil leak");
+            assert_eq!(strut.len(), 4, "each strut registers a gas leak, an oil leak, a pressure-sensor failure and a weight-on-wheels-sensing failure");
             strut_gas_leak[i] = strut[0];
             strut_oil_leak[i] = strut[1];
+            strut_gas_charge_sensor_fail[i] = strut[2];
+            strut_wow_sensing_fail[i] = strut[3];
 
             let retraction = fids(&reg, &format!("32_gear.{key}_retraction"));
-            assert_eq!(retraction.len(), 5, "each retraction chain registers five failures");
+            // The two body legs (`registry.rs`'s `register_retractions`)
+            // additionally register a sixth failure, `bogie_trim_fail`; the
+            // nose/wing legs have no such mechanism and stay at five.
+            assert!(retraction.len() == 5 || retraction.len() == 6, "each retraction chain registers five failures, plus a sixth (bogie trim) on the two body legs; got {}", retraction.len());
             actuator_leak[i] = retraction[0];
             uplock_jam[i] = retraction[1];
             downlock_fail[i] = retraction[2];
             door_jam[i] = retraction[3];
             sensor_lies[i] = retraction[4];
+            if retraction.len() == 6 {
+                bogie_trim_fail[i] = retraction[5];
+            }
         }
 
         let mut antiskid_inop = [0u64; N_BRAKED_WHEELS];
@@ -209,15 +277,48 @@ impl Ids {
 
         let mut shimmy = [0u64; 3];
         let mut steer_actuator_leak = [0u64; 3];
+        let mut steer_disc_mechanism_fail = 0u64;
+        let mut steer_overtravel_fail = 0u64;
         for (i, key) in STEER_KEY.iter().enumerate() {
             let steer = fids(&reg, &format!("32_gear.{key}_steering"));
-            assert_eq!(steer.len(), 2, "each steerable position registers a shimmy and an actuator failure");
+            // The nose position (`registry.rs`'s own `key == "nose"` guard
+            // in `register_steering`) additionally registers the
+            // disconnect-mechanism and angle-limit-override failures; the
+            // two body positions stay at two.
+            assert!(steer.len() == 2 || steer.len() == 4, "each steerable position registers a shimmy and an actuator failure, plus two more on the nose position only; got {}", steer.len());
             shimmy[i] = steer[0];
             steer_actuator_leak[i] = steer[1];
+            if steer.len() == 4 {
+                steer_disc_mechanism_fail = steer[2];
+                steer_overtravel_fail = steer[3];
+            }
         }
 
         let parking = fids(&reg, "32_gear.parking_brake_accumulator");
         assert_eq!(parking.len(), 1);
+
+        let bscu = fids(&reg, "32_gear.bscu");
+        assert_eq!(bscu.len(), 6, "the BSCU registers six channels: ctl_1, ctl_2, norm/alt pressure sensors, autobrake, selector valve");
+        let bscu_ctl = [bscu[0], bscu[1]];
+        let bscu_norm_press_sensor_fail = bscu[2];
+        let bscu_alt_press_sensor_fail = bscu[3];
+        let bscu_autobrake_fail = bscu[4];
+        let bscu_sel_valve_jam = bscu[5];
+
+        let pedal = fids(&reg, "32_gear.brake_pedal_transducers");
+        assert_eq!(pedal.len(), 2, "left and right brake pedal transducers");
+        let brake_pedal_sensor_fail = [pedal[0], pedal[1]];
+
+        let steer_ctl_ids = fids(&reg, "32_gear.steer_ctl");
+        assert_eq!(steer_ctl_ids.len(), 3, "the SSC registers two channels and a selector valve");
+        let steer_ctl = [steer_ctl_ids[0], steer_ctl_ids[1]];
+        let steer_sel_valve_jam = steer_ctl_ids[2];
+
+        let steer_input = fids(&reg, "32_gear.steer_input_transducers");
+        assert_eq!(steer_input.len(), 3, "captain tiller, F/O tiller, pedal steering");
+        let capt_tiller_fail = steer_input[0];
+        let fo_tiller_fail = steer_input[1];
+        let pedal_steer_fail = steer_input[2];
 
         Self {
             strut_gas_leak,
@@ -232,6 +333,22 @@ impl Ids {
             parking_brake_leak: parking[0],
             shimmy,
             steer_actuator_leak,
+            strut_gas_charge_sensor_fail,
+            strut_wow_sensing_fail,
+            bogie_trim_fail,
+            steer_disc_mechanism_fail,
+            steer_overtravel_fail,
+            bscu_ctl,
+            bscu_norm_press_sensor_fail,
+            bscu_alt_press_sensor_fail,
+            bscu_autobrake_fail,
+            bscu_sel_valve_jam,
+            brake_pedal_sensor_fail,
+            steer_ctl,
+            steer_sel_valve_jam,
+            capt_tiller_fail,
+            fo_tiller_fail,
+            pedal_steer_fail,
         }
     }
 }
@@ -254,6 +371,62 @@ pub struct GearStructureLive {
     parking_brake_set: bool,
     /// Inputs `Truth` still does not carry anywhere; see [`GearCommands`].
     pub commands: GearCommands,
+
+    /// `E-IND-DESIGN.md`'s new Brake System Controller (BSC) and Steering
+    /// System Controller (SSC): pure BITE-flag pass-throughs of their own
+    /// failure ids, with no physics of their own to step -- computed once
+    /// per tick here (the same "cache the Truth-sourced reading so
+    /// `publish` has something to read back" shape this file already uses
+    /// for `gear_lever_down`/`parking_brake_set` above) rather than
+    /// threaded through `GearSystem`, which has no use for them.
+    bscu_ctl_fault: [bool; 2],
+    norm_brk_press_sensor_fault: bool,
+    altn_brk_press_sensor_fault: bool,
+    auto_brk_fault: bool,
+    brake_sel_vlv_jammed: bool,
+    brake_pedal_sensor_fault: [bool; 2],
+    steer_ctl_fault: [bool; 2],
+    steer_sel_vlv_jammed: bool,
+    capt_tiller_fault: bool,
+    fo_tiller_fault: bool,
+    pedal_steer_fault: bool,
+    /// `E-IND-DESIGN.md` 320800049/050 STEER B/W STEER FAULT: the two body
+    /// steering positions' own `actuator_leak` fault reaching the same
+    /// GENERIC BITE threshold every other channel fault in this design
+    /// uses, surfaced directly with no new failure id
+    /// (`[left body, right body]`).
+    body_steer_fault: [bool; 2],
+    /// `E-IND-DESIGN.md` 320800048 STEER ALTN STEER SYS HOT: the ALTN
+    /// nosewheel-steering circuit's own temperature, deg C. See `tick`'s
+    /// own doc comment on this field for the thermal law.
+    altn_steer_sys_temp_c: f64,
+    /// The nosewheel's own commanded angle last tick, deg -- kept only so
+    /// `tick` can compute this tick's slew rate for the thermal model
+    /// above.
+    prev_nw_commanded_angle_deg: f64,
+    /// `E-IND-DESIGN.md` 320800025/026 BRAKES RELEASED / RESIDUAL BRAKING:
+    /// the pilot's own commanded braking fraction, `max(left, right)` pedal
+    /// -- a sound (if not exhaustive) subset of the design's own
+    /// "pedal_or_autobrake_demand" (this port has no separate autobrake
+    /// demand signal to add to it, the same "sound if not exhaustive"
+    /// reasoning this file's own module doc already uses for LRU power
+    /// loss standing in for "faulted").
+    brake_pedal_commanded_fraction: f64,
+    /// `E-IND-DESIGN.md` 320800042: the gravity-extension handle selection,
+    /// cached the same way `gear_lever_down` is above so `publish` (which
+    /// gets no `Truth` of its own) can read it back as
+    /// `GRAVITY_EXTEND_SELECTED`.
+    gravity_extend_selected: bool,
+    /// `E-IND-DESIGN.md` 320800057/059: the towing/disconnect lever's own
+    /// selection, cached and published back the same way
+    /// `gravity_extend_selected` is above.
+    nw_steer_disc_selected: bool,
+    /// `E-IND-DESIGN.md` 320800019 BRAKES MINOR FAULT: true when any
+    /// braked wheel's own `antiskid_inop` fault is armed but below
+    /// `ANTISKID_BITE_THRESHOLD` -- a partial degradation noticed but not
+    /// yet channel-failed. No new failure id; derived from the same
+    /// magnitudes `antiskid_channel_fault` above already reads.
+    brakes_minor_fault: bool,
 }
 
 impl Default for GearStructureLive {
@@ -279,6 +452,24 @@ impl GearStructureLive {
             gear_lever_down: truth.controls.gear_lever_down,
             parking_brake_set: truth.controls.parking_brake_on,
             commands,
+            bscu_ctl_fault: [false; 2],
+            norm_brk_press_sensor_fault: false,
+            altn_brk_press_sensor_fault: false,
+            auto_brk_fault: false,
+            brake_sel_vlv_jammed: false,
+            brake_pedal_sensor_fault: [false; 2],
+            steer_ctl_fault: [false; 2],
+            steer_sel_vlv_jammed: false,
+            capt_tiller_fault: false,
+            fo_tiller_fault: false,
+            pedal_steer_fault: false,
+            body_steer_fault: [false; 2],
+            altn_steer_sys_temp_c: truth.environment.sat_c,
+            prev_nw_commanded_angle_deg: truth.controls.steering_command_deg[0],
+            gravity_extend_selected: truth.controls.gravity_extend_selected,
+            brake_pedal_commanded_fraction: truth.controls.brake_pedal_pos[0].max(truth.controls.brake_pedal_pos[1]),
+            nw_steer_disc_selected: truth.controls.nw_steer_disc_selected,
+            brakes_minor_fault: false,
         }
     }
 
@@ -294,16 +485,36 @@ impl GearStructureLive {
 
     fn faults_from(&self, faults: &Faults) -> GearSystemFaults {
         let leg = |i: usize| LegFaults {
-            strut: StrutFaults { gas_leak: faults.get(self.ids.strut_gas_leak[i]), oil_leak: faults.get(self.ids.strut_oil_leak[i]) },
+            strut: StrutFaults {
+                gas_leak: faults.get(self.ids.strut_gas_leak[i]),
+                oil_leak: faults.get(self.ids.strut_oil_leak[i]),
+                gas_charge_sensor_fail: faults.get(self.ids.strut_gas_charge_sensor_fail[i]),
+                wow_sensing_fail: faults.get(self.ids.strut_wow_sensing_fail[i]),
+            },
             retraction: RetractionFaults {
                 actuator_leak: faults.get(self.ids.actuator_leak[i]),
                 uplock_jam: faults.get(self.ids.uplock_jam[i]),
                 downlock_fail: faults.get(self.ids.downlock_fail[i]),
                 door_jam: faults.get(self.ids.door_jam[i]),
                 sensor_lies: faults.get(self.ids.sensor_lies[i]),
+                // `0` on the nose/wing legs -- `Faults::get` reads that as
+                // 0.0 (healthy), which is correct since they have no
+                // bogie-trim mechanism to fail.
+                bogie_trim_fail: faults.get(self.ids.bogie_trim_fail[i]),
             },
         };
-        let steer = |i: usize| SteeringFaults { shimmy_damper_fail: faults.get(self.ids.shimmy[i]), actuator_leak: faults.get(self.ids.steer_actuator_leak[i]) };
+        // `disc_mechanism_fail`/`steer_overtravel_fail` only exist on the
+        // nose position (`i == 0`); `steer_disc_mechanism_fail`/
+        // `steer_overtravel_fail` are `0` (healthy) whenever resolved for a
+        // position that has none, so gating on `i == 0` here is belt and
+        // braces against ever reading the nose's own fault onto a body
+        // position by mistake.
+        let steer = |i: usize| SteeringFaults {
+            shimmy_damper_fail: faults.get(self.ids.shimmy[i]),
+            actuator_leak: faults.get(self.ids.steer_actuator_leak[i]),
+            disc_mechanism_fail: if i == 0 { faults.get(self.ids.steer_disc_mechanism_fail) } else { 0.0 },
+            steer_overtravel_fail: if i == 0 { faults.get(self.ids.steer_overtravel_fail) } else { 0.0 },
+        };
         let mut wheel_brakes = [BrakeFaults::default(); N_BRAKED_WHEELS];
         for (wheel, slot) in wheel_brakes.iter_mut().enumerate() {
             *slot = BrakeFaults { antiskid_inop: faults.get(self.ids.antiskid_inop[wheel]), dragging: faults.get(self.ids.dragging[wheel]) };
@@ -351,13 +562,24 @@ fn inputs_from(truth: &Truth, commands: &GearCommands) -> GearSystemInputs {
         left_body: leg(3),
         right_body: leg(4),
         gear_lever_down: truth.controls.gear_lever_down,
-        gravity_extend_commanded: commands.gravity_extend_commanded,
+        // `E-IND-DESIGN.md` 320800042 L/G GRVTY EXTN FAULT: `Truth::
+        // controls.gravity_extend_selected` is the real crew-selection
+        // signal this module doc previously named as missing ("no real
+        // dataref found... never set from Truth"). `commands.
+        // gravity_extend_commanded` is kept (module doc, `GearCommands`)
+        // for anything that still constructs it directly (e.g. this file's
+        // own tests); ORed in rather than replaced so neither source can
+        // silently lose the other.
+        gravity_extend_commanded: commands.gravity_extend_commanded || truth.controls.gravity_extend_selected,
         green_hydraulic_fraction: fraction(truth.hydraulic_pressure_pa[0]),
         yellow_hydraulic_fraction: fraction(truth.hydraulic_pressure_pa[1]),
         nose_steering_command_deg: truth.controls.steering_command_deg[0],
         brake_pedal_left: truth.controls.brake_pedal_pos[0],
         brake_pedal_right: truth.controls.brake_pedal_pos[1],
         parking_brake_set: truth.controls.parking_brake_on,
+        // `E-IND-DESIGN.md` 320800057/059 STEER N/W STEER DISC FAULT / NOT
+        // DISC: the towing/disconnect lever selection.
+        nw_steer_disc_selected: truth.controls.nw_steer_disc_selected,
         dt_s: truth.dt_s,
     }
 }
@@ -373,6 +595,16 @@ impl crate::deep::live::Area for GearStructureLive {
         self.outputs = self.system.step(&inputs, &gear_faults);
         self.gear_lever_down = truth.controls.gear_lever_down;
         self.parking_brake_set = truth.controls.parking_brake_on;
+        self.gravity_extend_selected = truth.controls.gravity_extend_selected;
+        self.brake_pedal_commanded_fraction = truth.controls.brake_pedal_pos[0].max(truth.controls.brake_pedal_pos[1]);
+        self.nw_steer_disc_selected = truth.controls.nw_steer_disc_selected;
+        // `E-IND-DESIGN.md` 320800019: a wheel's `antiskid_inop` armed but
+        // still below the BITE self-test threshold -- noticed, not yet
+        // channel-failed.
+        self.brakes_minor_fault = (0..N_BRAKED_WHEELS).any(|wheel| {
+            let m = gear_faults.wheel_brakes[wheel].antiskid_inop;
+            m > 0.0 && m < ANTISKID_BITE_THRESHOLD
+        });
 
         // The antiskid computer's own BITE: a channel that has lost this
         // much of its release authority fails its self-test and reports,
@@ -380,6 +612,39 @@ impl crate::deep::live::Area for GearStructureLive {
         for wheel in 0..N_BRAKED_WHEELS {
             self.antiskid_channel_fault[wheel] = gear_faults.wheel_brakes[wheel].antiskid_inop >= ANTISKID_BITE_THRESHOLD;
         }
+
+        // `E-IND-DESIGN.md`'s new Brake System Controller (BSC) and
+        // Steering System Controller (SSC): pure BITE-flag pass-throughs,
+        // no physics to step (this file's own struct doc explains why they
+        // are read here rather than threaded through `GearSystem`).
+        self.bscu_ctl_fault = [faults.get(self.ids.bscu_ctl[0]) >= ANTISKID_BITE_THRESHOLD, faults.get(self.ids.bscu_ctl[1]) >= ANTISKID_BITE_THRESHOLD];
+        self.norm_brk_press_sensor_fault = faults.get(self.ids.bscu_norm_press_sensor_fail) >= ANTISKID_BITE_THRESHOLD;
+        self.altn_brk_press_sensor_fault = faults.get(self.ids.bscu_alt_press_sensor_fail) >= ANTISKID_BITE_THRESHOLD;
+        self.auto_brk_fault = faults.get(self.ids.bscu_autobrake_fail) >= ANTISKID_BITE_THRESHOLD;
+        self.brake_sel_vlv_jammed = faults.get(self.ids.bscu_sel_valve_jam) >= ANTISKID_BITE_THRESHOLD;
+        self.brake_pedal_sensor_fault =
+            [faults.get(self.ids.brake_pedal_sensor_fail[0]) >= ANTISKID_BITE_THRESHOLD, faults.get(self.ids.brake_pedal_sensor_fail[1]) >= ANTISKID_BITE_THRESHOLD];
+        self.steer_ctl_fault = [faults.get(self.ids.steer_ctl[0]) >= ANTISKID_BITE_THRESHOLD, faults.get(self.ids.steer_ctl[1]) >= ANTISKID_BITE_THRESHOLD];
+        self.steer_sel_vlv_jammed = faults.get(self.ids.steer_sel_valve_jam) >= ANTISKID_BITE_THRESHOLD;
+        self.capt_tiller_fault = faults.get(self.ids.capt_tiller_fail) >= ANTISKID_BITE_THRESHOLD;
+        self.fo_tiller_fault = faults.get(self.ids.fo_tiller_fail) >= ANTISKID_BITE_THRESHOLD;
+        self.pedal_steer_fault = faults.get(self.ids.pedal_steer_fail) >= ANTISKID_BITE_THRESHOLD;
+        // `E-IND-DESIGN.md` 320800049/050: the two body steering positions'
+        // own `actuator_leak`, surfaced directly with no new failure id.
+        self.body_steer_fault = [gear_faults.left_body_steering.actuator_leak >= ANTISKID_BITE_THRESHOLD, gear_faults.right_body_steering.actuator_leak >= ANTISKID_BITE_THRESHOLD];
+
+        // `E-IND-DESIGN.md` 320800048: the ALTN nosewheel-steering
+        // circuit's own thermal law (see the constants' own doc comment).
+        // Heat input is reasoned from how far the nosewheel is commanded
+        // deflected (a real valve has to keep flowing to hold a surface
+        // against airload/friction, not only while slewing); convective
+        // loss is proportional to the temperature rise above ambient.
+        let dt = truth.dt_s.max(0.0);
+        let commanded_angle_deg = truth.controls.steering_command_deg[0];
+        self.prev_nw_commanded_angle_deg = commanded_angle_deg;
+        let heat_in_w = ALTN_STEER_HEAT_PER_DEG_W * commanded_angle_deg.abs();
+        let convective_w = ALTN_STEER_CONVECTION_W_K * (self.altn_steer_sys_temp_c - truth.environment.sat_c);
+        self.altn_steer_sys_temp_c += (heat_in_w - convective_w) * dt / ALTN_STEER_THERMAL_CAPACITY_J_K;
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -405,6 +670,17 @@ impl crate::deep::live::Area for GearStructureLive {
             out(&format!("GEAR_STRUT_GAS_CHARGE_FRACTION:{n}"), struts[i].gas_charge_fraction);
             out(&format!("GEAR_STRUT_OIL_LEVEL_FRACTION:{n}"), struts[i].oil_level_fraction);
             out(&format!("GEAR_STRUT_LIFE_FRACTION:{n}"), struts[i].life_fraction_consumed);
+            // `E-IND-DESIGN.md` 320800043/046/032.
+            out(&format!("GEAR_STRUT_PRESS_SENSOR_FAULT:{n}"), b(leg.gas_charge_sensor_fault));
+            out(&format!("SENSED_ON_GROUND:{n}"), b(leg.sensed_on_ground));
+            out(&format!("BOGIE_TRIMMED:{n}"), b(leg.bogie_trimmed));
+            // `E-IND-DESIGN.md` 320800046: the leg's true ground-contact
+            // state as a boolean, so the WEIGHT ON WHEELS FAULT trigger can
+            // compare it against `SENSED_ON_GROUND:n` with a plain
+            // variable-vs-variable inequality rather than a value-vs-
+            // threshold mismatch (`GEAR_LEG_FORCE_N:n` is a continuous
+            // newton reading, not a 0/1 flag).
+            out(&format!("TRUE_ON_GROUND:{n}"), b(leg.force_n > 0.0));
         }
 
         for wheel in 0..N_BRAKED_WHEELS {
@@ -414,6 +690,8 @@ impl crate::deep::live::Area for GearStructureLive {
             out(&format!("BRAKE_WEAR_FRACTION:{n}"), o.brake_wheel_wear_fraction[wheel]);
             out(&format!("BRAKE_SKIDDING:{n}"), b(o.brake_wheel_skidding[wheel]));
             out(&format!("ANTISKID_CHANNEL_FAULT:{n}"), b(self.antiskid_channel_fault[wheel]));
+            // `E-IND-DESIGN.md` "BRAKE_APPLIED_FRACTION:n".
+            out(&format!("BRAKE_APPLIED_FRACTION:{n}"), o.brake_wheel_applied_fraction[wheel]);
         }
 
         out("PARK_BRAKE_SET", b(self.parking_brake_set));
@@ -422,18 +700,50 @@ impl crate::deep::live::Area for GearStructureLive {
 
         out("NW_STEER_ANGLE_DEG", o.nose_wheel_angle_deg);
         out("NW_STEER_SHIMMY_UNSTABLE", b(o.nose_steer_shimmy_unstable));
+        out("NW_STEER_DISCONNECTED", b(o.nw_steer_disconnected));
         for i in 0..2 {
             let n = i + 1;
             out(&format!("BODY_STEER_ANGLE_DEG:{n}"), o.body_steer_angle_deg[i]);
             out(&format!("BODY_STEER_SHIMMY_UNSTABLE:{n}"), b(o.body_steer_shimmy_unstable[i]));
+            out(&format!("BODY_STEER_FAULT:{n}"), b(self.body_steer_fault[i]));
         }
 
-        // The lever position the gear system is actually acting on, so the
-        // L/G GEAR NOT DOWNLOCKED procedure's "GEAR LEVER ... RECYCLE" line
-        // reads back the same command the legs obeyed.
-        out("GEAR_LEVER_POSITION_REQUEST", b(self.gear_lever_down));
+        // Not `GEAR_LEVER_POSITION_REQUEST`: that is FlyByWire's own *input*
+        // (gear.rs maps GEAR_UP/DOWN/TOGGLE/SET onto it, landing_gear/mod.rs
+        // reads it), and this area's lever comes from FlyByWire's *output*
+        // `GEAR_HANDLE_POSITION`. Publishing one back as the other -- deep
+        // ticks after the systems and wins the name -- rewrote every gear-up
+        // request to "down" before the systems could act on it, so the gear
+        // could never be raised. The lever position the legs are acting on
+        // goes out under this area's own name instead, for the L/G ECAM
+        // procedures (`fbw/ata32.rs`) and the RECYCLE line below.
+        out("GEAR_LEVER_SELECTED_DOWN", b(self.gear_lever_down));
+        // `E-IND-DESIGN.md` 320800042 L/G GRVTY EXTN FAULT.
+        out("GRAVITY_EXTEND_SELECTED", b(self.gravity_extend_selected));
 
         out("GEAR_WING_FATIGUE_INDEX", o.wing_fatigue_index);
+
+        // `E-IND-DESIGN.md`'s new Brake System Controller (BSC).
+        out("BSCU_CHANNEL_FAULT:1", b(self.bscu_ctl_fault[0]));
+        out("BSCU_CHANNEL_FAULT:2", b(self.bscu_ctl_fault[1]));
+        out("NORM_BRK_PRESS_SENSOR_FAULT", b(self.norm_brk_press_sensor_fault));
+        out("ALTN_BRK_PRESS_SENSOR_FAULT", b(self.altn_brk_press_sensor_fault));
+        out("AUTO_BRK_FAULT", b(self.auto_brk_fault));
+        out("BRAKE_SEL_VLV_JAMMED", b(self.brake_sel_vlv_jammed));
+        out("BRAKE_PEDAL_SENSOR_FAULT:1", b(self.brake_pedal_sensor_fault[0]));
+        out("BRAKE_PEDAL_SENSOR_FAULT:2", b(self.brake_pedal_sensor_fault[1]));
+
+        // `E-IND-DESIGN.md`'s new Steering System Controller (SSC).
+        out("STEER_CTL_FAULT:1", b(self.steer_ctl_fault[0]));
+        out("STEER_CTL_FAULT:2", b(self.steer_ctl_fault[1]));
+        out("STEER_SEL_VLV_JAMMED", b(self.steer_sel_vlv_jammed));
+        out("STEER_TILLER_FAULT:capt", b(self.capt_tiller_fault));
+        out("STEER_TILLER_FAULT:fo", b(self.fo_tiller_fault));
+        out("STEER_PEDAL_FAULT", b(self.pedal_steer_fault));
+        out("ALTN_STEER_SYS_TEMP_C", self.altn_steer_sys_temp_c);
+        out("BRAKE_PEDAL_COMMANDED_FRACTION", self.brake_pedal_commanded_fraction);
+        out("NW_STEER_DISC_SELECTED", b(self.nw_steer_disc_selected));
+        out("BRAKES_MINOR_FAULT", b(self.brakes_minor_fault));
     }
 }
 
@@ -853,6 +1163,33 @@ mod tests {
         consumed.push(ids.parking_brake_leak);
         consumed.extend(ids.shimmy);
         consumed.extend(ids.steer_actuator_leak);
+        // `E-IND-DESIGN.md`'s additions: struts' pressure-monitoring and
+        // weight-on-wheels-sensing BITE, the two body legs' bogie-trim
+        // BITE, the nosewheel's disconnect-mechanism and angle-limit-
+        // override failures, and the new BSC/SSC controller components.
+        // `bogie_trim_fail` carries a real `0` placeholder on the
+        // nose/wing legs (never a registered id) rather than a duplicate,
+        // so it is filtered out before the "every registered id is
+        // consumed" check below, exactly like every other `[u64; N_LEGS]`
+        // array here would if a real id happened to collide with it (it
+        // cannot: every real id is >= `failure_id(Area::GearStructure, ..)`
+        // which is far larger than 0).
+        consumed.extend(ids.strut_gas_charge_sensor_fail);
+        consumed.extend(ids.strut_wow_sensing_fail);
+        consumed.extend(ids.bogie_trim_fail.iter().copied().filter(|&id| id != 0));
+        consumed.push(ids.steer_disc_mechanism_fail);
+        consumed.push(ids.steer_overtravel_fail);
+        consumed.extend(ids.bscu_ctl);
+        consumed.push(ids.bscu_norm_press_sensor_fail);
+        consumed.push(ids.bscu_alt_press_sensor_fail);
+        consumed.push(ids.bscu_autobrake_fail);
+        consumed.push(ids.bscu_sel_valve_jam);
+        consumed.extend(ids.brake_pedal_sensor_fail);
+        consumed.extend(ids.steer_ctl);
+        consumed.push(ids.steer_sel_valve_jam);
+        consumed.push(ids.capt_tiller_fail);
+        consumed.push(ids.fo_tiller_fail);
+        consumed.push(ids.pedal_steer_fail);
         consumed.sort_unstable();
         consumed.dedup();
 
@@ -872,5 +1209,196 @@ mod tests {
         assert_eq!(a.strut_gas_leak, b.strut_gas_leak);
         assert_eq!(a.dragging, b.dragging);
         assert_eq!(a.parking_brake_leak, b.parking_brake_leak);
+        assert_eq!(a.bscu_ctl, b.bscu_ctl);
+        assert_eq!(a.bogie_trim_fail, b.bogie_trim_fail);
+        assert_eq!(a.steer_disc_mechanism_fail, b.steer_disc_mechanism_fail);
+    }
+
+    /// `E-IND-DESIGN.md`'s new Brake System Controller (BSC): each of its
+    /// six channels is an independent BITE flag that fires only its own
+    /// published name.
+    #[test]
+    fn bscu_channels_are_independent_bite_flags() {
+        let mut live = GearStructureLive::new();
+        let ctl1 = live.ids.bscu_ctl[0];
+        let ctl2 = live.ids.bscu_ctl[1];
+        let norm_sensor = live.ids.bscu_norm_press_sensor_fail;
+        let autobrake = live.ids.bscu_autobrake_fail;
+        let sel_valve = live.ids.bscu_sel_valve_jam;
+
+        let healthy = run(&mut GearStructureLive::new(), &rollout_truth(), &Faults::default(), 1.0);
+        for name in ["BSCU_CHANNEL_FAULT:1", "BSCU_CHANNEL_FAULT:2", "NORM_BRK_PRESS_SENSOR_FAULT", "ALTN_BRK_PRESS_SENSOR_FAULT", "AUTO_BRK_FAULT", "BRAKE_SEL_VLV_JAMMED"] {
+            assert_eq!(healthy.get(name), Some(&0.0), "{name} must be quiet when healthy");
+        }
+
+        let out = run(&mut live, &rollout_truth(), &Faults::from_pairs([(ctl1, 1.0)]), 1.0);
+        assert_eq!(out.get("BSCU_CHANNEL_FAULT:1"), Some(&1.0));
+        assert_eq!(out.get("BSCU_CHANNEL_FAULT:2"), Some(&0.0), "only the armed channel must report");
+
+        let mut live2 = GearStructureLive::new();
+        let out2 = run(&mut live2, &rollout_truth(), &Faults::from_pairs([(ctl2, 1.0), (norm_sensor, 1.0), (autobrake, 1.0), (sel_valve, 1.0)]), 1.0);
+        assert_eq!(out2.get("BSCU_CHANNEL_FAULT:2"), Some(&1.0));
+        assert_eq!(out2.get("NORM_BRK_PRESS_SENSOR_FAULT"), Some(&1.0));
+        assert_eq!(out2.get("AUTO_BRK_FAULT"), Some(&1.0));
+        assert_eq!(out2.get("BRAKE_SEL_VLV_JAMMED"), Some(&1.0));
+        assert_eq!(out2.get("BSCU_CHANNEL_FAULT:1"), Some(&0.0));
+    }
+
+    /// The new Steering System Controller (SSC)'s own channels, plus the
+    /// two body positions' `BODY_STEER_FAULT` surfaced from their existing
+    /// `actuator_leak`.
+    #[test]
+    fn ssc_channels_and_body_steer_fault_are_independent() {
+        let mut live = GearStructureLive::new();
+        let ctl1 = live.ids.steer_ctl[0];
+        let capt_tiller = live.ids.capt_tiller_fail;
+        let pedal_steer = live.ids.pedal_steer_fail;
+        let body_leak_left = live.ids.steer_actuator_leak[1]; // left body
+
+        let out = run(&mut live, &rollout_truth(), &Faults::from_pairs([(ctl1, 1.0), (capt_tiller, 1.0), (pedal_steer, 1.0)]), 1.0);
+        assert_eq!(out.get("STEER_CTL_FAULT:1"), Some(&1.0));
+        assert_eq!(out.get("STEER_CTL_FAULT:2"), Some(&0.0));
+        assert_eq!(out.get("STEER_TILLER_FAULT:capt"), Some(&1.0));
+        assert_eq!(out.get("STEER_TILLER_FAULT:fo"), Some(&0.0));
+        assert_eq!(out.get("STEER_PEDAL_FAULT"), Some(&1.0));
+        assert_eq!(out.get("BODY_STEER_FAULT:1"), Some(&0.0), "untouched by the SSC channels above");
+
+        let mut body = GearStructureLive::new();
+        let out2 = run(&mut body, &rollout_truth(), &Faults::from_pairs([(body_leak_left, 1.0)]), 1.0);
+        assert_eq!(out2.get("BODY_STEER_FAULT:1"), Some(&1.0));
+        assert_eq!(out2.get("BODY_STEER_FAULT:2"), Some(&0.0), "only the left body position's own leak must report");
+    }
+
+    /// `E-IND-DESIGN.md` 320800048 STEER ALTN STEER SYS HOT: sustained
+    /// nosewheel deflection heats the modelled ALTN circuit past the
+    /// GENERIC 100 C threshold; a healthy (centred) nosewheel stays near
+    /// ambient.
+    #[test]
+    fn sustained_steering_deflection_heats_the_altn_circuit_past_the_hot_threshold() {
+        let mut truth = rollout_truth();
+        truth.dt_s = 1.0;
+        truth.environment.sat_c = 15.0;
+
+        let mut idle = GearStructureLive::new();
+        let idle_out = run(&mut idle, &truth, &Faults::default(), 600.0);
+        assert!(idle_out["ALTN_STEER_SYS_TEMP_C"] < 30.0, "a centred nosewheel must stay near ambient: {}", idle_out["ALTN_STEER_SYS_TEMP_C"]);
+
+        truth.controls.steering_command_deg[0] = 45.0;
+        let mut deflected = GearStructureLive::new();
+        let out = run(&mut deflected, &truth, &Faults::default(), 3_000.0);
+        assert!(out["ALTN_STEER_SYS_TEMP_C"] > super::ALTN_STEER_SYS_HOT_C, "sustained deflection must heat the ALTN circuit past the hot threshold: {}", out["ALTN_STEER_SYS_TEMP_C"]);
+    }
+
+    /// `E-IND-DESIGN.md` 320800057/059 STEER N/W STEER DISC FAULT / NOT
+    /// DISC, reached through `Truth` end to end: a healthy mechanism tracks
+    /// the towing-lever selection; `disc_mechanism_fail` freezes it.
+    #[test]
+    fn nw_steer_disconnect_selection_is_wired_from_truth_and_can_be_jammed() {
+        let mut truth = rollout_truth();
+        truth.dt_s = 0.1;
+
+        let mut live = GearStructureLive::new();
+        let not_selected = run(&mut live, &truth, &Faults::default(), 1.0);
+        assert_eq!(not_selected.get("NW_STEER_DISCONNECTED"), Some(&0.0));
+
+        truth.controls.nw_steer_disc_selected = true;
+        let selected = run(&mut live, &truth, &Faults::default(), 1.0);
+        assert_eq!(selected.get("NW_STEER_DISCONNECTED"), Some(&1.0), "a healthy mechanism must respond to Truth's own selection");
+
+        let mut jammed = GearStructureLive::new();
+        let disc_id = jammed.ids.steer_disc_mechanism_fail;
+        let jam_faults = Faults::from_pairs([(disc_id, 1.0)]);
+        truth.controls.nw_steer_disc_selected = false;
+        run(&mut jammed, &truth, &jam_faults, 0.1);
+        // Select while jammed: must not move.
+        truth.controls.nw_steer_disc_selected = true;
+        let jam_out = run(&mut jammed, &truth, &jam_faults, 1.0);
+        assert_eq!(jam_out.get("NW_STEER_DISCONNECTED"), Some(&0.0), "a jammed mechanism must not respond to a new selection reaching it through Truth");
+    }
+
+    /// `E-IND-DESIGN.md` 320800042 L/G GRVTY EXTN FAULT, reached through
+    /// `Truth`: `GRAVITY_EXTEND_SELECTED` mirrors the crew selection, and a
+    /// severe uplock jam then defeats even gravity extension (the
+    /// mechanical path `retraction.rs`'s own test already proves directly;
+    /// this proves the `Truth` wiring reaches it).
+    #[test]
+    fn gravity_extend_selected_is_wired_from_truth_and_can_still_be_defeated() {
+        let mut truth = rollout_truth();
+        truth.dt_s = 0.1;
+        truth.controls.gear_lever_down = false; // retract first
+
+        let mut live = GearStructureLive::new();
+        for _ in 0..300 {
+            live.tick(&truth, &Faults::default());
+        }
+        assert_eq!(published(&live).get("GEAR_UPLOCKED:1"), Some(&1.0));
+
+        truth.controls.gear_lever_down = true;
+        truth.controls.gravity_extend_selected = true;
+        let out = run(&mut live, &truth, &Faults::default(), 0.1);
+        assert_eq!(out.get("GRAVITY_EXTEND_SELECTED"), Some(&1.0), "the selection must be published back");
+
+        // A severe jam on a fresh nose leg must still defeat it, reached
+        // this time through the Truth-sourced selection rather than
+        // `GearCommands`.
+        let mut jammed = GearStructureLive::new();
+        let jam_id = jammed.ids.uplock_jam[0];
+        let mut up_truth = truth.clone();
+        up_truth.controls.gear_lever_down = false;
+        up_truth.controls.gravity_extend_selected = false;
+        for _ in 0..300 {
+            jammed.tick(&up_truth, &Faults::default());
+        }
+        assert_eq!(published(&jammed).get("GEAR_UPLOCKED:1"), Some(&1.0));
+
+        let mut down_truth = truth.clone();
+        down_truth.controls.gravity_extend_selected = true;
+        let jam_faults = Faults::from_pairs([(jam_id, 1.0)]);
+        let jam_out = run(&mut jammed, &down_truth, &jam_faults, 0.1 * 5_000.0);
+        assert_eq!(jam_out.get("GEAR_STUCK_LOCKED:1"), Some(&1.0), "a severe uplock jam must defeat gravity extension reached through Truth too");
+    }
+
+    /// `E-IND-DESIGN.md` 320800019 BRAKES MINOR FAULT: a wheel's own
+    /// `antiskid_inop` below the BITE threshold is a real, noticed
+    /// degradation, distinct from (and not the same trigger as) the
+    /// deep-registry's own `L_G_BRAKES_ANTISKID_FAULT`, which only fires at
+    /// or above that threshold.
+    #[test]
+    fn brakes_minor_fault_fires_below_the_antiskid_bite_threshold_and_not_above_it() {
+        let mut minor = GearStructureLive::new();
+        let id = minor.ids.antiskid_inop[3];
+        let out = run(&mut minor, &rollout_truth(), &Faults::from_pairs([(id, 0.2)]), 1.0);
+        assert_eq!(out.get("BRAKES_MINOR_FAULT"), Some(&1.0), "a sub-threshold antiskid degradation must be noticed");
+        assert_eq!(out.get("ANTISKID_CHANNEL_FAULT:4"), Some(&0.0), "but must not itself trip the channel's own BITE fault");
+
+        let mut full = GearStructureLive::new();
+        let out2 = run(&mut full, &rollout_truth(), &Faults::from_pairs([(id, 1.0)]), 1.0);
+        assert_eq!(out2.get("ANTISKID_CHANNEL_FAULT:4"), Some(&1.0));
+
+        let healthy = run(&mut GearStructureLive::new(), &rollout_truth(), &Faults::default(), 1.0);
+        assert_eq!(healthy.get("BRAKES_MINOR_FAULT"), Some(&0.0));
+    }
+
+    /// `E-IND-DESIGN.md` 320800046 L/G WEIGHT ON WHEELS FAULT, reached
+    /// through `Truth`: `TRUE_ON_GROUND:n` and `SENSED_ON_GROUND:n` agree
+    /// when healthy and disagree once `wow_sensing_fail` is armed, and only
+    /// on the armed leg.
+    #[test]
+    fn true_and_sensed_on_ground_disagree_only_on_the_leg_with_a_wow_sensing_failure() {
+        let mut live = GearStructureLive::new();
+        let id = live.ids.strut_wow_sensing_fail[1]; // left wing leg
+        let out = run(&mut live, &rollout_truth(), &Faults::from_pairs([(id, 1.0)]), 2.0);
+        assert_ne!(out["TRUE_ON_GROUND:2"], out["SENSED_ON_GROUND:2"], "the armed leg's sensed state must disagree with its true state");
+        assert_eq!(out["TRUE_ON_GROUND:3"], out["SENSED_ON_GROUND:3"], "an untouched sibling leg must still agree");
+    }
+
+    #[test]
+    fn never_publishes_flybywires_own_gear_lever_input() {
+        let mut area = GearStructureLive::new();
+        let truth = Truth::default();
+        crate::deep::live::Area::tick(&mut area, &truth, &Faults::default());
+        let mut names = Vec::new();
+        crate::deep::live::Area::publish(&area, &mut |name, _| names.push(name.to_owned()));
+        assert!(!names.iter().any(|n| n == "GEAR_LEVER_POSITION_REQUEST"), "writing FlyByWire's gear lever input back from its handle output locks the gear down");
     }
 }

@@ -70,6 +70,17 @@ pub struct EndSystemFaults {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PartitionFaults {
     pub failure: f64,
+    /// `E-IND-DESIGN.md` 314800001: this partition's own FWS function
+    /// rejected the loaded airline-customization database at startup (a
+    /// checksum/version validity check) -- an inherently boolean software
+    /// validation outcome, not a physical fraction, so this is read as a
+    /// discrete flag (>= 0.5, this crate's own BITE-flag convention) rather
+    /// than a continuous fault like `failure` above. Only meaningful on the
+    /// CPIOM-C1 FWS partition; harmless (never armed) everywhere else.
+    pub customization_db_rejected: f64,
+    /// `E-IND-DESIGN.md` 314800005: as `customization_db_rejected`, for the
+    /// ATQC (Airline Total Quality Control?) database validity check.
+    pub atqc_db_rejected: f64,
 }
 
 /// A CPIOM or IOM module: its own hardware and loaded configuration, plus

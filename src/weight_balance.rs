@@ -22,10 +22,17 @@
 //!   (metres, "including payload, and including internal and external
 //!   fuel"), not the deprecated `sim/flightmodel/misc/cgz_ref_to_default`,
 //!   which is the zero fuel CG. It is an offset from the aircraft's reference
-//!   point, `sim/aircraft/weight/acf_cgZ_original` (feet). The converter put
-//!   that point at MSFS's empty weight CG in X-Plane's axes: z aft,
-//!   z = -(MSFS z + datum z) (msfs2xp-aircraft acf.rs:192-194, 1176-1179;
-//!   acf/_cgZ -16 for the cfg's 16 ft).
+//!   point, `sim/aircraft/weight/acf_cgZ_original` (feet). The converter
+//!   writes that point from the cfg's empty weight CG in X-Plane's axes by
+//!   default (z aft, z = -(MSFS z + datum z), msfs2xp-aircraft acf.rs's
+//!   `acf_point`) -- but `--cg-z` can override it with a certificated figure
+//!   instead when the cfg's own is known wrong (the installed A380 uses
+//!   `--cg-z -8`, not the cfg's -16 ft: main.rs's own doc comment on that
+//!   flag, and `acf/_cgZ -8.000000000` in the installed .acf). `corrected_empty`
+//!   re-derives the empty mass this module sums from whichever one X-Plane
+//!   actually reports, every tick, so an override is never silently
+//!   cancelled out of the CG this module writes (see its own doc comment for
+//!   the failure mode when it was).
 //! - X-Plane's own fuel sits in its nine tanks, two of which merge MSFS's
 //!   outer tanks into the outer feed tanks; the offset written here is the
 //!   whole aircraft's MSFS centre of gravity, eleven tanks at their own
@@ -42,161 +49,7 @@ use crate::published::{self, Published, Value};
 use crate::xp::{DataRef, Xplm};
 use crate::Vars;
 
-pub(crate) const FLIGHT_MODEL_CFG: &str = include_str!(
-    "../../fbw-aircraft/fbw-a380x/src/base/flybywire-aircraft-a380-842/SimObjects/AirPlanes/FlyByWire_A380X/common/config/flight_model.cfg"
-);
-
-pub const LB_TO_KG: f64 = 0.453_592_37;
-const FT_TO_M: f64 = 0.3048;
-
-/// A mass at a position: pounds, and feet z (back to front), x, y from the
-/// reference datum.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Mass {
-    pub pounds: f64,
-    pub position: [f64; 3],
-}
-
-/// The cfg's balance: the empty aircraft, the stations with their default
-/// weights, and the tank positions.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Balance {
-    pub datum: [f64; 3],
-    pub empty: Mass,
-    pub stations: Vec<Mass>,
-    /// Each station's type (1-2 pilots, 3 passengers, 6 cargo).
-    pub station_kinds: Vec<u32>,
-    pub tanks: Vec<[f64; 3]>,
-}
-
-fn numbers(s: &str) -> Vec<f64> {
-    s.split(',').filter_map(|v| v.trim().parse().ok()).collect()
-}
-
-fn position(v: &[f64]) -> [f64; 3] {
-    [v.first().copied().unwrap_or(0.), v.get(1).copied().unwrap_or(0.), v.get(2).copied().unwrap_or(0.)]
-}
-
-/// flight_model.cfg's `[WEIGHT_AND_BALANCE]` and `[FUEL_SYSTEM]` tanks.
-pub fn parse(cfg: &str) -> Balance {
-    let mut balance = Balance::default();
-    let mut stations = Vec::new();
-    let mut tanks = Vec::new();
-    for line in cfg.lines() {
-        let line = line.split(';').next().unwrap_or("").trim();
-        let Some((key, value)) = line.split_once('=') else { continue };
-        let key = key.trim().to_ascii_lowercase();
-        match key.as_str() {
-            "reference_datum_position" => balance.datum = position(&numbers(value)),
-            "empty_weight" => balance.empty.pounds = numbers(value).first().copied().unwrap_or(0.),
-            "empty_weight_cg_position" => balance.empty.position = position(&numbers(value)),
-            _ => {
-                if let Some(n) = key.strip_prefix("station_load.").and_then(|n| n.parse::<usize>().ok()) {
-                    // weight, z, x, y, name, type
-                    let v = numbers(value);
-                    // (the name is not a number, so the type follows y)
-                    let kind = v.get(4).copied().unwrap_or(0.) as u32;
-                    stations.push((n, Mass { pounds: v.first().copied().unwrap_or(0.), position: position(&v[1.min(v.len())..]) }, kind));
-                } else if let Some(n) = key.strip_prefix("tank.").and_then(|n| n.parse::<usize>().ok()) {
-                    let at = value.split('#').find_map(|f| f.trim().strip_prefix("Position:")).map(numbers).unwrap_or_default();
-                    tanks.push((n, position(&at)));
-                }
-            }
-        }
-    }
-    stations.sort_by_key(|s| s.0);
-    tanks.sort_by_key(|t| t.0);
-    balance.station_kinds = stations.iter().map(|s| s.2).collect();
-    balance.stations = stations.into_iter().map(|s| s.1).collect();
-    balance.tanks = tanks.into_iter().map(|t| t.1).collect();
-    balance
-}
-
-/// X-Plane's station count (`sim/flightmodel/weight/m_stations` is float[9]).
-pub const XPLANE_STATIONS: usize = 9;
-
-/// The payload, in pounds, above which FlyByWire is taken to have actually
-/// published one. Two crew at ~170 lb each clear this; the 2 lb an
-/// unpopulated loadsheet reports does not.
-const MIN_REPORTED_PAYLOAD_LB: f64 = 100.;
-
-fn kind_class(kind: u32) -> u32 {
-    // Captain and first officer (1, 2) are one kind.
-    if kind == 2 { 1 } else { kind }
-}
-
-/// The cfg stations grouped into X-Plane's nine, as the converter groups them
-/// for the .acf's stations (msfs2xp-aircraft stations.rs): stations at the
-/// same z and y of one kind share one, then the two closest of one kind merge
-/// (arms weighted by the cfg's weights) until nine are left.
-pub fn station_groups(b: &Balance) -> Vec<Vec<usize>> {
-    let kind = |i: usize| kind_class(b.station_kinds.get(i).copied().unwrap_or(0));
-    let arm = |g: &[usize]| {
-        let total: f64 = g.iter().map(|&i| b.stations[i].pounds.max(0.)).sum();
-        let mut p = [0.; 3];
-        for &i in g {
-            let w = if total > 0. { b.stations[i].pounds.max(0.) / total } else { 1. / g.len() as f64 };
-            for (k, v) in p.iter_mut().enumerate() {
-                *v += b.stations[i].position[k] * w;
-            }
-        }
-        p
-    };
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    for (i, s) in b.stations.iter().enumerate() {
-        match groups.iter_mut().find(|g| {
-            let t = &b.stations[g[0]];
-            t.position[0] == s.position[0] && t.position[2] == s.position[2] && kind(g[0]) == kind(i)
-        }) {
-            Some(g) => g.push(i),
-            None => groups.push(vec![i]),
-        }
-    }
-    while groups.len() > XPLANE_STATIONS {
-        let closest = |same_kind: bool| {
-            let mut best: Option<(f64, usize, usize)> = None;
-            for a in 0..groups.len() {
-                for c in a + 1..groups.len() {
-                    if same_kind && kind(groups[a][0]) != kind(groups[c][0]) {
-                        continue;
-                    }
-                    let (pa, pc) = (arm(&groups[a]), arm(&groups[c]));
-                    let d = (pa[0] - pc[0]).abs() + (pa[2] - pc[2]).abs();
-                    if best.is_none_or(|(bd, _, _)| d < bd) {
-                        best = Some((d, a, c));
-                    }
-                }
-            }
-            best
-        };
-        let Some((_, a, c)) = closest(true).or_else(|| closest(false)) else { break };
-        let moved = groups.remove(c);
-        groups[a].extend(moved);
-    }
-    groups
-}
-
-/// Total pounds and the centre of gravity, feet from the datum.
-pub fn centre_of_gravity(masses: impl IntoIterator<Item = Mass>) -> (f64, [f64; 3]) {
-    let mut total = 0.;
-    let mut moment = [0.; 3];
-    for m in masses {
-        total += m.pounds;
-        for (k, p) in m.position.iter().enumerate() {
-            moment[k] += m.pounds * p;
-        }
-    }
-    if total <= 0. {
-        return (0., [0.; 3]);
-    }
-    (total, moment.map(|m| m / total))
-}
-
-/// X-Plane's `cg_offset_z` for an MSFS CG: metres aft of the .acf's reference
-/// point, which is `reference_ft` along X-Plane's z (aft).
-pub fn xplane_cg_offset_z(msfs_cg_z_ft: f64, datum_z_ft: f64, reference_ft: f64) -> f64 {
-    (-(msfs_cg_z_ft + datum_z_ft) - reference_ft) * FT_TO_M
-}
+pub use crate::mass_balance::*;
 
 pub struct WeightBalance {
     balance: Balance,
@@ -272,6 +125,12 @@ impl WeightBalance {
     /// weights.
     pub fn update(&mut self, vars: &mut Vars, xplm: &Xplm) {
         let b = &self.balance;
+        // See `corrected_empty`'s doc comment: anchor the empty mass on the
+        // .acf's own declared reference point, not the cfg's raw (and on
+        // this A380, `--cg-z`-overridden) figure, or the override never
+        // reaches X-Plane's applied CG.
+        let reference_ft = self.reference_z.map(|r| xplm.get_f(r) as f64);
+        let empty = corrected_empty(b.empty, b.datum[0], reference_ft);
         let stations: Vec<Mass> = self
             .stations
             .iter()
@@ -282,7 +141,7 @@ impl WeightBalance {
             self.tanks.iter().zip(&b.tanks).map(|(id, at)| Mass { pounds: vars.read(id).max(0.), position: *at }).collect();
         let payload_lb: f64 = stations.iter().map(|s| s.pounds).sum();
         let stations_lb: Vec<f64> = stations.iter().map(|s| s.pounds).collect();
-        let (total_lb, cg) = centre_of_gravity(std::iter::once(b.empty).chain(stations).chain(tanks));
+        let (total_lb, cg) = centre_of_gravity(std::iter::once(empty).chain(stations).chain(tanks));
 
         let payload_kg = payload_lb * LB_TO_KG;
         let has_stations = self.station_max.is_some_and(|d| {
@@ -374,8 +233,7 @@ impl WeightBalance {
             (_, _, Some(d)) => xplm.set_f(d, payload_kg as f32),
             _ => {}
         }
-        if let (Some(d), Some(r), true) = (self.cg_offset_z.filter(|_| !skip_cg), self.reference_z, total_lb > 0.) {
-            let reference = xplm.get_f(r) as f64;
+        if let (Some(d), Some(reference), true) = (self.cg_offset_z.filter(|_| !skip_cg), reference_ft, total_lb > 0.) {
             let offset = xplane_cg_offset_z(cg[0], b.datum[0], reference);
             // This module is the one that crashes the converted A380: with
             // its writes skipped the aircraft sits indefinitely, with them
@@ -447,6 +305,38 @@ mod tests {
         assert_eq!(xplane_cg_offset_z(16., 0., -16.), 0.);
         // One foot forward in MSFS is 0.3048 m forward (negative) in X-Plane.
         assert!((xplane_cg_offset_z(17., 0., -16.) + 0.3048).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_empty_cg_follows_the_acfs_own_reference_point() {
+        let empty = Mass { pounds: 661_403., position: [16., 0., 2.8] };
+        // No override: the converter wrote `acf_cgZ_original` straight from
+        // the cfg (`p[2] = -(lon + datum)`), so the corrected position is
+        // the cfg's own -- unchanged behaviour.
+        assert_eq!(corrected_empty(empty, 0., Some(-16.)), empty);
+        // `--cg-z -8` (the installed A380's actual value, main.rs:79): the
+        // corrected position is 8 ft, not the cfg's 16.
+        assert_eq!(corrected_empty(empty, 0., Some(-8.)).position[0], 8.);
+        // Lateral/vertical are untouched either way.
+        assert_eq!(corrected_empty(empty, 0., Some(-8.)).position[1..], empty.position[1..]);
+        // No reference dataref found: keep the cfg's own, as before this fix.
+        assert_eq!(corrected_empty(empty, 0., None), empty);
+    }
+
+    #[test]
+    fn a_cg_z_override_reaches_the_applied_centre_of_gravity() {
+        // Before this fix, `centre_of_gravity` always anchored on the cfg's
+        // raw empty CG (16 ft) regardless of the .acf's own reference point,
+        // so `xplane_cg_offset_z` -- an offset *from* that reference --
+        // algebraically cancelled it out of X-Plane's final applied CG
+        // (reference_ft + offset == -(cg_msfs_ft + datum), independent of
+        // reference_ft): a `--cg-z` override never reached the sim. With the
+        // fix, an aircraft at exactly the empty weight lands exactly on the
+        // .acf's own declared reference point instead of back on the cfg's.
+        let empty = corrected_empty(Mass { pounds: 661_403., position: [16., 0., 2.8] }, 0., Some(-8.));
+        let (_, cg) = centre_of_gravity([empty]);
+        let offset_m = xplane_cg_offset_z(cg[0], 0., -8.);
+        assert!(offset_m.abs() < 1e-9, "empty aircraft should land on the acf's own -8 ft reference, got offset {offset_m} m");
     }
 }
 

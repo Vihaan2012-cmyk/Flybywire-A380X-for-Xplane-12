@@ -25,11 +25,24 @@
 //! path that the tracking loop's height estimate jitters -- a well
 //! documented radar altimeter phenomenon (see e.g. FAA/EUROCAE radio
 //! altimeter MOPS discussions of multipath susceptibility over water).
-//! Modelled as additive noise whose severity depends on the terrain type and
-//! is worse at low altitude (where the reflected geometry is closest to the
-//! direct path in both time and angle) -- GENERIC functional form and
-//! magnitude, since no public multipath error budget exists for this
+//! Modelled as additive noise whose severity depends on the terrain type
+//! and on height above the reflecting surface -- GENERIC functional form
+//! and magnitude, since no public multipath error budget exists for this
 //! specific system.
+//!
+//! The height dependence is a ramp, not a monotonic 1/height blow-up: the
+//! direct and reflected path lengths are both approximately equal to the
+//! aircraft's height above the surface, so as height goes to zero the two
+//! paths converge and there is no geometric separation left for them to
+//! beat against (this is also why a healthy installation reads within
+//! inches while stationary on the ramp -- a well-known characteristic, not
+//! only the fixed-offset effect above). Jitter ramps up from ~0 at
+//! touchdown to its worst around [`MULTIPATH_REFERENCE_HEIGHT_FT`] (the
+//! representative flare/threshold-crossing height where geometric
+//! separation is largest relative to the tracking loop's range gate), then
+//! decays with further height much as it did before -- GENERIC shape,
+//! chosen to be qualitatively right at both ends rather than diverging at
+//! zero height.
 //!
 //! ## Range limit
 //! Radio altimeters are only valid over a bounded height range; above it
@@ -45,8 +58,10 @@ use super::rng::Rng;
 
 /// Representative upper range limit, ft. GENERIC (see module docs).
 pub const MAX_RANGE_FT: f64 = 2500.0;
-/// Below this height, multipath is at its worst (closest reflected-path
-/// geometry); above it, decays to a small residual. GENERIC.
+/// The height at which multipath jitter peaks: below it the direct and
+/// reflected paths are converging toward the same length (near-zero
+/// jitter at touchdown, see the module docs); above it, decays toward a
+/// small residual. GENERIC.
 const MULTIPATH_REFERENCE_HEIGHT_FT: f64 = 50.0;
 /// Base 1-sigma noise at the reference height and severity 1.0, ft. GENERIC.
 const MULTIPATH_BASE_SIGMA_FT: f64 = 1.5;
@@ -131,7 +146,15 @@ impl RadioAltimeter {
         }
 
         let terrain_multiplier = if over_water_or_snow { SPECULAR_TERRAIN_MULTIPLIER } else { 1.0 };
-        let height_factor = (MULTIPATH_REFERENCE_HEIGHT_FT / true_agl_ft.max(1.0)).min(5.0);
+        // Ramp up from the surface to the reference height (paths
+        // converging toward zero separation as height -> 0, see module
+        // docs), then decay above it exactly as before -- both halves
+        // equal 1.0 at the reference height, so no extra cap is needed.
+        let height_factor = if true_agl_ft <= MULTIPATH_REFERENCE_HEIGHT_FT {
+            true_agl_ft.max(0.0) / MULTIPATH_REFERENCE_HEIGHT_FT
+        } else {
+            MULTIPATH_REFERENCE_HEIGHT_FT / true_agl_ft
+        };
         let severity = 1.0 + faults.tracking_loop_degradation.max(0.0) + faults.rx_antenna_degradation.max(0.0);
         let sigma_ft = MULTIPATH_BASE_SIGMA_FT * terrain_multiplier * height_factor * severity;
         let noise_ft = self.rng.gaussian() * sigma_ft;
@@ -251,5 +274,34 @@ mod tests {
         let mut ra = RadioAltimeter::new(1);
         let out = ra.step(0.0, false, &RadioAltimeterFaults::default());
         assert!(out.agl_ft.is_finite());
+    }
+
+    #[test]
+    fn parked_on_a_flat_ramp_reads_within_about_a_foot_of_true_height() {
+        // The bug this guards against: height_factor used to blow up (and
+        // clamp at a 5x cap) as true_agl_ft -> 0, giving sigma = 7.5 ft
+        // parked and swings of roughly +/-20 ft over many ticks; a healthy
+        // RA reads within inches on the ramp.
+        let mut ra = RadioAltimeter::new(5);
+        for _ in 0..500 {
+            let out = ra.step(0.0, false, &RadioAltimeterFaults::default());
+            assert!(out.valid);
+            assert!(out.agl_ft.abs() < 1.0, "{}", out.agl_ft);
+        }
+    }
+
+    #[test]
+    fn multipath_is_worst_near_the_reference_height_not_at_touchdown() {
+        let mut at_touchdown = RadioAltimeter::new(6);
+        let mut at_reference = RadioAltimeter::new(6);
+        let n = 2000;
+        let (mut touchdown_sq, mut reference_sq) = (0.0, 0.0);
+        for _ in 0..n {
+            let t = at_touchdown.step(0.0, false, &RadioAltimeterFaults::default());
+            let r = at_reference.step(MULTIPATH_REFERENCE_HEIGHT_FT, false, &RadioAltimeterFaults::default());
+            touchdown_sq += (t.agl_ft - 0.0).powi(2);
+            reference_sq += (r.agl_ft - MULTIPATH_REFERENCE_HEIGHT_FT).powi(2);
+        }
+        assert!(reference_sq > touchdown_sq, "touchdown {touchdown_sq} reference {reference_sq}");
     }
 }

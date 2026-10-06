@@ -30,6 +30,102 @@ pub fn register(r: &mut Registry) {
     register_pneumatic_and_apu_failures(r);
     register_insulation_failures(r);
     register_ecam_alerts(r);
+    register_ecam_completeness_additions(r);
+}
+
+/// ECAM completeness (`E:/fbw-debug/ecam/E-AIR-DESIGN.md`, ATA 21 AIR/VENT):
+/// two independent LRU faults, no threshold invented. `n` 8/9 at ata=21 --
+/// the highest id this file already used at that ata is 7.
+fn register_ecam_completeness_additions(r: &mut Registry) {
+    const ATA: u16 = 21;
+    {
+        let comp = "21_therm.fwd_cargo_trim_air_valve".to_string();
+        let fid = failure_id(Area::ThermalZones, ATA, 8);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::ThermalZones,
+            ata: ATA,
+            name: "FWD cargo zone trim-air valve".into(),
+            params: vec![frac("fault", "the FWD cargo zone's own trim-air valve broken", 0.0)],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::ThermalZones,
+            ata: ATA,
+            name: "FWD cargo zone trim-air valve fault".into(),
+            component: comp,
+            model_field: "thermal_zones::live::ThermalZonesLive.fwd_cargo_trv_fault".into(),
+            magnitude: "0 healthy .. 1 fully faulted".into(),
+            effect: "FlyByWire's own 211800030 COND FWD CARGO TEMP REGUL FAULT; distinct from the aircraft-wide HOT AIR valves 1/2 (already-wired 211800032/033) and from the automatic zone controller".into(),
+        });
+    }
+    {
+        let comp = "21_therm.ths_bay_ventilation_fan".to_string();
+        let fid = failure_id(Area::ThermalZones, ATA, 9);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::ThermalZones,
+            ata: ATA,
+            name: "THS (trimmable horizontal stabiliser) bay ventilation fan".into(),
+            params: vec![frac("fault", "the bay's own ventilation fan broken", 0.0)],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::ThermalZones,
+            ata: ATA,
+            name: "THS bay ventilation fan fault".into(),
+            component: comp,
+            model_field: "thermal_zones::live::ThermalZonesLive.ths_bay_vent_fault".into(),
+            magnitude: "0 healthy .. 1 fully faulted -- a component-broken flag; the bay has no thermal-network zone of its own in this port or in a380_systems, so the trigger is this flag, not a temperature this pass would otherwise have to invent (E-AIR-DESIGN.md 212800028)".into(),
+            effect: "FlyByWire's own 212800028 VENT THS BAY VENT FAULT".into(),
+        });
+    }
+    {
+        let comp = "21_therm.bulk_cargo_duct_heater".to_string();
+        let fid = failure_id(Area::ThermalZones, ATA, 10);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::ThermalZones,
+            ata: ATA,
+            name: "Bulk cargo compartment heater duct".into(),
+            params: vec![frac("overheat", "the duct's own outlet overheats, 0 healthy .. 1 clearly over the FCOM's 70 C trip", 0.0)],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::ThermalZones,
+            ata: ATA,
+            name: "Bulk cargo duct heater overtemperature".into(),
+            component: comp,
+            model_field: "thermal_zones::live::ThermalZonesLive.bulk_cargo_duct_temp_c".into(),
+            magnitude: "0 healthy (duct tracks the real, already-modelled CargoBulk zone air temperature) .. 1 fully faulted (+120 C GENERIC excess over it)".into(),
+            effect: "FlyByWire's own 211800024 COND BULK CARGO DUCT OVHT; the real 70 C trip (FCOM PRO-ABN-ECAM p.4669, E-AIR-FCOM.json) is applied in fbw/ata21_22_23.rs, not baked in here".into(),
+        });
+    }
+    {
+        let comp = "21_therm.trim_air_duct".to_string();
+        let fid = failure_id(Area::ThermalZones, ATA, 11);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::ThermalZones,
+            ata: ATA,
+            name: "Cockpit/cabin trim-air duct".into(),
+            params: vec![frac("overheat", "the duct's own outlet overheats, 0 healthy .. 1 clearly over the FCOM's 70 C trip", 0.0)],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::ThermalZones,
+            ata: ATA,
+            name: "Trim-air duct overtemperature".into(),
+            component: comp,
+            model_field: "thermal_zones::live::ThermalZonesLive.trim_air_duct_temp_c".into(),
+            magnitude: "0 healthy (duct tracks the real, already-modelled CabinMainDeck zone air temperature) .. 1 fully faulted (+120 C GENERIC excess over it)".into(),
+            effect: "FlyByWire's own 211800028 COND DUCT OVHT; the real 70 C trip (FCOM PRO-ABN-ECAM p.4675, E-AIR-FCOM.json) is applied in fbw/ata21_22_23.rs, not baked in here".into(),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +307,67 @@ fn register_fire_failures(r: &mut Registry) {
             ),
         });
     }
+
+    // ECAM completeness pass (E-FIRE §D/§E): the aft avionics bay's own
+    // equipment fire (new zone, §D), the main/upper avionics bays'
+    // equipment fires (existing zones, injected the same way the cabin-deck
+    // lavatory fires above finally gave those zones a real smoke source),
+    // and the FWD Lower Crew Rest module's own furnishings fire (new zone,
+    // §E). All four GENERIC magnitude, same explicit "not a certification
+    // test value, sized to the physically meaningful order of magnitude"
+    // method already used above (this function's own module doc) -- one
+    // order below a cargo fire for the avionics bays (contained,
+    // electrical in nature, same class as the two lavatory fires already
+    // registered), and the lavatory-fire-load magnitude for the LDCR
+    // module (an occupied crew-rest space carrying the identical class of
+    // furnishings/small-lavatory fire load CS/FAR 25.854's method above
+    // was sized for).
+    const AVNCS_FIRE_MAX_HEAT_W: f64 = 20_000.0;
+    const AVNCS_FIRE_MAX_SMOKE_KG_S: f64 = 0.002;
+
+    let avionics_equipment = [("AftAvionics", "aft_avionics", "Aft avionics equipment fire", 11u16), ("MainAvionics", "main_avionics", "Main avionics equipment fire", 12u16), ("UpperAvionics", "upper_avionics", "Upper avionics equipment fire", 13u16)];
+    for (zone_name, field, title, n) in avionics_equipment {
+        let component_id = format!("26_thermal.{field}_equipment_fire_load");
+        r.component(ComponentDef {
+            id: component_id.clone(),
+            area: Area::ThermalZones,
+            ata: 26,
+            name: format!("{zone_name} equipment fire load"),
+            params: vec![frac("severity", "fire severity, 0 = no fire, 1 = full-severity equipment fire (reference heat/smoke release rate)", 0.0)],
+            failures: vec![failure_id(Area::ThermalZones, 26, n)],
+        });
+        r.failure(FailureDef {
+            id: failure_id(Area::ThermalZones, 26, n),
+            area: Area::ThermalZones,
+            ata: 26,
+            name: title.to_string(),
+            component: component_id,
+            model_field: format!("thermal_zones::network::Zone.injected_heat_w / .injected_smoke_kg_s (via ThermalNetwork::inject_heat_w(zones.{field}, magnitude*{AVNCS_FIRE_MAX_HEAT_W}) and inject_smoke_kg_s(zones.{field}, magnitude*{AVNCS_FIRE_MAX_SMOKE_KG_S}))"),
+            magnitude: format!("0..1, fraction of the reference {AVNCS_FIRE_MAX_HEAT_W:.0} W / {AVNCS_FIRE_MAX_SMOKE_KG_S} kg/s full-severity equipment fire"),
+            effect: format!("{zone_name} smoke concentration rises, which is what deep::sensors' new avionics-bay smoke detectors (E-FIRE §B) sample; heat conducts to neighbouring zones through the real structure links."),
+        });
+    }
+
+    const LDCR_FIRE_MAX_HEAT_W: f64 = 20_000.0;
+    const LDCR_FIRE_MAX_SMOKE_KG_S: f64 = 0.002;
+    r.component(ComponentDef {
+        id: "26_thermal.fwd_lower_crew_rest_fire_load".to_string(),
+        area: Area::ThermalZones,
+        ata: 26,
+        name: "FWD Lower Crew Rest (LDCR) module fire load".to_string(),
+        params: vec![frac("severity", "fire severity, 0 = no fire, 1 = full-severity furnishings/waste-bin fire (reference heat/smoke release rate)", 0.0)],
+        failures: vec![failure_id(Area::ThermalZones, 26, 14)],
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::ThermalZones, 26, 14),
+        area: Area::ThermalZones,
+        ata: 26,
+        name: "FWD Lower Crew Rest module furnishings/waste-bin fire".to_string(),
+        component: "26_thermal.fwd_lower_crew_rest_fire_load".to_string(),
+        model_field: format!("thermal_zones::network::Zone.injected_heat_w / .injected_smoke_kg_s (via ThermalNetwork::inject_heat_w(zones.fwd_lower_crew_rest, magnitude*{LDCR_FIRE_MAX_HEAT_W}) and inject_smoke_kg_s(zones.fwd_lower_crew_rest, magnitude*{LDCR_FIRE_MAX_SMOKE_KG_S}))"),
+        magnitude: format!("0..1, fraction of the reference {LDCR_FIRE_MAX_HEAT_W:.0} W / {LDCR_FIRE_MAX_SMOKE_KG_S} kg/s full-severity fire"),
+        effect: "FwdLowerCrewRest smoke concentration rises, sampled by deep::sensors' new FWD Lower Crew Rest detector (E-FIRE §B), which serves both the module's own smoke alert and the LOWER DECK LAVATORY alert (same module, same real lavatory); heat conducts into CargoFwd through the real structure link.".to_string(),
+    });
 }
 
 // ---------------------------------------------------------------------------

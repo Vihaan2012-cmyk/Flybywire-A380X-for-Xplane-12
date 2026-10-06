@@ -264,6 +264,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "deep_electrical"
+version = "0.1.0"
+
+[[package]]
 name = "defmt"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -398,6 +402,7 @@ dependencies = [
  "a380_systems",
  "ab_glyph",
  "cc",
+ "deep_electrical",
  "flate2",
  "lewton",
  "lyon_tessellation",

@@ -30,6 +30,7 @@ mod hyd;
 pub(crate) mod loadsheet;
 mod pages;
 mod services;
+mod walkaround;
 /// JSON for the XPHFBW app's Study tab: the same page/group/topology data
 /// [`build_menu`]'s windows draw from, plus the failures/breakers catalogues
 /// and the action queues a click applies to. `panel.rs` routes to these.
@@ -66,6 +67,7 @@ pub(crate) enum PageKind {
     Failures,
     Breakers,
     GroundServices,
+    Walkaround,
     Loadsheet,
     All,
     /// One `deep` area's own page: its registered components, failures and
@@ -95,6 +97,7 @@ pub(crate) const ITEMS: &[(&str, PageKind)] = &[
     ("Failures", PageKind::Failures),
     ("Circuit Breakers", PageKind::Breakers),
     ("Ground Services", PageKind::GroundServices),
+    ("Walkaround", PageKind::Walkaround),
     ("Loadsheet", PageKind::Loadsheet),
     ("All Variables", PageKind::All),
     // One page per `deep` area (src/deep/*), in `deep_page::AREA_LIST`'s own
@@ -117,6 +120,8 @@ pub(crate) const ITEMS: &[(&str, PageKind)] = &[
     ("Deep: Thermal Zones", PageKind::Area(crate::deep::api::Area::ThermalZones)),
     ("Deep: Wiring", PageKind::Area(crate::deep::api::Area::Wiring)),
     ("Deep: Integration", PageKind::Area(crate::deep::api::Area::Integration)),
+    ("Deep: Auto Flight", PageKind::Area(crate::deep::api::Area::AutoFlight)),
+    ("Deep: Communications", PageKind::Area(crate::deep::api::Area::Communications)),
 ];
 
 pub(crate) fn item_of(kind: PageKind) -> usize {
@@ -419,6 +424,7 @@ unsafe extern "C" fn draw(window: WindowId, refcon: *mut c_void) {
                 PageKind::Failures => overflow = failures::draw(&mut cv, win.scroll),
                 PageKind::Breakers => overflow = services::breakers(&mut cv, win.scroll),
                 PageKind::GroundServices => services::ground(&mut cv),
+                PageKind::Walkaround => overflow = walkaround::draw(&mut cv, win.scroll),
                 PageKind::Loadsheet => overflow = loadsheet::draw(&mut cv, win.scroll),
                 PageKind::Area(area) => overflow = pages::flow(&mut cv, &deep_page::var_groups(area), win.scroll),
                 other => overflow = pages::flow(&mut cv, &pages::groups(other), win.scroll),
@@ -548,6 +554,6 @@ mod tests {
             .collect();
         let expected: Vec<crate::deep::api::Area> = deep_page::AREA_LIST.iter().map(|&(a, _)| a).collect();
         assert_eq!(area_items, expected, "ITEMS' Area entries must match deep_page::AREA_LIST, in order");
-        assert_eq!(area_items.len(), 18, "eighteen deep areas");
+        assert_eq!(area_items.len(), 20, "eighteen deep areas plus AutoFlight and Communications (E-AIR-DESIGN.md)");
     }
 }

@@ -133,7 +133,17 @@ pub struct RetractionFaults {
     /// Proximity sensor(s) report the opposite of the true lock state above
     /// `SENSOR_LIE_THRESHOLD`.
     pub sensor_lies: f64,
+    /// `E-IND-DESIGN.md` 320800032 L/G BOGIE POSITION FAULT: the body-gear
+    /// bogie-beam trim/levelling actuator fails to trim above
+    /// `BOGIE_TRIM_FAIL_THRESHOLD` -- a BITE-reported boolean, independent
+    /// of the rest of this leg's own retraction sequencing. Only meaningful
+    /// on the two body legs; harmless (never armed) on the nose/wing legs,
+    /// which have no bogie-trim mechanism at all.
+    pub bogie_trim_fail: f64,
 }
+
+/// As `SENSOR_LIE_THRESHOLD`: a BITE self-test either passes or fails.
+const BOGIE_TRIM_FAIL_THRESHOLD: f64 = 0.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -171,6 +181,10 @@ pub struct RetractionOutputs {
     /// (the uplock release failed): a genuine "gear won't extend" hazard,
     /// distinct from merely being slow.
     pub stuck_locked: bool,
+    /// `E-IND-DESIGN.md` 320800032: whether this leg's bogie-trim BITE
+    /// reports healthy. `true` unless `bogie_trim_fail` is armed; only
+    /// meaningful on the two body legs.
+    pub bogie_trimmed: bool,
 }
 
 pub struct Retraction {
@@ -254,7 +268,22 @@ impl Retraction {
             Phase::Locked => {}
             Phase::DoorsOpening => {
                 self.door_position = (self.door_position + door_rate * dt).min(1.0);
-                if self.door_position >= DOOR_OPEN_THRESHOLD {
+                // `E-IND-DESIGN.md` 320800032 L/G BOGIE POSITION FAULT: on
+                // the two body legs, the bogie-beam trim/levelling actuator
+                // must level the bogie before it is allowed to swing up
+                // into the wheel well -- a second gate on the same
+                // transition the door check above already gates, not a new
+                // kind of interlock. Only relevant while *retracting*
+                // (`!self.target_down`) and only on a body leg: a nose/wing
+                // leg has no bogie-beam mechanism to fail at all, so this
+                // gate is unconditionally true there regardless of what
+                // magnitude `faults.bogie_trim_fail` happens to carry (in
+                // production that field is never armed off a body leg at
+                // all -- no failure id for it exists on the other legs --
+                // but the physics itself should not depend on that
+                // registration-time guarantee to stay correct).
+                let bogie_ok = self.kind != LegKind::Body || self.target_down || faults.bogie_trim_fail < BOGIE_TRIM_FAIL_THRESHOLD;
+                if self.door_position >= DOOR_OPEN_THRESHOLD && bogie_ok {
                     self.phase = Phase::Traveling;
                 }
             }
@@ -299,6 +328,7 @@ impl Retraction {
             sensed_downlocked: self.downlocked != sensed_invert,
             phase: self.phase,
             stuck_locked: self.stuck_locked,
+            bogie_trimmed: faults.bogie_trim_fail < BOGIE_TRIM_FAIL_THRESHOLD,
         }
     }
 }
@@ -460,6 +490,42 @@ mod tests {
         }
         assert_eq!(out.phase, Phase::DoorsOpening, "a fully seized door must block the sequence indefinitely");
         assert!(out.gear_position > 0.95, "the gear itself must not have moved while the doors are stuck");
+    }
+
+    /// `E-IND-DESIGN.md` 320800032 L/G BOGIE POSITION FAULT: a body leg's
+    /// bogie-trim BITE failure stalls the retraction sequence in
+    /// `DoorsOpening` even once the door itself is fully open, and
+    /// `bogie_trimmed` reports the failure independently of the rest of the
+    /// sequence. A healthy leg (or a nose/wing leg, which has no bogie-trim
+    /// mechanism at all) is unaffected.
+    #[test]
+    fn a_bogie_trim_failure_only_stalls_a_body_legs_retraction() {
+        let mut r = Retraction::new(LegKind::Body);
+        let faults = RetractionFaults { bogie_trim_fail: 1.0, ..Default::default() };
+        let up_inputs = RetractionInputs { gear_lever_down: false, gravity_extend_commanded: false, hydraulic_pressure_fraction: 1.0, dt_s: 0.1 };
+        let mut out = r.step(&up_inputs, &faults);
+        for _ in 0..2_000 {
+            out = r.step(&up_inputs, &faults);
+        }
+        assert!(!out.bogie_trimmed, "the BITE flag must report the failure");
+        assert_eq!(out.phase, Phase::DoorsOpening, "a body leg must stall in DoorsOpening once its bogie fails to trim");
+        assert!(out.door_position >= DOOR_OPEN_THRESHOLD, "the door itself must have finished opening -- it is the bogie gate that is stuck");
+        assert!(out.gear_position > 0.95, "the leg itself must never have started travelling away from the down position, got {}", out.gear_position);
+
+        // Extending (gear coming back down) is not gated by the bogie trim
+        // at all.
+        let mut healthy_extend = Retraction::new(LegKind::Body);
+        let down_inputs = RetractionInputs { gear_lever_down: true, ..up_inputs };
+        let extend_out = run_to_locked(&mut healthy_extend, &down_inputs, &faults, 2_000);
+        assert_eq!(extend_out.phase, Phase::Locked, "extending must not be blocked by a bogie-trim failure");
+        assert!(extend_out.downlocked);
+
+        // A nose leg has no bogie-trim mechanism, so the same fault
+        // magnitude must never stall it.
+        let mut nose = Retraction::new(LegKind::Nose);
+        let nose_out = run_to_locked(&mut nose, &up_inputs, &faults, 2_000);
+        assert_eq!(nose_out.phase, Phase::Locked, "a nose leg must be unaffected by bogie_trim_fail, which does not apply to it");
+        assert!(nose_out.uplocked);
     }
 
     #[test]

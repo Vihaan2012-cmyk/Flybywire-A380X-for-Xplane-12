@@ -1,6 +1,6 @@
 //! A dump of the aircraft's whole state, every variable, every
 //! `xphfbw.stateDumpFrames` frames (`app_settings.rs`, default
-//! [`DEFAULT_EVERY_TICKS`]), to `D:\fbw-build\state-dumps`, for reading
+//! [`DEFAULT_EVERY_TICKS`]), to `D:\A380\fbw-build\state-dumps`, for reading
 //! what the systems did after a flight.
 //!
 //! `xphfbw.stateDumps`/`stateDumpFrames`/`stateDumpKeep` (the Simulation
@@ -39,7 +39,7 @@ pub const EVERY_TICKS: u64 = 1;
 /// `xphfbw.stateDumpFrames`'s shipped default (`app_settings.rs`), and the
 /// interval used while the app's settings cannot be read yet.
 pub const DEFAULT_EVERY_TICKS: u64 = 200;
-const ROOT: &str = r"D:\fbw-build\state-dumps";
+const ROOT: &str = r"D:\A380\fbw-build\state-dumps";
 /// `xphfbw.stateDumpKeep`'s shipped default.
 pub const DEFAULT_KEEP_PER_SESSION: usize = 60;
 const KEEP_SESSIONS: usize = 3;

@@ -1,7 +1,7 @@
 # Electrical area — progress log
 
 Area: `Area::Electrical` (`docs/deep/BRIEF.md`). Directory:
-`D:\fbw-xp-systems\src\deep\electrical\`.
+`D:\A380\fbw-xp-systems\src\deep\electrical\`.
 
 - [done] Backlog 1 — network data model & per-tick solver — `network.rs` —
   `BusId` (17 A380 buses: AC1-4, AC ESS, AC ESS SHED, AC EMER, AC GND FLT
@@ -27,7 +27,7 @@ Area: `Area::Electrical` (`docs/deep/BRIEF.md`). Directory:
   fault current — a real, useful primitive matching `breakers.rs`'s own
   "AC1 BUS FEED"-class entries, not just a test fix. 20 tests total.
 - [done] Backlog 2 — load catalogue — `loads.rs` — every named consumer
-  group in `D:\fbw-xp-systems\src\breakers.rs`'s ATA21/26/27/32/34/36
+  group in `D:\A380\fbw-xp-systems\src\breakers.rs`'s ATA21/26/27/32/34/36
   functions (cabin fans, FDAC/TADD/VCM/OCSM/CPIOM-B, pack flow valves, fire
   detection loops, PRIM/SEC/FCDC/FCU/rollout, LGCIU, electric hydraulic
   pumps, autobrake solenoid, gear/door proximity sensors and actuators,

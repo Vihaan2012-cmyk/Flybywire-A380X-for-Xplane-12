@@ -36,7 +36,7 @@ case a future design does decide to push the internal bus across after all.
 The interesting region is 100–500 and that is where the resolution goes.
 
 This crate is standalone. It is deliberately **not** a member of
-`D:\fbw-xp-systems\Cargo.toml` — it targets `wasm32-wasip1` and links against
+`D:\A380\fbw-xp-systems\Cargo.toml` — it targets `wasm32-wasip1` and links against
 the proprietary MSFS SDK, and must never be dragged into the X-Plane build. Its
 own `Cargo.toml` opens with an empty `[workspace]` table, which stops cargo
 walking up the tree, so the isolation is structural rather than a matter of
@@ -91,7 +91,7 @@ warm-up.
 ## Build
 
 ```powershell
-cd D:\fbw-xp-systems\msfs\lvar-bench
+cd D:\A380\fbw-xp-systems\msfs\lvar-bench
 .\build.ps1
 ```
 
@@ -107,7 +107,7 @@ is several GB; later runs take seconds.
 The equivalent single command line, if you would rather not use the script:
 
 ```powershell
-docker run --rm -v "D:/fbw-xp-systems/msfs/lvar-bench:/external" `
+docker run --rm -v "D:/A380/fbw-xp-systems/msfs/lvar-bench:/external" `
   ghcr.io/flybywiresim/dev-env@sha256:28b1f55c047b9ec338c3d676a82225fe135b0b1061fa7993c03b9a75b5e470cd `
   bash -c "cd /external && mkdir -p dist && cargo build --target wasm32-wasip1 --release && wasm-opt -O1 --signext-lowering --enable-bulk-memory --enable-nontrapping-float-to-int -o dist/lvar-bench.wasm target/wasm32-wasip1/release/lvar_bench.wasm"
 ```

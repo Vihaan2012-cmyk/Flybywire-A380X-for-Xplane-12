@@ -122,7 +122,7 @@ keys `EWD/elements/EclSoftKeys.tsx`, which do the identical thing explicitly
 SetSimVarValue(.., 0), 50)`); the converted aircraft's own `main.lua` and
 `cockpit_bindings.txt` for the four fallback names.
 
-The root cause is in the converter (`D:\msfs2xp-aircraft`, which this workstream
+The root cause is in the converter (`D:\A380\msfs2xp-aircraft`, which this workstream
 is to stay out of) — it should emit `LEFT_LEAVE_CODE` and honour
 `<Condition NotEmpty="SIMVAR">`. Fixing it here also fixes the already-installed
 aircraft without a reconversion. **Worth passing to whoever owns the converter**:
@@ -270,8 +270,8 @@ stay the same length) — i.e. two more `SourcePatch`es beside the ones here.
 ## 6. Verifying
 
 ```
-CARGO_TARGET_DIR=D:/fbw-xp-systems/target-c1 cargo test --release --features js --lib ecl
-CARGO_TARGET_DIR=D:/fbw-xp-systems/target-c1 cargo test --release --features js --lib -- --ignored --nocapture ecl_opens
+CARGO_TARGET_DIR=D:/A380/fbw-xp-systems/target-c1 cargo test --release --features js --lib ecl
+CARGO_TARGET_DIR=D:/A380/fbw-xp-systems/target-c1 cargo test --release --features js --lib -- --ignored --nocapture ecl_opens
 ```
 
 The first is always-on and checks both patches still match the built tree

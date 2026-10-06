@@ -295,6 +295,17 @@ fn oxygen_charge_absolute_pa(bottle: usize) -> f64 {
 }
 
 const CABIN_ABSOLUTE_FULL_SCALE_PA: f64 = 120_000.0;
+// ICAO Standard Atmosphere constants (ICAO Doc 7488), troposphere relation
+// only -- the same public formula `adr.rs`'s own module doc cites and
+// re-derives independently per this brief's no-cross-module-dependency
+// rule; used here for `DEEP_CPC_n_CABIN_ALTITUDE_FT` (E-AIR-DESIGN.md
+// 213800008).
+const CABIN_ALT_T0_K: f64 = 288.15;
+const CABIN_ALT_L_K_PER_M: f64 = 0.0065;
+const CABIN_ALT_P0_PA: f64 = 101_325.0;
+const CABIN_ALT_R_AIR: f64 = 287.052_87;
+const CABIN_ALT_G0: f64 = 9.80665;
+const M_TO_FT: f64 = 3.280_839_9;
 /// Cabin/ambient differential pressure transducer full scale, Pa.
 /// **GENERIC**: above the structural differential limit of a
 /// transport-category fuselage (the A380's is commonly quoted near 9.6 psi,
@@ -524,12 +535,16 @@ impl SmokeSource {
 struct LiveSmoke {
     var_reading: String,
     var_alarm: String,
+    /// ECAM completeness pass (E-FIRE §A): the detector's own monitored
+    /// circuit/self-test fault, published independently of the alarm.
+    var_fault: String,
     source: SmokeSource,
     detector: SmokeDetector,
-    /// `sensitivity_loss`, `false_bias_pct_per_ft`, `stuck`.
-    faults: [u64; 3],
+    /// `sensitivity_loss`, `false_bias_pct_per_ft`, `stuck`, `circuit_fault`.
+    faults: [u64; 4],
     reading_pct_per_ft: f64,
     alarm: bool,
+    fault: bool,
 }
 
 /// Where a pressure transducer's true pressure comes from. Two of the four
@@ -551,15 +566,24 @@ struct LivePressure {
     /// `drift_rate_pa_per_hr`, `stuck`.
     faults: [u64; 2],
     reading_pa: f64,
+    /// This tick's `stuck` fault magnitude, 0 healthy .. 1 fully frozen
+    /// (`registry.rs`'s own documented ceiling for this field) -- stored
+    /// alongside `reading_pa` so `213800016 CAB PRESS SENSORS FAULT`
+    /// (E-AIR-DESIGN.md) can publish a verdict on the transducer's own
+    /// validity, distinct from the pressure reading itself. Unused (and
+    /// harmlessly always 0.0) for every other `LivePressure` instance this
+    /// struct also serves.
+    stuck_frac: f64,
 }
 
 impl LivePressure {
     fn step(&mut self, true_pa: f64, faults: &Faults, dt: f64) {
         let drift_pa_per_hr =
             faults.get(self.faults[0]) * TRANSDUCER_DRIFT_FULL_SCALE_FRACTION_PER_HR * self.full_scale_pa;
+        self.stuck_frac = faults.get(self.faults[1]);
         self.reading_pa = self.transducer.step(
             true_pa,
-            &PressureTransducerFaults { drift_rate_pa_per_hr: drift_pa_per_hr, stuck: faults.get(self.faults[1]) },
+            &PressureTransducerFaults { drift_rate_pa_per_hr: drift_pa_per_hr, stuck: self.stuck_frac },
             dt,
         );
     }
@@ -667,6 +691,34 @@ pub struct DiscreteSensors {
     core_pickups: Vec<LiveSpeedPickup>,
     vibration: Vec<LiveVibration>,
     fuel_flow: Vec<LiveFuelFlow>,
+    /// 213800008 CAB PRESS DIFF PRESS LO (E-AIR-DESIGN.md): each CPC's own
+    /// cabin altitude (see `publish`'s own comment on the ICAO formula)
+    /// minus FlyByWire's own FMS-computed landing elevation
+    /// (`Truth::landing_elevation_ft`), ft. Stored here because it is
+    /// computed in `tick` (which has `Truth`) and read back in `publish`
+    /// (which does not).
+    cabin_alt_above_landing_elev_ft: [f64; 2],
+    /// This tick's `Truth::vertical_speed_fpm`, passed through for
+    /// `publish` (see that field's own doc).
+    vertical_speed_fpm: f64,
+    /// ECAM completeness pass (E-FIRE, un-UNSOURCED per `BRIEF-phase2-
+    /// FCOM.md`): the Smoke Detection Function's own two aggregate,
+    /// system-level BITE discretes -- `260800042` SMOKE FACILITIES DET
+    /// FAULT (the SDF fails to reconcile the fitted detectors against the
+    /// aircraft's own cabin configuration, FCOM PRO-ABN-ECAM p.4997) and
+    /// `260800092` SMOKE SAFETY TEST REQUIRED (the SDF's own automatic
+    /// safety test, run every 10 h on ground, has not completed
+    /// successfully within the last 50 h, FCOM p.5012). Both are direct
+    /// pass-throughs of their own registered failure's armed state, the
+    /// same class of mapping every other `circuit_fault`-style discrete in
+    /// this pass uses -- `safety_test_overdue` represents the BITE
+    /// "overdue" state itself, not a literal elapsed-hours clock (this
+    /// area has no persisted operating-hours counter to drive one from,
+    /// the same simplification `hydraulics::thermal`'s own monitored-
+    /// switch discretes already use).
+    sdf_ids: [u64; 2],
+    sdf_configuration_fault: bool,
+    sdf_safety_test_overdue: bool,
 }
 
 impl DiscreteSensors {
@@ -724,13 +776,31 @@ impl DiscreteSensors {
         // matching the name. Index 6 (`CARGO_FWD`/"Cargo :16") is skipped:
         // it is the forward cargo door already instantiated above from
         // `deep::cabin`'s published percentage, not from `Truth` directly.
-        const DOOR_REGISTRY_SLUG: [&str; 8] =
-            ["m1l", "m2l", "m2r", "m4l", "m5l", "u1l", "cargo_16", "cargo_17"];
-        for (i, name) in DOOR_NAMES.iter().enumerate() {
-            if i == 6 {
-                continue;
+        // Mapped by name, not position: `DOOR_NAMES` grew from 8 to 13
+        // entries (E-ELEC Phase 2, `deep::live::DOOR_NAMES`'s own doc) when
+        // the five additional upper doors (U1R/U2L/U2R/U3L/U3R) were exposed
+        // for `520800028`-`032`, which shifted `CARGO_FWD`/`CARGO_AFT` from
+        // indices 6/7 to 11/12 -- a positional `DOOR_REGISTRY_SLUG[i]` table
+        // would silently mismatch every door from U1L onward. The five new
+        // upper doors have no proximity-sensor model registered
+        // (`registry.rs`'s own `register_door_proximity` still only
+        // instantiates the original 8, which this alert never needed) --
+        // `None` skips them here, the same way `CARGO_FWD` was already
+        // skipped for the unrelated reason it doc'd above.
+        let door_registry_slug = |name: &str| -> Option<&'static str> {
+            match name {
+                "M1L" => Some("m1l"),
+                "M2L" => Some("m2l"),
+                "M2R" => Some("m2r"),
+                "M4L" => Some("m4l"),
+                "M5L" => Some("m5l"),
+                "U1L" => Some("u1l"),
+                "CARGO_AFT" => Some("cargo_17"),
+                _ => None, // CARGO_FWD (already-instantiated cargo door, see this fn's own doc) and the five new upper doors (no proximity-sensor model)
             }
-            let door_slug = DOOR_REGISTRY_SLUG[i];
+        };
+        for (i, name) in DOOR_NAMES.iter().enumerate() {
+            let Some(door_slug) = door_registry_slug(name) else { continue };
             for role in ["Open", "Closed"] {
                 let id = format!("52_doors.prox_{door_slug}_{}", role.to_lowercase());
                 proximity.push(LiveProximity {
@@ -788,6 +858,7 @@ impl DiscreteSensors {
                 full_scale_pa: TYRE_PRESSURE_FULL_SCALE_PA,
                 faults: index.ids(&format!("32_gear.tyre_pressure_{}", slug(wheel)), ["drift_rate_pa_per_hr", "stuck"]),
                 reading_pa: crate::physics::tyre::COLD_PRESSURE_PA,
+                stuck_frac: 0.0,
             });
         }
 
@@ -809,6 +880,7 @@ impl DiscreteSensors {
                 full_scale_pa: TYRE_PRESSURE_FULL_SCALE_PA,
                 faults: index.ids(&format!("32_gear.tyre_pressure_nose_{n}"), ["drift_rate_pa_per_hr", "stuck"]),
                 reading_pa: crate::physics::tyre::COLD_PRESSURE_PA,
+                stuck_frac: 0.0,
             });
         }
 
@@ -849,6 +921,7 @@ impl DiscreteSensors {
                 full_scale_pa: HYD_FULL_SCALE_PA,
                 faults: index.ids(&format!("29_hyd.pressure_{low}"), ["drift_rate_pa_per_hr", "stuck"]),
                 reading_pa: 0.0,
+                stuck_frac: 0.0,
             });
             temperature.push(LiveTemperature {
                 var: format!("DEEP_HYD_{up}_RESERVOIR_TEMP_SENSED_C"),
@@ -889,6 +962,7 @@ impl DiscreteSensors {
                 full_scale_pa: OXYGEN_BOTTLE_FULL_SCALE_PA,
                 faults: index.ids(&format!("35_oxy.pressure_{n}"), ["drift_rate_pa_per_hr", "stuck"]),
                 reading_pa: oxygen_charge_absolute_pa(n),
+                stuck_frac: 0.0,
             });
         }
 
@@ -913,6 +987,7 @@ impl DiscreteSensors {
                 full_scale_pa: P30_FULL_SCALE_PA,
                 faults: index.ids(&format!("77_eng.p30_{engine}"), ["drift_rate_pa_per_hr", "stuck"]),
                 reading_pa: 101_325.0,
+                stuck_frac: 0.0,
             });
             oil_pressure.push(LivePressure {
                 var: format!("DEEP_ENG_{engine}_OIL_PRESSURE_SENSED_PA"),
@@ -923,6 +998,7 @@ impl DiscreteSensors {
                 full_scale_pa: OIL_PRESSURE_FULL_SCALE_PA,
                 faults: index.ids(&format!("79_oil.pressure_{engine}"), ["drift_rate_pa_per_hr", "stuck"]),
                 reading_pa: 0.0,
+                stuck_frac: 0.0,
             });
             oil_temperature.push(LiveOilTemperature {
                 var: format!("DEEP_ENG_{engine}_OIL_TEMP_SENSED_C"),
@@ -1017,6 +1093,7 @@ impl DiscreteSensors {
                 full_scale_pa: CABIN_ABSOLUTE_FULL_SCALE_PA,
                 faults: index.ids(&format!("21_cab.cpc_{cpc}_absolute_pressure"), ["drift_rate_pa_per_hr", "stuck"]),
                 reading_pa: 101_325.0,
+                stuck_frac: 0.0,
             });
             cabin_differential.push(LivePressure {
                 var: format!("DEEP_CPC_{cpc}_DIFF_PRESSURE_SENSED_PA"),
@@ -1026,6 +1103,7 @@ impl DiscreteSensors {
                 faults: index
                     .ids(&format!("21_cab.cpc_{cpc}_differential_pressure"), ["drift_rate_pa_per_hr", "stuck"]),
                 reading_pa: 0.0,
+                stuck_frac: 0.0,
             });
         }
 
@@ -1037,14 +1115,16 @@ impl DiscreteSensors {
             smoke.push(LiveSmoke {
                 var_reading: format!("DEEP_SMOKE_{}_PCT_PER_FT", upper_slug(loc)),
                 var_alarm: format!("DEEP_SMOKE_{}_ALARM", upper_slug(loc)),
+                var_fault: format!("DEEP_SMOKE_{}_FAULT", upper_slug(loc)),
                 source: SmokeSource::DensityKgM3(format!("CARGO_{bay}_SMOKE_DENSITY_KG_M3")),
                 detector: SmokeDetector::new(),
                 faults: index.ids(
                     &format!("26_fire.smoke_{}", slug(loc)),
-                    ["sensitivity_loss", "false_bias_pct_per_ft", "stuck"],
+                    ["sensitivity_loss", "false_bias_pct_per_ft", "stuck", "circuit_fault"],
                 ),
                 reading_pct_per_ft: 0.0,
                 alarm: false,
+                fault: false,
             });
         }
         // Lavatories 1-4 are main-deck, 5-8 upper-deck. A lavatory smoke
@@ -1061,18 +1141,68 @@ impl DiscreteSensors {
             smoke.push(LiveSmoke {
                 var_reading: format!("DEEP_SMOKE_LAV_{n}_PCT_PER_FT"),
                 var_alarm: format!("DEEP_SMOKE_LAV_{n}_ALARM"),
+                var_fault: format!("DEEP_SMOKE_LAV_{n}_FAULT"),
                 source: SmokeSource::MassFractionOfCabinAir(format!(
                     "THERMAL_ZONE_{zone}_SMOKE_CONCENTRATION"
                 )),
                 detector: SmokeDetector::new(),
                 faults: index.ids(
                     &format!("26_fire.smoke_lav_{n}"),
-                    ["sensitivity_loss", "false_bias_pct_per_ft", "stuck"],
+                    ["sensitivity_loss", "false_bias_pct_per_ft", "stuck", "circuit_fault"],
                 ),
                 reading_pct_per_ft: 0.0,
                 alarm: false,
+                fault: false,
             });
         }
+
+        // ECAM completeness pass (E-FIRE §B): new detector instances
+        // reusing existing (or newly modelled, §D/§E) zone-smoke sources.
+        // Each entry: (id slug, zone it samples). The zone is always one
+        // `deep::thermal_zones` already publishes -- either pre-existing
+        // (`MAINAVIONICS`/`UPPERAVIONICS`/`CARGOBULK`/`CABINMAINDECK`/
+        // `CABINUPPERDECK`) or added by this same pass
+        // (`AFTAVIONICS`/`FWDLOWERCREWREST`, `thermal_zones::topology_a380`).
+        let new_smoke_instances = [
+            ("bulk_cargo", "DEEP_SMOKE_CARGO_BULK", "CARGOBULK"),
+            ("avncs_main_l", "DEEP_SMOKE_AVNCS_MAIN_L", "MAINAVIONICS"),
+            ("avncs_main_r", "DEEP_SMOKE_AVNCS_MAIN_R", "MAINAVIONICS"),
+            ("avncs_upper_l", "DEEP_SMOKE_AVNCS_UPPER_L", "UPPERAVIONICS"),
+            ("avncs_upper_r", "DEEP_SMOKE_AVNCS_UPPER_R", "UPPERAVIONICS"),
+            ("avncs_aft", "DEEP_SMOKE_AVNCS_AFT", "AFTAVIONICS"),
+            ("main5l_fltrest", "DEEP_SMOKE_MAIN5L_FLTREST", "CABINMAINDECK"),
+            ("main5l_cabrest", "DEEP_SMOKE_MAIN5L_CABREST", "CABINMAINDECK"),
+            ("main_1l_cws", "DEEP_SMOKE_MAIN_1L_CWS", "CABINMAINDECK"),
+            ("main_1l_rcc", "DEEP_SMOKE_MAIN_1L_RCC", "CABINMAINDECK"),
+            ("upper_1l_cws", "DEEP_SMOKE_UPPER_1L_CWS", "CABINUPPERDECK"),
+            ("upper_1l_rcc", "DEEP_SMOKE_UPPER_1L_RCC", "CABINUPPERDECK"),
+            ("main_2l_cws", "DEEP_SMOKE_MAIN_2L_CWS", "CABINMAINDECK"),
+            ("main_2l_rcc", "DEEP_SMOKE_MAIN_2L_RCC", "CABINMAINDECK"),
+            ("upper_2l_cws", "DEEP_SMOKE_UPPER_2L_CWS", "CABINUPPERDECK"),
+            ("upper_2l_rcc", "DEEP_SMOKE_UPPER_2L_RCC", "CABINUPPERDECK"),
+            ("main_3r_cws", "DEEP_SMOKE_MAIN_3R_CWS", "CABINMAINDECK"),
+            ("main_3r_rcc", "DEEP_SMOKE_MAIN_3R_RCC", "CABINMAINDECK"),
+            ("upper_3r_cws", "DEEP_SMOKE_UPPER_3R_CWS", "CABINUPPERDECK"),
+            ("upper_3r_rcc", "DEEP_SMOKE_UPPER_3R_RCC", "CABINUPPERDECK"),
+            ("upper_1l_shower", "DEEP_SMOKE_UPPER_1L_SHOWER", "CABINUPPERDECK"),
+            ("upper_1r_shower", "DEEP_SMOKE_UPPER_1R_SHOWER", "CABINUPPERDECK"),
+            ("fwdlowercrewrest", "DEEP_SMOKE_FWDLOWERCREWREST", "FWDLOWERCREWREST"),
+        ];
+        for (slug, var_base, zone) in new_smoke_instances {
+            smoke.push(LiveSmoke {
+                var_reading: format!("{var_base}_PCT_PER_FT"),
+                var_alarm: format!("{var_base}_ALARM"),
+                var_fault: format!("{var_base}_FAULT"),
+                source: SmokeSource::MassFractionOfCabinAir(format!("THERMAL_ZONE_{zone}_SMOKE_CONCENTRATION")),
+                detector: SmokeDetector::new(),
+                faults: index.ids(&format!("26_fire.smoke_{slug}"), ["sensitivity_loss", "false_bias_pct_per_ft", "stuck", "circuit_fault"]),
+                reading_pct_per_ft: 0.0,
+                alarm: false,
+                fault: false,
+            });
+        }
+
+        let sdf_ids = index.ids("26_fire.smoke_detection_function", ["configuration_fault", "safety_test_overdue"]);
 
         Self {
             proximity,
@@ -1094,6 +1224,11 @@ impl DiscreteSensors {
             core_pickups,
             vibration,
             fuel_flow,
+            cabin_alt_above_landing_elev_ft: [0.0; 2],
+            vertical_speed_fpm: 0.0,
+            sdf_ids,
+            sdf_configuration_fault: false,
+            sdf_safety_test_overdue: false,
         }
     }
 
@@ -1150,6 +1285,7 @@ impl DiscreteSensors {
         for s in &self.fuel_flow {
             ids.extend_from_slice(&s.faults);
         }
+        ids.extend_from_slice(&self.sdf_ids);
         ids
     }
 
@@ -1342,11 +1478,19 @@ impl DiscreteSensors {
                     sensitivity_loss: faults.get(s.faults[0]),
                     false_bias_pct_per_ft: faults.get(s.faults[1]) * SMOKE_FALSE_BIAS_FULL_SCALE_PCT_PER_FT,
                     stuck: faults.get(s.faults[2]),
+                    circuit_fault: faults.get(s.faults[3]),
                 },
             );
             s.reading_pct_per_ft = out.reading_pct_per_ft;
             s.alarm = out.alarm;
+            s.fault = out.circuit_fault;
         }
+
+        // ECAM completeness pass: the SDF's own two aggregate BITE
+        // discretes (struct doc on `sdf_ids`) -- pure pass-throughs, read
+        // directly off their own registered failure's armed state.
+        self.sdf_configuration_fault = faults.get(self.sdf_ids[0]) > 0.0;
+        self.sdf_safety_test_overdue = faults.get(self.sdf_ids[1]) > 0.0;
 
         // ---- Pressure transducers.
         for s in &mut self.hyd_pressure {
@@ -1375,6 +1519,17 @@ impl DiscreteSensors {
         for s in &mut self.cabin_differential {
             s.step(differential_pa, faults, dt);
         }
+        // 213800008 CAB PRESS DIFF PRESS LO (E-AIR-DESIGN.md): cabin
+        // altitude (ICAO Standard Atmosphere troposphere relation, `publish`'s
+        // own comment) minus FlyByWire's own FMS-computed landing elevation
+        // (`Truth::landing_elevation_ft`, real, already published for the SD
+        // PRESS page).
+        for (i, s) in self.cabin_absolute.iter().enumerate() {
+            let p_pa = s.reading_pa.max(1.0);
+            let alt_m = CABIN_ALT_T0_K / CABIN_ALT_L_K_PER_M * (1.0 - (p_pa / CABIN_ALT_P0_PA).powf(CABIN_ALT_R_AIR * CABIN_ALT_L_K_PER_M / CABIN_ALT_G0));
+            self.cabin_alt_above_landing_elev_ft[i] = alt_m * M_TO_FT - truth.landing_elevation_ft;
+        }
+        self.vertical_speed_fpm = truth.vertical_speed_fpm;
 
         // ---- Hydraulic reservoir float senders.
         for s in &mut self.hyd_quantity {
@@ -1471,7 +1626,17 @@ impl DiscreteSensors {
         for s in &self.smoke {
             out(&s.var_reading, s.reading_pct_per_ft);
             out(&s.var_alarm, b(s.alarm));
+            out(&s.var_fault, b(s.fault));
         }
+        // ECAM completeness pass (E-FIRE §C): the aggregate "SMOKE DET
+        // FAULT" (260800031), OR of every modelled smoke detector's own
+        // circuit fault -- the same aggregate-from-many-discretes pattern
+        // already established for `BREAKERS_TRIPPED_NOT_COMMANDED_COUNT`.
+        out("DEEP_SMOKE_ANY_DETECTOR_FAULT", b(self.smoke.iter().any(|s| s.fault)));
+        // `260800042` SMOKE FACILITIES DET FAULT, `260800092` SMOKE SAFETY
+        // TEST REQUIRED (struct doc on `sdf_ids`).
+        out("DEEP_SDF_CONFIGURATION_FAULT", b(self.sdf_configuration_fault));
+        out("DEEP_SDF_SAFETY_TEST_OVERDUE", b(self.sdf_safety_test_overdue));
         for s in self
             .hyd_pressure
             .iter()
@@ -1484,6 +1649,41 @@ impl DiscreteSensors {
         {
             out(&s.var, s.reading_pa);
         }
+        // 213800016 CAB PRESS SENSORS FAULT (E-AIR-DESIGN.md): each CPC's
+        // own transducer validity, built from the already-registered
+        // `stuck` fields above (their own documented "fully frozen"
+        // ceiling, `registry.rs`'s own doc, not a new invented threshold),
+        // OR'd across that CPC's absolute and differential transducer.
+        // Distinct from `cpcs_has_fault` (the CPIOM application-level
+        // fault, already claimed by 213800005/029-042) and from
+        // `adirs_data_is_valid` (a shared ADIRS-wide flag, not CPC-
+        // specific) -- see E-AIR-DESIGN.md's own note on 213800016.
+        for i in 0..2 {
+            let fault = self.cabin_absolute[i].stuck_frac.max(self.cabin_differential[i].stuck_frac) >= 1.0;
+            out(&format!("DEEP_CPC_{}_SENSOR_FAULT", i + 1), b(fault));
+        }
+        // 213800008 CAB PRESS DIFF PRESS LO (E-AIR-DESIGN.md): cabin
+        // pressure altitude, ft, from the same already-published absolute
+        // cabin pressure reading above -- the ICAO Standard Atmosphere
+        // troposphere relation (`h = T0/L * (1 - (P/P0)^(R*L/g0))`, the same
+        // public formula this area's own `adr.rs` cites and re-derives per
+        // this brief's no-cross-module-dependency rule; the stratosphere
+        // branch is not needed here since a cabin never approaches 11 km
+        // pressure altitude).
+        for i in 0..2 {
+            let p_pa = self.cabin_absolute[i].reading_pa.max(1.0);
+            let alt_m = CABIN_ALT_T0_K / CABIN_ALT_L_K_PER_M * (1.0 - (p_pa / CABIN_ALT_P0_PA).powf(CABIN_ALT_R_AIR * CABIN_ALT_L_K_PER_M / CABIN_ALT_G0));
+            out(&format!("DEEP_CPC_{}_CABIN_ALTITUDE_FT", i + 1), alt_m * M_TO_FT);
+            // The same cabin altitude, relative to FlyByWire's own real FMS
+            // landing elevation -- computed in `tick` (see that comment),
+            // read back here (213800008's own AND term).
+            out(&format!("DEEP_CPC_{}_CABIN_ALT_ABOVE_LANDING_ELEV_FT", i + 1), self.cabin_alt_above_landing_elev_ft[i]);
+        }
+        // 213800008's third AND term: X-Plane's own real exterior vertical
+        // speed, passed through unmodified (`Truth::vertical_speed_fpm`'s
+        // own doc) so an ECAM trigger can read it -- `Cond` only reads
+        // published names, never a raw `Truth` field.
+        out("DEEP_ADIRS_VERTICAL_SPEED_FPM", self.vertical_speed_fpm);
         for s in &self.oil_temperature {
             out(&s.var, s.reading_c);
         }
@@ -1530,7 +1730,7 @@ mod tests {
     fn truth_with(pairs: &[(&str, f64)]) -> Truth {
         let mut frame = PublishedFrame::default();
         for (name, value) in pairs {
-            frame.0.insert((*name).to_string(), *value);
+            frame.insert((*name).to_string(), *value);
         }
         Truth { dt_s: 0.5, published: frame, ..Truth::default() }
     }
@@ -1553,7 +1753,7 @@ mod tests {
     fn brake_truth(temp_c: f64) -> Truth {
         let mut frame = PublishedFrame::default();
         for n in 1..=16 {
-            frame.0.insert(format!("BRAKE_STACK_TEMP_C:{n}"), temp_c);
+            frame.insert(format!("BRAKE_STACK_TEMP_C:{n}"), temp_c);
         }
         Truth { dt_s: 0.5, published: frame, ..Truth::default() }
     }
@@ -1629,7 +1829,7 @@ mod tests {
         // to pass is to read the right one.
         let mut frame = PublishedFrame::default();
         for n in 1..=16 {
-            frame.0.insert(format!("BRAKE_STACK_TEMP_C:{n}"), 100.0 + n as f64 * 10.0);
+            frame.insert(format!("BRAKE_STACK_TEMP_C:{n}"), 100.0 + n as f64 * 10.0);
         }
         let truth = Truth { dt_s: 0.5, published: frame, ..Truth::default() };
         let out = run(&mut fresh(), &truth, &Faults::default(), 2);
@@ -1722,8 +1922,8 @@ mod tests {
         let charged = |n: usize| oxygen_charge_absolute_pa(n);
         // Two distinct pressures, so reading the wrong bottle would show.
         let mut frame = PublishedFrame::default();
-        frame.0.insert("OXYGEN_BOTTLE_PRESSURE_PA:1".to_string(), charged(1));
-        frame.0.insert("OXYGEN_BOTTLE_PRESSURE_PA:2".to_string(), charged(2));
+        frame.insert("OXYGEN_BOTTLE_PRESSURE_PA:1".to_string(), charged(1));
+        frame.insert("OXYGEN_BOTTLE_PRESSURE_PA:2".to_string(), charged(2));
         assert!(charged(1) > charged(2), "the crew bottle is charged higher than the therapeutic one");
         let full = Truth { dt_s: 1.0, published: frame, ..Truth::default() };
         let out = run(&mut fresh(), &full, &Faults::default(), 2);
@@ -1732,8 +1932,8 @@ mod tests {
 
         // The crew bottle empties to a quarter of its charge.
         let mut drained_frame = PublishedFrame::default();
-        drained_frame.0.insert("OXYGEN_BOTTLE_PRESSURE_PA:1".to_string(), 0.25 * charged(1));
-        drained_frame.0.insert("OXYGEN_BOTTLE_PRESSURE_PA:2".to_string(), charged(2));
+        drained_frame.insert("OXYGEN_BOTTLE_PRESSURE_PA:1".to_string(), 0.25 * charged(1));
+        drained_frame.insert("OXYGEN_BOTTLE_PRESSURE_PA:2".to_string(), charged(2));
         let drained = Truth { dt_s: 1.0, published: drained_frame, ..Truth::default() };
 
         let healthy = run(&mut fresh(), &drained, &Faults::default(), 2);
@@ -2598,9 +2798,9 @@ mod tests {
         let base = baseline(&truth, &reference_faults(), 2);
         let last = base.frames.last().expect("a frame");
         for (i, name) in base.names.iter().enumerate() {
-            truth.published.0.insert(name.clone(), last[i]);
+            truth.published.insert(name.clone(), last[i]);
         }
-        println!("TIMING published frame carries {} variables", truth.published.0.len());
+        println!("TIMING published frame carries {} variables", truth.published.len());
 
         let faults = Faults::default();
         let mut sensors = fresh();

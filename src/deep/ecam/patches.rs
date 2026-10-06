@@ -1,5 +1,5 @@
 //! `SourcePatch`es that splice registered `EcamAlert`s into FlyByWire's own
-//! compiled JS (the exact mechanism `ecam_patches.rs`, `wxr/mod.rs` and
+//! compiled JS (the exact mechanism `ecam_patches.rs` and
 //! `oans/plugin.rs` already use, assembled by `js_bridge.rs::native_ports`).
 //! See `docs/deep/ecam_bridge.md` for the full design and the one-line
 //! `js_bridge.rs` change (not made here -- an existing file this directory
@@ -15,7 +15,7 @@
 use crate::deep::api::EcamAlert;
 use crate::deep::ecam::codegen;
 use crate::deep::ecam::ids;
-use crate::js::msfs::SourcePatch;
+use crate::source_patch::SourcePatch;
 
 const EWD: &str = "/Pages/VCockpit/Instruments/A380X/EWD/ewd.js";
 const SYSTEMS_HOST: &str = "/Pages/VCockpit/Instruments/A380X/SystemsHost/SystemsHost.js";

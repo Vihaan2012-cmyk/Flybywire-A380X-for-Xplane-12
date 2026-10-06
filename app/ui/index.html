@@ -248,6 +248,33 @@
   .study-item-btn { border: 2px solid var(--line-dim); background: transparent; color: var(--text); padding: 8px 10px; text-align: left; text-transform: none; font-size: 13px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
   .study-item-btn.active { border-color: var(--ok); }
   .study-item-btn .amps { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+  /* Loadsheet tab: the aeroplane diagram, its cabin/cargo seat map, and
+     the weight/balance/boarding boxes below it. Scoped under
+     #loadsheet-content so none of it reaches the other tabs, which share
+     .box/.study-groups with very different content. */
+  .loadsheet-diagram { display: flex; flex-direction: column; gap: 18px; margin-bottom: 8px; }
+  .loadsheet-plane-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .loadsheet-plane-wrap svg { width: 100%; max-width: 640px; height: auto; display: block; background: #12151b; border: 1px solid #3a4150; border-radius: 4px; }
+  .loadsheet-plane-wrap svg text { font-family: "Segoe UI", system-ui, sans-serif; }
+  /* Its own dark background, not the page's: the empty-cell colour is
+     close enough to the page background that the swatch would otherwise
+     read as blank. */
+  .loadsheet-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 11px; color: var(--text-dim); background: #12151b; border: 1px solid #3a4150; border-radius: 4px; padding: 6px 14px; }
+  .loadsheet-legend .ll-item { display: inline-flex; align-items: center; gap: 5px; }
+  .loadsheet-legend .ll-note { margin-left: auto; font-style: italic; }
+  .loadsheet-legend .ll-swatch { width: 11px; height: 11px; border-radius: 2px; border: 1px solid #3a4150; display: inline-block; }
+  .loadsheet-cabin { display: flex; flex-direction: column; gap: 14px; }
+  .loadsheet-deck-title { font-size: 12px; letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 6px; }
+  .loadsheet-deck-row, .loadsheet-holds-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .loadsheet-zone, .loadsheet-hold { min-width: 78px; background: #20242c; border: 1px solid #3a4150; border-radius: 3px; padding: 5px 7px 6px; }
+  .loadsheet-hold { flex: 1 1 140px; }
+  .loadsheet-zone .lz-label, .loadsheet-hold .lz-label { font-size: 10.5px; color: #8b94a6; text-transform: uppercase; letter-spacing: 0.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .loadsheet-zone .lz-bar, .loadsheet-hold .lz-bar { height: 8px; margin-top: 4px; background: #141820; border-radius: 2px; overflow: hidden; }
+  .loadsheet-zone .lz-fill, .loadsheet-hold .lz-fill { height: 100%; }
+  .loadsheet-zone .lz-val, .loadsheet-hold .lz-val { font-size: 10.5px; color: #dfe4ee; margin-top: 3px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #loadsheet-content .study-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; align-items: start; }
+  #loadsheet-content .study-groups .box { margin-bottom: 0; }
   @media (max-width: 1100px) {
     .study-layout { grid-template-columns: 1fr; padding: 0 16px; }
     .study-nav { border-right: 0; border-bottom: 2px solid var(--line-dim); padding-bottom: 10px; max-height: 160px; }
@@ -405,6 +432,7 @@
         <div class="field"><span class="label">SimBrief auto import</span>
           <select data-key="CONFIG_AUTO_SIMBRIEF_IMPORT"><option value="DISABLED">Disabled</option><option value="ENABLED">Enabled</option></select></div>
       </div>
+      <div class="row"><span class="label dim">Set the SimBrief user ID above and Apply to use INIT &gt; CPNY F-PLN REQUEST on the MFD (Navigraph linking below is not yet available in this build).</span></div>
       <div class="row"><button type="button" class="small" data-action="navigraph">Link Navigraph account</button><span class="label dim" id="navigraph-user"></span></div>
       <div class="apply"><button type="submit">Apply</button></div>
     </form>
@@ -461,6 +489,7 @@
       <label class="row"><input type="checkbox" data-key="MODEL_WHEELCHOCKS_ENABLED" data-bool="1,0"><span class="label">Wheel chocks</span></label>
       <label class="row"><input type="checkbox" data-key="MODEL_CONES_ENABLED" data-bool="1,0"><span class="label">Safety cones</span></label>
       <label class="row"><input type="checkbox" data-key="MODEL_SATCOM_ENABLED" data-bool="1,0"><span class="label">Satcom antenna</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.cabinVisible"><span class="label">Passenger cabin</span><span class="help" title="Show the passenger cabin, from inside and through open doors. Off hides it to save frame rate; its textures stay loaded.">?</span></label>
       <label class="row"><input type="checkbox" data-key="REALISTIC_TILLER_ENABLED" data-bool="1,0"><span class="label">Realistic tiller</span></label>
       <label class="row"><input type="checkbox" data-key="PUSHBACK_USE_CONTROLLER_INPUT" data-bool="1,0"><span class="label">Pushback with controller input</span></label>
       <label class="row"><input type="checkbox" data-key="RMP_VHF_SPACING_25KHZ" data-bool="1,0"><span class="label">RMP 25 kHz spacing</span></label>
@@ -491,7 +520,7 @@
       <div class="field" data-show="xphfbw.randomFailures=true"><span class="label">Failure rate multiplier</span>
         <input type="number" min="0.1" max="1000" step="0.1" data-key="xphfbw.failureRate"></div>
       <label class="row"><input type="checkbox" data-key="xphfbw.persistence"><span class="label">Airframe wear &amp; damage persistence</span></label>
-      <label class="row"><input type="checkbox" data-key="xphfbw.stateDumps"><span class="label">State dumps</span><span class="help" title="Every variable written to D:\fbw-build\state-dumps every N frames, for diagnosing problems.">?</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.stateDumps"><span class="label">State dumps</span><span class="help" title="Every variable written to D:\A380\fbw-build\state-dumps every N frames, for diagnosing problems.">?</span></label>
       <div class="grid2" data-show="xphfbw.stateDumps=true">
         <div class="field"><span class="label">Every N frames</span><input type="number" min="10" max="10000" data-key="xphfbw.stateDumpFrames"></div>
         <div class="field"><span class="label">Keep dumps</span><input type="number" min="1" max="1000" data-key="xphfbw.stateDumpKeep"></div>
@@ -606,6 +635,7 @@ const DEFAULTS = {
   SOUND_ANNOUNCEMENTS_ENABLED: '1', SOUND_PTU_AUDIBLE_COCKPIT: '0', SOUND_INTERIOR_ENGINE: '0', SOUND_INTERIOR_WIND: '0', SOUND_EXTERIOR_MASTER: '0',
   'xphfbw.systemsOutOfProcess': true, 'xphfbw.coldStartGroundPower': true, 'xphfbw.randomFailures': false, 'xphfbw.failureRate': '1',
   'xphfbw.persistence': true, 'xphfbw.stateDumps': true, 'xphfbw.stateDumpFrames': '200', 'xphfbw.stateDumpKeep': '60',
+  'xphfbw.cabinVisible': true,
 };
 
 let settings = {};
@@ -665,6 +695,16 @@ function applyEfbBrightness() {
 
 document.addEventListener('change', (e) => {
   if (e.target.matches('[data-key]')) { applyVisibility(); applyStreamer(); if (e.target.dataset.key === 'xphfbw.efbBrightness') applyEfbBrightness(); }
+  // The cabin switch acts at once: a pilot flicking it to see what it does
+  // should not also have to find the section's Apply button.
+  if (e.target.dataset && e.target.dataset.key === 'xphfbw.cabinVisible') {
+    const values = { 'xphfbw.cabinVisible': valueOf(e.target) };
+    bridge.setSettings(values).then((r) => {
+      if (r && r.ok === false) { show(r.message || 'Could not apply'); return; }
+      settings = { ...settings, ...values };
+      show(values['xphfbw.cabinVisible'] ? 'Cabin shown' : 'Cabin hidden');
+    });
+  }
 });
 
 for (const form of $all('form[data-group]')) {
@@ -692,8 +732,12 @@ async function refreshStatus() {
   const s = await bridge.status();
   const set = (id, cls, text) => { const d = document.getElementById('dot-' + id); d.className = 'dot ' + cls; if (text) document.getElementById('st-' + id).textContent = text; };
   set('xplane', s.xplane ? 'ok' : 'bad', s.xplane ? 'X-Plane: connected' : 'X-Plane: not connected');
-  set('systems', s.systems ? (s.systems.late ? 'warn' : 'ok') : 'bad',
-      s.systems ? `Systems: running, ${s.systems.variables} variables, ${s.systems.roundTripMs.toFixed(2)} ms per frame` : 'Systems: stopped');
+  set('systems', s.systems ? 'ok' : 'bad',
+      // `lastTickMicros` is what `/api/status` (app/src/web.rs status()) actually
+      // sends; there is no `roundTripMs`/`late` field on this object (never was),
+      // reading them threw and froze this whole function, including the two
+      // updates below it, every time systems were actually running.
+      s.systems ? `Systems: running, ${s.systems.variables} variables, ${(s.systems.lastTickMicros / 1000).toFixed(2)} ms per frame` : 'Systems: stopped');
   set('displays', s.displays ? 'ok' : 'bad', s.displays ? `Displays: ${s.displays.screens} screens at ${s.displays.fps} fps` : 'Displays: stopped');
   document.getElementById('dot-link').className = 'dot ' + (s.xplane && s.systems ? 'ok' : 'bad');
   if (s.navigraphUser !== undefined) document.getElementById('navigraph-user').textContent = s.navigraphUser ? `Linked: ${s.navigraphUser}` : '';
@@ -871,6 +915,7 @@ function collectNames(page) {
   // (an alert can trigger on a reading another area publishes), so its
   // trigger conditions need their own names in the /vars poll.
   (page.alerts || []).forEach((a) => gateNames(a.trigger, out));
+  if (page.kind === 'walkaround') (page.items || []).forEach((it) => out.add(it.var));
   return [...out];
 }
 
@@ -1176,9 +1221,23 @@ async function renderBreakers(container) {
   const grid = el('div', { class: 'study-grid-list' });
   for (const c of list) {
     const amps = c.currentA !== null && c.currentA !== undefined ? c.currentA.toFixed(1) + 'A' : '';
-    const btn = el('button', { class: 'study-item-btn' + (c.closed ? ' active' : ''), type: 'button' });
-    btn.append(el('span', { text: `${c.number} ${c.name || c.typeName}${c.trip !== 'none' ? ' ' + c.trip.toUpperCase() : ''}` }), el('span', { class: 'amps', text: amps }));
-    btn.addEventListener('click', async () => { await studyPost('/study/action', { kind: 'toggleBreaker', id: c.number }); c.closed = !c.closed; btn.classList.toggle('active', c.closed); });
+    // `/study/breakers` (study/web.rs breakers_json) has no "number"/"typeName"
+    // field on any entry, and only "source":"catalogue" ones can be pulled/reset
+    // here (apply_action's pullBreaker/resetBreaker look them up in
+    // crate::breakers::catalog() only -- a "source":"deep" entry, the wider ELMS
+    // catalogue, has no write path at all yet). Disabling those rather than
+    // sending a kind/id that 400s matches this page's own rule elsewhere: report
+    // "not available" honestly instead of pretending the click worked.
+    const pullable = c.source === 'catalogue';
+    const btn = el('button', { class: 'study-item-btn' + (c.closed ? ' active' : ''), type: 'button', title: pullable ? '' : 'Not adjustable from this page yet' });
+    if (!pullable) btn.disabled = true;
+    btn.append(el('span', { text: `${c.id} ${c.name}${c.trip !== 'none' ? ' ' + c.trip.toUpperCase() : ''}` }), el('span', { class: 'amps', text: amps }));
+    btn.addEventListener('click', async () => {
+      const r = await studyPost('/study/action', c.closed ? { kind: 'pullBreaker', id: c.id } : { kind: 'resetBreaker', id: c.id });
+      if (r.ok === false) return;
+      c.closed = !c.closed;
+      btn.classList.toggle('active', c.closed);
+    });
     grid.append(btn);
   }
   container.append(grid);
@@ -1196,6 +1255,44 @@ function renderGroundServices(container, page, vars) {
   row.append(oxy);
   container.append(el('div', { class: 'box' }, row));
   renderGroups(container, page.groups || [], vars);
+}
+
+// The exterior walkaround (src/walkaround.rs): one toggle per cover, pin
+// and chock, grouped as the plugin sends them, each showing its live state
+// from its mirrored variable (`item.var`; the X-Plane dataref itself is not
+// in the /vars snapshot). What an installed item will do is spelled out
+// under the buttons, so a forgotten one is caught before engine start.
+function renderWalkaround(container, page, vars) {
+  const installed = (it) => (vars[it.var] ?? 0) > 0.5;
+  const all = el('div', { class: 'status' });
+  for (const [label, command] of [['Remove all', page.removeAllCommand], ['Install all', page.installAllCommand]]) {
+    const btn = el('button', { class: 'small', type: 'button', text: label });
+    btn.addEventListener('click', () => studyPost('/study/action', { kind: 'command', command }));
+    all.append(btn);
+  }
+  container.append(el('div', { class: 'box' }, all));
+  const wrap = el('div', { class: 'study-groups' });
+  for (const g of page.groups || []) {
+    const row = el('div', { class: 'status' });
+    for (const i of g.items) {
+      const it = page.items[i];
+      const on = installed(it);
+      const btn = el('button', { class: 'small' + (on ? '' : ' grey'), type: 'button' },
+        el('span', { class: 'dot' + (on ? ' bad' : ' ok') }), document.createTextNode(' ' + it.label + (on ? ' - INSTALLED' : ' - removed')));
+      btn.addEventListener('click', () => studyPost('/study/action', { kind: 'command', command: it.toggleCommand }));
+      row.append(btn);
+    }
+    wrap.append(el('div', { class: 'box' }, el('h2', { style: 'font-size:15px;margin:0 0 8px', text: g.name }), row));
+  }
+  container.append(wrap);
+  const on = (prefix) => (page.items || []).filter((it) => it.id.startsWith(prefix) && installed(it));
+  const notes = [];
+  if (on('pitot_').length || on('aoa_').length || on('static_').length) notes.push('Probe covers installed: the covered pitot, static and AoA sources read blocked in the ADIRUs.');
+  if (on('eng_inlet_').length) notes.push('Inlet covers installed: starting that engine ingests the cover (foreign-object damage).');
+  if (on('eng_exhaust_').length) notes.push('Exhaust covers installed: starting that engine blows the cover out.');
+  if (on('gear_pin_').length) notes.push('Gear pins installed: a pinned leg cannot retract.');
+  if (on('chocks_').length) notes.push('Chocks installed: taxiing over about 1 kt overruns them.');
+  if (notes.length) container.append(el('div', { class: 'box' }, ...notes.map((n) => el('div', { text: n }))));
 }
 
 // ---------------------------------------------------------------------
@@ -1671,6 +1768,7 @@ async function renderStudyContent() {
       else renderEngine(content, page, vars);
     } else if (page.kind === 'flightControls') renderFlightControls(content, page, vars);
     else if (page.kind === 'groundServices') renderGroundServices(content, page, vars);
+    else if (page.kind === 'walkaround') renderWalkaround(content, page, vars);
     else if (page.kind === 'area') renderArea(content, page, vars);
     else if (page.kind === 'all') renderAllVars(content, vars);
   };
@@ -2327,81 +2425,224 @@ function svgText(x, y, anchor, fill, size, text) {
   t.textContent = text;
   return t;
 }
+function svgPoly(pts, attrs) {
+  return svgEl('polygon', Object.assign({ points: pts.map((p) => p[0] + ',' + p[1]).join(' ') }, attrs));
+}
 // Empty to full. Amber past nine tenths, so a hold at its limit reads as one.
 function fillColour(frac) {
   if (frac >= 0.9) return '#d8a23a';
   if (frac > 0) return '#4f8fd0';
   return '#2a2f38';
 }
-function loadBlock(x, y, w, h, frac, label, value, title) {
+
+// The aeroplane's own geometry (Airbus's published A380 dimensions), one
+// SVG unit per metre in both x and y. Because that is the *only* scale
+// used anywhere below, the browser's own uniform viewBox fit (the default
+// "meet") is what keeps a metre the same size in both directions -- there
+// is no separate x-scale/y-scale pair here to let drift apart.
+// x is lateral (0 = centreline, +right), y is the fuselage station (0 =
+// nose, increasing aft), so the drawing reads nose-up.
+const AC = {
+  fusLen: 72.7, fusW: 7.1, noseLen: 9, tailLen: 13,
+  span: 79.75, rootChord: 17.7, tipChord: 4, sweep: 33.5, rootLeY: 27,
+  htpSpan: 30.4, htpRootS: 2, htpRootChord: 7, htpTipChord: 2.2, htpSweep: 34, htpRootLeY: 63,
+  engineInboard: 14, engineOutboard: 26, engineLen: 6, engineW: 3.2,
+};
+const halfFus = AC.fusW / 2;
+const halfSpan = AC.span / 2;
+const halfHtp = AC.htpSpan / 2;
+const tanSweep = Math.tan((AC.sweep * Math.PI) / 180);
+const tanHtpSweep = Math.tan((AC.htpSweep * Math.PI) / 180);
+// Leading/trailing edge station at a distance `s` from the centreline
+// (either side, by symmetry), following the wing's own sweep and taper.
+function wingLe(s) { return AC.rootLeY + (Math.abs(s) - halfFus) * tanSweep; }
+function wingChord(s) { return AC.rootChord + ((AC.tipChord - AC.rootChord) * (Math.abs(s) - halfFus)) / (halfSpan - halfFus); }
+function wingTe(s) { return wingLe(s) + wingChord(s); }
+function htpLe(s) { return AC.htpRootLeY + (Math.abs(s) - AC.htpRootS) * tanHtpSweep; }
+function htpChord(s) { return AC.htpRootChord + ((AC.htpTipChord - AC.htpRootChord) * (Math.abs(s) - AC.htpRootS)) / (halfHtp - AC.htpRootS); }
+function htpTe(s) { return htpLe(s) + htpChord(s); }
+function wingPts(sign) {
+  return [[sign * halfFus, wingLe(halfFus)], [sign * halfSpan, wingLe(halfSpan)], [sign * halfSpan, wingTe(halfSpan)], [sign * halfFus, wingTe(halfFus)]];
+}
+function htpPts(sign) {
+  return [[sign * AC.htpRootS, htpLe(AC.htpRootS)], [sign * halfHtp, htpLe(halfHtp)], [sign * halfHtp, htpTe(halfHtp)], [sign * AC.htpRootS, htpTe(AC.htpRootS)]];
+}
+// Where each wing tank sits, from the fuel page's own tank widths -- but
+// not its x positions: those run the trim tank's own width in between the
+// two wings' tanks, which is exactly right for the fuel page's flat
+// left-tip-to-right-tip layout but would carry that same offset into this
+// drawing as a wing that is not quite mirror-symmetric. Widths are placed
+// instead, side by side outward from each wingtip inward, on each side
+// separately, so the picture is exactly symmetric regardless.
+function wingTankSpans(tanks) {
+  const mPerUnit = AC.span / 960;
+  // Outward (tip) to inward (root) on each side: ascending x on the left,
+  // descending x on the right.
+  const left = tanks.filter((t) => t.label !== 'TRIM' && t.x + t.w / 2 < 480).sort((a, b) => a.x - b.x);
+  const right = tanks.filter((t) => t.label !== 'TRIM' && t.x + t.w / 2 >= 480).sort((a, b) => b.x - a.x);
+  const spans = new Map();
+  for (const [side, list] of [[-1, left], [1, right]]) {
+    let edge = side * halfSpan;
+    list.forEach((t, i) => {
+      const inner = i === list.length - 1 ? side * halfFus : edge - side * t.w * mPerUnit;
+      spans.set(t.name, [edge, inner]); // [outer, inner]
+      edge = inner;
+    });
+  }
+  return spans;
+}
+function fuselagePts() {
+  const r = halfFus, L = AC.fusLen, cylB = AC.noseLen, cylE = L - AC.tailLen;
+  return [
+    'M 0 0', `Q ${(r * 1.05).toFixed(2)} ${(AC.noseLen * 0.15).toFixed(2)} ${r} ${cylB}`,
+    `L ${r} ${cylE}`, `Q ${r} ${(L - AC.tailLen * 0.35).toFixed(2)} ${(r * 0.18).toFixed(2)} ${L}`,
+    `L ${(-r * 0.18).toFixed(2)} ${L}`, `Q ${-r} ${(L - AC.tailLen * 0.35).toFixed(2)} ${-r} ${cylE}`,
+    `L ${-r} ${cylB}`, `Q ${(-r * 1.05).toFixed(2)} ${(AC.noseLen * 0.15).toFixed(2)} 0 0`, 'Z',
+  ].join(' ');
+}
+// A cell (outline, proportional fill, leader line and label) shaped by
+// whatever quad it is given -- a trapezoid following the wing's sweep for
+// a wing tank, or a plain rectangle for the trim tank and cabin gauges.
+// `pts` runs inner-edge-first (its own "empty" side), so filling toward
+// the far edge by `frac` reads the same way a straight bar gauge would.
+// The label sits `leaderFrom`, a short tick away from `leaderTo` (a point
+// on the cell itself) rather than inside the cell, since a tip or trim
+// tank at this scale is too narrow to hold its own label; `dir` is +1 to
+// grow the two text lines away from the cell in the same direction the
+// tick runs (used on the wing's trailing-edge side, clear of the engines
+// hanging off its leading edge), or -1 to grow them back the other way.
+function loadBlock(pts, frac, leaderFrom, leaderTo, label, value, title, dir = -1) {
   const g = svgKids('g', {});
-  g.append(svgEl('rect', { x, y, width: w, height: h, rx: 2, fill: '#20242c', stroke: '#3a4150' }));
-  const fw = Math.max(0, Math.min(1, frac)) * (w - 2);
-  if (fw > 0) g.append(svgEl('rect', { x: x + 1, y: y + 1, width: fw, height: h - 2, rx: 1, fill: fillColour(frac) }));
-  g.append(svgText(x + w / 2, y + h / 2 + 3, 'middle', '#dfe4ee', 9, value));
-  if (label) g.append(svgText(x + w / 2, y - 3, 'middle', '#8b94a6', 8, label));
+  g.append(svgPoly(pts, { fill: '#20242c', stroke: '#3a4150', 'stroke-width': 0.3 }));
+  if (frac > 0) {
+    const f = Math.max(0, Math.min(1, frac));
+    const mid = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    const fillPts = [pts[0], pts[1], mid(pts[1], pts[2], f), mid(pts[0], pts[3], f)];
+    g.append(svgPoly(fillPts, { fill: fillColour(frac) }));
+  }
+  g.append(svgEl('line', { x1: leaderFrom[0], y1: leaderFrom[1], x2: leaderTo[0], y2: leaderTo[1], stroke: '#5a6272', 'stroke-width': 0.22 }));
+  if (label) g.append(svgText(leaderFrom[0], leaderFrom[1] + dir * 2.5, 'middle', '#8b94a6', 1.7, label));
+  g.append(svgText(leaderFrom[0], leaderFrom[1] + dir * 0.5, 'middle', '#dfe4ee', 1.85, value));
   const tt = svgKids('title', {});
   tt.textContent = title;
   g.append(tt);
   return g;
 }
 function drawAircraft(page, vars) {
-  const root = svgKids('svg', { viewBox: '0 0 960 400', width: '100%', style: 'max-height:420px' });
   const val = (n) => (Object.prototype.hasOwnProperty.call(vars, n) ? vars[n] : null);
+  const margin = 12;
+  const root = svgKids('svg', { viewBox: `${-(halfSpan + margin)} -4 ${2 * (halfSpan + margin)} ${AC.fusLen + 8}` });
 
-  // Wings and tailplane behind the fuselage, so the tanks sit on the wing.
-  root.append(svgEl('path', { d: 'M 150 190 L 470 108 L 900 48 L 915 70 L 500 140 L 470 190 Z', fill: '#1b1f27', stroke: '#39404e' }));
-  root.append(svgEl('path', { d: 'M 150 210 L 470 292 L 900 352 L 915 330 L 500 260 L 470 210 Z', fill: '#1b1f27', stroke: '#39404e' }));
-  root.append(svgEl('path', { d: 'M 62 190 L 150 156 L 208 164 L 150 190 Z', fill: '#1b1f27', stroke: '#39404e' }));
-  root.append(svgEl('path', { d: 'M 62 210 L 150 244 L 208 236 L 150 210 Z', fill: '#1b1f27', stroke: '#39404e' }));
-  root.append(svgEl('path', {
-    d: 'M 40 200 Q 48 172 110 170 L 900 176 Q 938 186 938 200 Q 938 214 900 224 L 110 230 Q 48 228 40 200 Z',
-    fill: '#252a33', stroke: '#454d5e',
-  }));
+  // Wing and tailplane behind the fuselage, so the fuselage outline reads
+  // crisp where they meet it.
+  for (const sign of [-1, 1]) {
+    root.append(svgPoly(wingPts(sign), { fill: '#1b1f27', stroke: '#39404e', 'stroke-width': 0.3 }));
+    root.append(svgPoly(htpPts(sign), { fill: '#1b1f27', stroke: '#39404e', 'stroke-width': 0.3 }));
+  }
+  root.append(svgEl('path', { d: fuselagePts(), fill: '#252a33', stroke: '#454d5e', 'stroke-width': 0.3 }));
+  // Four nacelles, hung ahead of the wing at their own span stations.
+  for (const sign of [-1, 1]) {
+    for (const s of [AC.engineInboard, AC.engineOutboard]) {
+      const yAft = wingLe(s) - 1;
+      root.append(svgEl('rect', {
+        x: sign * s - AC.engineW / 2, y: yAft - AC.engineLen, width: AC.engineW, height: AC.engineLen,
+        rx: AC.engineW / 2.4, fill: '#2a2f38', stroke: '#4a5060', 'stroke-width': 0.25,
+      }));
+    }
+  }
 
-  // Fuel across the wing, on the fuel page's own x/width scale.
+  // Fuel in the wing, where it really is: each tank's own width, placed
+  // symmetrically outward-to-inward (see wingTankSpans), shaped to the
+  // wing's sweep and taper at that span.
+  const spans = wingTankSpans(page.tanks || []);
   for (const t of page.tanks || []) {
+    if (t.label === 'TRIM' || !spans.has(t.name)) continue;
     const q = val(t.name);
     const frac = q === null ? 0 : q / t.capacityGal;
-    const x = 150 + (t.x / 960) * 780;
-    const w = Math.max(15, (t.w / 960) * 780);
-    const kg = q === null ? '--' : Math.round(q * 3.03907) + ' kg';
+    // The unit ("kg") is left to the legend and the tooltip: eleven tanks
+    // packed along the span have no room to spell it out every time.
+    const kg = q === null ? '--' : String(Math.round(q * 3.03907));
     const tip = t.label + ': ' + (q === null ? 'not modelled' : Math.round(q) + ' of ' + Math.round(t.capacityGal) + ' US gal');
-    if (t.label === 'TRIM') {
-      root.append(loadBlock(x, 182, w, 24, frac, t.label, kg, tip));
-    } else {
-      root.append(loadBlock(x, 84, w, 24, frac, t.label, kg, tip));
-      root.append(loadBlock(x, 300, w, 24, frac, null, kg, tip + ' (right)'));
-    }
+    const [sOut, sIn] = spans.get(t.name);
+    const pts = [[sIn, wingLe(sIn)], [sIn, wingTe(sIn)], [sOut, wingTe(sOut)], [sOut, wingLe(sOut)]];
+    const sc = (sIn + sOut) / 2;
+    // Labelled ahead of the leading edge, where the natural stagger of a
+    // swept wing keeps one tank's label clear of its neighbours' -- except
+    // where that span also carries an engine (drawn above, hanging further
+    // ahead of the same edge); there the label is pushed forward again,
+    // clear of the nacelle, rather than left to sit on top of it.
+    const nearEngine = [AC.engineInboard, AC.engineOutboard].filter((es) => Math.abs(Math.abs(sc) - es) < 3.2);
+    const naturalY = wingLe(sc) - 3.4;
+    const clearY = nearEngine.length ? Math.min(...nearEngine.map((es) => wingLe(es) - 1 - AC.engineLen - 1)) : naturalY;
+    const leaderFromY = Math.min(naturalY, clearY);
+    root.append(loadBlock(pts, frac, [sc, leaderFromY], [sc, wingLe(sc)], t.label, kg, tip));
   }
-
-  // Cabin: upper deck above the fuselage centreline, main deck on it. Each
-  // zone's width is its share of the seats, so the picture is a seat map.
-  const zones = page.zones || [];
-  for (const [i, deck] of [zones.filter((z) => z.deck === 1), zones.filter((z) => z.deck === 0)].entries()) {
-    const seats = deck.reduce((a, z) => a + z.seats, 0) || 1;
-    let x = 124;
-    for (const z of deck) {
-      const w = (z.seats / seats) * 756 - 3;
-      const pax = val(z.name);
-      root.append(loadBlock(x, i === 0 ? 140 : 194, w, 22, pax === null ? 0 : pax / z.seats, z.label,
-        pax === null ? '--' : Math.round(pax) + '/' + z.seats,
-        z.label + ': ' + (pax === null ? 'not modelled' : Math.round(pax) + ' of ' + z.seats + ' seats')));
-      x += w + 3;
-    }
-    root.append(svgText(118, (i === 0 ? 140 : 194) + 15, 'end', '#8b94a6', 9, i === 0 ? 'UPPER' : 'MAIN'));
-  }
-
-  // Holds, under the fuselage.
-  let hx = 200;
-  for (const h of page.holds || []) {
-    const q = val(h.name);
-    root.append(loadBlock(hx, 240, 150, 24, q === null ? 0 : q / h.maxKg, h.label,
-      q === null ? '--' : Math.round(q) + ' kg',
-      h.label + ': ' + (q === null ? 'not modelled' : Math.round(q) + ' of ' + Math.round(h.maxKg) + ' kg')));
-    hx += 160;
+  // The trim tank: one tank in the horizontal tail, feeding both wings, so
+  // it gets a box of its own rather than a slice of the span.
+  const trim = (page.tanks || []).find((t) => t.label === 'TRIM');
+  if (trim) {
+    const q = val(trim.name);
+    const frac = q === null ? 0 : q / trim.capacityGal;
+    const kg = q === null ? '--' : Math.round(q * 3.03907) + ' kg';
+    const tip = trim.label + ': ' + (q === null ? 'not modelled' : Math.round(q) + ' of ' + Math.round(trim.capacityGal) + ' US gal');
+    const x0 = -3.5, x1 = 3.5, y0 = htpLe(AC.htpRootS) + 1, y1 = y0 + 5.2;
+    const pts = [[x0, y0], [x0, y1], [x1, y1], [x1, y0]];
+    root.append(loadBlock(pts, frac, [0, y0 - 3.4], [0, y0], trim.label, kg, tip));
   }
   return root;
+}
+
+// Cabin and cargo: a compact seat map beside the aeroplane rather than
+// squeezed into its true 7.1 m-wide fuselage, where no label would fit.
+// Each zone's width is its share of the seats, so the picture is a seat
+// map; each hold keeps the forward/aft/bulk order the plugin sends.
+function loadsheetGauge(cls, frac, label, value, title, flexBasis) {
+  const cell = el('div', { class: cls, title, style: flexBasis ? `flex:${flexBasis} 1 0` : '' });
+  const bar = el('div', { class: 'lz-bar' }, el('div', {
+    class: 'lz-fill', style: `width:${Math.max(0, Math.min(1, frac)) * 100}%;background:${fillColour(frac)}`,
+  }));
+  cell.append(el('div', { class: 'lz-label', text: label }), bar, el('div', { class: 'lz-val', text: value }));
+  return cell;
+}
+function loadsheetDeck(title, zones, val) {
+  const row = el('div', { class: 'loadsheet-deck-row' });
+  for (const z of zones) {
+    const pax = val(z.name);
+    const frac = pax === null ? 0 : pax / z.seats;
+    row.append(loadsheetGauge('loadsheet-zone', frac, z.label, pax === null ? '--' : Math.round(pax) + '/' + z.seats,
+      z.label + ': ' + (pax === null ? 'not modelled' : Math.round(pax) + ' of ' + z.seats + ' seats'), z.seats));
+  }
+  return el('div', { class: 'loadsheet-deck' }, el('div', { class: 'loadsheet-deck-title', text: title }), row);
+}
+function loadsheetHolds(page, val) {
+  const row = el('div', { class: 'loadsheet-holds-row' });
+  for (const h of page.holds || []) {
+    const q = val(h.name);
+    const frac = q === null ? 0 : q / h.maxKg;
+    row.append(loadsheetGauge('loadsheet-hold', frac, h.label, q === null ? '--' : Math.round(q) + ' kg',
+      h.label + ': ' + (q === null ? 'not modelled' : Math.round(q) + ' of ' + Math.round(h.maxKg) + ' kg')));
+  }
+  return el('div', { class: 'loadsheet-deck' }, el('div', { class: 'loadsheet-deck-title', text: 'Cargo' }), row);
+}
+function loadsheetLegend() {
+  const item = (color, text) => el('span', { class: 'll-item' }, el('span', { class: 'll-swatch', style: `background:${color}` }), document.createTextNode(text));
+  return el(
+    'div', { class: 'loadsheet-legend' },
+    item('#2a2f38', 'Empty'), item('#4f8fd0', 'Partial'), item('#d8a23a', 'Past 90%'),
+    el('span', { class: 'll-note', text: 'Wing tank figures are kg' }),
+  );
+}
+function drawLoadsheetDiagram(page, vars) {
+  const val = (n) => (Object.prototype.hasOwnProperty.call(vars, n) ? vars[n] : null);
+  const zones = page.zones || [];
+  const wrap = el('div', { class: 'loadsheet-plane-wrap' }, drawAircraft(page, vars), loadsheetLegend());
+  const cabin = el(
+    'div', { class: 'loadsheet-cabin' },
+    loadsheetDeck('Upper deck', zones.filter((z) => z.deck === 1), val),
+    loadsheetDeck('Main deck', zones.filter((z) => z.deck === 0), val),
+    loadsheetHolds(page, val),
+  );
+  return el('div', { class: 'loadsheet-diagram' }, wrap, cabin);
 }
 
 async function loadsheetOnShow() {
@@ -2460,7 +2701,7 @@ async function loadsheetOnShow() {
       else if (live) text = Math.round(pax) + ' of ' + page.seats + ' passengers, ' + Math.round(cargo) + ' kg of cargo, ' + Math.round(fuel * 3.03907) + ' kg of fuel. The balance is live: X-Plane is flying this loadsheet.';
       else text = 'No loadsheet. Nobody is aboard, so the plugin leaves X-Plane\u2019s own balance alone rather than write one for an aeroplane carrying nobody.';
       summary.replaceChildren(el('span', { class: 'label' + (live ? '' : ' dim'), text }));
-      plan.replaceChildren(drawAircraft(page, vars));
+      plan.replaceChildren(drawLoadsheetDiagram(page, vars));
       body.innerHTML = '';
       renderGroups(body, page.groups, vars);
     } catch {

@@ -433,6 +433,150 @@ pub struct ApRawLawsFlare {
     pub delta_Theta_beta_c_deg: f64,
 }
 
+/// `base_prim_surface_status` in A380PrimComputerGeneralLogic_types.h.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BasePrimSurfaceStatus {
+    pub left_inboard_aileron_engaged: u8,  // boolean_T (unsigned char)
+    pub right_inboard_aileron_engaged: u8,  // boolean_T (unsigned char)
+    pub left_midboard_aileron_engaged: u8,  // boolean_T (unsigned char)
+    pub right_midboard_aileron_engaged: u8,  // boolean_T (unsigned char)
+    pub left_outboard_aileron_engaged: u8,  // boolean_T (unsigned char)
+    pub right_outboard_aileron_engaged: u8,  // boolean_T (unsigned char)
+    pub spoiler_pair_1_engaged: u8,  // boolean_T (unsigned char)
+    pub spoiler_pair_2_engaged: u8,  // boolean_T (unsigned char)
+    pub spoiler_pair_3_engaged: u8,  // boolean_T (unsigned char)
+    pub spoiler_pair_4_engaged: u8,  // boolean_T (unsigned char)
+    pub spoiler_pair_5_engaged: u8,  // boolean_T (unsigned char)
+    pub spoiler_pair_6_engaged: u8,  // boolean_T (unsigned char)
+    pub spoiler_pair_7_engaged: u8,  // boolean_T (unsigned char)
+    pub spoiler_pair_8_engaged: u8,  // boolean_T (unsigned char)
+    pub left_inboard_elevator_engaged: u8,  // boolean_T (unsigned char)
+    pub right_inboard_elevator_engaged: u8,  // boolean_T (unsigned char)
+    pub left_outboard_elevator_engaged: u8,  // boolean_T (unsigned char)
+    pub right_outboard_elevator_engaged: u8,  // boolean_T (unsigned char)
+    pub ths_engaged: u8,  // boolean_T (unsigned char)
+    pub upper_rudder_engaged: u8,  // boolean_T (unsigned char)
+    pub lower_rudder_engaged: u8,  // boolean_T (unsigned char)
+}
+
+/// `base_prim_lateral_surface_positions` in A380PrimComputerGeneralLogic_types.h.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BasePrimLateralSurfacePositions {
+    pub left_inboard_aileron_deg: f64,
+    pub right_inboard_aileron_deg: f64,
+    pub left_midboard_aileron_deg: f64,
+    pub right_midboard_aileron_deg: f64,
+    pub left_outboard_aileron_deg: f64,
+    pub right_outboard_aileron_deg: f64,
+    pub left_spoiler_1_deg: f64,
+    pub right_spoiler_1_deg: f64,
+    pub left_spoiler_2_deg: f64,
+    pub right_spoiler_2_deg: f64,
+    pub left_spoiler_3_deg: f64,
+    pub right_spoiler_3_deg: f64,
+    pub left_spoiler_4_deg: f64,
+    pub right_spoiler_4_deg: f64,
+    pub left_spoiler_5_deg: f64,
+    pub right_spoiler_5_deg: f64,
+    pub left_spoiler_6_deg: f64,
+    pub right_spoiler_6_deg: f64,
+    pub left_spoiler_7_deg: f64,
+    pub right_spoiler_7_deg: f64,
+    pub left_spoiler_8_deg: f64,
+    pub right_spoiler_8_deg: f64,
+    pub upper_rudder_deg: f64,
+    pub lower_rudder_deg: f64,
+}
+
+/// `base_prim_pitch_surface_positions` in A380PrimComputerGeneralLogic_types.h.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BasePrimPitchSurfacePositions {
+    pub left_inboard_elevator_deg: f64,
+    pub right_inboard_elevator_deg: f64,
+    pub left_outboard_elevator_deg: f64,
+    pub right_outboard_elevator_deg: f64,
+    pub ths_deg: f64,
+}
+
+/// `base_prim_fctl_logic_outputs` in A380PrimComputerGeneralLogic_types.h.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BasePrimFctlLogicOutputs {
+    pub surface_statuses: BasePrimSurfaceStatus,
+    pub lateral_surface_positions: BasePrimLateralSurfacePositions,
+    pub pitch_surface_positions: BasePrimPitchSurfacePositions,
+    pub lateral_law_capability: i32,  // a380_lateral_efcs_law (enum class : int32_T)
+    pub active_lateral_law: i32,  // a380_lateral_efcs_law (enum class : int32_T)
+    pub pitch_law_capability: i32,  // a380_pitch_efcs_law (enum class : int32_T)
+    pub active_pitch_law: i32,  // a380_pitch_efcs_law (enum class : int32_T)
+    pub abnormal_condition_law_active: u8,  // boolean_T (unsigned char)
+    pub is_master_prim: u8,  // boolean_T (unsigned char)
+    pub elevator_1_avail: u8,  // boolean_T (unsigned char)
+    pub elevator_1_engaged: u8,  // boolean_T (unsigned char)
+    pub elevator_2_avail: u8,  // boolean_T (unsigned char)
+    pub elevator_2_engaged: u8,  // boolean_T (unsigned char)
+    pub elevator_3_avail: u8,  // boolean_T (unsigned char)
+    pub elevator_3_engaged: u8,  // boolean_T (unsigned char)
+    pub ths_avail: u8,  // boolean_T (unsigned char)
+    pub ths_engaged: u8,  // boolean_T (unsigned char)
+    pub left_aileron_1_avail: u8,  // boolean_T (unsigned char)
+    pub left_aileron_1_engaged: u8,  // boolean_T (unsigned char)
+    pub left_aileron_2_avail: u8,  // boolean_T (unsigned char)
+    pub left_aileron_2_engaged: u8,  // boolean_T (unsigned char)
+    pub right_aileron_1_avail: u8,  // boolean_T (unsigned char)
+    pub right_aileron_1_engaged: u8,  // boolean_T (unsigned char)
+    pub right_aileron_2_avail: u8,  // boolean_T (unsigned char)
+    pub right_aileron_2_engaged: u8,  // boolean_T (unsigned char)
+    pub left_spoiler_hydraulic_mode_avail: u8,  // boolean_T (unsigned char)
+    pub left_spoiler_electric_mode_avail: u8,  // boolean_T (unsigned char)
+    pub left_spoiler_hydraulic_mode_engaged: u8,  // boolean_T (unsigned char)
+    pub left_spoiler_electric_mode_engaged: u8,  // boolean_T (unsigned char)
+    pub right_spoiler_hydraulic_mode_avail: u8,  // boolean_T (unsigned char)
+    pub right_spoiler_electric_mode_avail: u8,  // boolean_T (unsigned char)
+    pub right_spoiler_hydraulic_mode_engaged: u8,  // boolean_T (unsigned char)
+    pub right_spoiler_electric_mode_engaged: u8,  // boolean_T (unsigned char)
+    pub rudder_1_hydraulic_mode_avail: u8,  // boolean_T (unsigned char)
+    pub rudder_1_electric_mode_avail: u8,  // boolean_T (unsigned char)
+    pub rudder_1_hydraulic_mode_engaged: u8,  // boolean_T (unsigned char)
+    pub rudder_1_electric_mode_engaged: u8,  // boolean_T (unsigned char)
+    pub rudder_2_hydraulic_mode_avail: u8,  // boolean_T (unsigned char)
+    pub rudder_2_electric_mode_avail: u8,  // boolean_T (unsigned char)
+    pub rudder_2_hydraulic_mode_engaged: u8,  // boolean_T (unsigned char)
+    pub rudder_2_electric_mode_engaged: u8,  // boolean_T (unsigned char)
+    pub aileron_droop_active: u8,  // boolean_T (unsigned char)
+    pub aileron_antidroop_active: u8,  // boolean_T (unsigned char)
+    pub ths_automatic_mode_active: u8,  // boolean_T (unsigned char)
+    pub ths_manual_mode_c_deg_s: f64,
+    pub eha_ebha_elec_mode_inhibited: u8,  // boolean_T (unsigned char)
+    pub left_sidestick_disabled: u8,  // boolean_T (unsigned char)
+    pub right_sidestick_disabled: u8,  // boolean_T (unsigned char)
+    pub left_sidestick_priority_locked: u8,  // boolean_T (unsigned char)
+    pub right_sidestick_priority_locked: u8,  // boolean_T (unsigned char)
+    pub total_sidestick_pitch_command: f64,
+    pub total_sidestick_roll_command: f64,
+    pub speed_brake_inhibited: u8,  // boolean_T (unsigned char)
+    pub speed_brake_command_deg: f64,
+    pub ground_spoilers_armed: u8,  // boolean_T (unsigned char)
+    pub ground_spoilers_out: u8,  // boolean_T (unsigned char)
+    pub phased_lift_dumping_active: u8,  // boolean_T (unsigned char)
+    pub ground_spoiler_command_deg: f64,
+    pub spoiler_lift_active: u8,  // boolean_T (unsigned char)
+    pub ap_authorised: u8,  // boolean_T (unsigned char)
+    pub protection_ap_disconnect: u8,  // boolean_T (unsigned char)
+    pub high_alpha_prot_active: u8,  // boolean_T (unsigned char)
+    pub alpha_prot_deg: f64,
+    pub alpha_max_deg: f64,
+    pub v_alpha_prot_kn: f64,
+    pub v_alpha_max_kn: f64,
+    pub v_alpha_stall_warn_kn: f64,
+    pub high_speed_prot_active: u8,  // boolean_T (unsigned char)
+    pub high_speed_prot_lo_thresh_kn: f64,
+    pub high_speed_prot_hi_thresh_kn: f64,
+}
+
 /// `base_sec_discrete_inputs` in A380SecComputer_types.h.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -1166,6 +1310,130 @@ const _: () = {
     assert!(offset_of!(ApRawLawsFlare, delta_Theta_bz_deg) == 32);
     assert!(offset_of!(ApRawLawsFlare, delta_Theta_bx_deg) == 40);
     assert!(offset_of!(ApRawLawsFlare, delta_Theta_beta_c_deg) == 48);
+    assert!(size_of::<BasePrimSurfaceStatus>() == 21 && align_of::<BasePrimSurfaceStatus>() == 1);
+    assert!(offset_of!(BasePrimSurfaceStatus, left_inboard_aileron_engaged) == 0);
+    assert!(offset_of!(BasePrimSurfaceStatus, right_inboard_aileron_engaged) == 1);
+    assert!(offset_of!(BasePrimSurfaceStatus, left_midboard_aileron_engaged) == 2);
+    assert!(offset_of!(BasePrimSurfaceStatus, right_midboard_aileron_engaged) == 3);
+    assert!(offset_of!(BasePrimSurfaceStatus, left_outboard_aileron_engaged) == 4);
+    assert!(offset_of!(BasePrimSurfaceStatus, right_outboard_aileron_engaged) == 5);
+    assert!(offset_of!(BasePrimSurfaceStatus, spoiler_pair_1_engaged) == 6);
+    assert!(offset_of!(BasePrimSurfaceStatus, spoiler_pair_2_engaged) == 7);
+    assert!(offset_of!(BasePrimSurfaceStatus, spoiler_pair_3_engaged) == 8);
+    assert!(offset_of!(BasePrimSurfaceStatus, spoiler_pair_4_engaged) == 9);
+    assert!(offset_of!(BasePrimSurfaceStatus, spoiler_pair_5_engaged) == 10);
+    assert!(offset_of!(BasePrimSurfaceStatus, spoiler_pair_6_engaged) == 11);
+    assert!(offset_of!(BasePrimSurfaceStatus, spoiler_pair_7_engaged) == 12);
+    assert!(offset_of!(BasePrimSurfaceStatus, spoiler_pair_8_engaged) == 13);
+    assert!(offset_of!(BasePrimSurfaceStatus, left_inboard_elevator_engaged) == 14);
+    assert!(offset_of!(BasePrimSurfaceStatus, right_inboard_elevator_engaged) == 15);
+    assert!(offset_of!(BasePrimSurfaceStatus, left_outboard_elevator_engaged) == 16);
+    assert!(offset_of!(BasePrimSurfaceStatus, right_outboard_elevator_engaged) == 17);
+    assert!(offset_of!(BasePrimSurfaceStatus, ths_engaged) == 18);
+    assert!(offset_of!(BasePrimSurfaceStatus, upper_rudder_engaged) == 19);
+    assert!(offset_of!(BasePrimSurfaceStatus, lower_rudder_engaged) == 20);
+    assert!(size_of::<BasePrimLateralSurfacePositions>() == 192 && align_of::<BasePrimLateralSurfacePositions>() == 8);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_inboard_aileron_deg) == 0);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_inboard_aileron_deg) == 8);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_midboard_aileron_deg) == 16);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_midboard_aileron_deg) == 24);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_outboard_aileron_deg) == 32);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_outboard_aileron_deg) == 40);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_spoiler_1_deg) == 48);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_spoiler_1_deg) == 56);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_spoiler_2_deg) == 64);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_spoiler_2_deg) == 72);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_spoiler_3_deg) == 80);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_spoiler_3_deg) == 88);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_spoiler_4_deg) == 96);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_spoiler_4_deg) == 104);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_spoiler_5_deg) == 112);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_spoiler_5_deg) == 120);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_spoiler_6_deg) == 128);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_spoiler_6_deg) == 136);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_spoiler_7_deg) == 144);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_spoiler_7_deg) == 152);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, left_spoiler_8_deg) == 160);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, right_spoiler_8_deg) == 168);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, upper_rudder_deg) == 176);
+    assert!(offset_of!(BasePrimLateralSurfacePositions, lower_rudder_deg) == 184);
+    assert!(size_of::<BasePrimPitchSurfacePositions>() == 40 && align_of::<BasePrimPitchSurfacePositions>() == 8);
+    assert!(offset_of!(BasePrimPitchSurfacePositions, left_inboard_elevator_deg) == 0);
+    assert!(offset_of!(BasePrimPitchSurfacePositions, right_inboard_elevator_deg) == 8);
+    assert!(offset_of!(BasePrimPitchSurfacePositions, left_outboard_elevator_deg) == 16);
+    assert!(offset_of!(BasePrimPitchSurfacePositions, right_outboard_elevator_deg) == 24);
+    assert!(offset_of!(BasePrimPitchSurfacePositions, ths_deg) == 32);
+    assert!(size_of::<BasePrimFctlLogicOutputs>() == 448 && align_of::<BasePrimFctlLogicOutputs>() == 8);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, surface_statuses) == 0);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, lateral_surface_positions) == 24);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, pitch_surface_positions) == 216);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, lateral_law_capability) == 256);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, active_lateral_law) == 260);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, pitch_law_capability) == 264);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, active_pitch_law) == 268);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, abnormal_condition_law_active) == 272);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, is_master_prim) == 273);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, elevator_1_avail) == 274);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, elevator_1_engaged) == 275);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, elevator_2_avail) == 276);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, elevator_2_engaged) == 277);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, elevator_3_avail) == 278);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, elevator_3_engaged) == 279);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, ths_avail) == 280);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, ths_engaged) == 281);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, left_aileron_1_avail) == 282);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, left_aileron_1_engaged) == 283);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, left_aileron_2_avail) == 284);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, left_aileron_2_engaged) == 285);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, right_aileron_1_avail) == 286);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, right_aileron_1_engaged) == 287);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, right_aileron_2_avail) == 288);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, right_aileron_2_engaged) == 289);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, left_spoiler_hydraulic_mode_avail) == 290);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, left_spoiler_electric_mode_avail) == 291);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, left_spoiler_hydraulic_mode_engaged) == 292);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, left_spoiler_electric_mode_engaged) == 293);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, right_spoiler_hydraulic_mode_avail) == 294);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, right_spoiler_electric_mode_avail) == 295);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, right_spoiler_hydraulic_mode_engaged) == 296);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, right_spoiler_electric_mode_engaged) == 297);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, rudder_1_hydraulic_mode_avail) == 298);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, rudder_1_electric_mode_avail) == 299);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, rudder_1_hydraulic_mode_engaged) == 300);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, rudder_1_electric_mode_engaged) == 301);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, rudder_2_hydraulic_mode_avail) == 302);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, rudder_2_electric_mode_avail) == 303);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, rudder_2_hydraulic_mode_engaged) == 304);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, rudder_2_electric_mode_engaged) == 305);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, aileron_droop_active) == 306);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, aileron_antidroop_active) == 307);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, ths_automatic_mode_active) == 308);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, ths_manual_mode_c_deg_s) == 312);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, eha_ebha_elec_mode_inhibited) == 320);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, left_sidestick_disabled) == 321);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, right_sidestick_disabled) == 322);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, left_sidestick_priority_locked) == 323);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, right_sidestick_priority_locked) == 324);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, total_sidestick_pitch_command) == 328);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, total_sidestick_roll_command) == 336);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, speed_brake_inhibited) == 344);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, speed_brake_command_deg) == 352);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, ground_spoilers_armed) == 360);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, ground_spoilers_out) == 361);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, phased_lift_dumping_active) == 362);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, ground_spoiler_command_deg) == 368);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, spoiler_lift_active) == 376);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, ap_authorised) == 377);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, protection_ap_disconnect) == 378);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, high_alpha_prot_active) == 379);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, alpha_prot_deg) == 384);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, alpha_max_deg) == 392);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, v_alpha_prot_kn) == 400);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, v_alpha_max_kn) == 408);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, v_alpha_stall_warn_kn) == 416);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, high_speed_prot_active) == 424);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, high_speed_prot_lo_thresh_kn) == 432);
+    assert!(offset_of!(BasePrimFctlLogicOutputs, high_speed_prot_hi_thresh_kn) == 440);
     assert!(size_of::<BaseSecDiscreteInputs>() == 15 && align_of::<BaseSecDiscreteInputs>() == 1);
     assert!(offset_of!(BaseSecDiscreteInputs, sec_overhead_button_pressed) == 0);
     assert!(offset_of!(BaseSecDiscreteInputs, is_unit_1) == 1);

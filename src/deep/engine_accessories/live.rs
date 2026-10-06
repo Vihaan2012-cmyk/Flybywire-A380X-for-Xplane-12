@@ -83,6 +83,7 @@ use super::airflow_control::bleed_valve::{self, BleedValve, BleedValveFaults, Bl
 use super::airflow_control::vsv::{Vsv, VsvFaults, VsvState};
 use super::eec::{ActiveChannel, Eec, EecFaults, EecState, SensorFaults, PARAMS};
 use super::fuel::filter::{self, FilterFaults, FilterState};
+use super::fuel::strainer::{self, StrainerFaults, StrainerState};
 use super::fuel::flow_transmitter::{FlowReading, FlowTransmitter, PickoffFaults};
 use super::fuel::fmu::{FmuFaults, FmuState, FuelMeteringUnit};
 use super::fuel::hp_pump::{self, HpPumpFaults, HpPumpState};
@@ -245,6 +246,28 @@ const REVERSER_DISAGREE_TOLERANCE: f64 = 0.05;
 /// reverser's available actuation pressure fraction is measured against.
 const HYDRAULIC_NOMINAL_PA: f64 = 34_474_000.0;
 
+/// How far the EEC's backup oil-temperature probe (trend/logging channel,
+/// `E-ENG-DESIGN.md` Pattern 23) may disagree with the primary reading
+/// before the disagreement is reported, deg C. **GENERIC**: this port has
+/// no Trent-900 backup-probe figure, so this uses the same order of
+/// magnitude as the other GENERIC disagree margins in this file, restated
+/// in the backup probe's own unit (degrees C rather than a position
+/// fraction).
+const EEC_BACKUP_PROBE_DISAGREE_C: f64 = 5.0;
+/// Full-scale bias at fault magnitude 1.0, deg C. **GENERIC**.
+const EEC_BACKUP_PROBE_MAX_BIAS_C: f64 = 10.0;
+
+/// How far the thrust lever's second (channel B) position transducer may
+/// disagree with FlyByWire's own single `A32NX_AUTOTHRUST_TLA:n` channel
+/// before the disagreement is reported, degrees. **GENERIC**, the same
+/// figure (`0.05`) `ANTI_ICE_DISAGREE_TOLERANCE`/`REVERSER_DISAGREE_
+/// TOLERANCE` already use for a position *fraction*, reused here (not
+/// reinvented) for a position measured directly in degrees, per
+/// `E-ENG-DESIGN.md` Pattern 31.
+const THR_LEVER_DISAGREE_TOLERANCE_DEG: f64 = 0.05;
+/// Full-scale channel B bias at fault magnitude 1.0, degrees. **GENERIC**.
+const THR_LEVER_CHANNEL_B_MAX_BIAS_DEG: f64 = 2.0;
+
 /// Nothing. Every ATA chapter this area registers is now stepped by this
 /// live system; the test at the bottom of this file holds that to be true
 /// rather than leaving it to be discovered.
@@ -359,7 +382,9 @@ fn fid(reg: &Registry, component: &str, fragment: &str) -> u64 {
 struct FuelIds {
     lp_wear: u64,
     lp_inlet_restriction: u64,
+    strainer_clog: u64,
     filter_clog: u64,
+    filter_monitor_fault: u64,
     hp_wear: u64,
     hp_starvation: u64,
     fmu_sticking: u64,
@@ -375,12 +400,19 @@ struct FuelIds {
     eec_channel_b: u64,
     eec_sensor_a: [u64; N_EEC_PARAMS],
     eec_sensor_b: [u64; N_EEC_PARAMS],
+    /// The EEC's own backup oil-temperature probe bias, `E-ENG-DESIGN.md`
+    /// Pattern 23.
+    eec_backup_probe_bias: u64,
+    /// The thrust lever's second (channel B) position transducer bias,
+    /// Pattern 31.
+    tla_channel_b_bias: u64,
 }
 
 impl FuelIds {
     fn resolve(reg: &Registry, eng: usize) -> Self {
         let n = eng + 1;
         let lp = format!("73_fuel.lp_pump_{n}");
+        let strainer_id = format!("73_fuel.strainer_{n}");
         let filter_id = format!("73_fuel.filter_{n}");
         let hp = format!("73_fuel.hp_pump_{n}");
         let fmu = format!("73_fuel.fmu_{n}");
@@ -388,6 +420,7 @@ impl FuelIds {
         let ft = format!("73_fuel.flow_transmitter_{n}");
         let man = format!("73_fuel.manifold_{n}");
         let eec = format!("73_eec.channels_{n}");
+        let tla = format!("76_ctl.tla_channel_b_{n}");
 
         let mut nozzle = [0u64; NUM_GROUPS];
         for (g, slot) in nozzle.iter_mut().enumerate() {
@@ -403,7 +436,9 @@ impl FuelIds {
         Self {
             lp_wear: fid(reg, &lp, "LpPumpFaults.wear"),
             lp_inlet_restriction: fid(reg, &lp, "inlet_restriction"),
+            strainer_clog: fid(reg, &strainer_id, "StrainerFaults.clog"),
             filter_clog: fid(reg, &filter_id, "FilterFaults.clog"),
+            filter_monitor_fault: fid(reg, &filter_id, "monitor_fault"),
             hp_wear: fid(reg, &hp, "HpPumpFaults.wear"),
             hp_starvation: fid(reg, &hp, "inlet_starvation"),
             fmu_sticking: fid(reg, &fmu, "valve_sticking"),
@@ -419,6 +454,8 @@ impl FuelIds {
             eec_channel_b: fid(reg, &eec, "channel_b_fault"),
             eec_sensor_a,
             eec_sensor_b,
+            eec_backup_probe_bias: fid(reg, &eec, "backup_oil_temp_probe_bias"),
+            tla_channel_b_bias: fid(reg, &tla, "TlaChannelBFaults.bias"),
         }
     }
 
@@ -426,7 +463,9 @@ impl FuelIds {
         let mut v = vec![
             self.lp_wear,
             self.lp_inlet_restriction,
+            self.strainer_clog,
             self.filter_clog,
+            self.filter_monitor_fault,
             self.hp_wear,
             self.hp_starvation,
             self.fmu_sticking,
@@ -443,6 +482,8 @@ impl FuelIds {
         v.extend(self.nozzle);
         v.extend(self.eec_sensor_a);
         v.extend(self.eec_sensor_b);
+        v.push(self.eec_backup_probe_bias);
+        v.push(self.tla_channel_b_bias);
         v
     }
 }
@@ -559,6 +600,7 @@ struct ReverserIds {
     lock_hold: [u64; N_REV_LOCKS],
     lock_jam: [u64; N_REV_LOCKS],
     actuator_jam: u64,
+    control_fault: u64,
 }
 
 impl ReverserIds {
@@ -568,6 +610,7 @@ impl ReverserIds {
             lock_hold: std::array::from_fn(|l| fid(reg, &id, &format!("fails_to_hold ({})", REV_LOCK_KEYS[l]))),
             lock_jam: std::array::from_fn(|l| fid(reg, &id, &format!("jam ({})", REV_LOCK_KEYS[l]))),
             actuator_jam: fid(reg, &id, "ReverserFaults.actuator_jam"),
+            control_fault: fid(reg, &id, "ReverserFaults.control_fault"),
         }
     }
 
@@ -575,6 +618,7 @@ impl ReverserIds {
         let mut v = self.lock_hold.to_vec();
         v.extend(self.lock_jam);
         v.push(self.actuator_jam);
+        v.push(self.control_fault);
         v
     }
 }
@@ -631,7 +675,10 @@ struct ChainNames {
     filter_impending_bypass: String,
     filter_bypassed: String,
     filter_dp_pa: String,
+    filter_monitor_fault: String,
+    strainer_clogged: String,
     oil_filter_bypassed: String,
+    oil_system_contamination: String,
     hp_pump_low_flow: String,
     hp_pump_flow: String,
     lp_pump_outlet_pa: String,
@@ -656,6 +703,20 @@ struct ChainNames {
     eec_sensor_disagree: String,
     eec_selected: [String; N_EEC_PARAMS],
     eec_disagree: [String; N_EEC_PARAMS],
+    eec_backup_probe_fault: String,
+    /// FlyByWire's own single (channel A) TLA, mirrored under this area's
+    /// own name (`ata70.rs`'s own `eng_to_power_signal`/Pattern 18 doc
+    /// explains why a raw FlyByWire Var cannot be read directly in a
+    /// trigger).
+    tla_deg: String,
+    /// Pattern 31's second channel reading.
+    tla_channel_b_deg: String,
+    /// `(TLA_CHANNEL_B_DEG - A32NX_AUTOTHRUST_TLA:n).abs() >
+    /// THR_LEVER_DISAGREE_TOLERANCE_DEG`, computed here (not as an
+    /// `ecam::fbw` `Cond`, which cannot difference two Vars) and published
+    /// as a plain boolean -- the same shape `ANTI_ICE_DISAGREE`/
+    /// `REVERSER_DISAGREE` (`live.rs` elsewhere in this file) already use.
+    tla_channel_b_disagree: String,
     // Ignition.
     ign_spark_rate: [String; N_IGN_CHAINS],
     ign_powered: String,
@@ -705,7 +766,10 @@ impl ChainNames {
             filter_impending_bypass: v("FUEL_FILTER_IMPENDING_BYPASS"),
             filter_bypassed: v("FUEL_FILTER_BYPASSED"),
             filter_dp_pa: v("FUEL_FILTER_DP_PA"),
+            filter_monitor_fault: v("FUEL_FILTER_MONITOR_FAULT"),
+            strainer_clogged: v("FUEL_STRAINER_CLOGGED"),
             oil_filter_bypassed: v("OIL_FILTER_BYPASSED"),
+            oil_system_contamination: v("OIL_SYSTEM_CONTAMINATION"),
             hp_pump_low_flow: v("HP_PUMP_LOW_FLOW"),
             hp_pump_flow: v("HP_PUMP_FLOW_KG_S"),
             lp_pump_outlet_pa: v("LP_PUMP_OUTLET_PA"),
@@ -729,6 +793,10 @@ impl ChainNames {
             eec_sensor_disagree: v("EEC_SENSOR_DISAGREE"),
             eec_selected: std::array::from_fn(|i| v(&format!("EEC_{}_SELECTED", eec_param_key(i)))),
             eec_disagree: std::array::from_fn(|i| v(&format!("EEC_{}_DISAGREE", eec_param_key(i)))),
+            eec_backup_probe_fault: v("EEC_MAINTENANCE_FAULT"),
+            tla_deg: v("TLA_DEG"),
+            tla_channel_b_deg: v("TLA_CHANNEL_B_DEG"),
+            tla_channel_b_disagree: v("THR_LEVER_DISAGREE"),
             ign_spark_rate: std::array::from_fn(|c| v(&format!("IGN_{}_SPARK_RATE_HZ", IGN_CHAIN_KEYS[c].to_uppercase()))),
             ign_powered: v("IGN_POWERED"),
             no_ignition_available: v("NO_IGNITION_AVAILABLE"),
@@ -781,6 +849,20 @@ struct ReverserNames {
     position: String,
     uncommanded: String,
     position_disagree: String,
+    /// `E-ENG-DESIGN.md` Pattern 25: the reverse-thrust lever selection
+    /// itself, independent of the sleeve's actual position.
+    energized: String,
+    /// Pattern 24: the control loop's own self-monitoring.
+    ctl_fault: String,
+    /// Pattern 28: how many of the three locks are failing to hold, 0..3.
+    lock_degraded_count: String,
+    /// Pattern 26: this engine's reverser is placarded INOP and dispatched
+    /// under the MEL -- `crate::mel::deferred_state` of `crate::failures`'
+    /// own "thrust reverser lock fault" item (`78_000+i`, `failures.rs:831`,
+    /// MEL 78-30-04, `mel_catalog.rs:194`), the maintenance-selected
+    /// dispatch lockout the FCOM's own text names, distinct from the
+    /// in-flight lever-position condition first assumed.
+    mel_inop: String,
 }
 
 impl ReverserNames {
@@ -789,6 +871,10 @@ impl ReverserNames {
             position: format!("A32NX_ENG_{eng_number}_REV_POSITION"),
             uncommanded: format!("A32NX_ENG_{eng_number}_REV_UNCOMMANDED"),
             position_disagree: format!("A32NX_ENG_{eng_number}_REV_POSITION_DISAGREE"),
+            energized: format!("A32NX_ENG_{eng_number}_REV_ENERGIZED"),
+            mel_inop: format!("A32NX_ENG_{eng_number}_REV_MEL_INOP"),
+            ctl_fault: format!("A32NX_ENG_{eng_number}_REV_CTL_FAULT"),
+            lock_degraded_count: format!("A32NX_ENG_{eng_number}_REV_LOCK_DEGRADED_COUNT"),
         }
     }
 }
@@ -827,6 +913,7 @@ impl ReverserUnit {
             lock_b: lock(self.ids.lock_hold[1], self.ids.lock_jam[1]),
             lock_c: lock(self.ids.lock_hold[2], self.ids.lock_jam[2]),
             actuator_jam: faults.get(self.ids.actuator_jam),
+            control_fault: faults.get(self.ids.control_fault),
         };
         self.commanded = commanded;
         self.state = self.model.step(commanded, hydraulic_frac, &rev_faults, dt);
@@ -851,6 +938,7 @@ struct EngineChain {
     transmitter: FlowTransmitter,
     eec: Eec,
     lp: LpPumpState,
+    strainer: StrainerState,
     filter: FilterState,
     hp: HpPumpState,
     fmu_state: FmuState,
@@ -866,6 +954,25 @@ struct EngineChain {
     /// (unlike `step`) sees neither `Truth` nor the commands.
     wf_command_kg_s: f64,
     sov_commanded_open: bool,
+    /// The EEC's own backup oil-temperature probe reads faulted against the
+    /// primary reading this frame -- cached because `publish` does not see
+    /// `Truth` (`E-ENG-DESIGN.md` Pattern 23).
+    eec_backup_probe_fault: bool,
+    /// FlyByWire's own single (channel A) thrust-lever reading,
+    /// `Truth::engine_tla_deg`, mirrored back out under this area's own
+    /// name so `ecam::fbw::ata70`'s trigger `Cond`s can read it --
+    /// `no_wired_trigger_reads_a_variable_nobody_publishes` accepts only a
+    /// deep area's own published vars in a trigger, never a raw FlyByWire
+    /// Var directly, however well precedented reading it would be
+    /// otherwise (`E-ENG-DESIGN.md` Patterns 18/34/35).
+    tla_deg: f64,
+    /// The thrust lever's second (channel B) transducer reading, degrees --
+    /// Pattern 31.
+    tla_channel_b_deg: f64,
+    /// Channel B disagrees with FlyByWire's own single TLA channel by more
+    /// than `THR_LEVER_DISAGREE_TOLERANCE_DEG` -- cached for the same
+    /// reason as `eec_backup_probe_fault` above.
+    tla_channel_b_disagree: bool,
 
     // ---- Ignition (ATA 74).
     ignition_ids: IgnitionIds,
@@ -934,6 +1041,7 @@ impl EngineChain {
             transmitter: FlowTransmitter::new(),
             eec: Eec::new(),
             lp: LpPumpState::default(),
+            strainer: StrainerState::default(),
             filter: FilterState::default(),
             hp: HpPumpState::default(),
             fmu_state: FmuState::default(),
@@ -951,6 +1059,10 @@ impl EngineChain {
             delivered_kg_s: 0.0,
             wf_command_kg_s: 0.0,
             sov_commanded_open: false,
+            eec_backup_probe_fault: false,
+            tla_deg: 0.0,
+            tla_channel_b_deg: 0.0,
+            tla_channel_b_disagree: false,
 
             ignition_ids: IgnitionIds::resolve(reg, eng),
             ignition_state: IgnitionState::default(),
@@ -1063,11 +1175,33 @@ impl EngineChain {
         };
         self.hp = hp_pump::step(n3, self.fmu_state.differential_pa, &hp_faults);
 
-        // ---- LP pump and filter feed it.
+        // ---- Inlet strainer, LP pump, then the fine filter. The strainer
+        // sits ahead of the LP pump in the real fuel path (this module's
+        // own doc comment, "LP (boost) pump inlet strainer"); it is stepped
+        // against the same ambient inlet pressure and downstream flow
+        // reference the LP pump and filter already use, rather than
+        // rewired into the pump's own pressure-rise chain, so this
+        // addition cannot perturb the already-tested LP/HP/filter pressure
+        // solve (`E-ENG-DESIGN.md` Pattern 21).
+        let strainer_faults = StrainerFaults { clog: faults.get(self.fuel_ids.strainer_clog) };
+        self.strainer = strainer::step(inlet_pa, self.hp.delivered_m3_s, fuel_k, &strainer_faults);
         let lp_faults = LpPumpFaults { wear: faults.get(self.fuel_ids.lp_wear), inlet_restriction: faults.get(self.fuel_ids.lp_inlet_restriction) };
         self.lp = lp_pump::step(n3, inlet_pa, fuel_k, self.hp.delivered_m3_s, &lp_faults);
-        let filter_faults = FilterFaults { clog: faults.get(self.fuel_ids.filter_clog) };
+        let filter_faults = FilterFaults { clog: faults.get(self.fuel_ids.filter_clog), monitor_fault: faults.get(self.fuel_ids.filter_monitor_fault) };
         self.filter = filter::step(self.lp.outlet_pa, self.hp.delivered_m3_s, fuel_k, &filter_faults);
+
+        // ---- EEC backup oil-temperature probe (Pattern 23): an
+        // independent trend/logging channel, compared against the real oil
+        // temperature `Truth` carries directly.
+        let backup_bias_c = faults.get(self.fuel_ids.eec_backup_probe_bias) * EEC_BACKUP_PROBE_MAX_BIAS_C;
+        self.eec_backup_probe_fault = backup_bias_c.abs() > EEC_BACKUP_PROBE_DISAGREE_C;
+
+        // ---- Thrust lever channel B (Pattern 31): independent of
+        // FlyByWire's own single `Truth::engine_tla_deg` channel.
+        let tla_bias_deg = faults.get(self.fuel_ids.tla_channel_b_bias) * THR_LEVER_CHANNEL_B_MAX_BIAS_DEG;
+        self.tla_deg = truth.engine_tla_deg[eng];
+        self.tla_channel_b_deg = truth.engine_tla_deg[eng] + tla_bias_deg;
+        self.tla_channel_b_disagree = (self.tla_channel_b_deg - truth.engine_tla_deg[eng]).abs() > THR_LEVER_DISAGREE_TOLERANCE_DEG;
 
         // ---- FMU: meters the commanded flow out of what the HP pump
         // delivers at the pressure it delivers it.
@@ -1334,6 +1468,11 @@ pub struct EngineAccessoriesLive {
     engines: Vec<EngineChain>,
     /// Inputs `Truth` does not carry; see [`EngineAccessoryCommands`].
     pub commands: EngineAccessoryCommands,
+    /// `Truth::to_flex_temp_set`, mirrored under this area's own name
+    /// (`A32NX_TO_FLEX_TEMP_SET`) so an `ecam::fbw` trigger `Cond` may read
+    /// it -- cached because `publish` does not see `Truth`
+    /// (`E-ENG-DESIGN.md` Pattern 18's exact take-off-power detent).
+    to_flex_temp_set: bool,
 }
 
 impl Default for EngineAccessoriesLive {
@@ -1346,7 +1485,7 @@ impl EngineAccessoriesLive {
     pub fn new() -> Self {
         let mut reg = Registry::default();
         super::registry::register(&mut reg);
-        Self { engines: (0..N_ENGINES).map(|e| EngineChain::new(&reg, e)).collect(), commands: EngineAccessoryCommands::default() }
+        Self { engines: (0..N_ENGINES).map(|e| EngineChain::new(&reg, e)).collect(), commands: EngineAccessoryCommands::default(), to_flex_temp_set: false }
     }
 
     /// The fuel actually reaching engine `eng`'s burners, kg/s -- the one
@@ -1373,7 +1512,23 @@ impl crate::deep::live::Area for EngineAccessoriesLive {
 
     fn tick(&mut self, truth: &Truth, faults: &Faults) {
         let dt = truth.dt_s.max(0.0);
-        let commands = self.commands;
+        // The reverse-thrust selection is `Truth`'s, not `self.commands`'s:
+        // `deep::live::Controls::reverser_deploy_commanded` is what
+        // `plugin.rs` fills every frame from the real thrust lever angle
+        // (the same `AUTOTHRUST_TLA:n <= -4.3 deg` opening-authorisation
+        // angle FlyByWire's own `A380ReverserController` uses), but nothing
+        // ever copied it into `self.commands` before this -- `self.commands`
+        // is a plain public field nothing in production assigns, so it sat
+        // at `EngineAccessoryCommands::default()`'s `reverser_deploy_
+        // commanded: [false; 2]` forever, and this area's 14 reverser
+        // lock/jam failures (ATA 78) never had a real deploy command to
+        // block or pass. `self.commands`'s other fields (`engine_tgt_k`,
+        // `wf_command_kg_s`, `fuel_inlet_k`) remain genuinely test-only
+        // overrides (PROGRESS.md) -- only this one field has a real source
+        // in `Truth` now.
+        let mut commands = self.commands;
+        commands.reverser_deploy_commanded = truth.controls.reverser_deploy_commanded;
+        self.to_flex_temp_set = truth.to_flex_temp_set;
         for (eng, chain) in self.engines.iter_mut().enumerate() {
             // The starter air valve's position monitor needs to know how
             // long the command has been steady, which only the caller of
@@ -1388,14 +1543,27 @@ impl crate::deep::live::Area for EngineAccessoriesLive {
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
         let b = |x: bool| if x { 1.0 } else { 0.0 };
 
+        // One flag for the whole aircraft, not per engine -- matches
+        // FlyByWire's own `FwsFlightPhases.ts:215` ("until we have proper
+        // FADECs", every engine reads engine 1's own flag).
+        out("A32NX_TO_FLEX_TEMP_SET", b(self.to_flex_temp_set));
+
         for chain in self.engines.iter() {
             let n = &chain.names;
 
-            // ---- Fuel filter.
+            // ---- Fuel strainer and filter.
+            out(&n.strainer_clogged, b(chain.strainer.bypassed));
             out(&n.filter_impending_bypass, b(chain.filter.impending_bypass));
             out(&n.filter_bypassed, b(chain.filter.bypassed));
             out(&n.filter_dp_pa, chain.filter.differential_pa);
+            out(&n.filter_monitor_fault, b(chain.filter.monitor_fault));
             out(&n.oil_filter_bypassed, b(chain.oil_filter_bypassed));
+            // ---- Oil system contamination (Pattern 19): two or more of
+            // the five already-published per-bearing chip detectors active
+            // at once -- the sourced, non-invented distinction between one
+            // bearing's own chip light and widespread metal contamination.
+            let chips_active = (0..N_BEARINGS).filter(|&i| chain.bearing_state[i].chip_detected).count();
+            out(&n.oil_system_contamination, b(chips_active >= 2));
 
             // ---- Fuel pumps.
             out(&n.hp_pump_low_flow, b(chain.hp_pump_low_flow()));
@@ -1442,6 +1610,10 @@ impl crate::deep::live::Area for EngineAccessoriesLive {
                 out(&n.eec_selected[i], chain.eec_state.selected[i]);
                 out(&n.eec_disagree[i], b(chain.eec_state.disagree[i]));
             }
+            out(&n.eec_backup_probe_fault, b(chain.eec_backup_probe_fault));
+            out(&n.tla_deg, chain.tla_deg);
+            out(&n.tla_channel_b_deg, chain.tla_channel_b_deg);
+            out(&n.tla_channel_b_disagree, b(chain.tla_channel_b_disagree));
 
             // ---- Ignition.
             out(&n.ign_spark_rate[0], chain.ignition_state.chain_a_hz);
@@ -1517,6 +1689,31 @@ impl crate::deep::live::Area for EngineAccessoriesLive {
                 out(&rev.names.position, rev.state.position);
                 out(&rev.names.uncommanded, b(rev.state.uncommanded_deployment));
                 out(&rev.names.position_disagree, b((rev.state.position - target).abs() > REVERSER_DISAGREE_TOLERANCE));
+                // `E-ENG-DESIGN.md` Patterns 24/25/27/28/29. `rev.commanded`
+                // is the real reverse-thrust lever selection
+                // (`Truth::controls.reverser_deploy_commanded`, already
+                // wired -- Revision 3's own "the day a lever reaches Truth"
+                // premise is out of date, the integration baseline this
+                // worktree already carries wires it), independent of the
+                // sleeve's actual position.
+                out(&rev.names.energized, b(rev.commanded));
+                out(&rev.names.ctl_fault, b(rev.state.control_fault_active));
+                out(&rev.names.lock_degraded_count, f64::from(rev.state.lock_degraded_count));
+                // Pattern 26: `crate::mel::deferred_state` reads the MEL's
+                // own live deferral set (a `crate::failures` id, a separate,
+                // older per-unit fault namespace `engine_commands.rs` also
+                // reads directly for the same "thrust reverser lock fault",
+                // bridged into `deep::api::Faults` every tick via
+                // `deep/plugin.rs`'s own `active_magnitudes()` call but not
+                // consumed by this area's own registry -- this is a direct
+                // read of the MEL's own state, not a `Faults` magnitude, so
+                // it belongs here rather than through `Faults::get`).
+                // `crate::failures::mel_item` gives every one of these
+                // items its own static `MelCategory::C` (`failures.rs:831`),
+                // so a deferral is possible even with no operator MEL file
+                // loaded.
+                let mel_failure_id = 78_000 + (REVERSER_ENGINES[rev.slot] as u64 - 1);
+                out(&rev.names.mel_inop, b(crate::mel::deferred_state(mel_failure_id).is_some()));
             }
         }
     }
@@ -1869,11 +2066,9 @@ mod tests {
             controls: Controls { engine_master_on: [true; 4], starter_engaged: [true; 4], apu_bleed_pb_on: true, ..Controls::default() },
             // What `deep::pneumatic_ducts` would have published last frame:
             // the APU's bleed, at the starter air valve.
-            published: PublishedFrame(
-                (1..=4)
-                    .map(|n| (format!("DEEP_PNEU_ENG_{n}_START_DUCT_PRESSURE_PA"), 310_000.0))
-                    .collect(),
-            ),
+            published: (1..=4)
+                .map(|n| (format!("DEEP_PNEU_ENG_{n}_START_DUCT_PRESSURE_PA"), 310_000.0))
+                .collect::<PublishedFrame>(),
             ..Truth::default()
         }
     }
@@ -2302,7 +2497,7 @@ mod tests {
         let ids = NacelleIds::resolve(&reg, 0);
         let (mut truth, commands) = running();
         let hot_c = fire_detection::TRIP_K - 273.15 + 50.0;
-        truth.published = PublishedFrame((1..=4).map(|n| (format!("THERMAL_ZONE_NACELLECOWL{n}_TEMPERATURE_C"), hot_c)).collect());
+        truth.published = (1..=4).map(|n| (format!("THERMAL_ZONE_NACELLECOWL{n}_TEMPERATURE_C"), hot_c)).collect::<PublishedFrame>();
 
         let mut live = EngineAccessoriesLive::new();
         live.commands = commands;
@@ -2358,34 +2553,54 @@ mod tests {
     #[test]
     fn a_jammed_lock_blocks_a_commanded_deployment_and_the_position_disagrees() {
         // registry.rs: "Blocks legitimate deployment outright (every lock
-        // must release)". Nothing in `Truth` commands reverse yet, so the
-        // command comes from `EngineAccessoryCommands` here -- the one
-        // input this area is still waiting for, wired and tested so that
-        // the day it arrives nothing else has to change.
+        // must release)". The deploy command now comes from `Truth::
+        // controls.reverser_deploy_commanded` (`plugin.rs` fills it from the
+        // real thrust lever every frame; see this file's `tick()`), not
+        // `EngineAccessoryCommands` -- `commands` here is still used for
+        // this area's other, genuinely test-only overrides.
         let reg = registry();
         let ids = ReverserIds::resolve(&reg, 3);
         let (truth, commands) = running();
-        let deploying = EngineAccessoryCommands { reverser_deploy_commanded: [true, true], ..commands };
+        let deploying_truth = Truth { controls: Controls { reverser_deploy_commanded: [true, true], ..truth.controls }, ..truth };
 
         let mut live = EngineAccessoriesLive::new();
-        live.commands = deploying;
-        let healthy = run(&mut live, &truth, &Faults::default(), 10.0);
+        live.commands = commands;
+        let healthy = run(&mut live, &deploying_truth, &Faults::default(), 10.0);
         assert!(healthy["A32NX_ENG_3_REV_POSITION"] > 0.95, "a healthy reverser deploys when commanded");
         assert_eq!(healthy.get("A32NX_ENG_3_REV_POSITION_DISAGREE"), Some(&0.0));
 
         for lock in 0..N_REV_LOCKS {
             let mut live = EngineAccessoriesLive::new();
-            live.commands = deploying;
-            let jammed = run(&mut live, &truth, &Faults::from_pairs([(ids.lock_jam[lock], 1.0)]), 10.0);
+            live.commands = commands;
+            let jammed = run(&mut live, &deploying_truth, &Faults::from_pairs([(ids.lock_jam[lock], 1.0)]), 10.0);
             assert_eq!(jammed.get("A32NX_ENG_3_REV_POSITION"), Some(&0.0), "lock {lock} jammed must block deployment");
             assert_eq!(jammed.get("A32NX_ENG_3_REV_POSITION_DISAGREE"), Some(&1.0), "ENG 3 REVERSER FAULT must be reachable");
         }
 
         let mut live = EngineAccessoriesLive::new();
-        live.commands = deploying;
-        let seized = run(&mut live, &truth, &Faults::from_pairs([(ids.actuator_jam, 1.0)]), 10.0);
+        live.commands = commands;
+        let seized = run(&mut live, &deploying_truth, &Faults::from_pairs([(ids.actuator_jam, 1.0)]), 10.0);
         assert_eq!(seized.get("A32NX_ENG_3_REV_POSITION"), Some(&0.0));
         assert_eq!(seized.get("A32NX_ENG_3_REV_POSITION_DISAGREE"), Some(&1.0));
+    }
+
+    #[test]
+    fn the_reverser_deploy_command_comes_from_truth_controls_not_self_commands() {
+        // Regression test for the bug EDIT 1 fixes: before it, `tick()`
+        // read `self.commands.reverser_deploy_commanded` (set here to
+        // `false`, i.e. don't deploy) instead of `Truth::controls.
+        // reverser_deploy_commanded` (set here to `true`, the real lever's
+        // command) -- so this would have failed with both positions at
+        // `0.0` on the old code.
+        let (truth, commands) = running();
+        let not_deploying_commands = EngineAccessoryCommands { reverser_deploy_commanded: [false, false], ..commands };
+        let deploying_truth = Truth { controls: Controls { reverser_deploy_commanded: [true, true], ..truth.controls }, ..truth };
+
+        let mut live = EngineAccessoriesLive::new();
+        live.commands = not_deploying_commands;
+        let out = run(&mut live, &deploying_truth, &Faults::default(), 10.0);
+        assert!(out["A32NX_ENG_2_REV_POSITION"] > 0.95, "Truth::controls.reverser_deploy_commanded must drive deployment even when self.commands disagrees");
+        assert!(out["A32NX_ENG_3_REV_POSITION"] > 0.95);
     }
 
     // -----------------------------------------------------------------
@@ -2426,7 +2641,11 @@ mod tests {
         let mut ata: Vec<u16> = reg.failures.iter().map(|f| f.ata).collect();
         ata.sort_unstable();
         ata.dedup();
-        assert_eq!(ata, [26, 30, 71, 72, 73, 74, 75, 77, 78, 80], "this area's chapters");
+        assert_eq!(
+            ata,
+            [26, 30, 71, 72, 73, 74, 75, 76, 77, 78, 80],
+            "this area's chapters -- 76 (Engine Controls) added for the thrust-lever channel B position transducer, E-ENG-DESIGN.md Pattern 31"
+        );
         assert!(UNCONSUMED_ATA.is_empty(), "every chapter is stepped now");
     }
 

@@ -58,6 +58,14 @@ pub struct ReverserFaults {
     /// deploy and stow motion regardless of the locks, the direct
     /// "fails to deploy/stow" fault distinct from the lock logic above.
     pub actuator_jam: f64,
+    /// The reverser's own control loop (the EEC-side logic that drives the
+    /// actuator from a deploy/stow command), 0 healthy .. 1 dead: distinct
+    /// from `actuator_jam` (a physical seizure) -- this is a software/
+    /// electrical control fault that leaves the actuator itself free but
+    /// unable to be commanded, so the sleeve holds whatever position it
+    /// was already at and does not track a new command (`E-ENG-DESIGN.md`
+    /// Pattern 24).
+    pub control_fault: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +78,20 @@ pub struct ReverserState {
     /// 0 fully stowed .. 1 fully deployed.
     pub position: f64,
     pub uncommanded_deployment: bool,
+    /// The control loop itself reads faulted this frame
+    /// (`ReverserFaults::control_fault > 0`), independent of whether a
+    /// deploy is actually being commanded right now -- a real control-loop
+    /// self-test is continuous, not only active while a command is given.
+    pub control_fault_active: bool,
+    /// How many of the three independent locks (A, B, C) are failing to
+    /// hold this frame, 0..3 -- the same `fails_to_hold` inputs the
+    /// holding-capability calculation below already combines, counted
+    /// individually rather than only as their product. `E-ENG-DESIGN.md`
+    /// Pattern 28's "one of three" degraded-redundancy case is exactly
+    /// `lock_degraded_count == 1`; all three together is Pattern 13's own
+    /// `uncommanded_deployment` territory, not this count's job to flag
+    /// separately.
+    pub lock_degraded_count: u8,
 }
 
 impl ThrustReverser {
@@ -90,11 +112,17 @@ impl ThrustReverser {
     pub fn step(&mut self, commanded_deploy: bool, hydraulic_pressure_frac: f64, faults: &ReverserFaults, dt_s: f64) -> ReverserState {
         let dt = dt_s.max(0.0);
         let hyd = hydraulic_pressure_frac.clamp(0.0, 1.0);
-        let actuator_ok = 1.0 - faults.actuator_jam.clamp(0.0, 1.0);
+        // `control_fault` freezes the sleeve exactly as `actuator_jam`
+        // does, multiplicatively: at 1.0 the actuator authority is zero and
+        // the sleeve holds whatever position it already had, not tracking
+        // a new command -- the same functional effect as a seized ram, from
+        // a different (control-loop, not physical) cause.
+        let actuator_ok = (1.0 - faults.actuator_jam.clamp(0.0, 1.0)) * (1.0 - faults.control_fault.clamp(0.0, 1.0));
 
         // Holding capability: any one lock holding is enough (OR), so the
         // combined chance of failing to hold needs *all three* to fail.
         let hold_fail = faults.lock_a.fails_to_hold.clamp(0.0, 1.0) * faults.lock_b.fails_to_hold.clamp(0.0, 1.0) * faults.lock_c.fails_to_hold.clamp(0.0, 1.0);
+        let lock_degraded_count = [faults.lock_a.fails_to_hold, faults.lock_b.fails_to_hold, faults.lock_c.fails_to_hold].iter().filter(|&&f| f > 0.0).count() as u8;
         // Release capability for a legitimate deployment: every lock must
         // actually retract (AND), so any one jam blocks it.
         let release_capability =
@@ -120,7 +148,12 @@ impl ThrustReverser {
         };
         self.position = (self.position + error.clamp(-max_step, max_step)).clamp(0.0, 1.0);
 
-        ReverserState { position: self.position, uncommanded_deployment: !commanded_deploy && self.position > UNCOMMANDED_THRESHOLD }
+        ReverserState {
+            position: self.position,
+            uncommanded_deployment: !commanded_deploy && self.position > UNCOMMANDED_THRESHOLD,
+            control_fault_active: faults.control_fault > 0.0,
+            lock_degraded_count,
+        }
     }
 }
 
@@ -203,5 +236,36 @@ mod tests {
         run(&mut rev, true, 1.0, &ReverserFaults::default(), DEPLOY_TIME_S * 1.5);
         let s = run(&mut rev, false, 1.0, &ReverserFaults::default(), DEPLOY_TIME_S * 1.5);
         assert_eq!(s.position, 0.0);
+    }
+
+    #[test]
+    fn a_control_fault_holds_the_sleeve_and_does_not_track_a_deploy_command() {
+        let mut rev = ThrustReverser::new();
+        let faults = ReverserFaults { control_fault: 1.0, ..Default::default() };
+        let s = run(&mut rev, true, 1.0, &faults, DEPLOY_TIME_S * 2.0);
+        assert_eq!(s.position, 0.0, "the sleeve must not track the command with the control loop dead");
+        assert!(s.control_fault_active);
+    }
+
+    #[test]
+    fn a_healthy_control_loop_reads_no_fault() {
+        let mut rev = ThrustReverser::new();
+        let s = run(&mut rev, true, 1.0, &ReverserFaults::default(), DEPLOY_TIME_S * 1.5);
+        assert!(!s.control_fault_active);
+        assert!(s.position > 1.0 - 1e-6, "a healthy control loop must still deploy fully");
+    }
+
+    #[test]
+    fn the_lock_degraded_count_separates_one_failed_lock_from_none_and_from_two() {
+        let mut none = ThrustReverser::new();
+        let mut one = ThrustReverser::new();
+        let mut two = ThrustReverser::new();
+        let fail = LockFaults { fails_to_hold: 1.0, ..Default::default() };
+        let s0 = none.step(false, 1.0, &ReverserFaults::default(), 0.05);
+        let s1 = one.step(false, 1.0, &ReverserFaults { lock_a: fail, ..Default::default() }, 0.05);
+        let s2 = two.step(false, 1.0, &ReverserFaults { lock_a: fail, lock_b: fail, ..Default::default() }, 0.05);
+        assert_eq!(s0.lock_degraded_count, 0);
+        assert_eq!(s1.lock_degraded_count, 1);
+        assert_eq!(s2.lock_degraded_count, 2);
     }
 }

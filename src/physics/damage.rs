@@ -130,6 +130,38 @@ const TAILSTRIKE_PITCH_DEG: f64 = 12.99;
 const HARD_LANDING_VS_FPM: f64 = -600.0;
 const HARD_LANDING_G: f64 = 1.6;
 
+/// CS 25.303: "unless otherwise specified, a factor of safety of 1.5 must
+/// be applied to the prescribed limit load", which gives the ultimate load
+/// the structure must carry without failure. Flap and gear airloads go
+/// with dynamic pressure, so with speed squared: ultimate is reached at the
+/// limit speed x sqrt(1.5).
+const ULTIMATE_FACTOR_OF_SAFETY: f64 = 1.5;
+/// `deep::gear_structure` publishes its legs as nose, left wing, right
+/// wing, left body, right body (`GEAR_STRUT_COLLAPSED:1..5`); the .acf's own
+/// gear order (`_gear/0..4`, X-Plane's `rel_collapse1..5`) is nose, left
+/// body, right body, left wing, right wing.
+const DEEP_LEG_TO_XPLANE_GEAR: [u64; 5] = [0, 3, 4, 1, 2];
+
+/// How long a flap (VFE) or gear (VLE) speed limit must be exceeded
+/// continuously before it counts as an overspeed. A single sample above the
+/// limit used to arm the damage failure, so a one-knot gust, or selecting
+/// the next flap position a moment before the speed had bled off, did it
+/// (2026-09-28). Generic (no published A380 exceedance-recording delay):
+/// long enough that turbulence and selection timing never count, short
+/// enough that any real overspeed still does.
+const OVERSPEED_HOLD_S: f64 = 3.0;
+
+/// Whether a condition has now held continuously for `hold_s`, keeping its
+/// running time in `timer` (reset the moment it stops holding).
+fn sustained(timer: &mut f64, exceeded: bool, delta: f64, hold_s: f64) -> bool {
+    if exceeded {
+        *timer += delta;
+    } else {
+        *timer = 0.0;
+    }
+    *timer >= hold_s
+}
+
 /// "Engine running" proxy for hours/cycle bookkeeping: EGT clearly above
 /// ambient (a shutdown/cold engine's `ENGINE_EGT` sits at ambient; FlyByWire's
 /// idle EGT is several hundred degrees, `fadec.rs` `idle_egt`). A derived
@@ -247,9 +279,19 @@ pub struct EngineWear {
     in_exceedance: [bool; 10],
     #[serde(skip)]
     seconds_ip_overspeed: f64,
-    /// Derived, saturating function of `creep_life_fraction`, republished
-    /// as the engine workstream's hook.
+    /// Derived, saturating function of `creep_life_fraction` (1.0 once
+    /// [`Self::fod_ingested`]), shown on the Study engine pages. Display
+    /// only: the engine model's gas path does not read this number; its
+    /// damage comes from failures through `engine_commands.rs`'s `EXOTIC`
+    /// table.
     pub compressor_efficiency_loss: f64,
+    /// This engine ingested a walkaround inlet cover ([`Damage::arm_fod`]):
+    /// its HP compressor is destroyed. Persisted, and re-arms 72_024+n
+    /// ("FOD damage", the same destruction `EXOTIC` gives 72_012) on every
+    /// tick, so the engine stays unserviceable across sessions until the
+    /// Study panel's maintenance repair resets this record.
+    #[serde(default)]
+    pub fod_ingested: bool,
     /// Hours the "running" proxy has been true (engine hours).
     pub hours: f64,
     /// Times the "running" proxy transitioned false -> true (start cycles).
@@ -380,6 +422,7 @@ impl Default for EngineWear {
         Self {
             creep_life_fraction: 0.0,
             compressor_efficiency_loss: 0.0,
+            fod_ingested: false,
             hours: 0.0,
             cycles: 0,
             was_running: false,
@@ -428,15 +471,40 @@ pub struct Damage {
     oil_pressure_fraction_out: [VariableIdentifier; 4],
     pub engines: [EngineWear; 4],
 
+    /// (W162 follow-up) Used to be this port's own plain value: `deep/apu/
+    /// live.rs` published the bare `APU_EGT` name directly, and since
+    /// `deep.tick` runs after `simulation.tick`, that plain publish won the
+    /// name every frame -- so reading it here as-is, never decoded, was
+    /// correct at the time. W162 renamed deep's own publish to
+    /// `DEEP_APU_EGT` (the bare name collided with FlyByWire's own
+    /// `ElectronicControlBox`, which publishes `APU_EGT` as a packed ARINC
+    /// word, `write_arinc429(&self.apu_egt_id, ...)`). Once that rename
+    /// lands, this bare name stops being deep's plain value and becomes
+    /// FlyByWire's own packed word -- the same encoding `apu_egt_warning`
+    /// below already is -- so it must be decoded the identical SSM-gated
+    /// way, not read as a raw f64, or it compares as a huge packed float
+    /// against a correctly-decoded few-hundred-value `warning` and arms
+    /// almost immediately once the APU is running.
     apu_egt: VariableIdentifier,
     apu_egt_warning: VariableIdentifier,
     apu_overtemp_seconds: f64,
-    /// Percent of full APU oil quantity, drained by failures::extra 49_005
-    /// ("APU oil leak") the same way `EngineWear::oil_quantity_pct` is —
-    /// falling past `OIL_STARVATION_QTY_PCT` arms 49_004 ("APU oil low")
-    /// directly, the physical consequence rather than a standalone flag.
-    apu_oil_pct: f64,
-    apu_oil_pressure_fraction_out: VariableIdentifier,
+    /// How long IAS has been continuously above the flap handle's VFE /
+    /// the gear's VLE (see `OVERSPEED_HOLD_S`).
+    flap_overspeed_seconds: f64,
+    gear_overspeed_seconds: f64,
+    /// The same, past ultimate (`ULTIMATE_FACTOR_OF_SAFETY`).
+    flap_ultimate_seconds: f64,
+    gear_ultimate_seconds: f64,
+    /// FlyByWire's own surface positions (percent): only a surface that was
+    /// out and carrying the airload is damaged by it.
+    flaps_position_pct: VariableIdentifier,
+    slats_position_pct: VariableIdentifier,
+    /// `deep::gear_structure`'s per-leg strut failure.
+    deep_leg_collapsed: [VariableIdentifier; 5],
+    deep_leg_force_n: [VariableIdentifier; 5],
+    /// This session's structural damage, id -> magnitude, published whole
+    /// every tick through `failures::set_damage_levels`.
+    structural: std::collections::BTreeMap<u64, f64>,
 
     /// FlyByWire's own real per-wheel brake temperature (`Brake::update`,
     /// `fbw-common/.../hydraulic/brake.rs`), 16 positions: left wing
@@ -474,11 +542,16 @@ pub struct Damage {
     pub events: Vec<String>,
 }
 
-/// Reference mass for the brake-energy scale: MLW at a typical heavy-jet
-/// reference approach speed band (140 kt = 72 m/s), giving a first-
-/// principles kinetic-energy scale with no published brake-specific number
-/// (docs/physics/failures.md marks this as derived, not a cert limit).
-const BRAKE_ENERGY_REFERENCE_J: f64 = 0.5 * MLW_KG * (72.0_f64 * 72.0_f64);
+/// The brake energy past which the wing-gear brakes count as worn out: the
+/// kinetic energy of a maximum-energy rejected take-off, which is what
+/// transport brakes are designed to absorb (CS 25.735's accelerate-stop
+/// requirement) -- MTOW (WV003, 510 t, see `MLW_KG`) at a typical heavy-jet
+/// decision-speed band (150 kt = 77 m/s). Derived, not a published A380
+/// brake figure (docs/physics/failures.md). It used to be MLW at a 140 kt
+/// approach speed, which a normal heavy-weight landing stopped mostly on the
+/// brakes could reach, arming wear-out on both wing gears (2026-09-28).
+const MTOW_KG: f64 = 510_000.0;
+const BRAKE_ENERGY_REFERENCE_J: f64 = 0.5 * MTOW_KG * (77.0_f64 * 77.0_f64);
 /// Generic transport-category brake thermal time constant order of
 /// magnitude (cooling over several minutes with no forced fan cooling);
 /// marked generic in the docs table.
@@ -531,8 +604,15 @@ impl Damage {
             apu_egt: vars.get("APU_EGT".to_owned()),
             apu_egt_warning: vars.get("APU_EGT_WARNING".to_owned()),
             apu_overtemp_seconds: 0.0,
-            apu_oil_pct: full_oil_quantity(),
-            apu_oil_pressure_fraction_out: vars.get("APU_OIL_PRESSURE_FRACTION".to_owned()),
+            flap_overspeed_seconds: 0.0,
+            gear_overspeed_seconds: 0.0,
+            flap_ultimate_seconds: 0.0,
+            gear_ultimate_seconds: 0.0,
+            flaps_position_pct: vars.get("LEFT_FLAPS_POSITION_PERCENT".to_owned()),
+            slats_position_pct: vars.get("LEFT_SLATS_POSITION_PERCENT".to_owned()),
+            deep_leg_collapsed: std::array::from_fn(|i| vars.get(format!("GEAR_STRUT_COLLAPSED:{}", i + 1))),
+            deep_leg_force_n: std::array::from_fn(|i| vars.get(format!("GEAR_LEG_FORCE_N:{}", i + 1))),
+            structural: std::collections::BTreeMap::new(),
             brake_temperature: std::array::from_fn(|i| vars.get(format!("BRAKE_TEMPERATURE_{}", i + 1))),
             flaps_handle_index: vars.get("FLAPS_HANDLE_INDEX".to_owned()),
             ias: xplm.and_then(|x| x.find("sim/flightmodel/position/indicated_airspeed")),
@@ -583,11 +663,66 @@ impl Damage {
         self.update_engines(vars, delta);
         self.update_engine_limits(vars, on_ground, delta);
         self.update_apu(vars, delta);
-        self.update_flap_gear_speed_overspeeds(vars, xplm);
+        self.update_flap_gear_speed_overspeeds(vars, xplm, delta);
         self.update_vmo_mmo(xplm);
         self.update_brake_energy(xplm, delta);
         self.update_brake_temperature_tyre_burst(vars);
         self.update_touchdown_exceedances(xplm, delta);
+        let ias = Self::get_f(xplm, self.ias);
+        let gear_down = Self::get_i(xplm, self.gear_handle_down) != 0;
+        self.update_structural(vars, ias, gear_down, delta);
+        failures::set_damage_levels(self.structural.clone());
+    }
+
+    /// Structural damage once a load passes ultimate (CS 25.303), each
+    /// through the model that owns the part, latched for the session:
+    /// - flaps/slats extended past their placard speed x sqrt(1.5), held
+    ///   for `OVERSPEED_HOLD_S`: the drive is bent and jams where it is
+    ///   (27_101/27_102, FlyByWire's own flap/slat assembly);
+    /// - gear down past its placard speed x sqrt(1.5), held: the gear doors'
+    ///   actuators jam (FlyByWire's own GearActuatorJammed, 32_023-32_025),
+    ///   so the gear cannot be raised;
+    /// - a strut `deep::gear_structure` failed past its own ultimate load
+    ///   (per leg, from its touchdown sink speed and load, the aircraft's
+    ///   weight included): X-Plane's own gear collapse for that leg
+    ///   (32_130-32_134).
+    /// VMO/MMO and tailstrike stay logged exceedances: there is no sourced
+    /// design dive speed to put an ultimate on, and a tailstrike is a
+    /// contact, not a load this module measures.
+    fn update_structural<W: systems::simulation::SimulatorReaderWriter>(&mut self, vars: &mut W, ias: f64, gear_down: bool, delta: f64) {
+        let ultimate_speed_factor = ULTIMATE_FACTOR_OF_SAFETY.sqrt();
+        let flap_index = vars.read(&self.flaps_handle_index).round().clamp(0.0, 4.0) as usize;
+        let flap_limit = VFE_KT[flap_index] * ultimate_speed_factor;
+        if sustained(&mut self.flap_ultimate_seconds, ias > flap_limit, delta, OVERSPEED_HOLD_S) {
+            if vars.read(&self.flaps_position_pct) > 1.0 {
+                self.structural_damage(27_101, &format!("flaps jammed: {ias:.0} kt at CONF {flap_index}, ultimate {flap_limit:.0} kt"));
+            }
+            if vars.read(&self.slats_position_pct) > 1.0 {
+                self.structural_damage(27_102, &format!("slats jammed: {ias:.0} kt at CONF {flap_index}, ultimate {flap_limit:.0} kt"));
+            }
+        }
+        let gear_limit = VLE_VLO_KT * ultimate_speed_factor;
+        if sustained(&mut self.gear_ultimate_seconds, gear_down && ias > gear_limit, delta, OVERSPEED_HOLD_S) {
+            for (id, door) in [(32_023, "nose"), (32_024, "left"), (32_025, "right")] {
+                self.structural_damage(id, &format!("{door} gear doors jammed: {ias:.0} kt gear down, ultimate {gear_limit:.0} kt"));
+            }
+        }
+        for (deep_leg, xplane_gear) in DEEP_LEG_TO_XPLANE_GEAR.into_iter().enumerate() {
+            if vars.read(&self.deep_leg_collapsed[deep_leg]) > 0.5 {
+                let force = vars.read(&self.deep_leg_force_n[deep_leg]);
+                self.structural_damage(
+                    32_130 + xplane_gear,
+                    &format!("gear leg collapsed (deep leg {}, X-Plane gear {xplane_gear}, leg force {force:.0} N)", deep_leg + 1),
+                );
+            }
+        }
+    }
+
+    fn structural_damage(&mut self, id: u64, description: &str) {
+        if !self.structural.contains_key(&id) {
+            self.structural.insert(id, 1.0);
+            self.events.push(format!("structural damage past ultimate: {description} (failure {id})"));
+        }
     }
 
     fn arm(&mut self, id: u64, description: &str) {
@@ -595,6 +730,25 @@ impl Damage {
             failures::set_active(id, true);
             self.events.push(format!("exceedance: {description} (failure {id})"));
         }
+    }
+
+    /// Foreign-object damage from a walkaround engine-inlet cover a running
+    /// engine has ingested (`walkaround.rs`, called the moment N2 crosses
+    /// its own rotating threshold with the cover still installed). A whole
+    /// fabric cover goes through the fan and down the core: the HP
+    /// compressor is destroyed. Arms 72_024+n, which `engine_commands.rs`'s
+    /// `EXOTIC` table gives exactly the perturbation of 72_012 ("HP
+    /// compressor destruction": compression and flow gone, imbalance on the
+    /// bearings), so the engine model itself loses its flame and runs the
+    /// core down -- the start fails and the engine is unserviceable. Marks
+    /// the engine's persisted [`EngineWear::fod_ingested`], so it stays that
+    /// way across sessions until the Study panel's repair. `n` is 0-based
+    /// (engine 1 is `n == 0`); out-of-range `n` is ignored.
+    pub fn arm_fod(&mut self, n: usize, description: &str) {
+        let Some(engine) = self.engines.get_mut(n) else { return };
+        engine.fod_ingested = true;
+        engine.compressor_efficiency_loss = 1.0;
+        self.arm(72_024 + n as u64, description);
     }
 
     /// Every failure id this module's own [`Damage::arm`] calls can set,
@@ -626,6 +780,9 @@ impl Damage {
         }
         for leg in 0..4u64 {
             ids.push(32_101 + leg); // gear tyre burst (fuse-plug melt)
+        }
+        for n in 0..4u64 {
+            ids.push(72_024 + n); // FOD from an ingested walkaround inlet cover
         }
         ids
     }
@@ -709,7 +866,7 @@ impl Damage {
             // that borrow ends, since the two can't be live at once.
             let mut overtemp_exceeded = false;
             let mut creep_report: Option<String> = None;
-            let (creep_life_fraction, compressor_efficiency_loss) = {
+            let (creep_life_fraction, compressor_efficiency_loss, fod_ingested) = {
                 let e = &mut self.engines[n];
 
                 let running = t >= ENGINE_RUNNING_EGT_C;
@@ -723,12 +880,20 @@ impl Damage {
 
                 if t > trent900::TGT_OVERTEMP_UNTRIMMED_C {
                     e.seconds_above_overtemp += delta;
-                    // Miner's-rule linear damage: the 20-second overtemperature
-                    // budget consumed at 1x while above it.
-                    e.creep_life_fraction += delta / trent900::OVERTEMP_LIMIT_S;
-                    e.creep_from_overtemp += delta / trent900::OVERTEMP_LIMIT_S;
+                    // The TCDS allows an excursion of up to 20 s above this
+                    // limit, so one that ends inside it is permitted, not
+                    // damage -- the same rule the MCT and TOGA terms below
+                    // follow. Every second above it used to charge 1/20 of
+                    // the whole budget, cumulatively and persisted, so start
+                    // and thrust-spike transients wore an engine out over a
+                    // dozen sessions (2026-09-28). Only a single excursion
+                    // held past the allowance is a real exceedance: it arms
+                    // the turbine over-temperature failure, and its excess
+                    // is charged at the same tenth-rate as the others.
                     if e.seconds_above_overtemp > trent900::OVERTEMP_LIMIT_S {
                         overtemp_exceeded = true;
+                        e.creep_life_fraction += delta / (trent900::OVERTEMP_LIMIT_S * 10.0);
+                        e.creep_from_overtemp += delta / (trent900::OVERTEMP_LIMIT_S * 10.0);
                     }
                 } else {
                     e.seconds_above_overtemp = 0.0;
@@ -779,7 +944,7 @@ impl Damage {
 
                 // Saturating efficiency loss: up to 15% (an order-of-magnitude
                 // ceiling, not a cited figure) as creep life is consumed.
-                e.compressor_efficiency_loss = (e.creep_life_fraction * 0.05).min(0.15);
+                e.compressor_efficiency_loss = if e.fod_ingested { 1.0 } else { (e.creep_life_fraction * 0.05).min(0.15) };
                 // Creep life is what arms bearing wear, and an engine that
                 // reaches 1.0 seizes -- so every quarter of it consumed is
                 // worth a line saying which term did it and what the turbine
@@ -803,7 +968,7 @@ impl Damage {
                         e.toga_lever_seconds,
                     ));
                 }
-                (e.creep_life_fraction, e.compressor_efficiency_loss)
+                (e.creep_life_fraction, e.compressor_efficiency_loss, e.fod_ingested)
             };
 
             if let Some(line) = creep_report {
@@ -821,6 +986,12 @@ impl Damage {
             }
             if creep_life_fraction >= 2.0 {
                 self.arm(72_004 + n as u64, &format!("engine {} compressor stall risk", n + 1));
+            }
+            // A persisted ingestion re-arms its failure every tick (the id
+            // itself is derived, so a reload drops it until this puts it
+            // back): the compressor stays destroyed until repaired.
+            if fod_ingested {
+                self.arm(72_024 + n as u64, &format!("engine {} HP compressor destroyed by an ingested inlet cover", n + 1));
             }
 
             // 79_004+n oil leak -> quantity drops -> pressure fraction drops
@@ -865,44 +1036,80 @@ impl Damage {
     }
 
     fn update_apu<W: systems::simulation::SimulatorReaderWriter>(&mut self, vars: &mut W, delta: f64) {
-        let egt = vars.read(&self.apu_egt);
-        let warning = vars.read(&self.apu_egt_warning);
-        if warning > 0.0 && egt > warning {
-            self.apu_overtemp_seconds += delta;
-            // A generic 60-second sustained-overtemperature trigger (no
-            // published APU time limit found): documented as generic.
-            if self.apu_overtemp_seconds > 60.0 {
-                self.arm(49_000, "APU EGT overtemperature damage");
+        // `A32NX_APU_EGT` and `A32NX_APU_EGT_WARNING` are both names
+        // FlyByWire's own source defines as ARINC 429 words
+        // (`fbw-common/.../apu/electronic_control_box.rs`
+        // `write_arinc429(&self.apu_egt_id, ...)` /
+        // `write_arinc429(&self.apu_egt_warning_id, ...)`): the f32 bit
+        // pattern in the low 32 bits, a two-bit SSM above it, the whole
+        // word stored as that u64's numeric value in an f64
+        // (`shared/arinc429.rs` `to_arinc429`/`from_arinc429`).
+        //
+        // `A32NX_APU_EGT` used NOT to be decoded here (`deep/apu/live.rs`
+        // used to publish the bare `APU_EGT` name plain, and since
+        // `deep.tick` runs after `simulation.tick`, that plain publish won
+        // the name every frame) -- but W162 renamed deep's own publish away
+        // to `DEEP_APU_EGT` (the bare name collided with FlyByWire's own
+        // packed word), so this bare name is now genuinely FlyByWire's own
+        // ARINC word, the same encoding `apu_egt_warning` already is, and
+        // must be decoded the identical SSM-gated way (see `apu_egt`'s own
+        // doc comment) -- not read as a raw f64, which would compare a huge
+        // packed float against a correctly-decoded few-hundred-value
+        // `warning` and arm almost immediately once the APU is running.
+        //
+        // Decoded by *which variable this is*, not by whether a given
+        // reading happens to look packed (`prim.rs`'s own `from_simvar`
+        // shows any ordinary float decodes to some SSM/value pair with no
+        // error, so a value-shape guess can misread a plain number as
+        // packed or a packed one as plain without warning -- unlike
+        // `study/canvas.rs`'s display-only `looks_packed`, this decision
+        // arms a failure and must not guess). Trust a decoded value only
+        // when its SSM is normal operation: a word FlyByWire marks failed,
+        // without data, or under test must never arm anything.
+        const SSM_NORMAL_OPERATION: u64 = 0b11;
+        let egt_word = vars.read(&self.apu_egt) as u64;
+        let egt_ssm = (egt_word >> 32) & 0b11;
+        let egt = (egt_ssm == SSM_NORMAL_OPERATION).then(|| f32::from_bits(egt_word as u32) as f64);
+        let warning_word = vars.read(&self.apu_egt_warning) as u64;
+        let warning_ssm = (warning_word >> 32) & 0b11;
+        let warning = (warning_ssm == SSM_NORMAL_OPERATION).then(|| f32::from_bits(warning_word as u32) as f64);
+
+        if let (Some(egt), Some(warning)) = (egt, warning) {
+            if warning > 0.0 && egt > warning {
+                self.apu_overtemp_seconds += delta;
+                // A generic 60-second sustained-overtemperature trigger (no
+                // published APU time limit found): documented as generic.
+                // 49_000 is the deep APU's turbine damage (`deep/apu/live.rs`),
+                // so the damaged turbine runs hot and its ECB trips it.
+                if self.apu_overtemp_seconds > 60.0 {
+                    self.arm(49_000, "APU EGT overtemperature damage");
+                }
+            } else {
+                self.apu_overtemp_seconds = 0.0;
             }
         } else {
+            // No trustworthy reading/threshold published yet (unwritten,
+            // which decodes to SSM 0, or a word FlyByWire itself marks
+            // failed/no-data/test): hold the timer at zero rather than arm
+            // a damage failure from data nothing vouches for.
             self.apu_overtemp_seconds = 0.0;
         }
 
-        // 49_004 APU oil leak: drains apu_oil_pct exactly like an engine oil
-        // leak drains EngineWear::oil_quantity_pct (79_004), and the same
-        // below-threshold falloff into a published pressure-fraction hook
-        // for the (not yet built) APU/fluids consumer to read -- the same
-        // "Local, but still publishes a real hook downstream" pattern
-        // `update_engines` uses for `oil_pressure_fraction_out`.
-        if failures::active_ids().contains(&49_004) {
-            self.apu_oil_pct = (self.apu_oil_pct - OIL_LEAK_DRAIN_PCT_PER_S * delta).max(0.0);
-        }
-        let apu_oil_pressure_fraction = if self.apu_oil_pct >= OIL_STARVATION_QTY_PCT {
-            1.0
-        } else {
-            (self.apu_oil_pct / OIL_STARVATION_QTY_PCT).clamp(0.0, 1.0)
-        };
-        vars.write(&self.apu_oil_pressure_fraction_out, apu_oil_pressure_fraction);
+        // 49_004 "APU oil leak" is not modelled here: it is the deep APU's
+        // own oil leak (`deep/apu/live.rs`), whose ECB trips on low oil
+        // pressure and hands the shutdown to FlyByWire's ECB (`APU_ECB_TRIP`).
+        // The separate sump this used to drain published a pressure nothing
+        // read.
     }
 
-    fn update_flap_gear_speed_overspeeds<W: systems::simulation::SimulatorReaderWriter>(&mut self, vars: &mut W, xplm: Option<&Xplm>) {
+    fn update_flap_gear_speed_overspeeds<W: systems::simulation::SimulatorReaderWriter>(&mut self, vars: &mut W, xplm: Option<&Xplm>, delta: f64) {
         let ias = Self::get_f(xplm, self.ias);
         let flap_index = vars.read(&self.flaps_handle_index).round().clamp(0.0, 4.0) as usize;
-        if ias > VFE_KT[flap_index] {
+        if sustained(&mut self.flap_overspeed_seconds, ias > VFE_KT[flap_index], delta, OVERSPEED_HOLD_S) {
             self.arm(27_100, &format!("flap overspeed at CONF {flap_index} ({ias:.0} kt)"));
         }
         let gear_down = Self::get_i(xplm, self.gear_handle_down) != 0;
-        if gear_down && ias > VLE_VLO_KT {
+        if sustained(&mut self.gear_overspeed_seconds, gear_down && ias > VLE_VLO_KT, delta, OVERSPEED_HOLD_S) {
             self.arm(32_120, &format!("gear overspeed ({ias:.0} kt)"));
         }
     }
@@ -1018,6 +1225,13 @@ impl Damage {
         for n in take_repair_requests() {
             if let Some(e) = self.engines.get_mut(n) {
                 *e = EngineWear::default();
+                // The failures this module derived for this engine go with
+                // the wear that armed them: resetting the record alone left
+                // them armed, still perturbing the engine's gas path, for
+                // the rest of the session.
+                for base in [72_000u64, 72_004, 72_008, 72_024] {
+                    failures::set_active(base + n as u64, false);
+                }
                 log.push(format!("engine {} wear reset (maintenance repair)", n + 1));
             }
         }
@@ -1034,6 +1248,7 @@ impl Damage {
 static LATEST_WEAR: std::sync::Mutex<[EngineWear; 4]> = std::sync::Mutex::new([EngineWear {
     creep_life_fraction: 0.0,
     compressor_efficiency_loss: 0.0,
+    fod_ingested: false,
     hours: 0.0,
     cycles: 0,
     was_running: false,
@@ -1072,6 +1287,18 @@ pub fn request_repair_engine(n: usize) {
     }
 }
 
+/// The engine (1-based) whose own damage record armed failure `id`, for the
+/// failures [`Damage::apply_requests`] clears with the record: creep,
+/// oil-starvation and overtemperature wear (72_000/72_004/72_008 + n) and
+/// an ingested inlet cover (72_024 + n). Repairing one of these as a failure
+/// has to repair the engine too, or the record re-arms it the next tick.
+pub fn engine_of_damage_failure(id: u64) -> Option<usize> {
+    [72_000u64, 72_004, 72_008, 72_024]
+        .iter()
+        .find(|&&base| (base..base + 4).contains(&id))
+        .map(|&base| (id - base) as usize + 1)
+}
+
 fn take_repair_requests() -> Vec<usize> {
     REPAIR_REQUESTS.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default()
 }
@@ -1105,6 +1332,261 @@ mod tests {
     }
     use crate::aspects::test_vars::TestVars;
     use systems::simulation::{SimulatorReaderWriter, VariableRegistry};
+
+    /// A gust or an early flap selection -- a couple of seconds over the
+    /// limit -- is not an overspeed; three seconds continuously over is.
+    #[test]
+    fn a_speed_limit_counts_only_once_exceeded_continuously_for_the_hold_time() {
+        let mut t = 0.0;
+        assert!(!sustained(&mut t, true, 1.0, OVERSPEED_HOLD_S));
+        assert!(!sustained(&mut t, true, 1.0, OVERSPEED_HOLD_S), "2 s over is a gust");
+        assert!(!sustained(&mut t, false, 1.0, OVERSPEED_HOLD_S), "back under: the timer restarts");
+        assert!(!sustained(&mut t, true, 1.0, OVERSPEED_HOLD_S));
+        assert!(!sustained(&mut t, true, 1.0, OVERSPEED_HOLD_S));
+        assert!(sustained(&mut t, true, 1.0, OVERSPEED_HOLD_S), "3 s continuously over is an overspeed");
+    }
+
+    /// The brakes are designed for a maximum-energy rejected take-off, so a
+    /// normal heavy landing stopped entirely on the brakes is well inside
+    /// that, and an RTO at MTOW from above the reference band is past it.
+    #[test]
+    fn a_heavy_landing_is_inside_the_brake_energy_reference_and_a_max_rto_is_not() {
+        let heavy_landing = 0.5 * MLW_KG * (72.0_f64 * 72.0_f64); // MLW, 140 kt, all on the brakes
+        assert!(heavy_landing < BRAKE_ENERGY_REFERENCE_J * 0.75, "a heavy landing must leave the brakes real margin");
+        let max_rto = 0.5 * MTOW_KG * (82.0_f64 * 82.0_f64); // MTOW, 160 kt
+        assert!(max_rto > BRAKE_ENERGY_REFERENCE_J, "an RTO at MTOW from 160 kt must still count");
+    }
+
+    /// A TGT excursion above the over-temperature limit that ends inside
+    /// the TCDS's own 20-second allowance is permitted: no creep, no
+    /// failure. Every such second used to charge 1/20 of the whole budget,
+    /// cumulatively and persisted, so start and thrust-spike transients wore
+    /// an engine out over a dozen sessions (2026-09-28: engine 2 at 0.08
+    /// after 2.7 hours).
+    #[test]
+    fn an_overtemp_inside_the_20s_allowance_costs_nothing() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        for n in 0..4 {
+            vars.write(&d.egt[n], 970.0);
+        }
+        for _ in 0..15 {
+            d.update(&mut vars, None, 1.0);
+        }
+        assert_eq!(d.engines[0].creep_life_fraction, 0.0, "15 s inside the 20 s allowance is certified operation");
+        assert!(!crate::failures::active_ids().contains(&72_008));
+    }
+
+    /// `arm_fod` (`walkaround.rs`'s engine-inlet-cover-ingestion route)
+    /// arms the per-engine FOD id and gives the engine a real, causal
+    /// efficiency loss through the same channel a creep-derived exceedance
+    /// already drives -- not a scripted message with no physical effect.
+    #[test]
+    fn arm_fod_damages_the_named_engine_and_arms_its_own_id_only() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        assert_eq!(d.engines[1].compressor_efficiency_loss, 0.0);
+        d.arm_fod(1, "engine 2 FOD from an ingested walkaround inlet cover");
+        assert!(d.engines[1].compressor_efficiency_loss > 0.0, "ingestion must cost real compressor efficiency");
+        assert!(crate::failures::active_ids().contains(&72_025), "engine 2's own FOD id (72_024+1) is armed");
+        assert!(!crate::failures::active_ids().contains(&72_024), "engine 1's FOD id must not be touched");
+        assert_eq!(d.engines[0].compressor_efficiency_loss, 0.0);
+        crate::failures::replace([]);
+    }
+
+    fn set(vars: &mut TestVars, name: &str, value: f64) {
+        let id = systems::simulation::VariableRegistry::get(vars, name.to_owned());
+        systems::simulation::SimulatorReaderWriter::write(vars, &id, value);
+    }
+
+    /// CONF 3's VFE is 196 kt, so its ultimate is 196 x sqrt(1.5) = 240 kt.
+    /// Below it nothing breaks however long it is held, a brief excursion
+    /// past it (a gust) is inside the hold, and a held one jams only the
+    /// surfaces that were out and carrying the load.
+    #[test]
+    fn past_ultimate_held_extended_flaps_jam_but_retracted_slats_do_not() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        set(&mut vars, "FLAPS_HANDLE_INDEX", 3.0);
+        set(&mut vars, "LEFT_FLAPS_POSITION_PERCENT", 60.0);
+        set(&mut vars, "LEFT_SLATS_POSITION_PERCENT", 0.0);
+        for _ in 0..60 {
+            d.update_structural(&mut vars, 239.0, false, 1.0);
+        }
+        assert!(d.structural.is_empty(), "under ultimate: {:?}", d.structural);
+        d.update_structural(&mut vars, 250.0, false, 1.0);
+        d.update_structural(&mut vars, 200.0, false, 1.0);
+        assert!(d.structural.is_empty(), "a one-second excursion is inside the hold");
+        for _ in 0..5 {
+            d.update_structural(&mut vars, 250.0, false, 1.0);
+        }
+        assert!(d.structural.contains_key(&27_101), "extended flaps past ultimate, held, must jam");
+        assert!(!d.structural.contains_key(&27_102), "retracted slats carried no load");
+        crate::failures::replace([]);
+    }
+
+    /// VLE 250 kt, ultimate 250 x sqrt(1.5) = 306 kt: the doors jam, and only
+    /// with the gear down.
+    #[test]
+    fn a_gear_overspeed_past_ultimate_jams_the_gear_doors() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        for _ in 0..10 {
+            d.update_structural(&mut vars, 320.0, false, 1.0);
+        }
+        assert!(d.structural.is_empty(), "gear up: nothing out in the airflow");
+        for _ in 0..10 {
+            d.update_structural(&mut vars, 300.0, true, 1.0);
+        }
+        assert!(d.structural.is_empty(), "past VLE but under ultimate");
+        for _ in 0..5 {
+            d.update_structural(&mut vars, 320.0, true, 1.0);
+        }
+        for id in [32_023, 32_024, 32_025] {
+            assert!(d.structural.contains_key(&id), "{id}: the door actuators must jam");
+        }
+        crate::failures::replace([]);
+    }
+
+    /// `deep::gear_structure`'s leg 2 is the left wing leg; X-Plane's is gear
+    /// 3 (`_gear/3`, `rel_collapse4`): the leg the deep model broke is the
+    /// one that collapses, and the damage reaches the failure set.
+    #[test]
+    fn a_leg_the_deep_gear_model_breaks_collapses_that_same_leg() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        set(&mut vars, "GEAR_STRUT_COLLAPSED:2", 1.0);
+        d.update(&mut vars, None, 1.0);
+        assert_eq!(d.structural.keys().copied().collect::<Vec<_>>(), vec![32_133]);
+        assert!(crate::failures::is_active(32_133), "published through the damage channel");
+        assert!(!crate::failures::armed_ids().contains(&32_133), "never saved as crew-armed");
+        crate::failures::replace([]);
+        crate::failures::set_damage_levels(std::collections::BTreeMap::new());
+    }
+
+    /// An ingested inlet cover destroys the compressor for good: its
+    /// failure stays armed tick after tick, comes back after a reload (the
+    /// id itself is derived and dropped on save; the persisted record
+    /// re-arms it), and only the maintenance repair clears it.
+    #[test]
+    fn an_ingested_cover_destroys_the_compressor_until_repaired() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        d.arm_fod(2, "engine 3 FOD from an ingested walkaround inlet cover");
+        for _ in 0..10 {
+            d.update(&mut vars, None, 1.0);
+        }
+        assert!(crate::failures::is_active(72_026), "the destruction must stay armed");
+        assert!(d.engines[2].fod_ingested);
+        assert_eq!(d.engines[2].compressor_efficiency_loss, 1.0);
+        assert!(!d.engines[1].fod_ingested && !crate::failures::is_active(72_025));
+
+        // A new session: the save keeps the record, not the derived id.
+        let saved: [EngineWear; 4] = serde_json::from_str(&serde_json::to_string(&d.engines).unwrap()).unwrap();
+        crate::failures::replace([]);
+        let mut d = Damage::new(&mut vars, None);
+        d.engines = load_engines(saved).0;
+        d.update(&mut vars, None, 1.0);
+        assert!(crate::failures::is_active(72_026), "a reload must not repair the engine");
+
+        request_repair_engine(3); // 1-based: engine 3 is index 2
+        let _ = d.apply_requests();
+        assert!(!d.engines[2].fod_ingested);
+        assert!(!crate::failures::is_active(72_026), "the repair must clear the failure it armed");
+        d.update(&mut vars, None, 1.0);
+        assert!(!crate::failures::is_active(72_026), "and it must not come back");
+        crate::failures::replace([]);
+    }
+
+    /// The Study page's "Repair" on an engine's own damage failure (a
+    /// destroyed compressor from an ingested cover) goes through
+    /// `web::apply_action`'s `repairFailure`, which only knows the failure
+    /// id: it must reach the engine's record, or the record re-arms the
+    /// failure the next tick and the repair never sticks.
+    #[test]
+    fn repairing_an_engine_damage_failure_from_the_study_page_repairs_the_engine() {
+        assert_eq!(engine_of_damage_failure(72_024), Some(1));
+        assert_eq!(engine_of_damage_failure(72_027), Some(4));
+        assert_eq!(engine_of_damage_failure(72_005), Some(2));
+        assert_eq!(engine_of_damage_failure(72_012), None, "not a record-armed id");
+        assert_eq!(engine_of_damage_failure(72_028), None);
+
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        d.arm_fod(0, "engine 1 FOD from an ingested walkaround inlet cover");
+        d.update(&mut vars, None, 1.0);
+        assert!(crate::failures::is_active(72_024));
+
+        crate::study::web::apply_action(r#"{"kind":"repairFailure","id":72024}"#).unwrap();
+        let _ = d.apply_requests();
+        for _ in 0..5 {
+            d.update(&mut vars, None, 1.0);
+        }
+        assert!(!d.engines[0].fod_ingested, "the engine is repaired, not just the failure");
+        assert!(!crate::failures::is_active(72_024), "and the failure stays cleared");
+        crate::failures::replace([]);
+    }
+
+    /// Hundreds of brief spikes -- many sessions of starts and thrust
+    /// transients -- never add up to wear: each one is inside the
+    /// allowance on its own.
+    #[test]
+    fn repeated_brief_overtemp_spikes_never_wear_the_engine() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        for _ in 0..500 {
+            vars.write(&d.egt[0], 970.0);
+            d.update(&mut vars, None, 2.0);
+            vars.write(&d.egt[0], 700.0);
+            d.update(&mut vars, None, 10.0);
+        }
+        assert_eq!(d.engines[0].creep_life_fraction, 0.0);
+        assert!(!crate::failures::active_ids().contains(&72_000), "no bearing wear from transients");
+    }
+
+    /// Held past the allowance, it is a real exceedance: turbine
+    /// over-temperature damage arms, and only the excess costs creep, at
+    /// the same tenth-rate the take-off and TOGA limits charge.
+    #[test]
+    fn an_overtemp_held_past_the_allowance_charges_only_the_excess() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        vars.write(&d.egt[0], 970.0);
+        for _ in 0..40 {
+            d.update(&mut vars, None, 1.0);
+        }
+        let expected = 20.0 / (trent900::OVERTEMP_LIMIT_S * 10.0);
+        assert!((d.engines[0].creep_life_fraction - expected).abs() < 1e-9, "20 s over the allowance: {}", d.engines[0].creep_life_fraction);
+        assert!(crate::failures::active_ids().contains(&72_008), "a 40 s overtemp is a real exceedance");
+        crate::failures::replace([]);
+    }
 
     /// Sustained EGT above the Trent 900's 850 C maximum-continuous TGT,
     /// with all four engines "running" (so the 5-minute all-engines limit
@@ -1393,26 +1875,99 @@ mod tests {
         crate::failures::replace([]);
     }
 
-    /// failures::extra 49_004 ("APU oil leak") drains `apu_oil_pct`, which
-    /// falls off `apu_oil_pressure_fraction_out` once starved -- the same
-    /// leak-then-low-pressure chain as the per-engine one above (79_004).
+    /// (W162 follow-up) A helper packing an ARINC word the same way
+    /// FlyByWire's own `to_arinc429` does: f32 bits low, a two-bit SSM
+    /// above, stored as that u64's numeric value in an f64 -- used to drive
+    /// both `apu_egt` and `apu_egt_warning`, now that both are FlyByWire's
+    /// own packed words (see `apu_egt`'s own doc comment).
+    fn pack_arinc(ssm: u64, data: f32) -> f64 {
+        ((ssm << 32) | data.to_bits() as u64) as f64
+    }
+
+    /// `A32NX_APU_EGT`/`A32NX_APU_EGT_WARNING` as FlyByWire's own
+    /// `ElectronicControlBox` actually sends both, since W162's rename: an
+    /// ARINC 429 word, the f32 bits low, the two-bit SSM above
+    /// (`shared/arinc429.rs` `to_arinc429`). A real APU EGT past the packed
+    /// threshold, with both words marked normal operation, must arm the
+    /// overtemperature failure after the 60 s window -- the case the raw
+    /// (undecoded) comparison always missed, since a plain reading of ~900
+    /// can never exceed a raw packed word in the billions.
     #[test]
-    fn an_apu_oil_leak_drains_quantity_and_drops_oil_pressure() {
+    fn a_packed_apu_egt_warning_word_arms_overtemp_once_the_real_egt_exceeds_it() {
         let _guard = crate::failures::tests::serial();
         let _f = crate::failures::Failures::new();
         crate::failures::replace([]);
-        crate::failures::set_active(49_004, true);
         let mut vars = TestVars::default();
         let mut d = Damage::new(&mut vars, None);
+        vars.write(&d.apu_egt, pack_arinc(0b11, 950.0)); // 950.0 C packed, SSM 3 (normal operation)
+        vars.write(&d.apu_egt_warning, pack_arinc(0b11, 900.0)); // 900.0 C packed, SSM 3 (normal operation)
 
-        d.update(&mut vars, None, 1.0);
-        assert_eq!(d.apu_oil_pct, 100.0 - OIL_LEAK_DRAIN_PCT_PER_S, "a leak should drain quantity from the first tick");
-
-        for _ in 0..400 {
+        for _ in 0..60 {
             d.update(&mut vars, None, 1.0);
         }
-        assert_eq!(d.apu_oil_pct, 0.0, "sump should be empty by now");
-        assert_eq!(vars.read(&d.apu_oil_pressure_fraction_out), 0.0, "an empty sump must show zero oil pressure");
+        assert!(!crate::failures::active_ids().contains(&49_000), "not yet past the 60 s window");
+
+        d.update(&mut vars, None, 1.0);
+        assert!(crate::failures::active_ids().contains(&49_000), "950 C real EGT past a decoded 900 C threshold must arm");
+        crate::failures::replace([]);
+    }
+
+    /// A word FlyByWire itself marks failed (SSM 0) -- the sender does not
+    /// vouch for it (the ECB is off), so it must never arm the
+    /// overtemperature failure no matter how hot the packed EGT reads.
+    #[test]
+    fn a_packed_apu_egt_warning_word_marked_failure_never_arms() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        vars.write(&d.apu_egt, pack_arinc(0b11, 950.0));
+        vars.write(&d.apu_egt_warning, pack_arinc(0b00, 900.0)); // 900.0 C packed, SSM 0 (failure warning)
+
+        for _ in 0..120 {
+            d.update(&mut vars, None, 1.0);
+        }
+        assert!(!crate::failures::active_ids().contains(&49_000), "a word the ECB marks failed must never arm the failure");
+        crate::failures::replace([]);
+    }
+
+    /// The ordinary case today: `APU_EGT_WARNING` unwritten (0.0, nothing
+    /// in the live plugin publishes it) decodes to SSM 0 and must not arm
+    /// even a high real EGT.
+    #[test]
+    fn an_unwritten_apu_egt_warning_never_arms() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        vars.write(&d.apu_egt, pack_arinc(0b11, 950.0));
+
+        for _ in 0..120 {
+            d.update(&mut vars, None, 1.0);
+        }
+        assert!(!crate::failures::active_ids().contains(&49_000));
+        crate::failures::replace([]);
+    }
+
+    /// (W162 follow-up) `A32NX_APU_EGT` unwritten (0.0, decodes to SSM 0)
+    /// must not arm even against a trustworthy, high packed warning
+    /// threshold -- an untrusted/absent real reading is not "hotter than
+    /// the threshold", it is simply not known.
+    #[test]
+    fn an_unwritten_apu_egt_never_arms_against_a_trustworthy_warning() {
+        let _guard = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+        crate::failures::replace([]);
+        let mut vars = TestVars::default();
+        let mut d = Damage::new(&mut vars, None);
+        vars.write(&d.apu_egt_warning, pack_arinc(0b11, 900.0));
+
+        for _ in 0..120 {
+            d.update(&mut vars, None, 1.0);
+        }
+        assert!(!crate::failures::active_ids().contains(&49_000));
         crate::failures::replace([]);
     }
 }

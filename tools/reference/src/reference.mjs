@@ -5,7 +5,7 @@
 //   npm run reference -- --state all --screen PFD_L,EWD
 //   npm run reference -- --state approach --record   also record DOM/CSS/SVG usage
 //
-// Output: D:/fbw-build/reference-png/<state>/<SCREEN>.png, plus
+// Output: D:/A380/fbw-build/reference-png/<state>/<SCREEN>.png, plus
 // <SCREEN>.access.json (every variable/storage/Coherent access and errors)
 // and state.resolved.json (the flat state both renderers load).
 import fs from 'node:fs';

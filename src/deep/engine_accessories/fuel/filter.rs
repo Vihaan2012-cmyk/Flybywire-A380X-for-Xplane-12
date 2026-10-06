@@ -25,8 +25,13 @@ const DESIGN_DROP_PA: f64 = 0.5 * PSI_PA;
 pub const DESIGN_FLOW_M3_S: f64 = 6.0e-3;
 /// Reference temperature the design drop is quoted at, K.
 const REFERENCE_TEMP_K: f64 = 333.15;
-/// Bypass valve cracking differential, Pa (**GENERIC**).
-const BYPASS_CRACK_PA: f64 = 35.0 * PSI_PA;
+/// Bypass valve cracking differential, Pa (**GENERIC**). `pub(super)`: the
+/// strainer (`fuel::strainer`) reuses this exact figure as the same
+/// manufacturer's component-class analogue, per `E-ENG-DESIGN.md` Pattern
+/// 21 -- no Trent-900 strainer-specific bypass pressure is published
+/// anywhere, so this is a documented approximation, not a second invented
+/// number.
+pub(super) const BYPASS_CRACK_PA: f64 = 35.0 * PSI_PA;
 /// The impending-bypass warning threshold, as a fraction of the cracking
 /// differential (real filter bypass indicators typically warn well before
 /// the valve actually opens).
@@ -38,6 +43,15 @@ pub struct FilterFaults {
     /// Element blocked with debris/wax (cold-fuel wax formation, or debris
     /// ingested from the tank): resistance grows as `1 / (1 - clog)^2`.
     pub clog: f64,
+    /// The differential-pressure *monitor* itself (the electronics/switch
+    /// that watches the element and reports impending bypass), 0 healthy ..
+    /// 1 dead, independent of `clog`: a real bypass-warning monitor is a
+    /// separate sensing chain from the mechanical bypass valve it watches,
+    /// so it can fail on its own while the element is perfectly clean, and
+    /// the element can clog with a healthy monitor -- the two conditions
+    /// are not correlated (`ata70.rs`'s own `ENG n FUEL FILTER MONITORING
+    /// FAULT` vs. `ENG n FUEL FILTER CLOG`).
+    pub monitor_fault: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -46,6 +60,9 @@ pub struct FilterState {
     pub differential_pa: f64,
     pub bypassed: bool,
     pub impending_bypass: bool,
+    /// The monitor itself reads faulted, regardless of the element's own
+    /// real clog state.
+    pub monitor_fault: bool,
 }
 
 /// One step. `inlet_pa` is the LP pump's delivery, `flow_m3_s` the flow
@@ -63,6 +80,7 @@ pub fn step(inlet_pa: f64, flow_m3_s: f64, fuel_k: f64, faults: &FilterFaults) -
         differential_pa,
         bypassed: element_drop >= BYPASS_CRACK_PA,
         impending_bypass: element_drop >= BYPASS_CRACK_PA * IMPENDING_BYPASS_FRACTION,
+        monitor_fault: faults.monitor_fault > 0.0,
     }
 }
 
@@ -87,7 +105,7 @@ mod tests {
 
     #[test]
     fn a_badly_clogged_filter_opens_its_bypass() {
-        let s = step(3.0e5, DESIGN_FLOW_M3_S, REFERENCE_TEMP_K, &FilterFaults { clog: 0.9 });
+        let s = step(3.0e5, DESIGN_FLOW_M3_S, REFERENCE_TEMP_K, &FilterFaults { clog: 0.9, ..Default::default() });
         assert!(s.bypassed);
         assert_eq!(s.differential_pa, BYPASS_CRACK_PA);
     }
@@ -106,7 +124,7 @@ mod tests {
         // 0.87 sits inside it: 0.5/0.13^2 = 29.6 psi, warning but not yet
         // bypassing. (The old 0.85 was outside the window it claimed to be
         // inside -- 0.5/0.15^2 is only 22.2 psi, below the warning point.)
-        let s = step(3.0e5, DESIGN_FLOW_M3_S, REFERENCE_TEMP_K, &FilterFaults { clog: 0.87 });
+        let s = step(3.0e5, DESIGN_FLOW_M3_S, REFERENCE_TEMP_K, &FilterFaults { clog: 0.87, ..Default::default() });
         assert!(s.impending_bypass);
         assert!(!s.bypassed, "must warn *before* it bypasses, not at the same time");
         assert!(
@@ -121,5 +139,20 @@ mod tests {
         let cold = step(3.0e5, DESIGN_FLOW_M3_S, 240.0, &FilterFaults::default());
         let hot = step(3.0e5, DESIGN_FLOW_M3_S, REFERENCE_TEMP_K, &FilterFaults::default());
         assert!(cold.differential_pa > hot.differential_pa);
+    }
+
+    #[test]
+    fn the_monitor_fault_is_independent_of_the_real_clog_state() {
+        // A healthy element with a dead monitor: the monitor reads faulted
+        // even though the element itself is perfectly clean.
+        let dead_monitor = step(3.0e5, DESIGN_FLOW_M3_S, REFERENCE_TEMP_K, &FilterFaults { clog: 0.0, monitor_fault: 1.0 });
+        assert!(dead_monitor.monitor_fault);
+        assert!(!dead_monitor.bypassed && !dead_monitor.impending_bypass, "the element itself is clean");
+
+        // A badly clogged element with a healthy monitor: the monitor
+        // itself stays fine even though the element it watches is not.
+        let healthy_monitor = step(3.0e5, DESIGN_FLOW_M3_S, REFERENCE_TEMP_K, &FilterFaults { clog: 0.9, monitor_fault: 0.0 });
+        assert!(!healthy_monitor.monitor_fault);
+        assert!(healthy_monitor.bypassed);
     }
 }

@@ -138,6 +138,12 @@ fn cruise() -> Truth {
         altitude_ft: 37_000.0,
         on_ground: false,
         engine_n1_frac: [0.88; 4],
+        // A cruise thrust-lever setting, well below the MCT/TOGA detents
+        // `ata70.rs`'s own `eng_to_power_signal` reads (33.3-36.7/>43.3 deg)
+        // -- this fixture is not a take-off case.
+        engine_tla_deg: [25.0; 4],
+        // No flex temperature entered in this fixture.
+        to_flex_temp_set: false,
         engine_running: [true; 4],
         // A healthy engine does not bypass its oil filter; a clogged
         // one is what the failure under test has to cause.
@@ -149,9 +155,21 @@ fn cruise() -> Truth {
         engine_bleed_temp_k: [523.0; 4],
         engine_hp_port_pressure_pa: [827_000.0; 4],
         engine_hp_port_temp_k: [703.0; 4],
+        // (build fix, INT-P4) `Truth::engine_ip_port_pressure_pa`/`_temp_k`
+        // (W91, Batch 2): the real, unswitched IP8 tap condition, always --
+        // this fixture's own comment above already describes "about 30 psia
+        // / 250 C at the IP8 tap", the same figures `engine_bleed_pressure_
+        // pa`/`_temp_k` carry here (ordinary cruise: the customer bleed is
+        // drawing from IP8), so these mirror those two.
+        engine_ip_port_pressure_pa: [207_000.0; 4],
+        engine_ip_port_temp_k: [523.0; 4],
         engine_n2_frac: [0.90; 4],
         engine_n3_frac: [0.93; 4],
         engine_fuel_flow_kg_s: [0.9; 4],
+        // W216: no real `fuel.rs` runs in this offline audit harness, so
+        // there is no real reading to hand `deep::fuel::live` -- `None`,
+        // matching `Truth::default()`'s own value for this field.
+        fuel_tank_quantity_gal: None,
         tyre_pressure_pa: [1_550_000.0; crate::physics::tyre::WHEELS],
         engine_oil_pressure_pa: [3.1e5; 4],
         engine_oil_temp_c: [85.0; 4],
@@ -169,14 +187,37 @@ fn cruise() -> Truth {
         apu_bleed_pressure_pa: 21_662.0,
         ac_bus_volts: [115.0; 4],
         dc_bus_volts: [28.0; 2],
+        // (build fix, INT-P4) `Truth::ac_bus_powered`/`dc_bus_powered`
+        // (W162, this batch): FlyByWire's own bus-is-powered discretes,
+        // alongside the voltages just above -- all four/both are live in
+        // this ordinary cruise fixture.
+        ac_bus_powered: [true; 4],
+        dc_bus_powered: [true; 2],
         // Every PRIM/SEC healthy: an ordinary cruise, nothing failed.
         prim_healthy: [true; 3],
         sec_healthy: [true; 3],
+        // E-FCTL, ECAM completeness pass: no priority take-over held, an
+        // in-trim cruise (flaps up, sticks/pedals centred) -- nothing this
+        // offline audit harness needs to vary.
+        prim_left_sidestick_disabled: false,
+        prim_right_sidestick_disabled: false,
+        prim_left_sidestick_priority_locked: false,
+        prim_right_sidestick_priority_locked: false,
+        flap_lever_handle_index: 0.0,
+        capt_sidestick_pitch_raw: 0.0,
+        capt_sidestick_roll_raw: 0.0,
+        rudder_pedal_raw: 0.0,
+        // Straight and level cruise: no rotation on any axis.
+        body_rate_pitch_raw: 0.0,
+        body_rate_yaw_raw: 0.0,
+        body_rate_roll_raw: 0.0,
         // 5000 psi, the A380's own system pressure.
         hydraulic_pressure_pa: [34_474_000.0; 2],
         gpu_plugged_in: false,
         aircraft_mass_kg: 450_000.0,
         pitch_deg: 2.5,
+        roll_deg: 0.0,
+        heading_true_deg: 0.0,
         groundspeed_m_s: 250.0,
         angle_of_attack_deg: 2.5,
         radio_height_ft: 37_000.0,
@@ -185,6 +226,24 @@ fn cruise() -> Truth {
         cabin_pressure_pa: 75_000.0,
         cabin_temp_k: 297.0,
         sun_elevation_deg: 40.0,
+        // Ordinary cruise, nothing failed: no FDAC or OCSM channel is down
+        // either (E-AIR-DESIGN.md 211800022 / 213800015).
+        fdac_channel_failure: [[false; 2]; 2],
+        ocsm_channel_failure: [[false; 2]; 4],
+        // Ordinary cruise fixture: level flight, no descent, an FMS
+        // destination entered at sea level, both APs and A/THR engaged, the
+        // per-engine A/THR and FWD-cargo-flow signals not yet written by
+        // FlyByWire (E-AIR-DESIGN.md's 220800009-012 / 211800045 notes).
+        vertical_speed_fpm: 0.0,
+        landing_elevation_ft: 0.0,
+        athr_status: 2.0,
+        ap1_active: true,
+        ap2_active: true,
+        athr_eng_fault: [false; 4],
+        pack_flow_insufficient_fwd_crg: false,
+        // Three healthy, aligned IRs agreeing with the attitude above.
+        ir: [crate::deep::live::IrOutputs { pitch_deg: Some(2.5), roll_deg: Some(0.0), true_heading_deg: Some(0.0), flight_path_angle_deg: Some(0.0) }; 3],
+        att_hdg_switching_knob: 1.0,
         environment: EnvironmentTruth { sat_c: -56.5, leading_edge_c: -20.0, ambient_pressure_pa: 21_662.0, tas_ms: 250.0, precipitation_on_aircraft_ratio: 0.0, weather: None },
         commanded_surfaces: flying_surfaces(),
         controls: Controls { parking_brake_on: false, gear_lever_down: false, engine_master_on: [true; 4], ..Controls::default() },
@@ -397,6 +456,7 @@ fn all_commands_exercised() -> Truth {
             fire_pb_apu_released: true,
             fire_agent_pb_pressed: [[true; 2]; 4],
             fire_agent_pb_apu_pressed: true,
+            cargo_agent_pb_pressed: [true; 2], // W194
             wing_anti_ice_selected: true,
             nacelle_anti_ice_selected: [true; 4],
             engine_bleed_pb_auto: [false; 4],
@@ -423,6 +483,10 @@ fn all_commands_exercised() -> Truth {
             apu_master_sw_on: true,
             apu_start_pb_on: true,
             reverser_deploy_commanded: [true; 2],
+            baro_mode: [1.0, 0.0], // deliberately disagreeing, exercising 340800018
+            fcu_switch_off: false,
+            gravity_extend_selected: false,
+            nw_steer_disc_selected: false,
         },
         ..Truth::default()
     }
@@ -1546,10 +1610,22 @@ mod tests {
         // family -- not reporting the same answer for everything (see the
         // doc comment above for what reverting each half looks like).
         let bus_short = families.iter().find(|f| f.var == "FAIL_BUS_SHORT_HOOK").expect("FAIL_BUS_SHORT_HOOK is in the catalogue today");
+        // (build fix, INT-P4) Pin updated 18 -> 15: `breakers.rs::
+        // bus_short_circuit_current_multiplier` (W109) now reads every one
+        // of these 18 ids via `crate::failures::magnitude(24_200 + k as
+        // u64)`, a COMPUTED expression -- this file's own static scanner
+        // only recognises a literal decimal token in the source (the same
+        // coarse-check limitation W108's report documents for its own
+        // sensor ids), so only the 3 ids that happen to be spelled out as
+        // a literal number somewhere else (test/comment text) show as
+        // "referenced"; the other 15 are equally read at runtime through
+        // the same `24_200+k` expression, just never cited as a literal.
+        // Not a revert of the fix this test guards against -- confirmed by
+        // reading `bus_short_circuit_current_multiplier` directly.
         assert_eq!(
             bus_short.dead_ids.len(),
-            bus_short.ids.len(),
-            "known_dead_family_has_a_nonempty_dead_ids_list: nothing outside failures.rs/this file reads any of FAIL_BUS_SHORT_HOOK's 18 ids today -- if this now fails, either it got wired (update the pin) or the exclusion of failures.rs/this file broke"
+            15,
+            "known_mostly_dead_family_has_the_expected_dead_id_count: FAIL_BUS_SHORT_HOOK's ids are all read at runtime (breakers.rs's `24_200 + k` expression, W109), but only 3 are ever spelled out as a literal decimal this file's static scanner can see -- if this count changes, either a new literal citation appeared/disappeared, or the exclusion of failures.rs/this file broke"
         );
         assert!(!bus_short.dead_ids.is_empty(), "sanity: the family above must be nonempty for the equality check to mean anything");
         // A finer pin on the bug this test itself caught mid-session:

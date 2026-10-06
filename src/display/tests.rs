@@ -16,7 +16,7 @@ use super::tessellate::{add_dimming, Images, Mesh, Resources, Tessellator};
 use super::text::{Atlas, Fonts};
 use super::{soft, Displays, Tess};
 
-const SNAPSHOTS: &str = r"D:\fbw-build\display-snapshots";
+const SNAPSHOTS: &str = r"D:\A380\fbw-build\display-snapshots";
 const PACKAGE_HTML_UI: &str =
     r"D:\Microsoft Flight Simulator 2020\Microsoft Flight Simulator 2020 Packages\Community\flybywire-aircraft-a380-842\html_ui";
 

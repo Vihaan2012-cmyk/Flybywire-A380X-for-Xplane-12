@@ -1,6 +1,6 @@
 # fire_ice progress
 
-Directory: `D:\fbw-xp-systems\src\deep\fire_ice\`. Self-contained per
+Directory: `D:\A380\fbw-xp-systems\src\deep\fire_ice\`. Self-contained per
 `docs/deep/BRIEF.md` rule 2 (no `crate::` dependency) except `registry.rs`,
 which is the one file allowed to use `crate::deep::api` per the lead's
 registration-API instruction.
@@ -207,21 +207,21 @@ OVERHEAT}`, `ANTI_ICE_{WING_L,WING_R}_OVERHEAT`, `WINDOW_HEAT_{L,R}_FAULT`,
   area's own live system -- a different model in a directory outside this
   pass's scope, not something this fix touches or can reach into.
 
-- [done] Cargo bottle fire-command decision (`failure_audit.rs` finding: "cargo
-  fire bottles can never be fired") — the literal `false` `step_bottles` used
-  to pass as both cargo bottles' fire command is now a named, fully-documented
-  constant, `FireIceLive::NO_CARGO_FIRE_COMMAND`. Decision made honestly, not
-  patched over: no cargo fire/agent pushbutton exists anywhere in `Truth::
-  controls` in this port (`Controls`'s own doc, `docs/deep/truth-requests.md`),
-  and `Truth`/`Controls` live in `src/deep/live.rs`, outside this directory, so
-  adding one is not this pass's call. `registry.rs`'s two cargo squib
-  `FailureDef.effect` strings now say plainly that the failure is currently
-  unobservable for want of that command (previously identical wording to the
-  now-real engine/APU squibs, which is what made this misleading), and name
-  what `Truth` would need (`cargo_fire_pb_released`/`cargo_agent_pb_pressed`,
-  mirroring the engine/APU fields). The bottles' *leak* failures are
-  unaffected (they drain independently of any fire command) and now publish a
-  real low-pressure switch (`FIRE_BOTTLE_CARGO_{FWD,AFT}_LOW_PRESSURE`), which
-  they did not before -- so of the 4 cargo bottle failures, the 2 leaks are
-  now live and the 2 squibs are honestly documented as inert rather than
-  silently assumed to work.
+- [superseded by W194] Cargo bottle fire-command decision (`failure_audit.rs`
+  finding: "cargo fire bottles can never be fired") — originally left the
+  literal `false` `step_bottles` passed as both cargo bottles' fire command
+  as a named, fully-documented constant, `FireIceLive::NO_CARGO_FIRE_
+  COMMAND`, because no cargo fire/agent pushbutton existed anywhere in
+  `Truth::controls` in this port and `Truth`/`Controls` live outside this
+  directory. W194 (a separate pass, prompted by a converter/plugin audit
+  finding `PUSH_OVHD_CARGOSMOKE_FWD/_AFT`'s click had zero reader) added
+  `Truth::controls.cargo_agent_pb_pressed: [bool; 2]` in `src/deep/live.rs`,
+  sourced from the real `A32NX_CARGOSMOKE_{FWD,AFT}_DISCHARGED` overhead
+  pushbuttons, and `step_bottles` now passes that instead of the removed
+  `NO_CARGO_FIRE_COMMAND` constant. `registry.rs`'s two cargo squib
+  `FailureDef.effect` strings, previously saying the failure was
+  unobservable for want of a command, now say it behaves like the engine/
+  APU squibs. The bottles' *leak* failures were, and remain, unaffected
+  (they drain independently of any fire command) and still publish a real
+  low-pressure switch (`FIRE_BOTTLE_CARGO_{FWD,AFT}_LOW_PRESSURE`) -- so of
+  the 4 cargo bottle failures, all 4 (2 leaks, 2 squibs) are now live.

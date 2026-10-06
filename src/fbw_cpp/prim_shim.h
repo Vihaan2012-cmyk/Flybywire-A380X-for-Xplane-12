@@ -40,6 +40,12 @@ void fbw_prim_discrete_outputs(fbw_prim *prim, base_prim_discrete_outputs *out);
 void fbw_prim_analog_outputs(fbw_prim *prim, base_prim_analog_outputs *out);
 // getDebugOutputs().fg_laws.ap_fd_1.flare_law (FlyByWireInterface.cpp:1980-1986).
 void fbw_prim_flare_law(fbw_prim *prim, ap_raw_laws_flare *out);
+// getDebugOutputs().fctl_logic: the real per-channel avail/engaged discretes,
+// aileron droop/anti-droop, and sidestick disabled/priority-locked bits
+// (E-FCTL, ECAM completeness pass). Computed every tick by the real compiled
+// Simulink regardless of whether anything reads it; this is the sibling of
+// fbw_prim_discrete_outputs/fbw_prim_bus_outputs above, not a new model.
+void fbw_prim_fctl_logic_outputs(fbw_prim *prim, base_prim_fctl_logic_outputs *out);
 
 // A few internal flags of the last step (getDebugOutputs()), for tests and
 // diagnostics: [on_ground, engine_running, triple_adr_failure,
@@ -49,6 +55,12 @@ void fbw_prim_flare_law(fbw_prim *prim, ap_raw_laws_flare *out);
 // alpha_floor_condition, v_ias_kn].
 #define FBW_PRIM_DIAGNOSTICS 16
 void fbw_prim_diagnostics(fbw_prim *prim, double *out);
+
+// The self-monitoring state behind prim_healthy (Prim::isSelfTestInProgress /
+// isMonitoringHealthy / isPowerSupplyFault), which fbw_prim_diagnostics above
+// does not cover: [self_test_in_progress, monitoring_healthy, power_supply_fault].
+#define FBW_PRIM_HEALTH_DIAGNOSTICS 3
+void fbw_prim_health_diagnostics(fbw_prim *prim, bool *out);
 
 fbw_sec *fbw_sec_create(int unit);
 void fbw_sec_destroy(fbw_sec *sec);

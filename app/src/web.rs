@@ -149,7 +149,7 @@ fn action(shared: &Shared, name: &str) -> Value {
             json!({ "ok": true, "message": "Opened X-Plane's Log.txt" })
         }
         "open-dumps" => {
-            open(r"D:\fbw-build\state-dumps");
+            open(r"D:\A380\fbw-build\state-dumps");
             json!({ "ok": true, "message": "Opened the state dumps" })
         }
         "report" => {
@@ -164,7 +164,10 @@ fn action(shared: &Shared, name: &str) -> Value {
             crate::views::restart_displays();
             json!({ "ok": true, "message": "Restarting the instrument displays" })
         }
-        "restart-all" | "restart-systems" | "reset-airframe" | "navigraph" | "licenses" => {
+        "navigraph" => {
+            json!({ "ok": false, "message": "Navigraph account linking isn't available yet; set a SimBrief user ID above instead to use INIT > CPNY F-PLN REQUEST" })
+        }
+        "restart-all" | "restart-systems" | "reset-airframe" | "licenses" => {
             json!({ "ok": false, "message": "Not available yet in this XPHFBW build" })
         }
         other => json!({ "ok": false, "message": format!("Unknown action {other}") }),

@@ -223,8 +223,7 @@ pub fn native_image(id: &str) -> Option<Arc<NativeImage>> {
 /// worker has drawn a first frame, or the side is unrecognised.
 ///
 /// Compositing contract for the XPHFBW ND screens (`SCREEN_DU_NDL`/
-/// `SCREEN_DU_NDR`, `src/display/screens.rs`): draw this image (or
-/// `crate::wxr::layer`, its mutually-exclusive twin -- see there) as the
+/// `SCREEN_DU_NDR`, `src/display/screens.rs`): draw this image as the
 /// bottom of the screen's whole 0,0,768,1024 region, straight
 /// (non-premultiplied) RGBA with row 0 at the top and no scaling needed
 /// (the image is already the screen's exact size), then alpha-composite the

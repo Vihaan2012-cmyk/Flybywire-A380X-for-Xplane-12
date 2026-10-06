@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Downloads the Chromium build the installed Playwright expects into
-// PLAYWRIGHT_BROWSERS_PATH (D:/fbw-build/browsers; C: is nearly full).
+// PLAYWRIGHT_BROWSERS_PATH (D:/A380/fbw-build/browsers; C: is nearly full).
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';

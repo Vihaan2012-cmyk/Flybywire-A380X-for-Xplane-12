@@ -176,7 +176,7 @@ The planned fix (not started -- do this first next session):
 1. **The fire.patch above is not yet applied to the live `D:\fbw-aircraft`
    checkout**, so the current running build still has the RNG-based
    extinguishing. Apply with
-   `cd D:\fbw-aircraft && git apply D:\fbw-xp-systems\patches\fbw-rust\fire.patch`
+   `cd D:\fbw-aircraft && git apply D:\A380\fbw-xp-systems\patches\fbw-rust\fire.patch`
    once no other agent is using that checkout, then rebuild.
 2. **Cockpit input for `FIRE_BUTTON_ENGn`/`FIRE_BUTTON_APU`/`OVHD_FIRE_TEST_
    PB_IS_PRESSED`/`OVHD_FIRE_AGENT_1_ENG_n_IS_PRESSED`** was not audited here

@@ -13,12 +13,24 @@
 //! - **Ambient**: `environment.ambient_pressure_pa` and `sat_c` are the
 //!   pressure and temperature every leak discharges into, every relief
 //!   valve references and every duct conducts to.
-//! - **Engine bleed ports**: `engine_bleed_pressure_pa`/`engine_bleed_
-//!   temp_k` are the IP8 tap's own upstream condition; `engine_hp_port_
-//!   pressure_pa`/`_temp_k` are the HP6 tap's own, read *unconditionally*
-//!   (module doc on that pair in `deep::live`), so the HP valve's own
-//!   stuck-valve failure (15_036_015) and the precooler's real hot source
-//!   are both reachable now -- previously this branch was fed a fixed
+//! - **Engine bleed ports**: `engine_ip_port_pressure_pa`/`engine_ip_
+//!   port_temp_k` are the IP8 tap's own upstream condition, read
+//!   *unconditionally* -- not `engine_bleed_pressure_pa`/`_temp_k`, which
+//!   already carry whichever of IP8/HP6 `engine_commands.rs:466`'s own
+//!   switch picked for the customer bleed this tick (`deep::live`'s own
+//!   doc on that pair) and so read as HP6's real hot condition whenever
+//!   that *other*, unrelated switch has the shallow engine model's HP
+//!   valve open. This area runs its own independent IP8-tap/HP-valve/
+//!   PR-valve model with its own actuator lag (`network.rs`); feeding it
+//!   the pre-switched pair used to double-switch the port and let a real
+//!   HP6-hot slug reach the passive IP tap (`duct::passive_valve_open_
+//!   fraction`, no lag of its own) unannounced -- the cause of a ~400 C
+//!   all-engine precooler-outlet spike at TOGA, fixed in W91
+//!   (`E:/fbw-debug/fixes/W91.md`). `engine_hp_port_pressure_pa`/`_temp_k`
+//!   are the HP6 tap's own, read *unconditionally* (module doc on that
+//!   pair in `deep::live`), so the HP valve's own stuck-valve failure
+//!   (15_036_015) and the precooler's real hot source are both reachable
+//!   now -- previously this branch was fed a fixed
 //!   [`HP_PORT_UNAVAILABLE_PA`] (zero), which correctly held the valve
 //!   shut but meant nothing behind it could ever be exercised.
 //! - **Precooler cooling air**: the precooler is an air-to-air exchanger
@@ -152,6 +164,19 @@ const FBW_HP_VALVE: [u64; 4] = [36_008, 36_009, 36_010, 36_011];
 /// (`PNEUMATIC_VALVES` valves 5-8).
 const FBW_PR_VALVE: [u64; 4] = [36_012, 36_013, 36_014, 36_015];
 
+/// The extra catalogue's own "Engine n precooler fault" ids (36_004-
+/// 36_007, `Effect::Hook { var: "FAIL_PRECOOLER_HOOK", owner: Owner::Air }`)
+/// -- a crew-armable failure from the Study Failures page, with no
+/// consumer at all until now (W50/W109). Independent of, and in a
+/// different id space from, this area's own deep-catalogue precooler-
+/// fouling id (`f(36, 4)`, `deep::api::failure_id`-hashed, armed from the
+/// Study panel's separate deep-failures view and already covered by
+/// `arming_precooler_fouling_leaves_the_delivered_bleed_hotter` below) --
+/// the same "two independent sources of the same mechanism" relationship
+/// `physics::bays.rs`'s `ENGINE_BLEED_LEAK_FAILURE_IDS` already has with
+/// this area's own 36_000-36_003 duct-leak modelling.
+const EXTRA_PRECOOLER_FAULT_IDS: [u64; 4] = [36_004, 36_005, 36_006, 36_007];
+
 /// The registry component behind all eight. `registry.rs` catalogues one
 /// id per distinct fault mechanism on a component *class* (its own module
 /// doc: "x4 engines"), so the four engines share one component and one
@@ -219,6 +244,37 @@ struct VarNames {
     wai_valve_open: [String; 2],
     hyd_reservoir_pressure: [String; 2],
     cross_bleed_open: [String; 3],
+    // ---- ECAM-completeness additions (E-AIR-DESIGN.md, ATA 21 AIR/PRESS).
+    // Independent LRU-style faults: each is a component that is broken or
+    // not, no threshold invented, the same shape `fbw/ata24.rs`'s
+    // `ELEC_GEN_n_FAULT` uses. They do not participate in the duct network
+    // solve, so they live as their own fields rather than inside
+    // `DuctNetworkFaults`/`NetworkOutputs`.
+    pack_regul_fault: [String; 2],
+    mixer_press_regul_fault: String,
+    ram_air_door_fault: [String; 2],
+    press_man_ctl_fault: String,
+    cabin_air_extract_vlv_fault: String,
+    /// 211800022: exactly one of a pack's two FDAC channels down (both down
+    /// is 211800009/010, already wired). Bridged from FlyByWire's own real
+    /// per-channel discretes (`Truth::fdac_channel_failure`), not a new
+    /// failure.
+    pack_regul_redundancy_fault: String,
+    /// 213800015: all four OCSMs' own `BothChannelsFault` together.
+    /// Bridged from FlyByWire's own real per-channel discretes
+    /// (`Truth::ocsm_channel_failure`).
+    outflw_vlv_ctl_fault_all: String,
+    /// 211800013/014: each pack's own air cycle machine outlet temperature,
+    /// C. Real physics on a real input (see [`PneumaticDuctsLive::tick`]'s
+    /// own comment) rather than a bare boolean, so the FCOM's real 95 C
+    /// trip (`E-AIR-FCOM.json` 211800013, FCOM p.4653) is applied in
+    /// `fbw/ata21_22_23.rs`, the same way `ac_dead`'s 90 V is applied in
+    /// `fbw/ata24.rs` rather than pre-baked into a boolean here.
+    pack_acm_outlet_temp_c: [String; 2],
+    /// 211800017-020: each pack's two flow-control valves (FCVs), one
+    /// binary LRU fault each -- see [`PneumaticDuctsLive::tick`]'s own
+    /// comment for why this is our own component rather than a bridge.
+    pack_fcv_fault: [[String; 2]; 2],
 }
 
 fn per_engine(fmt: impl Fn(usize) -> String) -> [String; 4] {
@@ -253,6 +309,15 @@ impl VarNames {
             wai_valve_open: std::array::from_fn(|i| format!("DEEP_PNEU_WAI_{}_VALVE_OPEN", side[i])),
             hyd_reservoir_pressure: std::array::from_fn(|i| format!("DEEP_PNEU_HYD_{}_RESERVOIR_PRESSURE_PA", hyd[i])),
             cross_bleed_open: std::array::from_fn(|i| format!("DEEP_PNEU_XBLEED_{}_OPEN", xbleed[i])),
+            pack_regul_fault: std::array::from_fn(|i| format!("DEEP_PNEU_PACK_{}_REGUL_FAULT", i + 1)),
+            mixer_press_regul_fault: "DEEP_PNEU_MIXER_PRESS_REGUL_FAULT".to_owned(),
+            ram_air_door_fault: std::array::from_fn(|i| format!("DEEP_PNEU_RAM_AIR_{}_FAULT", i + 1)),
+            press_man_ctl_fault: "DEEP_PNEU_PRESS_MAN_CTL_FAULT".to_owned(),
+            cabin_air_extract_vlv_fault: "DEEP_PNEU_CABIN_AIR_EXTRACT_VLV_FAULT".to_owned(),
+            pack_regul_redundancy_fault: "DEEP_PNEU_PACK_REGUL_REDUNDANCY_FAULT".to_owned(),
+            outflw_vlv_ctl_fault_all: "DEEP_PNEU_OUTFLW_VLV_CTL_FAULT_ALL".to_owned(),
+            pack_acm_outlet_temp_c: std::array::from_fn(|i| format!("DEEP_PNEU_PACK_{}_ACM_OUTLET_TEMPERATURE_C", i + 1)),
+            pack_fcv_fault: std::array::from_fn(|p| std::array::from_fn(|v| format!("DEEP_PNEU_PACK_{}_FCV_{}_FAULT", p + 1, v + 1))),
         }
     }
 }
@@ -266,6 +331,23 @@ pub struct PneumaticDuctsLive {
     derived_names: Vec<String>,
     /// [`Self::own_zone_excess_k`]'s own stored, relaxing state.
     own_zone_excess_state: [f64; ZONE_COUNT],
+    // ---- ECAM-completeness additions. This tick's magnitude (0 healthy
+    // .. 1 fully failed) of each independent LRU fault, and this tick's
+    // verdict of each bridged FlyByWire condition.
+    pack_regul_fault: [f64; 2],
+    mixer_press_regul_fault: f64,
+    ram_air_door_fault: [f64; 2],
+    press_man_ctl_fault: f64,
+    cabin_air_extract_vlv_fault: f64,
+    pack_regul_redundancy_fault: bool,
+    outflw_vlv_ctl_fault_all: bool,
+    pack_acm_outlet_temp_c: [f64; 2],
+    pack_fcv_fault: [[f64; 2]; 2],
+    /// **Pending FlyByWire write.** 211800045 AIR PACK REGUL DEGRADED --
+    /// see `Truth::pack_flow_insufficient_fwd_crg`'s own doc and
+    /// `E:/fbw-debug/ecam/E-AIR-FBW-WRITES.md`. A plain passthrough
+    /// (`Truth` -> published Var; a `Cond` cannot read `Truth` directly).
+    pack_flow_insufficient_fwd_crg: bool,
 }
 
 impl Default for PneumaticDuctsLive {
@@ -291,6 +373,16 @@ impl PneumaticDuctsLive {
             names: VarNames::new(),
             derived_names: coupling_table().into_iter().map(|(id, _)| format!("DEEP_DERIVED_FBW_FAILURE_{id}")).collect(),
             own_zone_excess_state: [0.0; ZONE_COUNT],
+            pack_regul_fault: [0.0; 2],
+            mixer_press_regul_fault: 0.0,
+            ram_air_door_fault: [0.0; 2],
+            press_man_ctl_fault: 0.0,
+            cabin_air_extract_vlv_fault: 0.0,
+            pack_regul_redundancy_fault: false,
+            outflw_vlv_ctl_fault_all: false,
+            pack_acm_outlet_temp_c: [15.0; 2],
+            pack_fcv_fault: [[0.0; 2]; 2],
+            pack_flow_insufficient_fwd_crg: false,
         }
     }
 
@@ -323,8 +415,17 @@ impl PneumaticDuctsLive {
     fn engine_inputs(truth: &Truth) -> [EngineBleedInput; 4] {
         let fan_air_k = Self::ram_total_temp_k(truth);
         std::array::from_fn(|i| EngineBleedInput {
-            ip_port_pressure_pa: truth.engine_bleed_pressure_pa[i].max(0.0),
-            ip_port_temp_k: truth.engine_bleed_temp_k[i].max(1.0),
+            // Real, unswitched IP8 port condition, read unconditionally
+            // (`Truth`'s own doc on this pair, W91) -- not
+            // `engine_bleed_pressure_pa`/`_temp_k`, which already carry
+            // whichever of IP8/HP6 the *shallow* engine model's own switch
+            // (`engine_commands.rs:466`) picked for the customer bleed.
+            // Wiring that pre-switched pair in here double-switched the
+            // port and let a real HP6-hot slug through this area's own
+            // passive (no actuator lag) IP tap unannounced the instant
+            // that other, unrelated switch opened.
+            ip_port_pressure_pa: truth.engine_ip_port_pressure_pa[i].max(0.0),
+            ip_port_temp_k: truth.engine_ip_port_temp_k[i].max(1.0),
             // Real HP6 port condition, read unconditionally (`Truth`'s own
             // doc on this pair): below FlyByWire's HP-valve interlock
             // whenever the engine genuinely has no usable HP source, and a
@@ -538,7 +639,26 @@ impl PneumaticDuctsLive {
         let start_check_valve = faults.get(f(36, 24));
         for i in 0..4 {
             self.faults.engine_duct[i] = engine_duct;
-            self.faults.engine_precooler[i] = engine_precooler;
+            // `engine_precooler` above is this area's own deep-catalogue
+            // fouling input, shared by all four engines (this fn's own doc:
+            // `registry.rs` catalogues one id per component *class*, not
+            // per instance). `EXTRA_PRECOOLER_FAULT_IDS[i]` is the extra
+            // catalogue's *per-engine* id a crew can actually arm from the
+            // Study Failures page; `max` so either source alone still
+            // fouls the core and arming both is not double the fouling.
+            self.faults.engine_precooler[i] = PrecoolerFaults {
+                // (build fix, INT-P4) `faults.get`, not a direct
+                // `crate::failures::magnitude` call: this is `deep::live`
+                // area code, which must never touch `crate::failures`'
+                // process-wide state directly (see W108's own build-fix
+                // note in `deep/apu/live.rs::faults_from` for the full
+                // reasoning -- the same bug, same fix, this area's own
+                // pre-existing instance of it). `deep/plugin.rs::
+                // DeepLayer::faults` now folds these 4 extra-catalogue ids
+                // into the same `Faults` map production already builds.
+                fouling: engine_precooler.fouling.max(faults.get(EXTRA_PRECOOLER_FAULT_IDS[i])),
+                ..engine_precooler
+            };
             self.faults.upstream[i].hp_valve_stuck = upstream_hp;
             self.faults.upstream[i].pr_valve_stuck = upstream_pr;
             self.faults.upstream[i].ip_check_valve_stuck_closed = upstream_ip;
@@ -608,6 +728,77 @@ impl crate::deep::live::Area for PneumaticDuctsLive {
         let inputs = self.inputs(truth);
         self.out = self.network.step(&inputs, &self.faults);
         self.relax_own_zone_excess(truth.dt_s);
+
+        // ---- ECAM-completeness additions (E-AIR-DESIGN.md). New ata=21
+        // ids (this area previously only used 36/30): 1/2 pack regulation
+        // train, 3 mixer unit pressure regulator, 4/5 ram-air door, 6
+        // manual pressurisation control path, 7 cabin air extract valve.
+        self.pack_regul_fault = [faults.get(f(21, 1)), faults.get(f(21, 2))];
+        self.mixer_press_regul_fault = faults.get(f(21, 3));
+        self.ram_air_door_fault = [faults.get(f(21, 4)), faults.get(f(21, 5))];
+        self.press_man_ctl_fault = faults.get(f(21, 6));
+        self.cabin_air_extract_vlv_fault = faults.get(f(21, 7));
+        // 211800022, corrected against the real FCOM text (E-AIR-FCOM.json,
+        // FCOM p.4662, "AIR PACK 1+2 REGUL REDUNDANCY LOST"): "the
+        // performance of both packs is degraded due to several valve and
+        // sensor failures... on EACH pack, AT LEAST ONE of [the ACM, the
+        // altitude valve, the ACM isolating valve, the temperature control
+        // valve, the turbine bypass valve, the ram-air inlet/outlet valves,
+        // the temperature sensors] is failed" -- an AND across the two
+        // packs of an OR across several real per-pack components, not the
+        // narrower FDAC-channel XOR this field held before this pass (that
+        // XOR is kept nowhere else; 211800022 is its only consumer). Built
+        // from the three per-pack component faults this area already models
+        // (the regulation train, the ram-air door, and either real FDAC
+        // channel down) -- both down on the same pack is 211800009/010,
+        // already wired, but a single down channel still counts here as
+        // "at least one of the redundant systems failed".
+        let pack_has_a_fault = |i: usize| self.pack_regul_fault[i] > 0.0 || self.ram_air_door_fault[i] > 0.0 || truth.fdac_channel_failure[i][0] || truth.fdac_channel_failure[i][1];
+        self.pack_regul_redundancy_fault = pack_has_a_fault(0) && pack_has_a_fault(1);
+        // 213800015: all four OCSMs' own `BothChannelsFault` (both real
+        // channels down) together.
+        self.outflw_vlv_ctl_fault_all = truth.ocsm_channel_failure.iter().all(|ch| ch[0] && ch[1]);
+
+        // 211800013/014, ata=21 n=8/9: each pack's own air cycle machine
+        // (ACM) outlet temperature. This network has no ACM thermal-cycle
+        // physics (it moves bleed-air mass/pressure/temperature up to the
+        // pack, `o.pack_supply_temp_k`, which is the pack's real, already-
+        // computed INLET condition -- the design sheet's own `pneumatic.
+        // pack_inlet_pressure/temperature`), so the ACM's own cooling is
+        // modelled here as an effectiveness the failure degrades: at
+        // magnitude 0 the ACM cools its hot inlet air fully to ambient
+        // (`environment.sat_c`, a real Truth input); at magnitude 1 it
+        // cools nothing and the outlet is the same hot inlet air the pack
+        // was fed. **The only cited number is the FCOM's own 95 C trip**
+        // (E-AIR-FCOM.json 211800013, FCOM p.4653), applied in
+        // `fbw/ata21_22_23.rs`, not here -- this function only publishes
+        // the real temperature the trip is compared against.
+        let ambient_c = truth.environment.sat_c;
+        for i in 0..2 {
+            let inlet_c = self.out.pack_supply_temp_k[i] - 273.15;
+            let acm_overheat = faults.get(f(21, 8 + i as u16));
+            let cooling_effectiveness = (1.0 - acm_overheat).clamp(0.0, 1.0);
+            self.pack_acm_outlet_temp_c[i] = inlet_c - cooling_effectiveness * (inlet_c - ambient_c);
+        }
+
+        // 211800017-020, ata=21 n=10-13: each pack's two flow-control
+        // valves (FCVs), one binary LRU fault each. The design sheet's
+        // original plan bridged FlyByWire's own already-computed
+        // `FcvFault` (`full_digital_agu_controller.rs:310-394`), but that
+        // fault is not written to any SimVar FlyByWire's own `write()`
+        // already publishes (unlike the FDAC/OCSM *channel* discretes
+        // above) -- only adding one would expose it, and editing
+        // `fbw-aircraft` is out of this worktree's hard rules. So this is
+        // this area's own component instead: a real FCV, modelled the same
+        // component-broken-flag shape as `pack_regul_fault` above, no
+        // threshold invented.
+        for p in 0..2 {
+            for v in 0..2 {
+                self.pack_fcv_fault[p][v] = faults.get(f(21, 10 + (p * 2 + v) as u16));
+            }
+        }
+
+        self.pack_flow_insufficient_fwd_crg = truth.pack_flow_insufficient_fwd_crg;
     }
 
     fn publish(&self, out: &mut dyn FnMut(&str, f64)) {
@@ -657,6 +848,24 @@ impl crate::deep::live::Area for PneumaticDuctsLive {
             out(&n.cross_bleed_open[i], o.cross_bleed_valve_open[i]);
         }
 
+        // ---- ECAM-completeness additions (E-AIR-DESIGN.md).
+        for i in 0..2 {
+            out(&n.pack_regul_fault[i], self.pack_regul_fault[i]);
+            out(&n.ram_air_door_fault[i], self.ram_air_door_fault[i]);
+        }
+        out(&n.mixer_press_regul_fault, self.mixer_press_regul_fault);
+        out(&n.press_man_ctl_fault, self.press_man_ctl_fault);
+        out(&n.cabin_air_extract_vlv_fault, self.cabin_air_extract_vlv_fault);
+        out(&n.pack_regul_redundancy_fault, on(self.pack_regul_redundancy_fault));
+        out(&n.outflw_vlv_ctl_fault_all, on(self.outflw_vlv_ctl_fault_all));
+        for i in 0..2 {
+            out(&n.pack_acm_outlet_temp_c[i], self.pack_acm_outlet_temp_c[i]);
+            for v in 0..2 {
+                out(&n.pack_fcv_fault[i][v], self.pack_fcv_fault[i][v]);
+            }
+        }
+        out("DEEP_PNEU_PACK_FLOW_INSUFFICIENT_FWD_CRG", on(self.pack_flow_insufficient_fwd_crg));
+
         // The level-2 couplings, so a derived failure is never silent
         // (`docs/deep/authority.md`).
         let mut k = 0usize;
@@ -699,8 +908,8 @@ mod tests {
             on_ground: false,
             engine_n1_frac: [0.85; 4],
             engine_running: [true; 4],
-            engine_bleed_pressure_pa: [260_000.0; 4],
-            engine_bleed_temp_k: [400.0; 4],
+            engine_ip_port_pressure_pa: [260_000.0; 4],
+            engine_ip_port_temp_k: [400.0; 4],
             ac_bus_volts: [115.0; 4],
             ..Truth::default()
         }
@@ -834,6 +1043,85 @@ mod tests {
     }
 
     #[test]
+    fn arming_the_extra_catalogues_precooler_fault_also_fouls_the_core() {
+        // 36_004, "Engine 1 precooler fault" (`failures.rs` extra::
+        // pneumatic()) -- a crew-armable failure from the Study Failures
+        // page, independent of this area's own deep-catalogue fouling id
+        // `f(36, 4)` (covered by the next test below). Global
+        // `failures::STATE`, so serialised the same way `breakers.rs`/
+        // `physics/bays.rs` already do for their own global-state tests.
+        let _g = crate::failures::tests::serial();
+        let _f = crate::failures::Failures::new();
+
+        let mut truth = cruise_truth();
+        // Adapted per PLUGIN-ORDER.md/W149/W168: after W91's rewire, the
+        // upstream stage reads `engine_ip_port_pressure_pa`/`_temp_k`
+        // (the real, unswitched IP8 port), not `engine_bleed_pressure_pa`/
+        // `_temp_k` (W91's own pre-switched customer-bleed pair) -- so the
+        // "high-power tap" this test needs is set on the field the
+        // precooler's cooling-duty math (`Self::bypass_mdot_kg_s`) and the
+        // upstream stage actually consume post-W91.
+        truth.engine_ip_port_temp_k = [560.0; 4];
+        truth.engine_ip_port_pressure_pa = [300_000.0; 4];
+        // (INT-FIX root-cause fix) Packs off: `cruise_truth()` leaves
+        // `Controls::pack_pb_on` at its real default, `[true; 2]`
+        // (`deep/live.rs`), and `network.rs`'s own real, untouched topology
+        // feeds Pack 1's supply duct from BOTH engine 1 and engine 2
+        // (`pack1_from_1`/`pack1_from_2`, both `transfer_kg`'d into the same
+        // `self.packs[0].gas` -- the real A380 architecture, pack 1 fed by
+        // the inboard-left pair). `transfer_kg` is bidirectional (flow runs
+        // whichever way pressure actually points), so with the packs on,
+        // fouling engine 2's precooler genuinely, physically perturbs the
+        // shared pack-1 manifold, which then feeds a small amount of that
+        // perturbation back into engine 1's own duct -- confirmed by
+        // instrumenting both runs tick by tick: every metric (duct
+        // pressure/temperature, precooler outlet, zone heat) is bit-
+        // identical between "engine 2 fouled" and "clean" for engine 1 with
+        // the packs off, and diverges the moment they are on. That coupling
+        // is real and intentional (unmodified by any integration batch),
+        // not the fault-id mixup the isolation check below means to catch
+        // -- so leaving the packs on (their real default) confounds this
+        // specific check with an unrelated, correctly-modeled effect.
+        // Packs off removes that confound and leaves the check testing
+        // exactly what its comment says: that `EXTRA_PRECOOLER_FAULT_IDS[1]`
+        // does not also land on `engine_precooler[0]`.
+        truth.controls.pack_pb_on = [false, false];
+
+        crate::failures::set_magnitude(36_004, 1.0);
+        assert_eq!(crate::failures::magnitude(36_004), 1.0, "setup: the extra catalogue's fault must actually register");
+
+        // (build fix, INT-P4) `apply_faults` now reads this id through the
+        // `Faults` map it is handed, not a direct `crate::failures::
+        // magnitude` call (see this file's own `faults.get(EXTRA_
+        // PRECOOLER_FAULT_IDS[i])`, changed for the same reason W108's own
+        // build-fix note in `deep/apu/live.rs::faults_from` explains: area
+        // code must never touch `crate::failures`' process-wide state
+        // directly, or the audit harness's `thread::scope` sweep workers,
+        // which build their own local `Faults` and never hold `serial()`,
+        // panic). `crate::failures::set_magnitude` above still exercises
+        // the real global registration path (the "setup" assertion just
+        // above proves it), but reaching this area now also needs the same
+        // id in the `Faults` this test hands `run` directly, the same way
+        // production's `DeepLayer::faults()` folds it in every frame.
+        let mut faulted = live_system();
+        let mut clean = live_system();
+        run(faulted.as_mut(), &truth, &Faults::from_pairs([(36_004, 1.0)]), 60);
+        crate::failures::set_magnitude(36_004, 0.0);
+        run(clean.as_mut(), &truth, &Faults::default(), 60);
+        let hot = published(faulted.as_ref())["DEEP_PNEU_ENG_1_DUCT_TEMPERATURE_C"];
+        let cool = published(clean.as_ref())["DEEP_PNEU_ENG_1_DUCT_TEMPERATURE_C"];
+        assert!(hot > cool + 3.0, "the extra catalogue's precooler fault must foul the core too: {hot} C vs {cool} C");
+
+        // Engine 2's own id (36_005) must not touch engine 1's core.
+        crate::failures::set_magnitude(36_005, 1.0);
+        let mut eng2 = live_system();
+        run(eng2.as_mut(), &truth, &Faults::from_pairs([(36_005, 1.0)]), 60);
+        let eng1_untouched = published(eng2.as_ref())["DEEP_PNEU_ENG_1_DUCT_TEMPERATURE_C"];
+        assert!((eng1_untouched - cool).abs() < 3.0, "engine 2's fault id must not foul engine 1's core: {eng1_untouched} C vs clean {cool} C");
+        crate::failures::set_magnitude(36_005, 0.0);
+    }
+
+    #[test]
     fn arming_precooler_fouling_leaves_the_delivered_bleed_hotter() {
         // Failure 15_036_004, effect: "For the same cooling flow the
         // outlet runs hotter ... raising overtemperature-trip risk".
@@ -849,8 +1137,8 @@ mod tests {
         // Needs a bleed hot enough for the precooler to have work to do at
         // all (its regulation target is 200 C), i.e. a high-power tap.
         let mut truth = cruise_truth();
-        truth.engine_bleed_temp_k = [560.0; 4];
-        truth.engine_bleed_pressure_pa = [300_000.0; 4];
+        truth.engine_ip_port_temp_k = [560.0; 4];
+        truth.engine_ip_port_pressure_pa = [300_000.0; 4];
 
         let mut fouled = live_system();
         let mut clean = live_system();
@@ -866,8 +1154,8 @@ mod tests {
         let mut truth = cruise_truth();
         truth.engine_running = [false; 4];
         truth.engine_n1_frac = [0.0; 4];
-        truth.engine_bleed_pressure_pa = [101_325.0; 4];
-        truth.engine_bleed_temp_k = [288.15; 4];
+        truth.engine_ip_port_pressure_pa = [101_325.0; 4];
+        truth.engine_ip_port_temp_k = [288.15; 4];
         truth.on_ground = true;
         truth.environment.sat_c = 15.0;
         truth.environment.ambient_pressure_pa = 101_325.0;
@@ -897,8 +1185,8 @@ mod tests {
         let mut truth = cruise_truth();
         truth.controls.cross_bleed_selector = 0.0; // SHUT: no neighbour can help
         truth.controls.pack_pb_on = [false, false]; // no consumer to mask the source
-        truth.engine_bleed_pressure_pa[0] = 150_000.0; // below the 206.8 kPa IP8/HP6 switch-over
-        truth.engine_bleed_temp_k[0] = 400.0;
+        truth.engine_ip_port_pressure_pa[0] = 150_000.0; // below the 206.8 kPa IP8/HP6 switch-over
+        truth.engine_ip_port_temp_k[0] = 400.0;
         truth.engine_hp_port_pressure_pa[0] = 500_000.0;
         truth.engine_hp_port_temp_k[0] = 600.0;
 
@@ -911,13 +1199,44 @@ mod tests {
         assert!(peak_hp_open > 0.1, "the HP valve must open off the real HP6 port once IP8 alone cannot hold regulation, peak {peak_hp_open}");
     }
 
+    /// W91: `engine_bleed_pressure_pa`/`_temp_k` carry whichever of IP8/HP6
+    /// the *shallow* `physics::engine` model's own switch (`engine_
+    /// commands.rs:466`) currently has feeding the customer bleed -- they
+    /// can read scorching hot even while the real IP8 tap stays cool and
+    /// the real HP6 port is reported unavailable (as it would be right
+    /// after that other, unrelated switch has briefly, and wrongly for
+    /// this area's own purposes, picked HP6). This area's own upstream
+    /// stage must key off the real, unswitched pair, or a transient in
+    /// that other switch injects an unregulated hot slug through this
+    /// area's own passive (no actuator lag) IP tap.
+    #[test]
+    fn the_upstream_stage_follows_the_real_unswitched_ip8_port_not_the_pre_switched_customer_bleed_pair() {
+        let mut truth = cruise_truth();
+        truth.engine_bleed_pressure_pa = [900_000.0; 4]; // pre-switched pair: looks HP6-hot
+        truth.engine_bleed_temp_k = [650.0; 4];
+        truth.engine_ip_port_pressure_pa = [260_000.0; 4]; // real IP8: unchanged, moderate
+        truth.engine_ip_port_temp_k = [400.0; 4];
+        truth.engine_hp_port_pressure_pa = [0.0; 4]; // real HP6: genuinely unavailable
+        truth.engine_hp_port_temp_k = [288.15; 4];
+
+        let mut area = live_system();
+        run(area.as_mut(), &truth, &Faults::default(), 60);
+        let map = published(area.as_ref());
+        assert!(
+            map["DEEP_PNEU_ENG_1_PRECOOLER_OUTLET_C"] < 300.0,
+            "must not read the pre-switched customer-bleed pair's HP6-hot temperature when the real IP8 tap is cool and the real HP6 port is unavailable, got {} C",
+            map["DEEP_PNEU_ENG_1_PRECOOLER_OUTLET_C"]
+        );
+        assert_eq!(map["DEEP_PNEU_ENG_1_PRECOOLER_OVHT"], 0.0);
+    }
+
     #[test]
     fn cross_bleed_selector_shut_overrides_the_apu_sole_source_heuristic() {
         let mut truth = cruise_truth();
         truth.engine_running = [false; 4];
         truth.engine_n1_frac = [0.0; 4];
-        truth.engine_bleed_pressure_pa = [101_325.0; 4];
-        truth.engine_bleed_temp_k = [288.15; 4];
+        truth.engine_ip_port_pressure_pa = [101_325.0; 4];
+        truth.engine_ip_port_temp_k = [288.15; 4];
         truth.on_ground = true;
         truth.environment.sat_c = 15.0;
         truth.environment.ambient_pressure_pa = 101_325.0;
@@ -1005,15 +1324,36 @@ mod tests {
         let leak_id = f_thermal(30, 1); // thermal_zones' own WingLeLeft anti-ice duct leak id
         let armed = Faults::from_pairs([(leak_id, 1.0)]);
         // The leak's heat is derived from the duct's real condition now (a
-        // choked crack fed from `engine_bleed_pressure_pa`/`_temp_k`), so a
-        // cold, unpowered aircraft leaks nothing -- the outcome the comment
+        // choked crack fed from `engine_ip_port_pressure_pa`/`_temp_k`), so
+        // a cold, unpowered aircraft leaks nothing -- the outcome the comment
         // above predicted once `thermal_zones` fixed its leak-model form.
         // Give it the running engine that area's own `takeoff_truth` uses:
         // Trent 972 IP8 at take-off power, 970 kPa / 590 K.
+        //
+        // (INT-FIX root-cause fix) `engine_bleed_pressure_pa`/`_temp_k` ARE
+        // also set here, alongside the ip-port pair: this is a cross-area
+        // test (`thermal_zones` is `with_area`'d in too), and
+        // `thermal_zones::live::apply_ice_and_duct_failures` -- untouched by
+        // any integration batch -- still reads `truth.engine_bleed_
+        // pressure_pa`/`_temp_k` for its own wing-duct-leak heat, not the
+        // new `engine_ip_port_*` pair W91 repointed *this* area's own
+        // `engine_inputs()` to. W91's own test-fixture rename (Batch 2,
+        // EDIT8-15) renamed this literal from `engine_bleed_*` to
+        // `engine_ip_port_*` for every test in this file, correctly for the
+        // ones that only exercise this area -- but this is the one test that
+        // also feeds `thermal_zones`, and stripping `engine_bleed_*` left
+        // that area's leak fed from `Truth::default()`'s 0 Pa / 0 K, so it
+        // never leaked at all (confirmed: this test passes verbatim, field
+        // names and all, against unmodified `D:/A380/fbw-xp-systems` main, where
+        // `engine_ip_port_pressure_pa`/`_temp_k` do not exist and only
+        // `engine_bleed_*` is set). Setting both fields to the same take-off
+        // condition feeds each area the input it actually reads.
         let truth = Truth {
             dt_s: 1.0,
             engine_running: [true; 4],
             engine_n1_frac: [1.0; 4],
+            engine_ip_port_pressure_pa: [970_000.0; 4],
+            engine_ip_port_temp_k: [590.0; 4],
             engine_bleed_pressure_pa: [970_000.0; 4],
             engine_bleed_temp_k: [590.0; 4],
             ..Truth::default()
@@ -1071,8 +1411,8 @@ mod tests {
         truth.environment.sat_c = 15.0;
         truth.environment.tas_ms = 0.0;
         truth.engine_n1_frac = [0.05; 4]; // starves the precooler's own cooling air
-        truth.engine_bleed_pressure_pa = [900_000.0; 4]; // a strong bleed source to rupture
-        truth.engine_bleed_temp_k = [560.0; 4];
+        truth.engine_ip_port_pressure_pa = [900_000.0; 4]; // a strong bleed source to rupture
+        truth.engine_ip_port_temp_k = [560.0; 4];
         truth.engine_hp_port_pressure_pa = [1_200_000.0; 4];
         truth.engine_hp_port_temp_k = [700.0; 4];
         let rupture_id = f(36, 2); // engine duct rupture, module doc's ordering (leak, rupture, insulation)
@@ -1290,6 +1630,22 @@ mod tests {
         let before = published(area.as_ref());
         area.tick(&still, &Faults::default());
         assert_eq!(before, published(area.as_ref()));
+    }
+
+    /// 211800045 AIR PACK REGUL DEGRADED (E-AIR-DESIGN.md): a plain
+    /// passthrough of the pending-write `Truth::pack_flow_insufficient_fwd_crg`
+    /// (see `E:/fbw-debug/ecam/E-AIR-FBW-WRITES.md`) -- reads `0.0` (healthy)
+    /// today, and this proves the passthrough itself is wired correctly so
+    /// the alert lights up the moment FlyByWire's write lands, with no
+    /// further plugin change.
+    #[test]
+    fn pack_flow_insufficient_fwd_crg_is_a_plain_truth_passthrough() {
+        let mut area = live_system();
+        area.tick(&Truth::default(), &Faults::default());
+        assert_eq!(published(area.as_ref())["DEEP_PNEU_PACK_FLOW_INSUFFICIENT_FWD_CRG"], 0.0);
+
+        area.tick(&Truth { pack_flow_insufficient_fwd_crg: true, ..Truth::default() }, &Faults::default());
+        assert_eq!(published(area.as_ref())["DEEP_PNEU_PACK_FLOW_INSUFFICIENT_FWD_CRG"], 1.0);
     }
 }
 

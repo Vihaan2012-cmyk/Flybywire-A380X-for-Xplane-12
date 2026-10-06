@@ -29,3 +29,10 @@ index of the same 18 failures; `registry.rs` is authoritative).
 18 distinct physical faults, one line each — no renamed duplicates. Each is
 exercised by at least one `#[cfg(test)]` in its own file showing the fault
 changing a real output (see `PROGRESS.md` for the per-file test summaries).
+
+`starter_degradation` (row 6 above) also has a second, legacy entry point:
+`failures::extra` id 49_002 ("APU starter fault", the flat catalogue's own
+pre-`deep` entry for the same physical fault) folds into it by `max` in
+`live.rs::faults_from`, since `deep::live` areas cannot otherwise see a
+legacy id at all. This is not a 19th physical fault, just a second armer
+for the same one.

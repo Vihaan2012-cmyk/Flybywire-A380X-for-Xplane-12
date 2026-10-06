@@ -298,6 +298,20 @@ fn f(v: bool) -> f64 {
     v as i32 as f64
 }
 
+/// Whether the overhead annunciator lamp-test switch is at its TEST
+/// position. The switch is a 3-way enum, not a boolean:
+/// `AnnLightTestState { Test = 0, Bright = 1, Dim = 2 }`
+/// (fbw-a380x MsfsAvionicsCommon/providers/OverheadPublisher.ts:6-10), and
+/// FBW's own behaviour XML and TS code always gate the test on `== 0` /
+/// `=== AnnLightTestState.Test`, never `!= 0`. `b()` would instead assert
+/// the test for BRIGHT (1) and DIM (2) and clear it only at TEST (0) -- the
+/// opposite of every FBW consumer. BRT (1) is also the cold-start default
+/// the converter's SASL init table writes to `fbw/A32NX_OVHD_INTLT_ANN`, so
+/// the bug asserted a permanent lamp test from cold and dark onward.
+fn lamp_test_active(switch: f64) -> u8 {
+    (switch == 0.) as u8
+}
+
 // ---------------------------------------------------------------------------
 // Variable names.
 // ---------------------------------------------------------------------------
@@ -360,6 +374,11 @@ pub struct Prims {
     prim_discrete: [BasePrimDiscreteOutputs; 3],
     prim_analog: [BasePrimAnalogOutputs; 3],
     prim_buses: [BasePrimOutBus; 3],
+    /// `getDebugOutputs().fctl_logic` per PRIM instance: the real per-
+    /// channel avail/engaged discretes `A32NX_PRIM_{p}_HEALTHY` alone
+    /// cannot resolve (E-FCTL, ECAM completeness pass; see
+    /// `fbw_computers.rs::PrimComputer::fctl_logic_outputs`).
+    prim_fctl_logic: [BasePrimFctlLogicOutputs; 3],
     sec_discrete: [BaseSecDiscreteOutputs; 3],
     sec_analog: [BaseSecAnalogOutputs; 3],
     sec_buses: [BaseSecOutBus; 3],
@@ -420,6 +439,7 @@ impl Prims {
             prim_discrete: Default::default(),
             prim_analog: Default::default(),
             prim_buses: Default::default(),
+            prim_fctl_logic: Default::default(),
             sec_discrete: Default::default(),
             sec_analog: Default::default(),
             sec_buses: Default::default(),
@@ -453,6 +473,10 @@ impl Prims {
 
     pub fn prim_discrete_outputs(&self) -> [BasePrimDiscreteOutputs; 3] {
         self.prim_discrete
+    }
+
+    pub fn prim_fctl_logic_outputs(&self) -> [BasePrimFctlLogicOutputs; 3] {
+        self.prim_fctl_logic
     }
 
     pub fn prim_analog_outputs(&self) -> [BasePrimAnalogOutputs; 3] {
@@ -489,6 +513,13 @@ impl Prims {
 
     pub fn lgciu_buses(&self) -> [BaseLgciuBus; 2] {
         self.lgciu
+    }
+
+    /// The start state as decided once X-Plane has placed the aircraft
+    /// (`lib.rs`'s start-state confirmation), which can differ from the one
+    /// this was built with before the aircraft was placed.
+    pub fn set_start_state(&mut self, start_state: f64) {
+        self.start_state = start_state;
     }
 
     /// handleFcuInitialization (cpp:909-974): the FCU events FlyByWire sends
@@ -798,7 +829,7 @@ impl Prims {
         d.selected_by_prim_1 = select(&self.prim_discrete[0]);
         d.selected_by_prim_2 = select(&self.prim_discrete[1]);
         d.selected_by_prim_3 = select(&self.prim_discrete[2]);
-        d.lights_test = b(self.names.get(vars, "A32NX_OVHD_INTLT_ANN"));
+        d.lights_test = lamp_test_active(self.names.get(vars, "A32NX_OVHD_INTLT_ANN"));
         d.pin_prog_qfe_avail = 0;
         d.efis_inputs = events.efis[i];
         d.efis_inputs.baro_is_inhg = b(self.names.get(vars, &format!("A32NX_FCU_EFIS_{side}_BARO_IS_INHG")));
@@ -928,19 +959,28 @@ impl Prims {
             let n = &mut self.names;
             n.set(vars, &format!("A32NX_EFIS_{side}_NAVAID_1_MODE"), navaid(bit_or(w2, 26, false), bit_or(w2, 28, true)));
             n.set(vars, &format!("A32NX_EFIS_{side}_NAVAID_2_MODE"), navaid(bit_or(w2, 27, true), bit_or(w2, 29, false)));
-            n.set(
-                vars,
-                &format!("A32NX_EFIS_{side}_ND_MODE"),
-                nd_mode(bit_or(w1, 11, false), bit_or(w1, 12, false), bit_or(w1, 13, true), bit_or(w1, 14, false), bit_or(w1, 15, false)),
+            let nd_mode_val = nd_mode(bit_or(w1, 11, false), bit_or(w1, 12, false), bit_or(w1, 13, true), bit_or(w1, 14, false), bit_or(w1, 15, false));
+            n.set(vars, &format!("A32NX_EFIS_{side}_ND_MODE"), nd_mode_val);
+            let nd_range_val = nd_range(
+                [bit_or(w1, 24, false), bit_or(w1, 25, false), bit_or(w1, 26, false), bit_or(w1, 27, true), bit_or(w1, 28, false), bit_or(w1, 29, false)],
+                oans != 5.,
             );
-            n.set(
-                vars,
-                &format!("A32NX_EFIS_{side}_ND_RANGE"),
-                nd_range(
-                    [bit_or(w1, 24, false), bit_or(w1, 25, false), bit_or(w1, 26, false), bit_or(w1, 27, true), bit_or(w1, 28, false), bit_or(w1, 29, false)],
-                    oans != 5.,
-                ),
-            );
+            n.set(vars, &format!("A32NX_EFIS_{side}_ND_RANGE"), nd_range_val);
+            // The cockpit's own ND mode/range legends (16 SASL light codes,
+            // installed main.lua ~21606-21909 captain, ~22023+ F/O) read
+            // fbw/A380X_EFIS_{L,R}_ND_MODE/_ND_RANGE -- this file's own
+            // local-variable convention for the EFIS CP (efis-cp.xml:
+            // "Suffix L:A380X_EFIS_"), matching the ACTIVE_OVERLAY /
+            // TRAF_BUTTON_IS_ON / LS_BUTTON_IS_ON aliases below -- not the
+            // A32NX_ name just published above, which is this plugin's own
+            // dataref for the same FCU value. Nothing used to publish the
+            // A380X_ name at all: SASL's own TARGETS fallback (main.lua)
+            // papered over the gap with a private copy of its own, created
+            // ~3s after load and mirrored from the A32NX_ dataref every
+            // tick, so every legend read the wrong (default 0 / ZOOM) state
+            // until then. Publish it here instead, like its siblings.
+            n.set(vars, &format!("A380X_EFIS_{side}_ND_MODE"), nd_mode_val);
+            n.set(vars, &format!("A380X_EFIS_{side}_ND_RANGE"), nd_range_val);
             n.set(vars, &format!("A32NX_EFIS_{side}_OANS_RANGE"), oans);
             n.set(
                 vars,
@@ -1206,28 +1246,39 @@ impl Prims {
         self.prim_discrete[i] = self.prims[i].discrete_outputs();
         self.prim_analog[i] = self.prims[i].analog_outputs();
         self.prim_buses[i] = self.prims[i].bus_outputs();
+        // [E-FCTL] getDebugOutputs().fctl_logic (not part of FlyByWireInterface's
+        // own update(), which never reads this bus): the sub-computer
+        // resolution `A32NX_PRIM_{p}_HEALTHY` alone cannot give (ECAM
+        // completeness pass, `E:/fbw-debug/ecam/E-FCTL-DESIGN.md` section 3.1).
+        self.prim_fctl_logic[i] = self.prims[i].fctl_logic_outputs();
 
-        // [diagnostic] One-time per unit: PRIM_3/SEC_3 have been observed
-        // unhealthy while `powered` (A32NX_ELEC_DC_1_BUS_IS_POWERED = 1),
-        // causing spurious PRIM 3/SEC 3, BTV and ROW/ROP ECAM faults. The
-        // health bit itself is computed inside the compiled Simulink model
-        // (fbw_a380/src/prim/Prim.cpp via fbw_prim_discrete_outputs), so
-        // this dumps `PrimDiagnostics` (triple ADR/IR/RA loss, all-SFCC-
-        // lost) the moment it happens, to find which input is actually
-        // gating health besides `powered`. Remove once root-caused.
+        // [diagnostic] Root-caused (W104): prim_healthy (Prim.cpp:231) is
+        // gated by self-test completion, the >20ms power-outage-fault latch
+        // and discrete_inputs.prim_overhead_button_pressed (Prim.cpp:151-158,
+        // 189-210) -- never by triple ADR/IR/SFCC/RA loss or speed-scale-lost
+        // (those are unrelated `general_logic`/`flight_envelope` outputs,
+        // which is why the previous version of this diagnostic always
+        // printed all-false and never found "what else gates it"). Every
+        // real PRIM reads unhealthy for up to 36s (Prim.h longSelfTestDuration)
+        // after any real >3s power interruption, by design -- it drives the
+        // FAULT light's self-test blink pattern, not a fault condition. Only
+        // log if a PRIM is STILL unhealthy after ITS OWN self test finished:
+        // that is the one case that would actually mean a stuck health bit.
         {
             static LOGGED: [std::sync::atomic::AtomicBool; 3] =
                 [const { std::sync::atomic::AtomicBool::new(false) }; 3];
-            if powered && self.prim_discrete[i].prim_healthy == 0 && !LOGGED[i].swap(true, std::sync::atomic::Ordering::Relaxed) {
-                let d = self.prims[i].diagnostics();
+            let h = self.prims[i].health_diagnostics();
+            if powered
+                && !h.self_test_in_progress
+                && self.prim_discrete[i].prim_healthy == 0
+                && !LOGGED[i].swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
                 crate::log(&format!(
-                    "js: PRIM {} unhealthy while powered ({power}=1): triple_adr_failure={} triple_ir_failure={} all_sfcc_lost={} all_ra_failure={} speed_scale_lost={}",
+                    "js: PRIM {} unhealthy after its self test completed, while powered ({power}=1): \
+                     monitoring_healthy={} power_supply_fault={}",
                     i + 1,
-                    d.triple_adr_failure,
-                    d.triple_ir_failure,
-                    d.all_sfcc_lost,
-                    d.all_ra_failure,
-                    d.speed_scale_lost,
+                    h.monitoring_healthy,
+                    h.power_supply_fault,
                 ));
             }
         }
@@ -1286,6 +1337,58 @@ impl Prims {
         ] {
             n.set(vars, &format!("A32NX_PRIM_{p}_{name}"), to_simvar(word));
         }
+
+        // [E-FCTL] `fctl_logic`'s own per-channel discretes, straight
+        // unmodified booleans (`E-FCTL-DESIGN.md` section 3.1): the sub-unit
+        // resolution `A32NX_PRIM_{p}_HEALTHY` cannot give on its own. Read
+        // from `self.prim_fctl_logic[i]`, set just above, not re-fetched
+        // here, so this is exactly this tick's real compiled output.
+        let fl = self.prim_fctl_logic[i];
+        for (name, bit) in [
+            ("ELEVATOR_1_AVAIL", fl.elevator_1_avail),
+            ("ELEVATOR_2_AVAIL", fl.elevator_2_avail),
+            ("ELEVATOR_3_AVAIL", fl.elevator_3_avail),
+            ("LEFT_AILERON_1_AVAIL", fl.left_aileron_1_avail),
+            ("LEFT_AILERON_2_AVAIL", fl.left_aileron_2_avail),
+            ("RIGHT_AILERON_1_AVAIL", fl.right_aileron_1_avail),
+            ("RIGHT_AILERON_2_AVAIL", fl.right_aileron_2_avail),
+            ("RUDDER_1_HYDRAULIC_MODE_AVAIL", fl.rudder_1_hydraulic_mode_avail),
+            ("RUDDER_1_ELECTRIC_MODE_AVAIL", fl.rudder_1_electric_mode_avail),
+            ("RUDDER_2_HYDRAULIC_MODE_AVAIL", fl.rudder_2_hydraulic_mode_avail),
+            ("RUDDER_2_ELECTRIC_MODE_AVAIL", fl.rudder_2_electric_mode_avail),
+            ("AILERON_DROOP_ACTIVE", fl.aileron_droop_active),
+            ("AILERON_ANTIDROOP_ACTIVE", fl.aileron_antidroop_active),
+            ("LEFT_SIDESTICK_DISABLED", fl.left_sidestick_disabled),
+            ("RIGHT_SIDESTICK_DISABLED", fl.right_sidestick_disabled),
+            ("LEFT_SIDESTICK_PRIORITY_LOCKED", fl.left_sidestick_priority_locked),
+            ("RIGHT_SIDESTICK_PRIORITY_LOCKED", fl.right_sidestick_priority_locked),
+        ] {
+            n.set(vars, &format!("A32NX_PRIM_{p}_{name}"), bit as f64);
+        }
+
+        // [E-FCTL] The same raw sidestick/pedal axis this PRIM's own
+        // `capt_pitch_stick_pos`/`capt_roll_stick_pos`/`rudder_pedal_pos`
+        // assignment reads a few lines above (`update_prim`'s own body,
+        // `readings.inputs[0..3]`), published once so `deep::flight_controls`
+        // can model the transducer(s) feeding it without a second, invented
+        // reading (ECAM completeness pass, `E-FCTL-DESIGN.md` section 3.2).
+        // Identical every PRIM index, so writing it three times over is
+        // harmless -- the same tick's `readings` every time.
+        n.set(vars, "A32NX_CAPT_SIDESTICK_PITCH_RAW", readings.inputs[0]);
+        n.set(vars, "A32NX_CAPT_SIDESTICK_ROLL_RAW", readings.inputs[1]);
+        n.set(vars, "A32NX_RUDDER_PEDAL_RAW", readings.inputs[2]);
+
+        // [E-FCTL, coordinator follow-up] The real *sensed* body rate
+        // (`SimReadings::body_rotation_velocity_rad_s`'s own doc: read from
+        // the native datarefs `physics::adirs::Adiru::publish` overwrites
+        // with its own strapdown-IRS gyro model every tick), published so
+        // `deep::flight_controls` can model the flight-control laws' own
+        // rate-gyro pair from a real, already-failable quantity instead of
+        // leaving 271800018 unsourced for lack of one. x=pitch/y=yaw/z=roll,
+        // `SimReadings`' own axis order.
+        n.set(vars, "A32NX_BODY_RATE_PITCH_RAW", readings.body_rotation_velocity_rad_s.0);
+        n.set(vars, "A32NX_BODY_RATE_YAW_RAW", readings.body_rotation_velocity_rad_s.1);
+        n.set(vars, "A32NX_BODY_RATE_ROLL_RAW", readings.body_rotation_velocity_rad_s.2);
     }
 
     fn update_prim_fg_shim<V: VariableRegistry + SimulatorReaderWriter>(
@@ -2005,6 +2108,46 @@ pub(crate) mod tests {
         bit_or(bus.fg.ats_discrete_word, 11, false)
     }
 
+    /// W84/W99: `A32NX_HYD_UPPER_RUD_DEFLECTION` (`a380_systems`' own
+    /// compiled rudder actuator output, not modelled in this crate -- W125)
+    /// was logged climbing from ~0.5 to a hard 1.0 at an almost perfectly
+    /// constant ~0.0036/s in every kept session, with zero pilot input,
+    /// starting from the session's very first sample -- the signature of a
+    /// rate-type rudder-trim/yaw-damper law integrating a *sustained*
+    /// nonzero pedal error, not an aerodynamic blow-back (needs airspeed)
+    /// and not anything in `deep::flight_controls` (never wired to the
+    /// cockpit at all, W125; and its own hinge moment is provably zero at
+    /// zero dynamic pressure). W99 traced that sustained error to
+    /// `sim/joystick/yoke_heading_ratio` standing in for the pilot's pedal.
+    /// This is the untested other half: given the pedal this real, compiled
+    /// SEC actually sees is genuinely centred throughout (`Rig`'s own
+    /// `readings.inputs[2]` default, matching what W99's fix produces with
+    /// no rudder-pedal hardware), the SEC must never command a *sustained*
+    /// rudder trim -- run long enough (300 s simulated, longer than the
+    /// 120-155 s the real drift took to hit the stop) to have caught a slow
+    /// integrator this test's own tick rate could otherwise miss.
+    #[test]
+    fn zero_pedal_never_lets_the_sec_command_a_sustained_rudder_trim_over_300_simulated_seconds() {
+        let mut rig = Rig::new(true, 0., 0.); // on the ground, stationary, fully powered (`world()`)
+        assert_eq!(rig.readings.inputs[2], 0.0, "no rudder-pedal hardware: pedal must read centred (W99)");
+        let ticks = (300.0 / DT) as usize;
+        for i in 0..ticks {
+            rig.tick(&[]);
+            // Checked every tick, not just at the end: a slow, constant-rate
+            // ramp (this bug's own signature) is exactly what a check only
+            // at t=300s could miss if it happened to cross back through
+            // zero, and exactly what a check every tick cannot.
+            let active_1 = rig.vars.value("A32NX_RUDDER_TRIM_1_ACTIVE_MODE_COMMANDED");
+            let active_2 = rig.vars.value("A32NX_RUDDER_TRIM_2_ACTIVE_MODE_COMMANDED");
+            let cmd_1 = rig.vars.value("A32NX_RUDDER_TRIM_1_COMMANDED_POSITION");
+            let cmd_2 = rig.vars.value("A32NX_RUDDER_TRIM_2_COMMANDED_POSITION");
+            assert_eq!(active_1, 0.0, "SEC 1 rudder trim went active with zero pedal at tick {i}");
+            assert_eq!(active_2, 0.0, "SEC 2 rudder trim went active with zero pedal at tick {i}");
+            assert!(cmd_1.abs() < 1e-6, "SEC 1 commanded a nonzero rudder trim ({cmd_1}) with zero pedal at tick {i}");
+            assert!(cmd_2.abs() < 1e-6, "SEC 2 commanded a nonzero rudder trim ({cmd_2}) with zero pedal at tick {i}");
+        }
+    }
+
     #[test]
     fn powered_computers_come_up_healthy_on_the_ground() {
         let mut rig = Rig::new(true, 0., 0.);
@@ -2067,6 +2210,58 @@ pub(crate) mod tests {
         }
         assert!(rig.prims.prim_discrete.iter().all(|p| p.prim_healthy == 0));
         assert_eq!(rig.fadec_out[0].output.athr_control_active, 0);
+    }
+
+    /// W104: a PRIM that comes up already powered (the Rig's default) never
+    /// needed a self test, so it must not report one in progress.
+    #[test]
+    fn a_prim_powered_from_the_start_is_not_mid_self_test() {
+        let mut rig = Rig::new(true, 0., 0.);
+        rig.run(40);
+        for i in 0..3 {
+            let h = rig.prims.prims[i].health_diagnostics();
+            assert!(!h.self_test_in_progress, "PRIM {}", i + 1);
+            assert!(h.monitoring_healthy, "PRIM {}", i + 1);
+            assert!(!h.power_supply_fault, "PRIM {}", i + 1);
+        }
+    }
+
+    /// W104: after a real >3 s power interruption with the hydraulics
+    /// unpressurised (the every-cold-start case: the ground rig's `world()`
+    /// pressurises GREEN/YELLOW, so unpower them too), a PRIM must read
+    /// unhealthy WHILE self_test_in_progress is true (expected, not a bug),
+    /// then settle healthy and stay healthy once the self test completes --
+    /// it must never re-enter self test on its own with power held steady.
+    #[test]
+    fn a_prim_completes_its_self_test_after_a_real_outage_and_stays_healthy() {
+        let mut rig = Rig::new(true, 0., 0.);
+        for bus in ["108PH", "247PP", "DC_1"] {
+            rig.vars.set(&format!("A32NX_ELEC_{bus}_BUS_IS_POWERED"), 0.);
+        }
+        for sys in ["GREEN", "YELLOW"] {
+            rig.vars.set(&format!("A32NX_HYD_{sys}_SYSTEM_1_SECTION_PRESSURE_SWITCH"), 0.);
+        }
+        // Over 3 s unpowered selects the long (36 s) self test (Prim.cpp:36-42).
+        rig.run(80); // 80 * DT(0.05) = 4 s outage.
+        for bus in ["108PH", "247PP", "DC_1"] {
+            rig.vars.set(&format!("A32NX_ELEC_{bus}_BUS_IS_POWERED"), 1.);
+        }
+        for sys in ["GREEN", "YELLOW"] {
+            rig.vars.set(&format!("A32NX_HYD_{sys}_SYSTEM_1_SECTION_PRESSURE_SWITCH"), 1.);
+        }
+        rig.run(1); // The tick power returns: self test starts.
+        assert!(rig.prims.prims[0].health_diagnostics().self_test_in_progress, "self test must start");
+        assert_eq!(rig.prims.prim_discrete[0].prim_healthy, 0, "unhealthy during self test is expected");
+
+        rig.run(720); // 720 * 0.05 = 36 s: the long self test's full duration.
+        let h = rig.prims.prims[0].health_diagnostics();
+        assert!(!h.self_test_in_progress, "self test must have completed by 36 s");
+        assert!(h.monitoring_healthy);
+        assert!(!h.power_supply_fault);
+        assert_eq!(rig.prims.prim_discrete[0].prim_healthy, 1, "healthy once the self test is done");
+
+        rig.run(200); // Power held steady: must not flap back to unhealthy.
+        assert_eq!(rig.prims.prim_discrete[0].prim_healthy, 1, "stays healthy with power held");
     }
 
     /// FailuresConsumer ids reach the computers exactly where
@@ -2268,6 +2463,29 @@ pub(crate) mod tests {
     /// or NaN roll command instantly) or a wrong sign (thrust moving up
     /// instead of down for a slower target).
     #[test]
+    fn efis_nd_mode_and_range_publish_the_a380x_alias() {
+        // 16 SASL legend codes (installed main.lua ~21606-21909 captain,
+        // ~22023+ F/O) read fbw/A380X_EFIS_{L,R}_ND_RANGE and _ND_MODE --
+        // this file's own local-variable convention for the EFIS CP
+        // (efis-cp.xml: "Suffix L:A380X_EFIS_") -- not
+        // fbw/A32NX_EFIS_{L,R}_ND_RANGE/_ND_MODE, this plugin's own dataref
+        // for the same FCU value (see EfisKnobs above). Without the alias
+        // update_fcu_shim now publishes, nothing published that name at all.
+        let mut vars = MapVars::default();
+        let mut p = Prims::new(&mut vars, 0.);
+        // Word 1: bit 14 (b4 of nd_mode -> 1.0) and bit 26 (3rd slot of the
+        // range array -> position 2 -> 3.0). Arbitrary but distinct,
+        // non-default values, so an accidental always-0 alias would fail.
+        let bits = (1u32 << 13) | (1u32 << 25);
+        p.fcu_buses[0].efis_discrete_word_1 = BaseArinc429 { SSM: SSM_NO, Data: bits as f32 };
+        p.update_fcu_shim(&mut vars);
+        assert_eq!(vars.value("A32NX_EFIS_L_ND_MODE"), 1.);
+        assert_eq!(vars.value("A380X_EFIS_L_ND_MODE"), vars.value("A32NX_EFIS_L_ND_MODE"));
+        assert_eq!(vars.value("A32NX_EFIS_L_ND_RANGE"), 3.);
+        assert_eq!(vars.value("A380X_EFIS_L_ND_RANGE"), vars.value("A32NX_EFIS_L_ND_RANGE"));
+    }
+
+    #[test]
     fn a_cruise_flight_engages_ap_hdg_alt_and_athr_together() {
         let mut rig = Rig::new(false, 280., 2_500.);
         rig.run(40); // the computers come up healthy and settle
@@ -2381,5 +2599,20 @@ pub(crate) mod tests {
             assert!(out.output.sim_throttle_lever_pos.is_finite() && out.output.sim_throttle_lever_pos <= 100.);
             assert!(out.output.N1_c_percent.is_finite() && (0. ..=105.).contains(&out.output.N1_c_percent));
         }
+    }
+
+    /// `A32NX_OVHD_INTLT_ANN` is FBW's `AnnLightTestState` enum (Test = 0,
+    /// Bright = 1, Dim = 2), not a boolean: only the TEST position (0) should
+    /// assert the FCU's lamp test. BRT (1) is the normal running position
+    /// and also the cold-start default (the converter's SASL init table
+    /// writes 1 to `fbw/A32NX_OVHD_INTLT_ANN` at aircraft load), so getting
+    /// the polarity backwards means a permanent lamp test from cold and dark
+    /// onward -- this is the regression `b()` (a plain `!= 0` boolean cast)
+    /// produced.
+    #[test]
+    fn lamp_test_asserts_only_at_the_test_position_not_bright_or_dim() {
+        assert_eq!(lamp_test_active(0.), 1, "TEST position must assert the lamp test");
+        assert_eq!(lamp_test_active(1.), 0, "BRT (normal, cold-start default) must not assert the lamp test");
+        assert_eq!(lamp_test_active(2.), 0, "DIM must not assert the lamp test");
     }
 }

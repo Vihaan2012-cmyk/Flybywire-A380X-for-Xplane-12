@@ -68,7 +68,7 @@ use std::sync::Mutex;
 use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
 use crate::published::{self, Command, Published, Value};
-use crate::sensors::{is_localizer_frequency, magnetic_minus_true, normalise_180, normalise_360, LOC_DEG_PER_DOT};
+use crate::sensors::{is_localizer_frequency, magnetic_minus_true, normalise_180, normalise_360, GS_DEG_PER_DOT, LOC_DEG_PER_DOT};
 use crate::xp::{DataRef, Xplm};
 use crate::Vars;
 
@@ -542,6 +542,17 @@ impl Follow {
 }
 
 struct Refs {
+    /// `sim/operation/override/override_autotune` (X-Plane's SDK doc,
+    /// `Resources/plugins/DataRefs.txt`: "Disable radio auto-tune,
+    /// ignoring user preferences and UI setting"). If a user has
+    /// X-Plane's own "automatically tune radios to nearby navaids"
+    /// preference enabled, X-Plane silently rewrites the very
+    /// `nav_frequency_hz`/`com{n}_frequency_hz_833` actuators
+    /// `write_to_xplane` (below) tunes every tick, away from whatever the
+    /// RMP/FCU commanded (W152). Claimed there (idempotent, every tick,
+    /// matching `flight_controls.rs`'s `override_surfaces` re-arming
+    /// convention) and handed back in `release`.
+    override_autotune: Option<DataRef>,
     nav_frequency: Option<DataRef>,
     nav_standby: Option<DataRef>,
     obs_pilot: Option<DataRef>,
@@ -552,6 +563,13 @@ struct Refs {
     relative_bearing: Option<DataRef>,
     bearing: Option<DataRef>,
     hdef: Option<DataRef>,
+    // NAV HAS GLIDE SLOPE/NAV GLIDE SLOPE ERROR/NAV RAW GLIDE SLOPE:1,2,4.
+    // Receiver 3 (the LS/MMR) is already fully fed by sensors.rs's `Ils`
+    // (NavSimData::GS_VALID/GS_ERROR/GS_ANGLE).
+    vdef: Option<DataRef>,
+    glideslope_flag: Option<DataRef>,
+    nav1_slope: Option<DataRef>,
+    nav2_slope: Option<DataRef>,
     horizontal: Option<DataRef>,
     nav_type: Option<DataRef>,
     from_to: Option<DataRef>,
@@ -584,6 +602,7 @@ impl Refs {
         let a = |n: &str| xplm.find(&format!("sim/cockpit2/radios/actuators/{n}"));
         let i = |n: &str| xplm.find(&format!("sim/cockpit2/radios/indicators/{n}"));
         Self {
+            override_autotune: f("sim/operation/override/override_autotune"),
             nav_frequency: a("nav_frequency_hz"),
             nav_standby: a("nav_standby_frequency_hz"),
             obs_pilot: a("nav_obs_deg_mag_pilot"),
@@ -594,6 +613,10 @@ impl Refs {
             relative_bearing: i("nav_relative_bearing_deg"),
             bearing: i("nav_bearing_deg_mag"),
             hdef: i("nav_hdef_dots_pilot"),
+            vdef: i("nav_vdef_dots_pilot"),
+            glideslope_flag: i("nav_flag_glideslope"),
+            nav1_slope: f("sim/cockpit/radios/nav1_slope_degt"),
+            nav2_slope: f("sim/cockpit/radios/nav2_slope_degt"),
             horizontal: i("nav_display_horizontal"),
             nav_type: i("nav_type"),
             from_to: i("nav_flag_from_to_pilot"),
@@ -659,6 +682,12 @@ struct Ids {
     dme: [VariableIdentifier; 3],
     radial_error: [VariableIdentifier; 3],
     magvar: [VariableIdentifier; 3],
+    // NAV HAS LOCALIZER/NAV HAS GLIDE SLOPE/NAV GLIDE SLOPE ERROR/NAV RAW
+    // GLIDE SLOPE:1,2,4 -- receiver 3 is sensors.rs's `Ils` (NavSimData).
+    has_localizer: [VariableIdentifier; 3],
+    has_glide_slope: [VariableIdentifier; 3],
+    glide_slope_error: [VariableIdentifier; 3],
+    raw_glide_slope: [VariableIdentifier; 3],
     adf_active: [VariableIdentifier; 2],
     adf_radial: [VariableIdentifier; 2],
     com_active: [VariableIdentifier; 3],
@@ -688,6 +717,15 @@ struct Ids {
 /// module feeds, zero-based.
 const OWN_RECEIVERS: [usize; 3] = [0, 1, 3];
 
+/// Whether a glide slope is actually being received: only possible on a
+/// localizer frequency, and only when X-Plane's own EFIS flag agrees.
+/// `nav_flag_glideslope` (DataRefs.txt) is 1 when a glide slope is
+/// "expected but not received" -- the opposite sense of FlyByWire's own
+/// NAV HAS GLIDE SLOPE (1 = present).
+fn glide_slope_present(localizer: bool, expected_but_not_received: bool) -> bool {
+    localizer && !expected_but_not_received
+}
+
 impl Ids {
     fn new(vars: &mut Vars) -> Self {
         let mut get = |n: String| vars.get(n);
@@ -705,6 +743,10 @@ impl Ids {
             dme: own(&mut get, "NAV DME"),
             radial_error: own(&mut get, "NAV RADIAL ERROR"),
             magvar: own(&mut get, "NAV MAGVAR"),
+            has_localizer: own(&mut get, "NAV HAS LOCALIZER"),
+            has_glide_slope: own(&mut get, "NAV HAS GLIDE SLOPE"),
+            glide_slope_error: own(&mut get, "NAV GLIDE SLOPE ERROR"),
+            raw_glide_slope: own(&mut get, "NAV RAW GLIDE SLOPE"),
             adf_active: [1, 2].map(|n| get(format!("ADF ACTIVE FREQUENCY:{n}"))),
             adf_radial: [1, 2].map(|n| get(format!("ADF RADIAL:{n}"))),
             com_active: [1, 2, 3].map(|n| get(format!("COM ACTIVE FREQUENCY:{n}"))),
@@ -921,6 +963,13 @@ impl Radios {
     fn write_to_xplane(&mut self, xplm: &Xplm) {
         let r = &self.refs;
         let rx = &self.receivers;
+        // W152: claimed every tick (cheap, idempotent). Without it,
+        // X-Plane's own autotune preference -- if the user has it on --
+        // can silently retune the very actuators below away from what the
+        // RMP/FCU commanded (see `Refs::override_autotune`'s doc).
+        if let Some(d) = r.override_autotune {
+            xplm.set_i(d, 1);
+        }
         let int_at = |d: Option<DataRef>, follow: &mut Follow, i: usize, v: f64| {
             if let (Some(d), false) = (d, follow.written == Some(v)) {
                 xplm.set_vi_at(d, i, v as i32);
@@ -1057,6 +1106,11 @@ impl Radios {
             Self::ints(xplm, r.nav_type),
             Self::floats(xplm, r.nav_course),
         );
+        // NAV HAS GLIDE SLOPE/NAV GLIDE SLOPE ERROR/NAV RAW GLIDE SLOPE:1,2,4
+        // -- same indicators sensors.rs's `Ils` already reads for receiver 3.
+        let vdef = Self::floats(xplm, r.vdef);
+        let glideslope_flag = Self::ints(xplm, r.glideslope_flag);
+        let raw_slope = [r.nav1_slope, r.nav2_slope].map(|d| d.map(|d| xplm.get_f(d) as f64));
         let magvar = match (r.psi, r.mag_psi) {
             (Some(p), Some(m)) => magnetic_minus_true(xplm.get_f(p) as f64, xplm.get_f(m) as f64),
             _ => 0.,
@@ -1085,6 +1139,17 @@ impl Radios {
                 };
                 vars.write_from_xplane(&ids.radial_error[k], error);
                 vars.write_from_xplane(&ids.magvar[k], magvar);
+                let has_gs = glide_slope_present(localizer, glideslope_flag[i] != 0);
+                vars.write_from_xplane(&ids.has_localizer[k], localizer as i32 as f64);
+                vars.write_from_xplane(&ids.has_glide_slope[k], has_gs as i32 as f64);
+                vars.write_from_xplane(&ids.glide_slope_error[k], if has_gs { vdef[i] as f64 * GS_DEG_PER_DOT } else { 0. });
+                // X-Plane exposes a raw glide slope angle dataref only for
+                // nav1/nav2 (array index 0/1); nav4 (index 3) has none, so
+                // it stays 0 -- a documented gap, not a regression (it read
+                // 0 before this fix too), and low-impact: the A380X's
+                // primary GS needle is receiver 3's, already fed above.
+                let raw = if has_gs { raw_slope.get(i).copied().flatten().unwrap_or(0.) } else { 0. };
+                vars.write_from_xplane(&ids.raw_glide_slope[k], raw);
             }
         }
         // NAV VOR LATLONALT:n, for the ND: only where a station is actually
@@ -1164,6 +1229,18 @@ impl Radios {
             *d = Some(Display { nav_ident, adf_ident, ls: self.ls.clone() });
         }
     }
+
+    /// Hands X-Plane's own radio auto-tune preference back on exit
+    /// (`override_autotune`, claimed every tick in `write_to_xplane`; see
+    /// its doc, W152): the same convention `engine_commands::
+    /// EngineCommands::release`, `flight_controls::.../release` and
+    /// `handling::.../release` already follow for every override this
+    /// plugin takes.
+    pub fn release(&mut self, xplm: &Xplm) {
+        if let Some(d) = self.refs.override_autotune {
+            xplm.set_i(d, 0);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1183,6 +1260,16 @@ mod tests {
         // The word round-trips through prim.rs's own encoding.
         let bits = crate::prim::to_simvar(normal);
         assert_eq!(crate::prim::from_simvar(bits).SSM, RA_SSM_NORMAL);
+    }
+
+    #[test]
+    fn glide_slope_present_reads_x_planes_flag_the_right_way_round() {
+        // nav_flag_glideslope=0 on a localizer frequency: a glide slope is there.
+        assert!(glide_slope_present(true, false));
+        // The EFIS flag up (1): "expected but not received" -- no glide slope.
+        assert!(!glide_slope_present(true, true));
+        // A VOR/plain nav frequency never carries a glide slope.
+        assert!(!glide_slope_present(false, false));
     }
 
     #[test]

@@ -52,6 +52,7 @@
 //! `Truth`-building `deep::plugin` does, out of scope for the weather
 //! trait and not yet drawn into its own seam.
 
+pub mod weather_model;
 pub mod weather_truth;
 
 pub mod flight_control_surfaces;

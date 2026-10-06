@@ -24,7 +24,11 @@ __host.screenSize(screen) -> [width, height]  // CSS px the renderer expects
 ```
 
 Mouse input comes back as `__screenEvent(screen, type /* "down"|"up"|"move"|"wheel" */, x, y, button, delta)`,
-in the same CSS pixels. The DOM side turns it into DOM events.
+in the same CSS pixels. The DOM side turns it into DOM events. Once XPHFBW's
+bridge has switched a screen over (docs/briefs/xphfbw-js-bridge.md rule 7,
+per screen since S08), that screen's input goes to XPHFBW's `Input` ring
+instead and this callback stops firing for it, independent of any other
+screen's switch-over.
 
 ## Opcodes
 

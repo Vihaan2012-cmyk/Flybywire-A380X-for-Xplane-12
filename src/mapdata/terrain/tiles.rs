@@ -370,7 +370,7 @@ mod tests {
     use super::*;
 
     const XPLANE: &str = "D:/Steam Games/steamapps/common/X-Plane 12";
-    const REFERENCE: &str = "D:/fbw-build/terrain-reference.map";
+    const REFERENCE: &str = "D:/A380/fbw-build/terrain-reference.map";
 
     #[test]
     fn tiles_round_trip_through_terrain_map_encoding() {

@@ -49,6 +49,13 @@ ROOTS = {
     "base_prim_analog_outputs": PRIM,
     "base_prim_out_bus": PRIM,
     "ap_raw_laws_flare": PRIM,
+    # E-FCTL W/ECAM (2026-09-26): the real per-channel availability/engaged
+    # bus `getDebugOutputs().fctl_logic` already computes every tick
+    # (A380PrimComputerFctl_types.h:1108-1183, re-declared identically in
+    # A380PrimComputerGeneralLogic_types.h:876-946, the header this shim
+    # already includes) but which `prim_shim.cpp` never copied out before
+    # this pass -- see `fbw_prim_fctl_logic_outputs`.
+    "base_prim_fctl_logic_outputs": PRIM,
     "sec_inputs": SEC,
     "base_sec_out_bus": SEC,
     "base_sec_discrete_outputs": SEC,

@@ -15,7 +15,7 @@
 //! ECAM-008, INST-010's WBBC fallback, ECAM-017's CIDS chimes), nothing is
 //! patched here and the report says why.
 
-use crate::js::msfs::SourcePatch;
+use crate::source_patch::SourcePatch;
 
 /// The Electronic Checklist's own patches: the ECAM control panel's inputs and
 /// the normal-checklist sensing (`docs/ecl.md`).

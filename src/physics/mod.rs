@@ -4,7 +4,7 @@
 //! their commands into the underlying physics (mass flow, energy, torque)
 //! that the flight model and displayed simulator variables should show.
 //!
-//! Brief: `D:\fbw-xp-systems\docs\briefs\hyperrealism.md`. Parameter sources
+//! Brief: `D:\A380\fbw-xp-systems\docs\briefs\hyperrealism.md`. Parameter sources
 //! are cited in `docs/physics/<area>.md`.
 
 pub mod engine;
@@ -42,6 +42,7 @@ pub mod damage;
 // temperature/leak/wear-pin model, and the fuse-plug melt it can arm.
 // `docs/physics/failures.md`.
 pub mod tyre;
+pub mod tyre_model;
 
 // hyperrealism.md physics workstream 3 (air): bleed, packs, distribution,
 // cabin thermal model and pressurisation. Almost all of it lands as a

@@ -39,6 +39,28 @@ const FEED_TANK_NETWORK_INDEXES: [usize; 4] = [2, 5, 6, 9];
 /// to ever bind in practice.
 const MAX_EXPEDITED_STEPS_PER_TICK: usize = 2000;
 
+/// How long `AIRCRAFT_PRESET_QUICK_MODE` stays at 1 (real seconds) after an
+/// expedited load finishes, before `update`'s unconditional top-of-function
+/// check clears it back to 0.
+///
+/// Every JS gauge that reads this var (FwsCore, CdsDisplayUnit,
+/// OitDisplayUnit, LegacyCdsDisplayUnit -- see `E:/fbw-debug/fixes/W21.md`
+/// -- and the pre-existing ISISDisplayUnit.tsx precedent) does it through
+/// the XPHFBW bridge's shared-memory snapshot, which is published once per
+/// plugin/X-Plane frame (`xphfbw_host.rs`'s `publish`, called from
+/// `post_tick` right after this module's `update` runs) and only sampled
+/// once per gauge's own `requestAnimationFrame` tick
+/// (`app/js/msfs-runtime.js`'s `tick()`/`native.snapshot()`). An expedited
+/// load sets this to 1, runs its whole procedure, and clears it back to 0
+/// inside one call to `update` -- one plugin frame -- so without a hold
+/// those two independently-clocked sample points could straddle the pulse
+/// and never observe it at all. 2 s comfortably outlives the worst single
+/// plugin-frame stall measured so far (live_log's registry-generation
+/// re-dump, ~1.6 s -- see the W63 fix report) and any GPU-starved rAF
+/// cadence, while staying unnoticeable next to the 12-60 s self-tests it
+/// exists to let a preset skip.
+const QUICK_MODE_HOLD_SECONDS: f64 = 2.0;
+
 pub struct AircraftPresets {
     load_request: VariableIdentifier,
     progress: VariableIdentifier,
@@ -68,6 +90,10 @@ pub struct AircraftPresets {
     /// one-tick refuel pulse (its own "refuel end detected" path) rather
     /// than a refuel left stuck open.
     clear_refuel_started: bool,
+    /// Real seconds left before `quick_mode` gets written back to 0, once
+    /// an expedited load has finished; 0 when nothing is being held (see
+    /// `QUICK_MODE_HOLD_SECONDS`).
+    quick_mode_hold_remaining: f64,
 }
 
 fn logged(message: &str) {
@@ -115,6 +141,7 @@ impl AircraftPresets {
             xml: None,
             fuel_checked_this_load: false,
             clear_refuel_started: false,
+            quick_mode_hold_remaining: 0.,
         }
     }
 
@@ -152,6 +179,20 @@ impl AircraftPresets {
     /// genuinely is not yet true, which the very next tick simply checks
     /// again rather than waiting out an additional delay on top.
     pub fn update<V: VariableRegistry + SimulatorReaderWriter, X: XplaneIo>(&mut self, vars: &mut V, xplane: &mut X, delta: f64) {
+        // Unconditional and first: an expedited load that already finished
+        // (`finish_loading`, below) leaves `quick_mode` at 1 and starts this
+        // countdown so the XPHFBW bridge publishes at least one snapshot a
+        // gauge's own frame can actually observe (see
+        // `QUICK_MODE_HOLD_SECONDS`). Runs ahead of the `is_ready`/
+        // `load_request` gates so the hold always finishes even if
+        // `is_ready` drops or another load starts/cancels mid-hold.
+        if self.quick_mode_hold_remaining > 0. {
+            self.quick_mode_hold_remaining -= delta;
+            if self.quick_mode_hold_remaining <= 0. {
+                self.quick_mode_hold_remaining = 0.;
+                vars.write(&self.quick_mode, 0.);
+            }
+        }
         if self.clear_refuel_started {
             // The one-tick refuel pulse `ensure_fuel_for_engine_start` sent
             // last tick: end it now so fuel.rs sees a real, momentary
@@ -379,7 +420,17 @@ impl AircraftPresets {
         logged(&format!("AircraftPresets:update() Aircraft Preset {} loading finished or cancelled!", self.current_procedure_id));
         vars.write(&self.load_request, 0.);
         vars.write(&self.progress, 0.);
-        vars.write(&self.quick_mode, 0.);
+        // An expedited load leaves `quick_mode` at 1 here (set earlier this
+        // same `update()` call): hold it instead of clearing it in the same
+        // frame it was set in, so the bridge/gauges get a real chance to see
+        // it (see `QUICK_MODE_HOLD_SECONDS`). A paced load, or one that
+        // never got past `initialize_new_loading_process`, never set it, so
+        // this is unchanged: straight to 0.
+        if vars.read(&self.quick_mode) != 0. {
+            self.quick_mode_hold_remaining = QUICK_MODE_HOLD_SECONDS;
+        } else {
+            vars.write(&self.quick_mode, 0.);
+        }
         self.loading_is_active = false;
     }
 }
@@ -560,5 +611,73 @@ mod tests {
         }
         assert!(steps.len() > 50);
         assert_eq!(host.vars.value("GENERAL ENG STARTER:4"), 1.);
+    }
+
+    #[test]
+    fn expedited_load_holds_quick_mode_after_finishing_then_clears_it() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        p.update(&mut vars, &mut xp, 1. / 30.); // starts the load
+        p.update(&mut vars, &mut xp, 1. / 30.); // runs to the COND step
+        assert_eq!(
+            vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"),
+            1.,
+            "set for the duration of the expedited load, same as before this fix"
+        );
+
+        vars.set("A32NX_ELEC_AC_1_BUS_IS_POWERED", 1.);
+        p.update(&mut vars, &mut xp, 1. / 30.); // finishes the procedure
+        assert!(!p.loading_is_active);
+        assert_eq!(
+            vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"),
+            1.,
+            "held at 1 once the load finishes, not zeroed within the same frame it completed in (W100)"
+        );
+
+        // Still held just under the hold window.
+        run(&mut p, &mut vars, &mut xp, QUICK_MODE_HOLD_SECONDS - 0.1);
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"), 1.);
+
+        // Cleared once the hold window has fully elapsed, by the
+        // unconditional check at the top of `update()` -- no further load
+        // activity needed to trigger it.
+        run(&mut p, &mut vars, &mut xp, 0.2);
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"), 0.);
+    }
+
+    #[test]
+    fn paced_load_never_sets_quick_mode() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 0.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        vars.set("A32NX_ELEC_AC_1_BUS_IS_POWERED", 1.);
+        // The self-test skip is an expedited-only convention (see the doc
+        // comment on `AircraftPresets::new`): a paced load must never set
+        // quick_mode, at any point in the run, including after it finishes.
+        for _ in 0..300 {
+            p.update(&mut vars, &mut xp, 1. / 30.);
+            assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"), 0.);
+        }
+    }
+
+    #[test]
+    fn no_preset_load_leaves_quick_mode_at_zero() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        // No AIRCRAFT_PRESET_LOAD ever set: quick_mode must never move.
+        run(&mut p, &mut vars, &mut xp, 3.);
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"), 0.);
     }
 }

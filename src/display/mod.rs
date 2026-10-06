@@ -34,6 +34,7 @@ use std::time::Instant;
 
 use crate::xp::{self, AvionicsId, Xplm};
 use crate::xphfbw_bridge::{Input, InputKind, ScreenBlock, ScreenHeader, Session, MAX_DIRTY_RECTS};
+use crate::xphfbw_bridge_views::{ViewDef, EFB_SCREEN};
 use screens::{ScreenDef, SCREENS};
 use stream::Op;
 use tessellate::{Images, Mesh, Resources, Tessellator};
@@ -150,6 +151,15 @@ struct Bridge {
     /// index in the `Input` records this module pushes ([`Session::input`]
     /// order matches `ScreenBlock` order, both `SCREENS` order).
     screens: Vec<Option<BridgeScreen>>,
+    /// Screen index (`SCREENS` order) -> the `ViewDef::index` whose
+    /// `Loaded` report governs it (`SlotHeader::view_loaded`, S10), or
+    /// `None` for a screen with no view of its own (the EFB --
+    /// `bridge_active`'s doc comment). Computed once, from panel.cfg's own
+    /// view list, when the session attaches ([`set_bridge`]): the mapping
+    /// cannot change without a new session (a new panel.cfg parse), so
+    /// there is no need to recompute it every frame the way the per-screen
+    /// loaded state itself does.
+    view_for_screen: Vec<Option<u32>>,
 }
 
 /// What X-Plane's main thread draws from: the meshes tessellation made, a
@@ -163,10 +173,18 @@ pub struct Displays {
     res: Resources,
     renderer: Option<Result<gl::Renderer, String>>,
     fbo: Option<xp::DataRef>,
+    /// `sim/graphics/view/viewport` (int[4], read-only): the current OpenGL
+    /// viewport, read the same way `fbo` reads `current_gl_fbo` instead of
+    /// `glGetIntegerv(GL_VIEWPORT)` (developer.x-plane.com, "Plugin Guidance
+    /// for OpenGL Drawing": "Do not use glGet to retrieve OpenGL state").
+    /// `Renderer::viewport` (the old glGet read) is kept only as the
+    /// fallback for an X-Plane build that does not publish this dataref.
+    viewport: Option<xp::DataRef>,
     events: VecDeque<ScreenEvent>,
     /// XPHFBW's screens, once attached; `None` keeps every screen on the
-    /// QuickJS drawing path (rule 7: `displays_active` starts and stays 0
-    /// with no session to read it from).
+    /// QuickJS drawing path. Once attached, each screen switches over on
+    /// its own (rule 7, per screen: `bridge_active`'s doc comment) rather
+    /// than waiting for every screened view to have loaded.
     bridge: Option<Bridge>,
     /// What is left of this X-Plane frame's [`UPLOAD_BUDGET_BYTES`].
     upload_budget: usize,
@@ -443,6 +461,7 @@ impl Displays {
             res: Resources { fonts: Fonts::default(), atlas: Atlas::default(), images: Images::new(html_ui) },
             renderer: None,
             fbo: xplm.and_then(|x| x.find("sim/graphics/view/current_gl_fbo")),
+            viewport: xplm.and_then(|x| x.find("sim/graphics/view/viewport")),
             events: VecDeque::new(),
             bridge: None,
             upload_budget: UPLOAD_BUDGET_BYTES,
@@ -517,7 +536,22 @@ impl Displays {
         }
         let Some(Ok(renderer)) = self.renderer.as_mut() else { return };
         let framebuffer = self.fbo.map_or(0, |d| xplm.get_i(d)) as u32;
-        let target = gl::Target { framebuffer, viewport: renderer.viewport() };
+        // `glGetIntegerv(GL_VIEWPORT)` (the old `renderer.viewport()` path)
+        // is exactly what developer.x-plane.com's "Plugin Guidance for
+        // OpenGL Drawing" says not to call ("stall for the driver"); the
+        // same page names `sim/graphics/view/viewport` (int[4], read-only)
+        // as the dataref to read it from instead -- the same pattern `fbo`
+        // above already uses for `current_gl_fbo`. Falls back to the old
+        // glGet read for an X-Plane build too old to publish the dataref,
+        // or one answering with anything but the 4 ints a viewport is.
+        let viewport = resolve_viewport(
+            self.viewport.and_then(|d| {
+                let mut v = [0; 4];
+                (xplm.get_vi(d, &mut v) == 4).then_some(v)
+            }),
+            || renderer.viewport(),
+        );
+        let target = gl::Target { framebuffer, viewport };
         let [_, _, vw, vh] = target.viewport;
         let def = self.screens[index].def;
         // X-Plane draws devices at the size they were made with; a mesh is
@@ -539,10 +573,8 @@ impl Displays {
         let Some(Ok(renderer)) = self.renderer.as_mut() else { return };
         let s = &mut self.screens[index];
         let region = [0, 0, s.mesh.width as i32, s.mesh.height as i32];
-        // [wxr] WXR_L/WXR_R fall back here when mapdata has nothing for an
-        // id (terrain's own ids); crate::wxr::native_image, docs/wxr.md.
         let natives: Vec<_> =
-            s.mesh.natives.iter().map(|id| crate::mapdata::plugin::native_image(id).or_else(|| crate::wxr::native_image(id))).collect();
+            s.mesh.natives.iter().map(|id| crate::mapdata::plugin::native_image(id)).collect();
         renderer.draw(&mut s.gpu, s.stream, &s.mesh, &s.steps, region, target, &s.brightness, &natives, &mut self.res);
     }
 
@@ -551,10 +583,11 @@ impl Displays {
     /// screen's texture and draw it, its dimming regions applied on top
     /// just as the QuickJS path dims its mesh. `true` if this screen was
     /// drawn this way, so the caller must not also run the QuickJS path;
-    /// `false` (no session attached, `displays_active` is 0, or this screen
-    /// has no `ScreenBlock`) leaves it to the caller's QuickJS path.
+    /// `false` (no session attached, this screen's own `bridge_active` is
+    /// still false, or this screen has no `ScreenBlock`) leaves it to the
+    /// caller's QuickJS path.
     fn draw_bridge_screen(&mut self, index: usize, target: gl::Target) -> bool {
-        if !self.bridge_active() {
+        if !self.bridge_active(index) {
             return false;
         }
         let def = self.screens[index].def;
@@ -637,7 +670,7 @@ impl Displays {
             "SCREEN_DU_NDR" => Some(crate::mapdata::terrain::types::Side::Right),
             _ => None,
         };
-        let layer = side.and_then(|s| crate::mapdata::plugin::terrain_layer(s).or_else(|| crate::wxr::layer(s)));
+        let layer = side.and_then(|s| crate::mapdata::plugin::terrain_layer(s));
         let mut has_underlay = false;
         if let Some((lw, lh, generation, rgba)) = layer {
             if generation != bs.underlay_generation {
@@ -652,7 +685,7 @@ impl Displays {
         // upload again next frame, rather than skip the draw outright.
         if let Some(Ok(renderer)) = self.renderer.as_mut() {
             let underlay = has_underlay.then_some(&bs.underlay);
-            renderer.draw_bridge(&mut bs.gpu, underlay, width, height, target, &brightness, &dimming);
+            renderer.draw_bridge(def.id, &mut bs.gpu, underlay, width, height, target, &brightness, &dimming);
         }
         true
     }
@@ -665,11 +698,29 @@ impl Displays {
         xphfbw::device_to_css(x as f64, y as f64, height, (sx, sy))
     }
 
-    /// Whether XPHFBW should be drawing (rule 7): `false` with no session
-    /// attached, so every screen keeps the QuickJS drawing path and every
-    /// pointer event keeps going to the scripts' `ScreenEvent`s.
-    fn bridge_active(&self) -> bool {
-        self.bridge.as_ref().is_some_and(|b| b.session.slots.header().displays_active.load(Ordering::Relaxed) != 0)
+    /// Whether XPHFBW should be drawing `index` (rule 7, per screen: S08,
+    /// built on S10's `SlotHeader::view_loaded` mirror). `false` with no
+    /// session attached, so every screen keeps the QuickJS drawing path and
+    /// every pointer event keeps going to the scripts' `ScreenEvent`s.
+    /// Otherwise a screen switches over the moment *its own* view has
+    /// reported `Loaded { ok: true }` (`view_loaded[view] == 1`, S10;
+    /// `view_for_screen` maps this screen to that view, [`Bridge`]'s doc
+    /// comment), independent of every other screen: one view stuck
+    /// loading, crashed, or never created no longer blanks a screen whose
+    /// own view is fine. The EFB (`EFB_SCREEN`) has no view of its own --
+    /// its gauge is excluded from `view_list`
+    /// (`xphfbw_bridge_views::EXCLUDED_GAUGES`, screens.rs's doc comment)
+    /// -- so `view_for_screen` has no entry for it; it counts as active
+    /// once its own `ScreenBlock` has painted at least one frame, the same
+    /// signal `draw_bridge_screen` already uses to decide there is
+    /// something worth uploading.
+    fn bridge_active(&self, index: usize) -> bool {
+        let Some(bridge) = self.bridge.as_ref() else { return false };
+        if SCREENS.get(index).is_some_and(|s| s.id == EFB_SCREEN) {
+            return bridge.screens.get(index).and_then(|s| s.as_ref()).is_some_and(|bs| bs.block.header().frame.load(Ordering::Relaxed) != 0);
+        }
+        let Some(Some(view)) = bridge.view_for_screen.get(index) else { return false };
+        bridge.session.slots.header().view_loaded.get(*view as usize).is_some_and(|c| c.load(Ordering::Relaxed) == 1)
     }
 
     fn push_event(&mut self, screen: usize, kind: &'static str, x: c_int, y: c_int, button: i32, delta: f64) {
@@ -681,13 +732,14 @@ impl Displays {
         self.events.push_back(ScreenEvent { screen: id, kind, x: cx, y: cy, button, delta });
     }
 
-    /// A pointer event on a screen: XPHFBW's `Input` ring while its displays
-    /// are active (CSS pixel coordinates, same mapping as `push_event`'s
-    /// `ScreenEvent`s; the ring has no room for a right-click distinction,
-    /// so every button maps to the same `InputKind`), the scripts'
-    /// `ScreenEvent` queue otherwise.
+    /// A pointer event on a screen: XPHFBW's `Input` ring while that
+    /// screen's own bridge switch-over is active (rule 7, per screen: S08;
+    /// CSS pixel coordinates, same mapping as `push_event`'s `ScreenEvent`s;
+    /// the ring has no room for a right-click distinction, so every button
+    /// maps to the same `InputKind`), the scripts' `ScreenEvent` queue
+    /// otherwise.
     fn dispatch_pointer(&mut self, screen: usize, screen_event_kind: &'static str, input_kind: InputKind, x: c_int, y: c_int, button: i32, delta: f64) {
-        if self.bridge_active() {
+        if self.bridge_active(screen) {
             let (cx, cy) = self.to_screen(screen, x, y);
             if input_kind != InputKind::Move {
                 static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -706,11 +758,12 @@ impl Displays {
 
     /// One keystroke from a device's `XPLMAvionicsKeyboard_f` callback (the
     /// KCCU typing into the MFD, [`InputKind::Key`]'s doc comment): only
-    /// meaningful while XPHFBW is drawing (rule 7), since the QuickJS path
-    /// has no keyboard route of its own. `false` (dropped silently) with no
-    /// bridge attached or `displays_active` still 0.
+    /// meaningful while XPHFBW is drawing this screen (rule 7, per screen:
+    /// S08), since the QuickJS path has no keyboard route of its own.
+    /// `false` (dropped silently) with no bridge attached or this screen's
+    /// own switch-over still not active.
     fn dispatch_key(&mut self, screen: usize, ch: u32, vkey: u32, flags: u32) -> bool {
-        if !self.bridge_active() {
+        if !self.bridge_active(screen) {
             return false;
         }
         let Some(bridge) = &self.bridge else { return false };
@@ -891,7 +944,7 @@ impl Displays {
     }
 
     /// See [`set_bridge`].
-    fn set_bridge(&mut self, tag: Option<&'static str>, session: Option<&'static Session>) {
+    fn set_bridge(&mut self, tag: Option<&'static str>, session: Option<&'static Session>, views: &[ViewDef]) {
         let Some((tag, session)) = tag.zip(session) else {
             if self.bridge.take().is_some() {
                 log("XPHFBW bridge detached");
@@ -901,15 +954,91 @@ impl Displays {
         let screens: Vec<Option<BridgeScreen>> = SCREENS
             .iter()
             .map(|def| {
-                let block = ScreenBlock::create(tag, def.id, def.width, def.height);
+                let (dw, dh) = crate::xphfbw_bridge_views::device_size(def.id, def.width, def.height);
+                let block = ScreenBlock::create(tag, def.id, dw, dh);
                 if block.is_none() {
                     log(&format!("could not create the XPHFBW ScreenBlock for {}", def.id));
                 }
                 block.map(|block| BridgeScreen { block, gpu: gl::BridgeGpu::default(), last_uploaded: 0, force_full: true, underlay: gl::BridgeGpu::default(), underlay_generation: 0, last_upload_at: None, uploads: 0 })
             })
             .collect();
+        // S08, per-screen switch-over: which view (if any) governs each
+        // screen, worked out once from panel.cfg's own view list rather
+        // than a second shared-memory field -- `bridge_active` reads S10's
+        // `view_loaded` straight through this.
+        let mut view_for_screen: Vec<Option<u32>> = vec![None; SCREENS.len()];
+        for v in views {
+            if let Some(i) = screens::find(&v.screen) {
+                view_for_screen[i] = Some(v.index);
+            }
+        }
         log(&format!("XPHFBW bridge attached ({tag}), {}/{} screens", screens.iter().filter(|s| s.is_some()).count(), SCREENS.len()));
-        self.bridge = Some(Bridge { session, screens });
+        self.bridge = Some(Bridge { session, screens, view_for_screen });
+    }
+}
+
+/// S08: a screen must switch to the bridge on its own view's `view_loaded`
+/// reading (S10), independent of every other screen's, and the EFB (which
+/// has no view of its own) must switch on its own `ScreenBlock`'s paint
+/// instead.
+#[cfg(test)]
+mod bridge_active_tests {
+    use super::{screens, Displays, Session, ViewDef, EFB_SCREEN};
+    use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
+
+    fn tag() -> String {
+        format!("test_bridge_active_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos())
+    }
+
+    /// A minimal view list, the same shape `xphfbw_host.rs`'s `view_list`
+    /// produces from panel.cfg: the PFD is view 0, the ND is view 1.
+    fn views() -> Vec<ViewDef> {
+        vec![
+            ViewDef { index: 0, section: "VCockpit01".into(), gauge_url: "A380X/PFD/pfd.html".into(), width: 768, height: 1024, screen: "SCREEN_DU_PFDL".into() },
+            ViewDef { index: 1, section: "VCockpit02".into(), gauge_url: "A380X/ND/nd.html".into(), width: 768, height: 1024, screen: "SCREEN_DU_NDL".into() },
+        ]
+    }
+
+    fn attached(tag: &str) -> (Displays, &'static Session) {
+        let session: &'static Session = Box::leak(Box::new(Session::create(tag).expect("session creates")));
+        let tag: &'static str = Box::leak(tag.to_string().into_boxed_str());
+        let mut d = Displays::new(None, PathBuf::new());
+        d.set_bridge(Some(tag), Some(session), &views());
+        (d, session)
+    }
+
+    #[test]
+    fn a_screen_activates_on_its_own_views_loaded_flag_independent_of_the_others() {
+        let (d, session) = attached(&tag());
+        let pfdl = screens::find("SCREEN_DU_PFDL").unwrap();
+        let ndl = screens::find("SCREEN_DU_NDL").unwrap();
+        assert!(!d.bridge_active(pfdl));
+        assert!(!d.bridge_active(ndl));
+        // View 0 (the PFD) reports `Loaded { ok: true }` -- S10's encoding
+        // for `SlotHeader::view_loaded[0]`.
+        session.slots.header().view_loaded[0].store(1, Ordering::Relaxed);
+        assert!(d.bridge_active(pfdl), "the PFD's own view has loaded");
+        assert!(!d.bridge_active(ndl), "the ND's view has not, and must not follow the PFD's");
+    }
+
+    #[test]
+    fn a_failed_view_does_not_activate_its_screen() {
+        let (d, session) = attached(&tag());
+        let pfdl = screens::find("SCREEN_DU_PFDL").unwrap();
+        session.slots.header().view_loaded[0].store(2, Ordering::Relaxed); // reported ok: false
+        assert!(!d.bridge_active(pfdl), "a failed Loaded report must not switch the screen over");
+    }
+
+    #[test]
+    fn the_efb_activates_on_its_own_screen_block_not_on_view_loaded() {
+        let (mut d, _session) = attached(&tag());
+        let efb = screens::find(EFB_SCREEN).unwrap();
+        assert!(!d.bridge_active(efb), "no frame painted yet");
+        let bs = d.bridge.as_mut().unwrap().screens[efb].as_ref().expect("the EFB's ScreenBlock was created");
+        bs.block.header().frame.store(1, Ordering::Relaxed);
+        // `view_loaded` (still all zero here) must not matter for the EFB.
+        assert!(d.bridge_active(efb), "the EFB's own ScreenBlock has painted");
     }
 }
 
@@ -1004,6 +1133,37 @@ pub fn update_brightness(read: impl FnMut(&str) -> Option<f64>) {
     let _ = DISPLAYS.try_lock().map(|mut guard| guard.as_mut().map(|d| d.update_brightness(read)));
 }
 
+/// The viewport for this draw: `dataref` is `Some` reading already taken
+/// from `sim/graphics/view/viewport` (4 ints), `None` when that dataref was
+/// not found or answered with anything else; `fallback` (the old
+/// `glGetIntegerv(GL_VIEWPORT)` path, `Renderer::viewport`, which needs a
+/// live GL context) only runs then, so the normal case never calls glGet.
+fn resolve_viewport(dataref: Option<[c_int; 4]>, fallback: impl FnOnce() -> [c_int; 4]) -> [c_int; 4] {
+    dataref.unwrap_or_else(fallback)
+}
+
+#[cfg(test)]
+mod resolve_viewport_tests {
+    use super::resolve_viewport;
+
+    #[test]
+    fn prefers_the_dataref_reading_over_the_gl_get_fallback() {
+        let mut fallback_called = false;
+        let v = resolve_viewport(Some([1, 2, 3, 4]), || {
+            fallback_called = true;
+            [0, 0, 0, 0]
+        });
+        assert_eq!(v, [1, 2, 3, 4]);
+        assert!(!fallback_called, "the glGetIntegerv fallback must not run when the dataref answered");
+    }
+
+    #[test]
+    fn falls_back_to_gl_get_when_the_dataref_is_unavailable() {
+        let v = resolve_viewport(None, || [5, 6, 7, 8]);
+        assert_eq!(v, [5, 6, 7, 8]);
+    }
+}
+
 /// A screen's dirty rectangles as the app last set them (rule 6); at most
 /// [`MAX_DIRTY_RECTS`].
 fn read_dirty_rects(header: &ScreenHeader) -> Vec<[u32; 4]> {
@@ -1034,8 +1194,31 @@ fn read_dirty_rects(header: &ScreenHeader) -> Vec<[u32; 4]> {
 /// (its sizes come from the same panel.cfg parse `SCREENS` is written
 /// against, so no behaviour change is expected either way), `SCREENS`
 /// itself until then.
-pub fn set_bridge(tag: Option<&'static str>, session: Option<&'static Session>) {
-    let _ = with(|d| d.set_bridge(tag, session));
+pub fn set_bridge(tag: Option<&'static str>, session: Option<&'static Session>, views: &[ViewDef]) {
+    let _ = with(|d| d.set_bridge(tag, session, views));
+}
+
+/// S08: called from `xphfbw_host.rs`'s `check_gone` the moment XPHFBW's
+/// process is found to have exited, alongside the existing
+/// `displays_active`/`view_loaded` clears there. Without this, a screen
+/// whose own view had already loaded would keep reading that stale
+/// "loaded" state (S10's `view_loaded` mirror is not something `check_gone`
+/// can reach into on its own -- it lives behind `display::with`) and stay
+/// on the bridge, drawing whatever was last uploaded into a `ScreenBlock`
+/// nothing is updating any more. Most visibly this matters for the EFB,
+/// whose `bridge_active` check has no `view_loaded` entry to fall back on
+/// at all and depends entirely on its `ScreenBlock`'s `frame` counter
+/// (`bridge_active`'s doc comment): zeroing every screen's counter here is
+/// what lets the EFB notice XPHFBW is gone and return to the QuickJS
+/// placeholder like every other screen.
+pub fn mark_bridge_gone() {
+    let _ = with(|d| {
+        if let Some(bridge) = d.bridge.as_mut() {
+            for bs in bridge.screens.iter_mut().flatten() {
+                bs.block.header().frame.store(0, Ordering::Relaxed);
+            }
+        }
+    });
 }
 
 /// Create the cockpit devices, one per screen. Called once the plugin is
@@ -1052,6 +1235,7 @@ pub fn start(xplm: &'static Xplm) {
         displays.xplm = Some(xplm);
         displays.api = Some(api);
         displays.fbo = xplm.find("sim/graphics/view/current_gl_fbo");
+        displays.viewport = xplm.find("sim/graphics/view/viewport");
         *guard = Some(displays);
     }
     // Made without holding the lock: X-Plane may call back straight away.
@@ -1059,7 +1243,8 @@ pub fn start(xplm: &'static Xplm) {
     for (index, def) in SCREENS.iter().enumerate() {
         let id = CString::new(def.id).expect("no nul");
         let title = CString::new(def.title).expect("no nul");
-        let (w, h) = (def.width as c_int, def.height as c_int);
+        let (dw, dh) = crate::xphfbw_bridge_views::device_size(def.id, def.width, def.height);
+        let (w, h) = (dw as c_int, dh as c_int);
         let mut spec = xp::CreateAvionics {
             struct_size: std::mem::size_of::<xp::CreateAvionics>() as c_int,
             screen_width: w,

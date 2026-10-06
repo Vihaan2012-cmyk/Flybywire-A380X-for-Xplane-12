@@ -11,7 +11,7 @@
 // (.github/workflows/master.yml).
 //
 // Usage, from the FlyByWire workspace root:
-//   node D:/fbw-xp-systems/tools/js-build/fbw-env.cjs fbw-a380x/src/systems/systems-host/build.js
+//   node D:/A380/fbw-xp-systems/tools/js-build/fbw-env.cjs fbw-a380x/src/systems/systems-host/build.js
 'use strict';
 
 const path = require('path');

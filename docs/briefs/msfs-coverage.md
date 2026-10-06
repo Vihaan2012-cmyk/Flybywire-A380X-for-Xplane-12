@@ -10,7 +10,7 @@ own simulation. Nothing reads a silent 0/NaN.
   (treat "partly"/"missing" as leads; our own hand tables in sensors.rs,
   prim.rs, key_events.rs, js_bridge.rs, start_state.rs are more precise).
 - State dumps of a real cold apron start in X-Plane:
-  D:\fbw-build\state-dumps\session-*\dump-*.tsv (name, value, source, dataref).
+  D:\A380\fbw-build\state-dumps\session-*\dump-*.tsv (name, value, source, dataref).
   source 0 = nothing ever fed the variable. Simulator variables (names with
   spaces, e.g. "G FORCE") at source 0 are unserved inputs.
 - Log: D:/Steam Games/steamapps/common/X-Plane 12/Log.txt ("has no source here").

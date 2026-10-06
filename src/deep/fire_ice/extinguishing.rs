@@ -338,6 +338,32 @@ impl OpticalSmokeDetector {
     }
 }
 
+/// Fractional faults on one hold's cargo suppression system, 0 healthy ..
+/// 1 fully failed (ECAM completeness pass, E-FIRE §F).
+///
+/// `knockdown_squib_fault`/`extended_squib_fault` split what used to be a
+/// single `squib_failure` shared by both discharge stages: the general
+/// two-bottle cargo fire-suppression architecture (US Patent 9,248,326/
+/// 8,925,642, "Scalable cargo fire-suppression agent distribution system")
+/// has bottle 1 discharge rapidly for initial knockdown, and bottle 2 be
+/// timed to discharge later for extended suppression as concentration
+/// decays -- exactly the two-stage shape [`CargoSuppressionSystem::step`]
+/// already implements internally, but until this pass gated with one
+/// fault covering both stages. Splitting it makes the existing physics
+/// correspond to two physically distinct, independently-faultable
+/// initiators, matching real hardware (two bottles, two squibs).
+///
+/// `distribution_fault` is new: the line/valve between the bottle manifold
+/// and this hold, independent of the bottle/squib itself -- gates
+/// `effective_area` the same way a squib fault already does.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CargoSuppressionFaults {
+    pub leak: f64,
+    pub knockdown_squib_fault: f64,
+    pub extended_squib_fault: f64,
+    pub distribution_fault: f64,
+}
+
 /// Two-stage cargo suppression: an initial high-rate "knockdown" discharge
 /// to reach design concentration quickly, then a flow-restricted "metered"
 /// discharge whose small orifice makes the remaining agent last far
@@ -367,13 +393,17 @@ impl CargoSuppressionSystem {
 
     /// One tick. Switches from knockdown to metered once the zone reaches
     /// design concentration (a real, output-driven switch, not a fixed
-    /// timer).
-    pub fn step(&mut self, ambient_c: f64, fire_command: bool, zone_pressure_pa: f64, zone_concentration: &ZoneConcentration, faults: &BottleFaults, dt_s: f64) -> f64 {
+    /// timer). `knockdown_squib_fault` gates only the knockdown stage,
+    /// `extended_squib_fault` only the metered stage -- the same
+    /// independence a real second bottle/squib would have; `distribution_
+    /// fault` gates both, the same way each stage's own squib fault does,
+    /// since a distribution-path fault sits downstream of either bottle.
+    pub fn step(&mut self, ambient_c: f64, fire_command: bool, zone_pressure_pa: f64, zone_concentration: &ZoneConcentration, faults: &CargoSuppressionFaults, dt_s: f64) -> f64 {
         if fire_command && zone_concentration.suppression_fraction() >= 1.0 {
             self.knocked_down = true;
         }
-        let area = if self.knocked_down { self.metered_area_m2 } else { self.knockdown_area_m2 };
-        let effective_area = area * (1.0 - clamp01(faults.squib_failure));
+        let (area, stage_squib_fault) = if self.knocked_down { (self.metered_area_m2, faults.extended_squib_fault) } else { (self.knockdown_area_m2, faults.knockdown_squib_fault) };
+        let effective_area = area * (1.0 - clamp01(stage_squib_fault)) * (1.0 - clamp01(faults.distribution_fault));
         let dt = dt_s.max(0.0);
         let leak_area = LEAK_AREA_MAX_M2 * clamp01(faults.leak);
         let leak_kg_s = orifice_mass_flow_kg_s(LEAK_DISCHARGE_COEFFICIENT, leak_area, self.bottle.pressure_pa, (ambient_c + 273.15).max(1.0), 101_325.0);
@@ -600,7 +630,7 @@ mod tests {
         let mut system = CargoSuppressionSystem::new(10.0, 30.0);
         let mut zone = ZoneConcentration::new(30.0);
         for _ in 0..600 {
-            let delivered = system.step(20.0, true, 101_325.0, &zone, &BottleFaults::default(), 0.1);
+            let delivered = system.step(20.0, true, 101_325.0, &zone, &CargoSuppressionFaults::default(), 0.1);
             zone.step(delivered, 20.0, 101_325.0, 0.05, 0.1);
             if system.is_metering() {
                 break;
@@ -609,6 +639,56 @@ mod tests {
         assert!(system.is_metering(), "must reach design concentration and switch to metered discharge within the test window");
         let mass_at_switch = system.bottle.agent_mass_kg();
         assert!(mass_at_switch > 0.0, "must still have agent left for the extended metered phase");
+    }
+
+    /// E-FIRE §F: the knockdown and extended squib faults are independent
+    /// -- each silences only its own stage.
+    #[test]
+    fn knockdown_and_extended_squib_faults_are_independent_stages() {
+        let mut zone = ZoneConcentration::new(30.0);
+        let mut system = CargoSuppressionSystem::new(10.0, 30.0);
+        let faults = CargoSuppressionFaults { knockdown_squib_fault: 1.0, ..Default::default() };
+        // The knockdown stage is fully failed: no delivery at all while
+        // still in that stage, and the zone concentration never climbs
+        // enough to switch to metered.
+        let mut total = 0.0;
+        for _ in 0..200 {
+            let delivered = system.step(20.0, true, 101_325.0, &zone, &faults, 0.1);
+            zone.step(delivered, 20.0, 101_325.0, 0.05, 0.1);
+            total += delivered;
+        }
+        assert_eq!(total, 0.0, "a fully failed knockdown squib must deliver nothing in the knockdown stage");
+        assert!(!system.is_metering());
+
+        // A healthy knockdown stage reaches metering; the extended fault
+        // then silences only that later stage.
+        let mut zone2 = ZoneConcentration::new(30.0);
+        let mut system2 = CargoSuppressionSystem::new(10.0, 30.0);
+        let extended_fault = CargoSuppressionFaults { extended_squib_fault: 1.0, ..Default::default() };
+        for _ in 0..600 {
+            let delivered = system2.step(20.0, true, 101_325.0, &zone2, &extended_fault, 0.1);
+            zone2.step(delivered, 20.0, 101_325.0, 0.05, 0.1);
+            if system2.is_metering() {
+                break;
+            }
+        }
+        assert!(system2.is_metering(), "the knockdown stage must be unaffected by the extended-stage fault");
+        let delivered_while_metering = system2.step(20.0, true, 101_325.0, &zone2, &extended_fault, 0.1);
+        assert_eq!(delivered_while_metering, 0.0, "a fully failed extended squib must deliver nothing once metering");
+    }
+
+    /// E-FIRE §F: a distribution-path fault (the line/valve between the
+    /// bottle manifold and the hold) reduces delivered agent independently
+    /// of either squib.
+    #[test]
+    fn a_distribution_fault_reduces_delivered_agent_with_a_healthy_squib() {
+        let zone = ZoneConcentration::new(30.0);
+        let mut healthy = CargoSuppressionSystem::new(10.0, 30.0);
+        let mut faulted = CargoSuppressionSystem::new(10.0, 30.0);
+        let healthy_delivered = healthy.step(20.0, true, 101_325.0, &zone, &CargoSuppressionFaults::default(), 0.1);
+        let faulted_delivered = faulted.step(20.0, true, 101_325.0, &zone, &CargoSuppressionFaults { distribution_fault: 1.0, ..Default::default() }, 0.1);
+        assert!(healthy_delivered > 0.0);
+        assert_eq!(faulted_delivered, 0.0, "a fully failed distribution path must deliver nothing even with a healthy bottle/squib");
     }
 
     #[test]

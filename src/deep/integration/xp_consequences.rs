@@ -29,9 +29,12 @@
 //!   is aerodynamic and handled the same way ice drag is, below.
 //! - **A collapsed gear leg**: no X-Plane dataref represents "this strut is
 //!   structurally broken" either. [`gear_deploy_override`] retracts that
-//!   one gear's `sim/flightmodel2/gear/deploy_ratio` element instead, the
-//!   closest real consequence available -- X-Plane then computes *zero*
-//!   ground reaction there on its own (the same way a genuinely retracted
+//!   one gear's `sim/aircraft/parts/acf_gear_deploy` element instead (the
+//!   writable equivalent of the read-only `sim/flightmodel2/gear/
+//!   deploy_ratio` this used to -- and could not actually -- write; W215,
+//!   `E:/fbw-debug/fixes/W215.md`), the closest real consequence
+//!   available -- X-Plane then computes *zero* ground reaction there on
+//!   its own (the same way a genuinely retracted
 //!   gear gets none), so the corner of the airframe that leg was holding
 //!   up has nothing supporting it and the aircraft settles/tips under its
 //!   own weight exactly as a real collapse would, from X-Plane's own
@@ -49,8 +52,10 @@ use crate::deep::gear_structure::LegOutput;
 // leg's deploy ratio (module doc for what each corresponds to on
 // X-Plane). `deep` only describes *what* to apply; each host supplies its
 // own [`ForceSink`] -- `crate::xp`'s live implementation forwards to the
-// same six `*_plug_acf` datarefs and the `deploy_ratio` element this file
-// always used, read-add-write, exactly as before this trait existed.
+// same six `*_plug_acf` datarefs and `sim/aircraft/parts/acf_gear_deploy`,
+// the writable dataref this file's gear-leg relay targets since W215
+// (`E:/fbw-debug/fixes/W215.md`; previously the read-only `deploy_ratio`,
+// which never actually took the write).
 // ---------------------------------------------------------------------------
 
 /// Which of the six plugin-force/moment axes `sim/flightmodel/forces/
@@ -196,13 +201,18 @@ pub fn collapsed_leg_drag_force_n(leg: &LegOutput, static_load_share_n: f64, on_
     COLLAPSED_LEG_SLIDING_FRICTION * static_load_share_n.max(0.0)
 }
 
-/// Overrides one gear's `sim/flightmodel2/gear/deploy_ratio` element to 0
+/// Overrides one gear's `sim/aircraft/parts/acf_gear_deploy` element to 0
 /// once its `LegOutput.collapsed` is true (module doc: X-Plane then
-/// computes zero ground reaction there on its own). `index` is that
-/// dataref's own gear ordering (0 nose, then the four main legs in the
-/// `.acf`'s own order -- left wing/right wing/left body/right body for the
-/// converted A380X, matching `flight_controls.rs`'s own `WING1..4`
-/// left/right convention).
+/// computes zero ground reaction there on its own; W215,
+/// `E:/fbw-debug/fixes/W215.md`, for why this targets `acf_gear_deploy`
+/// and not the read-only `sim/flightmodel2/gear/deploy_ratio`). The
+/// caller (`Plugin::apply_deep_xp_consequences`, lib.rs) must run this
+/// after `handling.after_systems` has written this tick's baseline gear
+/// position for every leg, or this override is silently overwritten right
+/// back (same fix). `index` is that dataref's own gear ordering (0 nose,
+/// then the four main legs in the `.acf`'s own order -- left wing/right
+/// wing/left body/right body for the converted A380X, matching
+/// `flight_controls.rs`'s own `WING1..4` left/right convention).
 pub fn gear_deploy_override(sink: &dyn ForceSink, index: usize, leg: &LegOutput) {
     if leg.collapsed {
         sink.set_gear_deploy_ratio(index, 0.0);

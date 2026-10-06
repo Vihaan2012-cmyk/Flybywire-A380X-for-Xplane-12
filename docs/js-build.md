@@ -90,8 +90,8 @@ and sets the variables FlyByWire's CI sets for the A380X
 from the FlyByWire workspace root (`D:\fbw-aircraft`):
 
 ```
-node D:/fbw-xp-systems/tools/js-build/fbw-env.cjs fbw-a380x/src/systems/systems-host/build.js
-node D:/fbw-xp-systems/tools/js-build/fbw-env.cjs fbw-a380x/src/systems/extras-host/build.js
+node D:/A380/fbw-xp-systems/tools/js-build/fbw-env.cjs fbw-a380x/src/systems/systems-host/build.js
+node D:/A380/fbw-xp-systems/tools/js-build/fbw-env.cjs fbw-a380x/src/systems/extras-host/build.js
 ```
 
 `tools/js-build/hevents.txt` is unrelated (the plugin's own H: event name
