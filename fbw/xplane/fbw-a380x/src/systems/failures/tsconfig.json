@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // Babel assumes isolated modules, therefore enable it here as well.
+    "isolatedModules": true
+  },
+  "include": [
+    "src/**/*",
+  ]
+}

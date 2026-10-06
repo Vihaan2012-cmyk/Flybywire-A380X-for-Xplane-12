@@ -1,0 +1,167 @@
+@import "../../../MsfsAvionicsCommon/definitions.scss";
+@import "./widget-style.scss";
+
+@font-face {
+  font-family: "Ecam";
+  //noinspection CssUnknownTarget
+  src: url("/Fonts/fbw-a380x/FBW-Display-EIS-A380.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "FBW-Display-EIS-A380-SlashedZero";
+  //noinspection CssUnknownTarget
+  src: url("/Fonts/fbw-a380x/FBW-Display-EIS-A380-SlashedZero.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+}
+
+.mfd-main {
+  position: absolute;
+  width: 768px;
+  height: 1024px; /* 1:1.33 W:H  */
+  background: $display-background;
+  font-family: "FBW-Display-EIS-A380-SlashedZero", monospace;
+  display: flex;
+  flex-direction: column;
+}
+
+.mfd-title-bar-container {
+  display: flex;
+}
+
+.mfd-title-bar-title {
+  flex: 10;
+  background-color: $display-dark-grey;
+  padding: 3px 10px 3px 7px;
+}
+
+.mfd-title-bar-text {
+  color: #222222;
+  font-size: 30px;
+}
+
+.mfd-title-bar-section {
+  display: flex;
+  width: 70px;
+  background-color: $display-dark-grey;
+  margin-left: 2px;
+  justify-content: center;
+  align-items: center;
+}
+
+.mfd-title-bar-section.eo {
+  width: 70px;
+}
+
+.mfd-title-bar-section.tmpy {
+  width: 100px;
+}
+
+.mfd-title-bar-text.label {
+  padding: 2px;
+}
+
+.mfd-title-bar-text.tmpy {
+  background-color: $display-yellow;
+}
+.mfd-title-bar-text.penalty {
+  background-color: $display-white;
+}
+
+.mfd-title-bar-text.eo {
+  background-color: $display-amber;
+}
+
+
+.mfd-header-sys-select-row {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+}
+
+.mfd-header-callsign {
+  width: 25%;
+  text-align: left;
+  padding: 4px 10px 0px 10px;
+  color: $display-white;
+  font-family: "Ecam", monospace;
+  font-size: 24px;
+}
+
+.mfd-header-page-select-row {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+}
+
+.mfd-footer {
+  display: flex;
+  border-top: 2px solid $display-mfd-darker-grey;
+  padding: 5px;
+}
+
+.mfd-footer-message-area {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-left: 15px;
+  font-size: 26px;
+  color: $display-background;
+  font-family: "FBW-Display-EIS-A380-SlashedZero", monospace;
+  white-space: pre-wrap;
+}
+
+.fr {
+  display: flex;
+  flex-direction: row;
+}
+
+.fr.space-between {
+  justify-content: space-between;
+}
+
+.grow {
+  flex-grow: 1;
+}
+
+.fc {
+  display: flex;
+  flex-direction: column;
+}
+
+.aic {
+  align-items: center;
+}
+
+.jcc {
+  justify-content: center;
+}
+
+.mfd-surv-heading {
+  font-size: 28px;
+  color: $display-white;
+  font-family: "Ecam", monospace;
+}
+
+.mfd-surv-heading.failed {
+  color: $display-amber;
+}
+
+.hidden {
+  display: none;
+}
+
+.invisible {
+  visibility: hidden;
+}
+
+.mfd-amber-error-message {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  align-items: center;
+  color: $display-amber;
+  font-size: 24px;
+}

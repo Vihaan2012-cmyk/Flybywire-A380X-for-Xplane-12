@@ -1,0 +1,57 @@
+{
+  "repo": "Vihaan2012-cmyk/Flybywire-A380X-for-Xplane-12",
+  "assets": {
+    "cef": {
+      "root": "cef",
+      "parts": [
+        {
+          "file": "cef.part01.zip",
+          "size": 230344810,
+          "sha256": "b1e61c1c4e902a979f51bb7307dd1e77bc9ed12b1f5ecbce60f49e0705b1e8df",
+          "files": 944
+        }
+      ]
+    },
+    "xplane": {
+      "root": "FlyByWire A380X",
+      "parts": [
+        {
+          "file": "xplane.part01.zip",
+          "size": 627370823,
+          "sha256": "8167509df8ffa55958810ff7bc31089bc171905163deb6203efc3be905e3b720",
+          "files": 624
+        },
+        {
+          "file": "xplane.part02.zip",
+          "size": 398362810,
+          "sha256": "4d5c827f951709236cd232aa4dc8b73047a76831694860f4361f30e37f9b277a",
+          "files": 476
+        }
+      ]
+    },
+    "msfs": {
+      "root": "flybywire-aircraft-a380-842",
+      "parts": [
+        {
+          "file": "msfs.part01.zip",
+          "size": 715891154,
+          "sha256": "2e9397961c7c37a96bb5ac853c5caba3f788f47c463471055d8309c35d532da8",
+          "files": 267
+        },
+        {
+          "file": "msfs.part02.zip",
+          "size": 883875694,
+          "sha256": "65e7856c089c49e2b1d5fe2ce927e3e83f0c7a58ab3938418d63c02d5f2be5a5",
+          "files": 431
+        },
+        {
+          "file": "msfs.part03.zip",
+          "size": 584319352,
+          "sha256": "47670d10b3c2b6c4d9d5378bbef277fd0e16d11f3ab4d00f3b4603ba7723aeae",
+          "files": 481
+        }
+      ]
+    }
+  },
+  "tag": "assets-2026-10-06"
+}

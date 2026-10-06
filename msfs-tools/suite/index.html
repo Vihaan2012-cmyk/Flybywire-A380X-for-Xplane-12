@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A380 failure campaign</title>
+<style>
+  :root { --bg: #0f1216; --panel: #171b21; --text: #e6e8eb; --muted: #8b939e; --accent: #4fa3ff; --bad: #ff6b6b; --warn: #ffb547; --good: #4cd18a; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 4px 0 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+  .card { background: var(--panel); border-radius: 8px; padding: 10px 12px; }
+  .label { color: var(--muted); font-size: 12px; }
+  .value { font-size: 22px; font-variant-numeric: tabular-nums; }
+  .bar { height: 10px; background: #252b33; border-radius: 5px; overflow: hidden; margin-top: 6px; }
+  .bar > div { height: 100%; background: var(--accent); width: 0; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #252b33; }
+  th { color: var(--muted); font-weight: 500; }
+  .bad { color: var(--bad); } .warn { color: var(--warn); } .good { color: var(--good); }
+  ul { margin: 0; padding-left: 18px; } li { margin: 2px 0; }
+  section { margin-top: 14px; }
+  .muted { color: var(--muted); }
+  .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>A380 failure campaign <span id="state" class="muted"></span></h1>
+  <div class="card">
+    <div class="label">Time (campaign stops at 08:15, ECAM replay until 08:45)</div>
+    <div class="value" id="time">-</div>
+    <div class="bar"><div id="timebar"></div></div>
+  </div>
+  <section class="card">
+    <div class="label">Current phase</div>
+    <div class="value" id="phase" style="font-size:16px">-</div>
+    <div class="bar"><div id="phasebar"></div></div>
+    <div class="muted" id="phasecount"></div>
+  </section>
+  <section class="grid">
+    <div class="card"><div class="label">Runs</div><div class="value" id="runs">0</div></div>
+    <div class="card"><div class="label">Runs / s (last 2 min)</div><div class="value" id="rate">0</div></div>
+    <div class="card"><div class="label">Definite bugs</div><div class="value bad" id="bugs">0</div></div>
+    <div class="card"><div class="label">Emergent combos</div><div class="value warn" id="emergent">0</div></div>
+    <div class="card"><div class="label">Masked combos</div><div class="value warn" id="masked">0</div></div>
+    <div class="card"><div class="label">Singles live / no effect</div><div class="value" id="singles">0 / 0</div></div>
+    <div class="card"><div class="label">Harness errors</div><div class="value" id="harness">0</div></div>
+    <div class="card"><div class="label">Replay stage</div><div class="value" style="font-size:14px" id="replay">-</div></div>
+  </section>
+  <section class="card">
+    <div class="label">Phases</div>
+    <ul id="phases"></ul>
+    <div class="muted" id="note"></div>
+  </section>
+  <section class="card scroll">
+    <div class="label">Pair groups (pilot = random sample; expected left = rate x unrun)</div>
+    <table><thead><tr><th>Group</th><th>Population</th><th>Pilot</th><th>Rate (95%)</th><th>Run</th><th>Found</th><th>Unrun</th><th>Expected left (95% upper)</th></tr></thead><tbody id="groups"></tbody></table>
+  </section>
+  <section class="card">
+    <div class="label">Latest findings</div>
+    <ul id="recent"></ul>
+  </section>
+  <p class="muted">Results: E:\test1results (SUMMARY.md, singles-*.jsonl, pairs.jsonl, ECAM.md). Stop early: create a file named STOP in that folder.</p>
+</main>
+<script>
+const fmt = (s) => { s = Math.max(0, Math.floor(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return `${h}h ${String(m).padStart(2, '0')}m ${String(x).padStart(2, '0')}s`; };
+const n = (v) => (v ?? 0).toLocaleString();
+const set = (id, v) => { document.getElementById(id).textContent = v; };
+async function tick() {
+  try {
+    const p = await (await fetch('progress.json?' + Date.now())).json();
+    set('state', p.finished ? '(campaign finished)' : '(running)');
+    set('time', `${fmt(p.elapsed_s)} elapsed` + (p.finished ? '' : `, ${fmt(Math.max(0, (new Date('2026-10-03T08:15:00') - Date.now()) / 1000))} until the 08:15 stop`));
+    document.getElementById('timebar').style.width = `${Math.min(100, (100 * p.elapsed_s) / (p.elapsed_s + Math.max(1, (new Date('2026-10-03T08:15:00') - Date.now()) / 1000)))}%`;
+    set('phase', p.phase);
+    document.getElementById('phasebar').style.width = p.phase_total ? `${Math.min(100, (100 * p.phase_done) / p.phase_total)}%` : '0';
+    const left = p.runs_per_s > 0 && p.phase_total ? (p.phase_total - p.phase_done) / p.runs_per_s : 0;
+    set('phasecount', `${n(p.phase_done)} / ${n(p.phase_total)}${left ? ` - about ${fmt(left)} to finish this phase at the current rate` : ''}`);
+    set('runs', n(p.runs)); set('rate', (p.runs_per_s ?? 0).toFixed(1)); set('bugs', n(p.bugs)); set('emergent', n(p.emergent)); set('masked', n(p.masked));
+    set('singles', `${n(p.singles_live)} / ${n(p.singles_dead)}`); set('harness', n(p.harness_errors));
+    document.getElementById('phases').innerHTML = (p.phases || []).map((x) => `<li>${x.name}: ${n(x.done)} / ${n(x.total)}</li>`).join('') + `<li><b>${p.phase}</b>: ${n(p.phase_done)} / ${n(p.phase_total)}</li>`;
+    set('note', p.note || '');
+    document.getElementById('groups').innerHTML = (p.groups || []).map((g) => `<tr><td>${g.name}</td><td>${n(g.population)}</td><td>${n(g.pilot)}</td><td>${(100 * g.rate).toFixed(2)}% (${(100 * g.rate_lo).toFixed(2)}-${(100 * g.rate_hi).toFixed(2)}%)</td><td>${n(g.run)}</td><td>${n(g.hits)}</td><td>${n(g.unrun)}</td><td>${Math.round(g.expected_left).toLocaleString()} (${Math.round(g.expected_left_hi).toLocaleString()})</td></tr>`).join('');
+    document.getElementById('recent').innerHTML = (p.recent || []).map((r) => `<li class="${r.startsWith('BUG') || r.startsWith('HARNESS') ? 'bad' : 'warn'}">${r.replace(/</g, '&lt;')}</li>`).join('');
+  } catch (e) { set('state', '(waiting for progress.json)'); }
+  try { const r = await (await fetch('replay-status.json?' + Date.now())).json(); set('replay', `${r.stage}: ${r.detail}`); } catch (e) {}
+}
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>

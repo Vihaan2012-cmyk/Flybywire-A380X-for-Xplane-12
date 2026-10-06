@@ -1,0 +1,12 @@
+{
+  "index": "./instrument.tsx",
+  "name": "EWD",
+  "dimensions": {
+    "width": 768,
+    "height": 1024
+  },
+  "isInteractive": true,
+  "extraDeps": [
+    "../MsfsAvionicsCommon"
+  ]
+}

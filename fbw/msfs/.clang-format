@@ -1,0 +1,14 @@
+---
+BasedOnStyle: Chromium
+---
+Language: Cpp
+ColumnLimit: 140
+AlignArrayOfStructures: Left
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: Consecutive
+AlignConsecutiveShortCaseStatements:
+  Enabled: true
+
+
+
+

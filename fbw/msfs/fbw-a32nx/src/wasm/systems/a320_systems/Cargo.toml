@@ -1,0 +1,16 @@
+[package]
+name = "a320_systems"
+version = "0.1.0"
+authors = ["FlyByWire Simulations"]
+edition = "2021"
+
+[dependencies]
+uom.workspace = true
+nalgebra.workspace = true
+systems = { path = "../../../../../fbw-common/src/wasm/systems/systems" }
+
+[dev-dependencies]
+ntest.workspace = true
+rstest.workspace = true
+rand.workspace = true
+rand_pcg = "0.9.0"

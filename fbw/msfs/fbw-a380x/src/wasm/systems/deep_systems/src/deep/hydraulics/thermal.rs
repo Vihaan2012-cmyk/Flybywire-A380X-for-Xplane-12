@@ -1,0 +1,432 @@
+pub const OVERHEAT_K: f64 = 107.0 + 273.15;
+
+#[derive(Clone, Copy, Debug)]
+pub struct ThermalSizing {
+    pub fluid_mass_kg: f64,
+    pub ambient_loss_w_per_k: f64,
+}
+impl ThermalSizing {
+    pub fn a380_circuit() -> Self {
+        Self { fluid_mass_kg: 60.0, ambient_loss_w_per_k: 40.0 }
+    }
+
+    pub fn a380_manifold() -> Self {
+        Self { fluid_mass_kg: 5.0, ambient_loss_w_per_k: 15.0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HxValveFaults {
+    pub stuck: f64,
+}
+impl HxValveFaults {
+    pub fn fault(&self) -> bool {
+        self.stuck > 0.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AirLeakSwitchFaults {
+    pub leak: f64,
+    pub circuit_fault: f64,
+}
+impl AirLeakSwitchFaults {
+    pub fn leak_detected(&self) -> bool {
+        self.leak > 0.0
+    }
+    pub fn fault(&self) -> bool {
+        self.circuit_fault > 0.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OverheatChannelFaults {
+    pub circuit_fault: f64,
+}
+impl OverheatChannelFaults {
+    pub fn fault(&self) -> bool {
+        self.circuit_fault > 0.0
+    }
+}
+
+#[cfg(test)]
+mod discrete_fault_tests {
+    use super::*;
+
+    #[test]
+    fn hx_valve_fault_is_a_direct_pass_through() {
+        assert!(!HxValveFaults::default().fault());
+        assert!(HxValveFaults { stuck: 1.0 }.fault());
+        assert!(HxValveFaults { stuck: 0.3 }.fault(), "any nonzero magnitude raises the discrete, matching the smoke-detector circuit_fault convention");
+    }
+
+    #[test]
+    fn air_leak_switch_separates_the_leak_from_its_own_circuit_fault() {
+        let leaking = AirLeakSwitchFaults { leak: 1.0, circuit_fault: 0.0 };
+        assert!(leaking.leak_detected());
+        assert!(!leaking.fault(), "a real leak must not, by itself, raise the switch's own DET FAULT");
+        let switch_faulted = AirLeakSwitchFaults { leak: 0.0, circuit_fault: 1.0 };
+        assert!(!switch_faulted.leak_detected());
+        assert!(switch_faulted.fault());
+    }
+
+    #[test]
+    fn overheat_channel_fault_is_a_direct_pass_through() {
+        assert!(!OverheatChannelFaults::default().fault());
+        assert!(OverheatChannelFaults { circuit_fault: 1.0 }.fault());
+    }
+}
+
+const FLUID_CP_J_KG_K: f64 = 1900.0;
+const HHX_EFFECTIVENESS: f64 = 0.6;
+const FUEL_CP_J_KG_K: f64 = 2010.0;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ThermalOutputs {
+    pub temp_k: f64,
+    pub temp_c: f64,
+    pub overheat: bool,
+    pub fuel_heat_w: f64,
+    pub fuel_out_k: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ThermalState {
+    temp_k: f64,
+}
+impl ThermalState {
+    pub fn new(temp_k: f64) -> Self {
+        Self { temp_k }
+    }
+    pub fn temp_k(&self) -> f64 {
+        self.temp_k
+    }
+    pub fn temp_c(&self) -> f64 {
+        self.temp_k - 273.15
+    }
+
+    pub fn step(
+        &mut self,
+        sizing: &ThermalSizing,
+        pump_heat_w: f64,
+        throttling_heat_w: f64,
+        fluid_flow_kg_s: f64,
+        fuel_kg_s: f64,
+        fuel_temp_k: f64,
+        ambient_k: f64,
+        dt_s: f64,
+    ) -> ThermalOutputs {
+        let dt = dt_s.max(0.0);
+        let heat_in_w = pump_heat_w.max(0.0) + throttling_heat_w.max(0.0);
+
+        let fluid_capacity_w_per_k = fluid_flow_kg_s.max(0.0) * FLUID_CP_J_KG_K;
+        let fuel_capacity_w_per_k = fuel_kg_s.max(0.0) * FUEL_CP_J_KG_K;
+        let hx_conductance_w_per_k = HHX_EFFECTIVENESS * fluid_capacity_w_per_k.min(fuel_capacity_w_per_k);
+        let fuel_heat_w = hx_conductance_w_per_k * (self.temp_k - fuel_temp_k);
+        let fuel_out_k = if fuel_capacity_w_per_k > 0.0 { fuel_temp_k + fuel_heat_w / fuel_capacity_w_per_k } else { fuel_temp_k };
+
+        let ambient_loss_w_per_k = sizing.ambient_loss_w_per_k.max(0.0);
+        let conductance = (hx_conductance_w_per_k + ambient_loss_w_per_k).max(1e-9);
+        let target_k = (heat_in_w + hx_conductance_w_per_k * fuel_temp_k + ambient_loss_w_per_k * ambient_k) / conductance;
+        let thermal_mass_j_per_k = sizing.fluid_mass_kg.max(1e-6) * FLUID_CP_J_KG_K;
+        let rate = conductance / thermal_mass_j_per_k;
+        self.temp_k = target_k + (self.temp_k - target_k) * (-rate * dt).exp();
+
+        ThermalOutputs { temp_k: self.temp_k, temp_c: self.temp_c(), overheat: self.temp_k > OVERHEAT_K, fuel_heat_w, fuel_out_k }
+    }
+}
+
+pub fn throttling_heat_w(flow_m3_s: f64, dp_pa: f64) -> f64 {
+    flow_m3_s.abs() * dp_pa.abs()
+}
+
+pub const INNER_FAN_ON_C: f64 = 55.0;
+pub const INNER_FAN_OFF_C: f64 = 35.0;
+pub const OUTER_FAN_ON_C: f64 = 20.0;
+pub const OUTER_FAN_OFF_C: f64 = 0.0;
+pub const FAN_INHIBIT_MACH: f64 = 0.45;
+pub const FUEL_EXCHANGER_OPEN_C: f64 = 85.0;
+pub const FUEL_EXCHANGER_CLOSE_C: f64 = 40.0;
+pub const FEED_TANK_FUEL_INHIBIT_C: f64 = 53.0;
+
+const AIR_EXCHANGER_FAN_W_PER_K: f64 = 800.0;
+const AIR_EXCHANGER_STILL_W_PER_K: f64 = 150.0;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FqmsInhibit {
+    pub low_feed_tank_quantity: bool,
+    pub crossfeed_open: bool,
+    pub gravity_feed: bool,
+    pub low_feed_pump_pressure: bool,
+    pub electrical_emergency: bool,
+}
+
+impl FqmsInhibit {
+    pub fn any(&self) -> bool {
+        self.low_feed_tank_quantity || self.crossfeed_open || self.gravity_feed || self.low_feed_pump_pressure || self.electrical_emergency
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HsmuInputs {
+    pub mach: f64,
+    pub wing_anti_ice_used_this_flight: bool,
+    pub feed_tank_fuel_c: f64,
+    pub fqms_inhibit: FqmsInhibit,
+    pub air_exchanger_ok: [bool; 2],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HsmuOutputs {
+    pub fans_running: [bool; 2],
+    pub fans_inhibited: bool,
+    pub fuel_exchanger_valves_open: bool,
+    pub fuel_exchanger_inhibited: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Hsmu {
+    fans_on: [bool; 2],
+    fuel_valves_open: bool,
+}
+
+impl Hsmu {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn hysteresis(state: bool, value_c: f64, on_c: f64, off_c: f64) -> bool {
+        if value_c > on_c {
+            true
+        } else if value_c < off_c {
+            false
+        } else {
+            state
+        }
+    }
+
+    pub fn step(&mut self, fluid_c: f64, inputs: &HsmuInputs) -> HsmuOutputs {
+        let wanted = [
+            Self::hysteresis(self.fans_on[0], fluid_c, INNER_FAN_ON_C, INNER_FAN_OFF_C),
+            Self::hysteresis(self.fans_on[1], fluid_c, OUTER_FAN_ON_C, OUTER_FAN_OFF_C),
+        ];
+        let inhibited = inputs.mach > FAN_INHIBIT_MACH && !inputs.wing_anti_ice_used_this_flight;
+        self.fans_on = if inhibited { [false; 2] } else { wanted };
+
+        let fuel_too_hot = inputs.feed_tank_fuel_c > FEED_TANK_FUEL_INHIBIT_C;
+        let refused = inputs.fqms_inhibit.any() || fuel_too_hot;
+        let wanted_by_temp = Self::hysteresis(self.fuel_valves_open, fluid_c, FUEL_EXCHANGER_OPEN_C, FUEL_EXCHANGER_CLOSE_C);
+        self.fuel_valves_open = wanted_by_temp && !refused;
+
+        HsmuOutputs {
+            fans_running: self.fans_on,
+            fans_inhibited: inhibited && (wanted[0] || wanted[1]),
+            fuel_exchanger_valves_open: self.fuel_valves_open,
+            fuel_exchanger_inhibited: wanted_by_temp && refused,
+        }
+    }
+
+    pub fn cooled_sizing(&self, sizing: &ThermalSizing, air_exchanger_ok: [bool; 2]) -> ThermalSizing {
+        let mut extra = 0.0;
+        for i in 0..2 {
+            if air_exchanger_ok[i] {
+                extra += if self.fans_on[i] { AIR_EXCHANGER_FAN_W_PER_K } else { AIR_EXCHANGER_STILL_W_PER_K };
+            }
+        }
+        ThermalSizing { fluid_mass_kg: sizing.fluid_mass_kg, ambient_loss_w_per_k: sizing.ambient_loss_w_per_k + extra }
+    }
+
+    pub fn fans_running(&self) -> [bool; 2] {
+        self.fans_on
+    }
+
+    pub fn fuel_exchanger_valves_open(&self) -> bool {
+        self.fuel_valves_open
+    }
+}
+
+#[cfg(test)]
+mod hsmu_tests {
+    use super::*;
+
+    fn inputs() -> HsmuInputs {
+        HsmuInputs { mach: 0.0, wing_anti_ice_used_this_flight: false, feed_tank_fuel_c: 10.0, fqms_inhibit: FqmsInhibit::default(), air_exchanger_ok: [true; 2] }
+    }
+
+    #[test]
+    fn each_exchangers_fans_follow_their_own_sourced_hysteresis() {
+        let mut h = Hsmu::new();
+        assert!(!h.step(50.0, &inputs()).fans_running[0], "50 C sits inside the inner band, so off stays off");
+        assert!(h.step(56.0, &inputs()).fans_running[0], "above 55 C the inner fans run");
+        assert!(h.step(40.0, &inputs()).fans_running[0], "40 C is inside the band, so on stays on");
+        assert!(!h.step(34.0, &inputs()).fans_running[0], "below 35 C they stop");
+
+        let mut h = Hsmu::new();
+        let out = h.step(25.0, &inputs());
+        assert!(out.fans_running[1], "above 20 C the outer fans run");
+        assert!(!out.fans_running[0], "...while the inner ones are nowhere near theirs");
+    }
+
+    #[test]
+    fn the_mach_inhibit_applies_unless_wing_anti_ice_has_been_used() {
+        let mut h = Hsmu::new();
+        let mut i = inputs();
+        i.mach = 0.8;
+        let out = h.step(70.0, &i);
+        assert!(!out.fans_running[0] && !out.fans_running[1], "fast and clean, the fans are held off");
+        assert!(out.fans_inhibited, "and it is reported, because temperature did want them");
+
+        i.wing_anti_ice_used_this_flight = true;
+        let out = h.step(70.0, &i);
+        assert!(out.fans_running[0], "wing anti-ice used this flight lifts the inhibit");
+        assert!(!out.fans_inhibited);
+
+        i.wing_anti_ice_used_this_flight = false;
+        i.mach = 0.3;
+        assert!(h.step(70.0, &i).fans_running[0], "slow again, no inhibit");
+    }
+
+    #[test]
+    fn the_fuel_exchanger_opens_hot_and_closes_cold() {
+        let mut h = Hsmu::new();
+        assert!(!h.step(80.0, &inputs()).fuel_exchanger_valves_open, "80 C is below the opening threshold");
+        assert!(h.step(86.0, &inputs()).fuel_exchanger_valves_open, "above 85 C the valves open");
+        assert!(h.step(50.0, &inputs()).fuel_exchanger_valves_open, "50 C is inside the band, they stay open");
+        assert!(!h.step(39.0, &inputs()).fuel_exchanger_valves_open, "below 40 C they close");
+    }
+
+    #[test]
+    fn every_fqms_condition_refuses_the_fuel_exchanger() {
+        let cases: [(&str, fn(&mut HsmuInputs)); 6] = [
+            ("low feed tank quantity", |i| i.fqms_inhibit.low_feed_tank_quantity = true),
+            ("crossfeed open", |i| i.fqms_inhibit.crossfeed_open = true),
+            ("gravity feed", |i| i.fqms_inhibit.gravity_feed = true),
+            ("low feed pump pressure", |i| i.fqms_inhibit.low_feed_pump_pressure = true),
+            ("electrical emergency", |i| i.fqms_inhibit.electrical_emergency = true),
+            ("feed tank fuel above 53 C", |i| i.feed_tank_fuel_c = 54.0),
+        ];
+        for (name, arm) in cases {
+            let mut h = Hsmu::new();
+            let mut i = inputs();
+            arm(&mut i);
+            let out = h.step(90.0, &i);
+            assert!(!out.fuel_exchanger_valves_open, "{name} must refuse the exchanger");
+            assert!(out.fuel_exchanger_inhibited, "{name} should say it refused");
+        }
+        let mut h = Hsmu::new();
+        let mut i = inputs();
+        i.feed_tank_fuel_c = FEED_TANK_FUEL_INHIBIT_C;
+        assert!(h.step(90.0, &i).fuel_exchanger_valves_open);
+    }
+
+    #[test]
+    fn the_fans_conductance_reaches_the_heat_balance() {
+        let base = ThermalSizing::a380_circuit();
+        let mut h = Hsmu::new();
+        h.step(10.0, &inputs());
+        let cold = h.cooled_sizing(&base, [true; 2]);
+        h.step(90.0, &inputs());
+        let hot = h.cooled_sizing(&base, [true; 2]);
+        assert!(hot.ambient_loss_w_per_k > cold.ambient_loss_w_per_k, "running fans must add conductance");
+        assert!(hot.ambient_loss_w_per_k > 2.0 * base.ambient_loss_w_per_k, "and dominate the passive loss");
+        assert_eq!(hot.fluid_mass_kg, base.fluid_mass_kg, "cooling must not change the thermal mass");
+
+        let failed = h.cooled_sizing(&base, [false; 2]);
+        assert_eq!(failed.ambient_loss_w_per_k, base.ambient_loss_w_per_k, "failed exchangers add nothing");
+    }
+
+    #[test]
+    fn losing_the_air_exchangers_heats_the_fluid_until_the_fuel_exchanger_takes_over() {
+        let sizing = ThermalSizing::a380_circuit();
+        let run = |air_ok: [bool; 2]| {
+            let mut h = Hsmu::new();
+            let mut state = ThermalState::new(298.15);
+            let mut i = inputs();
+            i.air_exchanger_ok = air_ok;
+            i.feed_tank_fuel_c = 20.0;
+            let mut out = HsmuOutputs::default();
+            for _ in 0..7_200 {
+                out = h.step(state.temp_c(), &i);
+                let cooled = h.cooled_sizing(&sizing, air_ok);
+                let fuel_kg_s = if out.fuel_exchanger_valves_open { 0.5 } else { 0.0 };
+                state.step(&cooled, 60_000.0, 0.0, 2.0, fuel_kg_s, 293.15, 313.15, 0.5);
+            }
+            (state.temp_c(), out)
+        };
+
+        let (healthy_c, healthy) = run([true; 2]);
+        assert!(healthy_c < FUEL_EXCHANGER_OPEN_C, "healthy air cooling should stay below 85 C, got {healthy_c}");
+        assert!(!healthy.fuel_exchanger_valves_open, "so the fuel exchanger is never called on");
+        assert!(healthy.fans_running[0] || healthy.fans_running[1], "something should be cooling");
+
+        let (failed_c, failed) = run([false; 2]);
+        assert!(failed_c > healthy_c, "losing the air exchangers must run hotter");
+        assert!(failed.fuel_exchanger_valves_open, "and must bring the fuel exchanger in");
+        assert!(failed_c.is_finite() && failed_c > FUEL_EXCHANGER_CLOSE_C);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heating_with_no_cooling_path_raises_temperature() {
+        let mut t = ThermalState::new(288.15);
+        let sizing = ThermalSizing::a380_circuit();
+        let mut out = ThermalOutputs::default();
+        for _ in 0..600 {
+            out = t.step(&sizing, 2000.0, 0.0, 0.0, 0.0, 288.15, 288.15, 1.0);
+        }
+        assert!(out.temp_k > 288.15);
+    }
+
+    #[test]
+    fn the_fuel_heat_exchanger_removes_heat_and_warms_the_fuel() {
+        let mut t = ThermalState::new(360.0);
+        let sizing = ThermalSizing::a380_circuit();
+        let out = t.step(&sizing, 0.0, 0.0, 1.0, 1.0, 288.15, 288.15, 0.01);
+        assert!(out.fuel_heat_w > 0.0);
+        assert!(out.fuel_out_k > 288.15);
+    }
+
+    #[test]
+    fn settles_to_a_stable_temperature_under_constant_heat_load() {
+        let mut t = ThermalState::new(288.15);
+        let sizing = ThermalSizing::a380_circuit();
+        let mut last = 0.0;
+        for _ in 0..20000 {
+            let out = t.step(&sizing, 3000.0, 500.0, 0.5, 1.5, 288.15, 288.15, 1.0);
+            last = out.temp_k;
+        }
+        assert!(last.is_finite());
+        assert!(last < 500.0, "should settle, not run away: {last} K");
+        assert!(last > 288.15);
+    }
+
+    #[test]
+    fn overheat_flag_trips_above_the_skydrol_continuous_limit() {
+        let mut t = ThermalState::new(OVERHEAT_K + 5.0);
+        let out = t.step(&ThermalSizing::a380_circuit(), 0.0, 0.0, 0.0, 0.0, 288.15, 288.15, 0.0);
+        assert!(out.overheat);
+        let mut cool = ThermalState::new(320.0);
+        let out2 = cool.step(&ThermalSizing::a380_circuit(), 0.0, 0.0, 0.0, 0.0, 288.15, 288.15, 0.0);
+        assert!(!out2.overheat);
+    }
+
+    #[test]
+    fn throttling_heat_scales_with_flow_and_pressure_drop() {
+        assert_eq!(throttling_heat_w(0.0, 1000.0), 0.0);
+        let h1 = throttling_heat_w(1e-4, 1.0e6);
+        let h2 = throttling_heat_w(2e-4, 1.0e6);
+        assert!((h2 / h1 - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_nan_at_dt_zero_or_rest() {
+        let mut t = ThermalState::new(288.15);
+        let out = t.step(&ThermalSizing::a380_circuit(), 0.0, 0.0, 0.0, 0.0, 288.15, 288.15, 0.0);
+        assert!(out.temp_k.is_finite());
+        assert!((out.temp_k - 288.15).abs() < 1e-9, "dt=0 must not move the state: {}", out.temp_k);
+    }
+}

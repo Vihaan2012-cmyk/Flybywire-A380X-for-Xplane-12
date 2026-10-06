@@ -1,0 +1,525 @@
+use crate::deep::api::*;
+
+pub fn register(r: &mut Registry) {
+    register_engine_bleed_duct(r);
+    register_engine_precooler(r);
+    register_upstream_stage(r);
+    register_apu_bleed_duct(r);
+    register_apu_precooler(r);
+    register_pack_supply_duct(r);
+    register_wai_duct(r);
+    register_engine_start_duct(r);
+    register_hyd_reservoir_duct(r);
+    register_ecam_completeness_additions(r);
+    register_odls(r);
+    register_ecam(r);
+}
+
+fn register_ecam_completeness_additions(r: &mut Registry) {
+    const ATA: u16 = 21;
+    for (n, pack) in [1u16, 2].into_iter().zip([1, 2]) {
+        let comp = format!("21_pneu.pack_{pack}_regulation_train");
+        let fid = failure_id(Area::PneumaticDucts, ATA, n);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} regulation train (bypass valve / water extractor / ram-air-door interlock)"),
+            params: vec![ParamDef { name: "fault".into(), meaning: "the regulation train itself broken, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} regulation train fault"),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.pack_regul_fault".into(),
+            magnitude: "0 healthy .. 1 fully faulted -- a component-broken flag, not a physical quantity".into(),
+            effect: "FlyByWire's own 211800015/016 PACK n REGUL FAULT; distinct from the already-wired FDAC BothChannelsFault (211800009/010) and from the FDAC channel-redundancy bridge (211800022) -- see E-AIR-DESIGN.md".into(),
+        });
+    }
+
+    {
+        let comp = "21_pneu.mixer_unit_press_regulator".to_string();
+        let fid = failure_id(Area::PneumaticDucts, ATA, 3);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Mixer unit pressure regulator".into(),
+            params: vec![ParamDef { name: "fault".into(), meaning: "the regulator failing to hold its own setpoint, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Mixer unit pressure regulator fault".into(),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.mixer_press_regul_fault".into(),
+            magnitude: "0 healthy .. 1 fully faulted".into(),
+            effect: "FlyByWire's own 211800034 MIXER PRESS REGUL FAULT; a380_systems acknowledges this exact real failure mode as an unimplemented TODO (full_digital_agu_controller.rs:287) rather than modelling it, so this is a real, sourced gap this port fills, not an invented one".into(),
+        });
+    }
+
+    for (n, pack) in [4u16, 5].into_iter().zip([1, 2]) {
+        let comp = format!("21_pneu.pack_{pack}_ram_air_door");
+        let fid = failure_id(Area::PneumaticDucts, ATA, n);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} ram-air inlet door"),
+            params: vec![ParamDef { name: "stuck".into(), meaning: "door frozen at whatever position it held when the fault engaged, independent of its own command, 0 healthy .. 1 fully stuck".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} ram-air door stuck"),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.ram_air_door_fault".into(),
+            magnitude: "0 healthy .. 1 stuck -- a component-broken flag; the door's real, already-published position (COND_PACK_n_RAM_AIR_DOOR_POSITION, air_cycle_machine.rs:177) always tracks its own command with no independent failure mode in a380_systems, so this fault is the independent failure mode itself rather than a numeric position-disagree threshold, which nothing sources".into(),
+            effect: "FlyByWire's own 211800037/038 COND RAM AIR n FAULT".into(),
+        });
+    }
+
+    {
+        let comp = "21_pneu.press_manual_control_path".to_string();
+        let fid = failure_id(Area::PneumaticDucts, ATA, 6);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Manual pressurisation control path (altitude/V-S selectors)".into(),
+            params: vec![ParamDef { name: "fault".into(), meaning: "the manual signal path itself broken, distinct from the automatic CPIOM channels, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Manual pressurisation control path fault".into(),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.press_man_ctl_fault".into(),
+            magnitude: "0 healthy .. 1 fully faulted".into(),
+            effect: "FlyByWire's own 213800010 CAB PRESS MAN CTL FAULT; distinct from the already-wired 213800005 AUTO CTL FAULT (the automatic channels)".into(),
+        });
+    }
+
+    {
+        let comp = "21_pneu.cabin_air_extract_valve".to_string();
+        let fid = failure_id(Area::PneumaticDucts, ATA, 7);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Cabin air extract valve (overhead CABIN AIR EXTRACT pushbutton's own valve)".into(),
+            params: vec![ParamDef { name: "fault".into(), meaning: "the valve itself broken, 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: "Cabin air extract valve fault".into(),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.cabin_air_extract_vlv_fault".into(),
+            magnitude: "0 healthy .. 1 fully faulted".into(),
+            effect: "FlyByWire's own 213800018 COND CABIN AIR EXTRACT VLV FAULT; distinct from the FWD/BULK cargo isolation valves, which are cargo-hold ventilation, a different valve".into(),
+        });
+    }
+
+    for (n, pack) in [8u16, 9].into_iter().zip([1, 2]) {
+        let comp = format!("21_pneu.pack_{pack}_air_cycle_machine");
+        let fid = failure_id(Area::PneumaticDucts, ATA, n);
+        r.component(ComponentDef {
+            id: comp.clone(),
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} air cycle machine (ACM)"),
+            params: vec![ParamDef { name: "overheat".into(), meaning: "the ACM's own cooling effectiveness lost, 0 healthy (cools fully to ambient) .. 1 no cooling at all (outlet = hot inlet air)".into(), healthy: 0.0 }],
+            failures: vec![fid],
+        });
+        r.failure(FailureDef {
+            id: fid,
+            area: Area::PneumaticDucts,
+            ata: ATA,
+            name: format!("Pack {pack} ACM overheat"),
+            component: comp,
+            model_field: "pneumatic_ducts::live::PneumaticDuctsLive.pack_acm_outlet_temp_c".into(),
+            magnitude: "0 healthy (outlet tracks ambient) .. 1 fully faulted (outlet tracks the pack's real, already-computed inlet temperature, DEEP_PNEU_PACK_n_SUPPLY_TEMPERATURE_C)".into(),
+            effect: "FlyByWire's own 211800013/014 AIR PACK n OVHT; the real trip point (95 C at the pack outlet) is cited in fbw/ata21_22_23.rs, FCOM PRO-ABN-ECAM p.4653 (E-AIR-FCOM.json), not invented -- this failure only degrades the modelled outlet temperature the trigger compares against it".into(),
+        });
+    }
+
+    for p in 1u16..=2 {
+        for v in 1u16..=2 {
+            let n = 10 + (p - 1) * 2 + (v - 1);
+            let comp = format!("21_pneu.pack_{p}_fcv_{v}");
+            let fid = failure_id(Area::PneumaticDucts, ATA, n);
+            r.component(ComponentDef {
+                id: comp.clone(),
+                area: Area::PneumaticDucts,
+                ata: ATA,
+                name: format!("Pack {p} flow control valve (FCV) {v}"),
+                params: vec![ParamDef { name: "fault".into(), meaning: "the valve itself broken (position disagree or its FDAC channels both down), 0 healthy .. 1 fully faulted".into(), healthy: 0.0 }],
+                failures: vec![fid],
+            });
+            r.failure(FailureDef {
+                id: fid,
+                area: Area::PneumaticDucts,
+                ata: ATA,
+                name: format!("Pack {p} FCV {v} fault"),
+                component: comp,
+                model_field: "pneumatic_ducts::live::PneumaticDuctsLive.pack_fcv_fault".into(),
+                magnitude: "0 healthy .. 1 fully faulted -- a component-broken flag, the same shape as ELEC_GEN_n_FAULT in fbw/ata24.rs".into(),
+                effect: format!(
+                    "FlyByWire's own 2118000{} AIR PACK {p} VLV {v} FAULT. The design sheet's plan to bridge FlyByWire's own already-computed FcvFault (full_digital_agu_controller.rs:310-394) is not buildable without adding a write() line in fbw-aircraft, which this worktree's hard rules forbid touching; this is this area's own real FCV component instead, no threshold invented.",
+                    match (p, v) { (1,1) => 17, (1,2) => 18, (2,1) => 19, _ => 20 }
+                ),
+            });
+        }
+    }
+}
+
+fn register_upstream_stage(r: &mut Registry) {
+    let component = "36_pneu.engine_upstream_valve_stage".to_string();
+    r.component(ComponentDef {
+        id: component.clone(),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine IP tap / HP valve / PR (shutoff) valve stage (x4 engines)".into(),
+        params: vec![
+            ParamDef { name: "hp_valve_stuck".into(), meaning: "HP6 valve seized at its position when the fault engaged, 0 healthy .. 1 seized".into(), healthy: 0.0 },
+            ParamDef { name: "pr_valve_stuck".into(), meaning: "PR/shutoff valve (the real 'ENG n BLEED' pushbutton's own valve) seized, 0 healthy .. 1 seized".into(), healthy: 0.0 },
+            ParamDef { name: "ip_check_valve_stuck_closed".into(), meaning: "IP8 passive tap stuck toward closed, forcing reliance on the HP valve, 0 healthy .. 1 fully shut".into(), healthy: 0.0 },
+        ],
+        failures: vec![failure_id(Area::PneumaticDucts, 36, 15), failure_id(Area::PneumaticDucts, 36, 16), failure_id(Area::PneumaticDucts, 36, 17)],
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 15),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine HP valve stuck".into(),
+        component: component.clone(),
+        model_field: "network::UpstreamFaults.hp_valve_stuck (network::DuctNetworkFaults.upstream[n])".into(),
+        magnitude: "0 healthy .. 1 seized at whatever position it last held".into(),
+        effect: "Stuck shut: no HP6 backup once IP8 falls below the EASA switch-over pressure, engine duct pressure sags. Stuck open: continues drawing hot HP6 air even once IP8 alone would suffice, an avoidable EGT/performance penalty upstream at the compressor.".into(),
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 16),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine PR (shutoff) valve stuck".into(),
+        component: component.clone(),
+        model_field: "network::UpstreamFaults.pr_valve_stuck (network::DuctNetworkFaults.upstream[n])".into(),
+        magnitude: "0 healthy .. 1 seized at whatever position it last held".into(),
+        effect: "Stuck shut: that engine can no longer supply its own duct at all (a real 'ENG n BLEED FAULT'), leaving it dependent on cross-bleed. Stuck open: an ODLS trip's own isolation command can no longer close it, defeating the real isolation this system exists for.".into(),
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 17),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine IP8 check valve stuck closed".into(),
+        component,
+        model_field: "network::UpstreamFaults.ip_check_valve_stuck_closed (network::DuctNetworkFaults.upstream[n])".into(),
+        magnitude: "0 healthy .. 1 fully stuck shut".into(),
+        effect: "The passive IP8 tap can no longer pass its normal share of flow, forcing the HP valve to open further/more often than normal to hold regulation -- a real, measurable shift from the efficient IP8 source to the costlier HP6 one.".into(),
+    });
+}
+
+fn register_engine_bleed_duct(r: &mut Registry) {
+    let component = "36_pneu.engine_bleed_duct".to_string();
+    r.component(ComponentDef {
+        id: component.clone(),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine bleed duct, pylon run (x4 engines)".into(),
+        params: vec![
+            ParamDef { name: "leak".into(), meaning: "Crack/seal failure, orifice area 0..2% of the duct's own bore".into(), healthy: 0.0 },
+            ParamDef { name: "rupture".into(), meaning: "Duct severance, orifice area 0..100% of full bore".into(), healthy: 0.0 },
+            ParamDef { name: "insulation_damage".into(), meaning: "Lagging blanket torn/missing, conductance to the pylon zone rises up to 10x".into(), healthy: 0.0 },
+        ],
+        failures: vec![failure_id(Area::PneumaticDucts, 36, 1), failure_id(Area::PneumaticDucts, 36, 2), failure_id(Area::PneumaticDucts, 36, 3)],
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 1),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine bleed duct leak".into(),
+        component: component.clone(),
+        model_field: "duct::DuctSectionFaults.leak (network::DuctNetworkFaults.engine_duct[n])".into(),
+        magnitude: "Crack area, 0 healthy .. 1 = 2% of the duct's bore area (leak.rs::LEAK_AREA_FRACTION_OF_BORE)".into(),
+        effect: "Mass flow escapes to the pylon zone (leak.rs::step); manifold/downstream pressure sags proportionally, and the pylon ODLS eventually trips on the resulting heat if severe enough".into(),
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 2),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine bleed duct rupture".into(),
+        component: component.clone(),
+        model_field: "duct::DuctSectionFaults.rupture (network::DuctNetworkFaults.engine_duct[n])".into(),
+        magnitude: "Severance area, 0 healthy .. 1 = full duct bore area".into(),
+        effect: "Large mass flow escapes as a near-sonic jet; above leak.rs::RUPTURE_JET_ONSET the jet is treated as impinging (higher heat-transfer effectiveness into the pylon zone), reliably tripping that pylon's ODLS and, once confirmed, latching that engine's isolation valve shut (network.rs)".into(),
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 3),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine bleed duct insulation damage".into(),
+        component,
+        model_field: "duct::DuctSectionFaults.insulation_damage (network::DuctNetworkFaults.engine_duct[n])".into(),
+        magnitude: "Lagging condition, 0 intact .. 1 fully bare pipe (duct.rs::DuctSection::BARE_PIPE_MULTIPLIER = 10x conductance)".into(),
+        effect: "The pylon zone receives ordinary (non-fault) duct heat loss at up to 10x the healthy rate -- no ODLS trip on its own at normal bleed temperatures, but raises the pylon's baseline temperature so a subsequent leak trips ODLS sooner".into(),
+    });
+}
+
+fn register_engine_precooler(r: &mut Registry) {
+    let component = "36_pneu.engine_precooler".to_string();
+    r.component(ComponentDef {
+        id: component.clone(),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine bleed precooler (x4 engines)".into(),
+        params: vec![
+            ParamDef { name: "fouling".into(), meaning: "Core scaling/debris, conductance loss 0 clean .. 1 = 80% conductance lost".into(), healthy: 0.0 },
+            ParamDef { name: "fan_air_valve_stuck".into(), meaning: "FAV seized at whatever position it last held, 0 healthy .. 1 seized".into(), healthy: 0.0 },
+            ParamDef { name: "temp_sensor_fault".into(), meaning: "Modulating outlet-temperature sensor frozen at its last good reading, 0 healthy .. 1 frozen".into(), healthy: 0.0 },
+            ParamDef { name: "check_valve_failure".into(), meaning: "Non-return valve leaks ambient air backward into the duct, 0 healthy .. 1 fully open in reverse".into(), healthy: 0.0 },
+        ],
+        failures: vec![
+            failure_id(Area::PneumaticDucts, 36, 4),
+            failure_id(Area::PneumaticDucts, 36, 5),
+            failure_id(Area::PneumaticDucts, 36, 6),
+            failure_id(Area::PneumaticDucts, 36, 7),
+        ],
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 4),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine precooler fouling".into(),
+        component: component.clone(),
+        model_field: "precooler::PrecoolerFaults.fouling (network::DuctNetworkFaults.engine_precooler[n])".into(),
+        magnitude: "Conductance loss fraction, 0 clean .. 1 (precooler.rs::FOULING_MAX_REDUCTION = 80% loss at 1.0)".into(),
+        effect: "For the same cooling flow the outlet runs hotter (precooler.rs's NTU-effectiveness heat exchange); the FAV opens further to compensate, and at full fouling may not hold the outlet near target at all, raising overtemperature-trip risk".into(),
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 5),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine precooler fan air valve stuck".into(),
+        component: component.clone(),
+        model_field: "precooler::PrecoolerFaults.fan_air_valve_stuck (network::DuctNetworkFaults.engine_precooler[n])".into(),
+        magnitude: "0 healthy .. 1 seized at its position when the fault engaged".into(),
+        effect: "No further cooling-flow modulation: stuck closed (or partly open) leaves the bleed hot regardless of demand; the hard overtemperature protection (true-temperature-based, module docs) is unaffected by this fault and can still force full flow via a separate path -- but a valve seized fully open cannot heed it either".into(),
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 6),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine precooler outlet temperature sensor fault".into(),
+        component: component.clone(),
+        model_field: "precooler::PrecoolerFaults.temp_sensor_fault (network::DuctNetworkFaults.engine_precooler[n])".into(),
+        magnitude: "0 healthy .. 1 frozen at the last good reading".into(),
+        effect: "The modulating FAV loop under/over-corrects against a stale reading; the independent hard overtemperature trip still sees the true temperature (precooler.rs module docs: a biased sensor cannot defeat it), so this fault degrades regulation quality without defeating the safety protection".into(),
+    });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 7),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine precooler check valve failure".into(),
+        component,
+        model_field: "precooler::PrecoolerFaults.check_valve_failure (network::DuctNetworkFaults.engine_precooler[n])".into(),
+        magnitude: "0 healthy .. 1 fully open in reverse".into(),
+        effect: "When duct pressure sags below ambient (e.g. low power, other faults), outside air is drawn back into the duct uncontrolled instead of being blocked, cooling/diluting it unpredictably".into(),
+    });
+}
+
+fn register_apu_bleed_duct(r: &mut Registry) {
+    let component = "36_pneu.apu_bleed_duct".to_string();
+    r.component(ComponentDef {
+        id: component.clone(),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "APU bleed duct (x1)".into(),
+        params: vec![
+            ParamDef { name: "leak".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "rupture".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "insulation_damage".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+        ],
+        failures: vec![failure_id(Area::PneumaticDucts, 36, 8), failure_id(Area::PneumaticDucts, 36, 9), failure_id(Area::PneumaticDucts, 36, 10)],
+    });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 8), area: Area::PneumaticDucts, ata: 36, name: "APU bleed duct leak".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.apu_duct.leak".into(), magnitude: "Same as fault 1, applied to the APU bay zone".into(), effect: "Same as fault 1; heats the APU bay instead of a pylon".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 9), area: Area::PneumaticDucts, ata: 36, name: "APU bleed duct rupture".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.apu_duct.rupture".into(), magnitude: "Same as fault 2, applied to the APU bay zone".into(), effect: "Same as fault 2; can trip the APU bay ODLS and latch the APU isolation valve shut".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 10), area: Area::PneumaticDucts, ata: 36, name: "APU bleed duct insulation damage".into(), component, model_field: "network::DuctNetworkFaults.apu_duct.insulation_damage".into(), magnitude: "Same as fault 3".into(), effect: "Same as fault 3, applied to the APU bay zone".into() });
+}
+
+fn register_apu_precooler(r: &mut Registry) {
+    let component = "36_pneu.apu_precooler".to_string();
+    r.component(ComponentDef {
+        id: component.clone(),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "APU load-compressor precooler (x1)".into(),
+        params: vec![
+            ParamDef { name: "fouling".into(), meaning: "Same mechanism as the engine precooler".into(), healthy: 0.0 },
+            ParamDef { name: "fan_air_valve_stuck".into(), meaning: "Same mechanism as the engine precooler".into(), healthy: 0.0 },
+            ParamDef { name: "temp_sensor_fault".into(), meaning: "Same mechanism as the engine precooler".into(), healthy: 0.0 },
+            ParamDef { name: "check_valve_failure".into(), meaning: "Same mechanism as the engine precooler".into(), healthy: 0.0 },
+        ],
+        failures: vec![
+            failure_id(Area::PneumaticDucts, 36, 11),
+            failure_id(Area::PneumaticDucts, 36, 12),
+            failure_id(Area::PneumaticDucts, 36, 13),
+            failure_id(Area::PneumaticDucts, 36, 14),
+        ],
+    });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 11), area: Area::PneumaticDucts, ata: 36, name: "APU precooler fouling".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.apu_precooler.fouling".into(), magnitude: "Same as fault 4".into(), effect: "Same as fault 4".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 12), area: Area::PneumaticDucts, ata: 36, name: "APU precooler fan air valve stuck".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.apu_precooler.fan_air_valve_stuck".into(), magnitude: "Same as fault 5".into(), effect: "Same as fault 5".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 13), area: Area::PneumaticDucts, ata: 36, name: "APU precooler outlet temperature sensor fault".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.apu_precooler.temp_sensor_fault".into(), magnitude: "Same as fault 6".into(), effect: "Same as fault 6".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 14), area: Area::PneumaticDucts, ata: 36, name: "APU precooler check valve failure".into(), component, model_field: "network::DuctNetworkFaults.apu_precooler.check_valve_failure".into(), magnitude: "Same as fault 7".into(), effect: "Same as fault 7".into() });
+}
+
+fn register_pack_supply_duct(r: &mut Registry) {
+    let component = "36_pneu.pack_supply_duct".to_string();
+    r.component(ComponentDef {
+        id: component.clone(),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Pack supply duct (x2 packs)".into(),
+        params: vec![
+            ParamDef { name: "leak".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "rupture".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "insulation_damage".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+        ],
+        failures: vec![failure_id(Area::PneumaticDucts, 36, 18), failure_id(Area::PneumaticDucts, 36, 19), failure_id(Area::PneumaticDucts, 36, 20)],
+    });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 18), area: Area::PneumaticDucts, ata: 36, name: "Pack supply duct leak".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.packs[n].leak".into(), magnitude: "Same as fault 1".into(), effect: "Starves that pack of supply pressure; the manifold and other consumers are largely unaffected (downstream of the pack valve)".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 19), area: Area::PneumaticDucts, ata: 36, name: "Pack supply duct rupture".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.packs[n].rupture".into(), magnitude: "Same as fault 2".into(), effect: "Same as fault 18, far more severely".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 20), area: Area::PneumaticDucts, ata: 36, name: "Pack supply duct insulation damage".into(), component, model_field: "network::DuctNetworkFaults.packs[n].insulation_damage".into(), magnitude: "Same as fault 3".into(), effect: "Same as fault 3, applied to the wing-root zone".into() });
+}
+
+fn register_wai_duct(r: &mut Registry) {
+    let component = "30_pneu.wing_anti_ice_duct".to_string();
+    r.component(ComponentDef {
+        id: component.clone(),
+        area: Area::PneumaticDucts,
+        ata: 30,
+        name: "Wing anti-ice duct (x2, L/R leading edge)".into(),
+        params: vec![
+            ParamDef { name: "leak".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "rupture".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "insulation_damage".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+        ],
+        failures: vec![failure_id(Area::PneumaticDucts, 30, 1), failure_id(Area::PneumaticDucts, 30, 2), failure_id(Area::PneumaticDucts, 30, 3)],
+    });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 30, 1), area: Area::PneumaticDucts, ata: 30, name: "Wing anti-ice duct leak".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.wai[n].leak".into(), magnitude: "Same as fault 1".into(), effect: "Heats that wing's leading-edge zone directly (real risk: an undetected WAI duct leak burning through the leading-edge structure, the well-publicised reason this class of system carries ODLS at all)".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 30, 2), area: Area::PneumaticDucts, ata: 30, name: "Wing anti-ice duct rupture".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.wai[n].rupture".into(), magnitude: "Same as fault 2".into(), effect: "Same as fault 1, far more severely; reliably trips that side's leading-edge ODLS".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 30, 3), area: Area::PneumaticDucts, ata: 30, name: "Wing anti-ice duct insulation damage".into(), component, model_field: "network::DuctNetworkFaults.wai[n].insulation_damage".into(), magnitude: "Same as fault 3".into(), effect: "Same as fault 3".into() });
+}
+
+fn register_engine_start_duct(r: &mut Registry) {
+    let component = "36_pneu.engine_start_duct".to_string();
+    r.component(ComponentDef {
+        id: component.clone(),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine pneumatic starter duct (x4 engines)".into(),
+        params: vec![
+            ParamDef { name: "leak".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "rupture".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "insulation_damage".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "check_valve_failure".into(), meaning: "Non-return valve leaks the lit engine's own rising pressure backward into the manifold, 0 healthy .. 1 fully open in reverse".into(), healthy: 0.0 },
+        ],
+        failures: vec![
+            failure_id(Area::PneumaticDucts, 36, 21),
+            failure_id(Area::PneumaticDucts, 36, 22),
+            failure_id(Area::PneumaticDucts, 36, 23),
+            failure_id(Area::PneumaticDucts, 36, 24),
+        ],
+    });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 21), area: Area::PneumaticDucts, ata: 36, name: "Engine start duct leak".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.start[n].leak".into(), magnitude: "Same as fault 1".into(), effect: "Weakens starter torque available at the engine during a pneumatic start; heats that engine's own pylon zone".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 22), area: Area::PneumaticDucts, ata: 36, name: "Engine start duct rupture".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.start[n].rupture".into(), magnitude: "Same as fault 2".into(), effect: "Same as fault 21, far more severely".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 23), area: Area::PneumaticDucts, ata: 36, name: "Engine start duct insulation damage".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.start[n].insulation_damage".into(), magnitude: "Same as fault 3".into(), effect: "Same as fault 3".into() });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 24),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Engine start duct check valve failure".into(),
+        component,
+        model_field: "network::DuctNetworkFaults.start_check_valve_failure[n] (duct::one_way_transfer_kg's backflow_leak_fraction)".into(),
+        magnitude: "0 healthy (perfect non-return) .. 1 fully open in reverse".into(),
+        effect: "Once that engine lights and its own pressure exceeds the manifold's, a failed check valve lets it push pressure/heat backward into the manifold instead of being blocked -- disturbs every other consumer sharing the manifold during that engine's start".into(),
+    });
+}
+
+fn register_hyd_reservoir_duct(r: &mut Registry) {
+    let component = "36_pneu.hydraulic_reservoir_pressurisation_duct".to_string();
+    r.component(ComponentDef {
+        id: component.clone(),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Hydraulic reservoir pressurisation duct (x2, green/yellow)".into(),
+        params: vec![
+            ParamDef { name: "leak".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "rupture".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+            ParamDef { name: "insulation_damage".into(), meaning: "Same mechanism as the engine bleed duct".into(), healthy: 0.0 },
+        ],
+        failures: vec![failure_id(Area::PneumaticDucts, 36, 25), failure_id(Area::PneumaticDucts, 36, 26), failure_id(Area::PneumaticDucts, 36, 27)],
+    });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 25), area: Area::PneumaticDucts, ata: 36, name: "Hydraulic reservoir pressurisation duct leak".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.hyd_reservoir[n].leak".into(), magnitude: "Same as fault 1".into(), effect: "Reduces reservoir air pressurisation, raising cavitation risk for that hydraulic system's pumps at high demand".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 26), area: Area::PneumaticDucts, ata: 36, name: "Hydraulic reservoir pressurisation duct rupture".into(), component: component.clone(), model_field: "network::DuctNetworkFaults.hyd_reservoir[n].rupture".into(), magnitude: "Same as fault 2".into(), effect: "Same as fault 25, far more severely".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 27), area: Area::PneumaticDucts, ata: 36, name: "Hydraulic reservoir pressurisation duct insulation damage".into(), component, model_field: "network::DuctNetworkFaults.hyd_reservoir[n].insulation_damage".into(), magnitude: "Same as fault 3".into(), effect: "Same as fault 3".into() });
+}
+
+fn register_odls(r: &mut Registry) {
+    let component = "36_pneu.overheat_detection_loop".to_string();
+    r.component(ComponentDef {
+        id: component.clone(),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "Overheat Detection Loop System, dual-loop (x8 zones: 4 pylons, wing root, APU bay, 2 wing leading edges)".into(),
+        params: vec![
+            ParamDef { name: "loop_a_open".into(), meaning: "Loop A element circuit broken: no valid reading from A, 0 healthy .. 1 fully open".into(), healthy: 0.0 },
+            ParamDef { name: "loop_a_short".into(), meaning: "Loop A element shorted: A pegs at a fixed high (false-hot) reading, 0 healthy .. 1 fully shorted".into(), healthy: 0.0 },
+            ParamDef { name: "loop_b_open".into(), meaning: "Same as loop_a_open, loop B".into(), healthy: 0.0 },
+            ParamDef { name: "loop_b_short".into(), meaning: "Same as loop_a_short, loop B".into(), healthy: 0.0 },
+            ParamDef { name: "false_detection".into(), meaning: "System-level spurious trip not tied to either loop's own wiring, 0 healthy .. 1 trips a cold zone on its own".into(), healthy: 0.0 },
+        ],
+        failures: vec![
+            failure_id(Area::PneumaticDucts, 36, 28),
+            failure_id(Area::PneumaticDucts, 36, 29),
+            failure_id(Area::PneumaticDucts, 36, 30),
+            failure_id(Area::PneumaticDucts, 36, 31),
+            failure_id(Area::PneumaticDucts, 36, 32),
+        ],
+    });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 28), area: Area::PneumaticDucts, ata: 36, name: "ODLS loop A open circuit".into(), component: component.clone(), model_field: "odls::OdlsFaults.loop_a_open (network::DuctNetworkFaults.odls[zone])".into(), magnitude: "0 healthy .. 1 open (>= 0.5 treated as fully open, odls.rs::interpret)".into(), effect: "Loop A stops providing a valid reading; loop B alone still governs trip/no-trip (fail-safe voting, odls.rs). Both loops open at once reports a FAULT with no valid detection at all".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 29), area: Area::PneumaticDucts, ata: 36, name: "ODLS loop A short circuit".into(), component: component.clone(), model_field: "odls::OdlsFaults.loop_a_short (network::DuctNetworkFaults.odls[zone])".into(), magnitude: "0 healthy .. 1 shorted (>= 0.5 treated as fully shorted)".into(), effect: "Loop A pegs at a fixed reading well past the trip threshold, tripping that zone's isolation on its own (a real false alarm from a genuine wiring fault, distinct from fault 32)".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 30), area: Area::PneumaticDucts, ata: 36, name: "ODLS loop B open circuit".into(), component: component.clone(), model_field: "odls::OdlsFaults.loop_b_open (network::DuctNetworkFaults.odls[zone])".into(), magnitude: "Same as fault 28, loop B".into(), effect: "Same as fault 28, loop B".into() });
+    r.failure(FailureDef { id: failure_id(Area::PneumaticDucts, 36, 31), area: Area::PneumaticDucts, ata: 36, name: "ODLS loop B short circuit".into(), component: component.clone(), model_field: "odls::OdlsFaults.loop_b_short (network::DuctNetworkFaults.odls[zone])".into(), magnitude: "Same as fault 29, loop B".into(), effect: "Same as fault 29, loop B".into() });
+    r.failure(FailureDef {
+        id: failure_id(Area::PneumaticDucts, 36, 32),
+        area: Area::PneumaticDucts,
+        ata: 36,
+        name: "ODLS false detection".into(),
+        component,
+        model_field: "odls::OdlsFaults.false_detection (network::DuctNetworkFaults.odls[zone])".into(),
+        magnitude: "0 healthy .. 1 = a cold zone trips on its own regardless of real temperature (odls.rs::FALSE_DETECTION_FULL_K)".into(),
+        effect: "Trips and latches that zone's isolation valve shut with no real overheat present -- a nuisance trip, not a wiring fault on either specific loop (distinct from faults 29/31)".into(),
+    });
+}
+
+fn register_ecam(r: &mut Registry) {
+    r.alert(
+        EcamAlert::new("DEEP_PNEU_APU_BLEED_LEAK", 36, "AIR APU BLEED LEAK", Level::Warning, var("DEEP_PNEU_ODLS_TailCone_TRIP").on())
+            .confirm(1.0)
+            .step(line("APU BLEED", "OFF").done(var("A32NX_OVHD_PNEU_APU_BLEED_PB_IS_ON").off()))
+            .status_line("AIR APU BLEED LEAK")
+            .raised_by(&[failure_id(Area::PneumaticDucts, 36, 8), failure_id(Area::PneumaticDucts, 36, 9)]),
+    );
+}

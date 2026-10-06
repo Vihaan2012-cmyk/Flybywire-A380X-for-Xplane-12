@@ -1,0 +1,221 @@
+// Copyright (c) 2021-2025 FlyByWire Simulations
+//
+// SPDX-License-Identifier: GPL-3.0
+
+/* eslint-disable no-await-in-loop */
+
+import { Clock, EventBus, HEventPublisher, InstrumentBackplane } from '@microsoft/msfs-sdk';
+import {
+  BaroUnitSelector,
+  ExtrasSimVarPublisher,
+  FlightDeckBounds,
+  GPUManagement,
+  GroundSupportPublisher,
+  isMsfs2024,
+  GsxSimVarPublisher,
+  GsxSyncA32NX,
+  MsfsElectricsPublisher,
+  MsfsFlightModelPublisher,
+  MsfsMiscPublisher,
+  MsfsVersionPopupMonitor,
+  NotificationManager,
+  PilotSeatManager,
+  PilotSeatPublisher,
+  TelexCheck,
+} from '@flybywiresim/fbw-sdk';
+import { PushbuttonCheck } from './modules/pushbutton_check/PushbuttonCheck';
+import { FlightPlanAsoboSync } from './modules/flightplan_sync/FlightPlanAsoboSync';
+import { A32NXKeyInterceptor } from './modules/key_interceptor/KeyInterceptor';
+import { VersionCheck } from './modules/version_check/VersionCheck';
+import { AircraftSync } from './modules/aircraft_sync/AircraftSync';
+import { LightSync } from './modules/light_sync/LightSync';
+import { A32NXEcpBusPublisher } from '../shared/src/publishers/A32NXEcpBusPublisher';
+
+/**
+ * This is the main class for the extras-host instrument.
+ *
+ * It provides an environment for non-aircraft non-wasm systems/modules to run in.
+ *
+ * Usage:
+ *  - Add new modules as private readonly members of this class.
+ *  - Add the modules to the constructor if not constructed in the definition.
+ *  - If the modules do implement Instrument or Publisher (preferred):
+ *    - Add the modules to the backplane, init and update will be taken care of by the backplane.
+ *  - If the modules do not implement Instrument or Publisher:
+ *    - Add the modules to the connectedCallback() method.
+ *    - Add the modules to the Update() method.
+ *
+ * Each module not on the backplane must implement the following methods:
+ * - `constructor` to get access to the system-wide EventBus
+ * - `connectedCallback` which is called after the simulator set up everything. These functions will also add the subscribtion to special events.
+ * - `startPublish` which is called as soon as the simulator starts running. It will also start publishing the simulator variables onto the EventBus
+ * - `update` is called in every update call of the simulator, but only after `startPublish` is called
+ */
+class ExtrasHost extends BaseInstrument {
+  private static readonly flightDeckBounds: FlightDeckBounds = {
+    minX: -0.79,
+    maxX: 0.79,
+    minY: 1.0,
+    maxY: 2.8,
+    minZ: 9.7,
+    maxZ: 11.8,
+  };
+
+  private readonly bus = new EventBus();
+
+  private readonly backplane = new InstrumentBackplane();
+
+  private readonly clock = new Clock(this.bus);
+
+  private readonly msfsVersionPopup = new MsfsVersionPopupMonitor(this.bus, 'A32NX');
+
+  private readonly notificationManager: NotificationManager;
+
+  private readonly hEventPublisher: HEventPublisher;
+
+  private readonly simVarPublisher: ExtrasSimVarPublisher;
+
+  private readonly msfsElectricsPublisher: MsfsElectricsPublisher;
+
+  private readonly msfsFlightModelPublisher: MsfsFlightModelPublisher;
+
+  private readonly msfsMiscPublisher: MsfsMiscPublisher;
+
+  private readonly groundSupportPublisher: GroundSupportPublisher;
+
+  private readonly gsxSimVarPublusher: GsxSimVarPublisher;
+
+  private readonly pushbuttonCheck: PushbuttonCheck;
+
+  private readonly versionCheck: VersionCheck;
+
+  private readonly keyInterceptor: A32NXKeyInterceptor;
+
+  private readonly aircraftSync: AircraftSync;
+
+  private readonly pilotSeatManager = new PilotSeatManager(ExtrasHost.flightDeckBounds);
+
+  private readonly telexCheck = new TelexCheck();
+
+  private readonly flightPlanAsoboSync: FlightPlanAsoboSync | undefined;
+
+  /**interactionpoint 8 is GPU connection and 1 GPU in total */
+  private readonly gpuManagement = new GPUManagement(this.bus, 8, 1);
+
+  private readonly lightSync: LightSync = new LightSync(this.bus);
+
+  private readonly baroUnitSelector = new BaroUnitSelector((isHpa) => {
+    SimVar.SetSimVarValue('L:A32NX_FCU_EFIS_L_BARO_IS_INHG', 'bool', !isHpa);
+    SimVar.SetSimVarValue('L:A32NX_FCU_EFIS_R_BARO_IS_INHG', 'bool', !isHpa);
+  });
+
+  private readonly gsxSync = new GsxSyncA32NX(this.bus);
+
+  /**
+   * "mainmenu" = 0
+   * "loading" = 1
+   * "briefing" = 2
+   * "ingame" = 3
+   */
+  private gameState = 0;
+
+  constructor() {
+    super();
+
+    const aircraftProjectPrefix = process.env.AIRCRAFT_PROJECT_PREFIX;
+
+    if (aircraftProjectPrefix === undefined) {
+      throw new Error('[ExtrasHost] AIRCRAFT_PROJECT_PREFIX was undefined');
+    }
+
+    this.hEventPublisher = new HEventPublisher(this.bus);
+    this.simVarPublisher = new ExtrasSimVarPublisher(this.bus);
+    this.msfsElectricsPublisher = new MsfsElectricsPublisher(this.bus);
+    this.msfsFlightModelPublisher = new MsfsFlightModelPublisher(this.bus);
+    this.msfsMiscPublisher = new MsfsMiscPublisher(this.bus);
+    this.groundSupportPublisher = new GroundSupportPublisher(this.bus);
+    this.gsxSimVarPublusher = new GsxSimVarPublisher(this.bus);
+
+    this.notificationManager = new NotificationManager(this.bus);
+
+    this.pushbuttonCheck = new PushbuttonCheck(this.bus, this.notificationManager);
+    this.keyInterceptor = new A32NXKeyInterceptor(this.bus, this.notificationManager);
+
+    this.versionCheck = new VersionCheck(aircraftProjectPrefix, this.bus);
+    this.aircraftSync = new AircraftSync(aircraftProjectPrefix, this.bus);
+
+    if (!isMsfs2024()) {
+      this.flightPlanAsoboSync = new FlightPlanAsoboSync(this.bus);
+    }
+
+    this.backplane.addPublisher('SimvarPublisher', this.simVarPublisher);
+    this.backplane.addPublisher('MsfsElectricsPublisher', this.msfsElectricsPublisher);
+    this.backplane.addPublisher('MsfsFlightModelPublisher', this.msfsFlightModelPublisher);
+    this.backplane.addPublisher('MsfsMiscPublisher', this.msfsMiscPublisher);
+    this.backplane.addPublisher('GroundSupportPublisher', this.groundSupportPublisher);
+    this.backplane.addPublisher('GsxSimVarPublisher', this.gsxSimVarPublusher);
+    this.backplane.addPublisher('A32NXEcpBusPublisher', new A32NXEcpBusPublisher(this.bus));
+    this.backplane.addPublisher('PilotSeatPublisher', new PilotSeatPublisher(this.bus));
+    this.backplane.addInstrument('PilotSeatManager', this.pilotSeatManager);
+    this.backplane.addInstrument('GPUManagement', this.gpuManagement);
+    this.backplane.addInstrument('Clock', this.clock);
+    this.backplane.addInstrument('LightSync', this.lightSync);
+    this.backplane.addInstrument('GsxSync', this.gsxSync);
+
+    console.log('A32NX_EXTRASHOST: Created');
+  }
+
+  get templateID(): string {
+    return 'A32NX_EXTRASHOST';
+  }
+
+  public getDeltaTime() {
+    return this.deltaTime;
+  }
+
+  public onInteractionEvent(args: string[]): void {
+    this.hEventPublisher.dispatchHEvent(args[0]);
+  }
+
+  public connectedCallback(): void {
+    super.connectedCallback();
+
+    this.pushbuttonCheck.connectedCallback();
+    this.versionCheck.connectedCallback();
+    this.flightPlanAsoboSync?.connectedCallback();
+    this.aircraftSync.connectedCallback();
+
+    this.backplane.init();
+
+    this.baroUnitSelector.performSelection();
+  }
+
+  public parseXMLConfig(): void {
+    super.parseXMLConfig();
+    this.aircraftSync.parseXMLConfig(this.xmlConfig);
+  }
+
+  public Update(): void {
+    super.Update();
+
+    if (this.gameState !== GameState.ingame) {
+      const gs = this.getGameState();
+      if (gs === GameState.ingame) {
+        this.hEventPublisher.startPublish();
+        this.versionCheck.startPublish();
+        this.keyInterceptor.startPublish();
+        this.flightPlanAsoboSync?.init();
+        this.aircraftSync.startPublish();
+        this.telexCheck.showPopup();
+      }
+      this.gameState = gs;
+    }
+
+    this.versionCheck.update();
+    this.aircraftSync.update();
+
+    this.backplane.onUpdate();
+  }
+}
+
+registerInstrument('extras-host', ExtrasHost);

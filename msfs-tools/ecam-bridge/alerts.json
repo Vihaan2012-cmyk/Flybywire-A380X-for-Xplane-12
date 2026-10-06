@@ -1,0 +1,4647 @@
+[
+  {
+    "key": "APU_EGT_OVER_LIMIT",
+    "ata": 49,
+    "title": "APU EGT OVER LIMIT",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:DEEP_APU_EGT",
+      "L:OVHD_APU_MASTER_SW_PB_IS_ON"
+    ],
+    "status": [
+      "APU INOP"
+    ],
+    "inop": [
+      "APU"
+    ]
+  },
+  {
+    "key": "APU_OVERSPEED",
+    "ata": 49,
+    "title": "APU OVERSPEED",
+    "level": "Warning",
+    "confirm_s": 0.5,
+    "vars": [
+      "L:DEEP_APU_N",
+      "L:OVHD_APU_MASTER_SW_PB_IS_ON"
+    ],
+    "status": [
+      "APU INOP"
+    ],
+    "inop": [
+      "APU"
+    ]
+  },
+  {
+    "key": "APU_OIL_LO_PR",
+    "ata": 49,
+    "title": "APU OIL LO PR",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:DEEP_APU_OIL_PRESSURE_PSI",
+      "L:OVHD_APU_MASTER_SW_PB_IS_ON"
+    ],
+    "status": [
+      "APU INOP"
+    ],
+    "inop": [
+      "APU"
+    ]
+  },
+  {
+    "key": "APU_BLEED_FAULT",
+    "ata": 49,
+    "title": "APU BLEED FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:APU_LOAD_COMPRESSOR_SURGE",
+      "L:OVHD_APU_BLEED_PB_IS_ON"
+    ],
+    "status": [
+      "APU BLEED INOP"
+    ],
+    "inop": [
+      "APU BLEED"
+    ]
+  },
+  {
+    "key": "APU_GEN_1_FAULT",
+    "ata": 49,
+    "title": "APU GEN 1 FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:APU_GEN_1_OVERLOAD",
+      "L:OVHD_ELEC_APU_GEN_1_PB_IS_ON"
+    ],
+    "status": [
+      "APU GEN 1 INOP"
+    ],
+    "inop": [
+      "APU GEN 1"
+    ]
+  },
+  {
+    "key": "APU_GEN_2_FAULT",
+    "ata": 49,
+    "title": "APU GEN 2 FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:APU_GEN_2_OVERLOAD",
+      "L:OVHD_ELEC_APU_GEN_2_PB_IS_ON"
+    ],
+    "status": [
+      "APU GEN 2 INOP"
+    ],
+    "inop": [
+      "APU GEN 2"
+    ]
+  },
+  {
+    "key": "APU_START_FAULT",
+    "ata": 49,
+    "title": "APU START FAULT",
+    "level": "Caution",
+    "confirm_s": 60.0,
+    "vars": [
+      "L:DEEP_APU_N",
+      "L:OVHD_APU_START_PB_IS_ON"
+    ],
+    "status": [
+      "APU START FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "AVNCS_NETWORK_A_FAULT",
+    "ata": 42,
+    "title": "NETWORK AFDX 1 FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:AFDX_NETWORK_A_AVAILABLE"
+    ],
+    "status": [
+      "NETWORK AFDX 1 FAULT"
+    ],
+    "inop": [
+      "AFDX NETWORK 1"
+    ]
+  },
+  {
+    "key": "AVNCS_NETWORK_B_FAULT",
+    "ata": 42,
+    "title": "NETWORK AFDX 2 FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:AFDX_NETWORK_B_AVAILABLE"
+    ],
+    "status": [
+      "NETWORK AFDX 2 FAULT"
+    ],
+    "inop": [
+      "AFDX NETWORK 2"
+    ]
+  },
+  {
+    "key": "AVNCS_NETWORK_AB_FAULT",
+    "ata": 42,
+    "title": "NETWORK AFDX 1+2 FAULT",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:AFDX_NETWORK_A_AVAILABLE",
+      "L:AFDX_NETWORK_B_AVAILABLE"
+    ],
+    "status": [
+      "NETWORK AFDX 1+2 FAULT"
+    ],
+    "inop": [
+      "AFDX NETWORK 1+2"
+    ]
+  },
+  {
+    "key": "AVNCS_MODULE_CPIOM_C1_FAULT",
+    "ata": 42,
+    "title": "NETWORK CPIOM-C1 FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:AVNCS_MODULE_CPIOM_C1_AVAILABLE"
+    ],
+    "status": [
+      "CPIOM-C1 FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "AVNCS_MODULE_CPIOM_A1_FAULT",
+    "ata": 42,
+    "title": "NETWORK CPIOM-A1 FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:AVNCS_MODULE_CPIOM_A1_AVAILABLE"
+    ],
+    "status": [
+      "CPIOM-A1 FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "AVNCS_MODULE_CPIOM_F1_FAULT",
+    "ata": 42,
+    "title": "NETWORK CPIOM-F1 FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:AVNCS_MODULE_CPIOM_F1_AVAILABLE"
+    ],
+    "status": [
+      "CPIOM-F1 FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "AVNCS_MODULE_IOM_A1_FAULT",
+    "ata": 42,
+    "title": "NETWORK IOM-A1 FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:AVNCS_MODULE_IOM_A1_AVAILABLE"
+    ],
+    "status": [
+      "IOM-A1 FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "AVNCS_MODULE_IOM_A5_FAULT",
+    "ata": 42,
+    "title": "NETWORK IOM-A5 FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:AVNCS_MODULE_IOM_A5_AVAILABLE"
+    ],
+    "status": [
+      "IOM-A5 FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "AVNCS_AVIONICS_BAY_AFT_VENT_FAULT",
+    "ata": 21,
+    "title": "AVIONICS BAY AFT VENT FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:AVNCS_AVIONICS_BAY_AFT_AIRFLOW_FRAC"
+    ],
+    "status": [
+      "AVIONICS BAY AFT VENT FAULT"
+    ],
+    "inop": [
+      "CPIOM-F1/IOM-A5"
+    ]
+  },
+  {
+    "key": "AVNCS_AVIONICS_BAY_FWD_VENT_FAULT",
+    "ata": 21,
+    "title": "AVIONICS BAY FWD VENT FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:AVNCS_AVIONICS_BAY_FWD_AIRFLOW_FRAC"
+    ],
+    "status": [
+      "AVIONICS BAY FWD VENT FAULT"
+    ],
+    "inop": [
+      "CPIOM-C1/CPIOM-A1/IOM-A1"
+    ]
+  },
+  {
+    "key": "CABIN_WATER_QTY_LO",
+    "ata": 38,
+    "title": "POTABLE WATER QTY LO",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:CABIN_WATER_QTY_PERCENT"
+    ],
+    "status": [
+      "POTABLE WATER LO QTY"
+    ],
+    "inop": []
+  },
+  {
+    "key": "CABIN_WATER_PRESS_FAULT",
+    "ata": 38,
+    "title": "POTABLE WATER PRESS FAULT",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:CABIN_WATER_COMPRESSOR_CMD",
+      "L:CABIN_WATER_PRESS_PSI"
+    ],
+    "status": [
+      "POTABLE WATER SYS DEGRADED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "CABIN_DRAIN_MAST_ICE",
+    "ata": 38,
+    "title": "DRAIN MAST ICING",
+    "level": "Advisory",
+    "confirm_s": 30.0,
+    "vars": [
+      "L:CABIN_MAST_BLOCKED:1",
+      "L:CABIN_MAST_BLOCKED:2"
+    ],
+    "status": [
+      "DRAIN MAST HEATER — CHECK MAINT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "CABIN_IFE_SMOKE",
+    "ata": 44,
+    "title": "CAB IFE SMOKE",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:CABIN_IFE_ZONE_SMOKE:1",
+      "L:CABIN_IFE_ZONE_SMOKE:2",
+      "L:CABIN_IFE_ZONE_SMOKE:3",
+      "L:CABIN_SEAT_POWER_CMD"
+    ],
+    "status": [
+      "IFE SEAT POWER — CHECK MAINT"
+    ],
+    "inop": [
+      "IFE"
+    ]
+  },
+  {
+    "key": "CABIN_IFE_SYS_FAULT",
+    "ata": 44,
+    "title": "IFE SYS FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:CABIN_IFE_SERVER_FAIL:1",
+      "L:CABIN_IFE_SERVER_FAIL:2"
+    ],
+    "status": [
+      "IFE SYS INOP"
+    ],
+    "inop": [
+      "IFE"
+    ]
+  },
+  {
+    "key": "CABIN_GALLEY_OVEN_SMOKE",
+    "ata": 25,
+    "title": "GALLEY OVEN SMOKE",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:CABIN_GALLEY_OVEN_CMD",
+      "L:CABIN_GALLEY_OVEN_SMOKE:1",
+      "L:CABIN_GALLEY_OVEN_SMOKE:2",
+      "L:CABIN_GALLEY_OVEN_SMOKE:3"
+    ],
+    "status": [
+      "GALLEY OVEN — CHECK MAINT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "CABIN_GALLEY_FAULT",
+    "ata": 25,
+    "title": "GALLEY FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:CABIN_GALLEY_BUS_FAULT:1",
+      "L:CABIN_GALLEY_BUS_FAULT:2",
+      "L:CABIN_GALLEY_BUS_FAULT:3"
+    ],
+    "status": [
+      "GALLEY — CHECK MAINT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "CABIN_DOOR_NOT_LATCHED",
+    "ata": 52,
+    "title": "DOOR NOT LATCHED",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:CABIN_DOOR_LATCHED:1"
+    ],
+    "status": [
+      "DOOR NOT LATCHED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "CABIN_SLIDE_LO_PRESSURE",
+    "ata": 52,
+    "title": "SLIDE LO PRESSURE",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:CABIN_SLIDE_PRESSURE_LOW:1"
+    ],
+    "status": [
+      "SLIDE 1 — CHECK MAINT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "CABIN_CARGO_DOOR_FAULT",
+    "ata": 52,
+    "title": "CARGO DOOR FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:CABIN_CARGO_DOOR_CMD:1",
+      "L:CABIN_CARGO_DOOR_JAMMED:1"
+    ],
+    "status": [
+      "CARGO DOOR — CHECK MAINT"
+    ],
+    "inop": [
+      "CARGO DOOR"
+    ]
+  },
+  {
+    "key": "ELEC_GEN_1_FAULT",
+    "ata": 24,
+    "title": "ELEC GEN 1 FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:ELEC_GEN_1_FAULT",
+      "L:ELEC_GEN_1_PB_ON",
+      "L:ELEC_GEN_1_SMOKE"
+    ],
+    "status": [
+      "GEN 1 FAULT"
+    ],
+    "inop": [
+      "GEN 1"
+    ]
+  },
+  {
+    "key": "ELEC_APU_GEN_FAULT",
+    "ata": 24,
+    "title": "ELEC APU GEN FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:ELEC_APU_GEN_FAULT",
+      "L:ELEC_APU_GEN_PB_ON"
+    ],
+    "status": [
+      "APU GEN FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ELEC_TR_1_FAULT",
+    "ata": 24,
+    "title": "ELEC TR 1 FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:ELEC_TR_1_FAULT"
+    ],
+    "status": [
+      "TR 1 FAULT"
+    ],
+    "inop": [
+      "TR 1"
+    ]
+  },
+  {
+    "key": "ELEC_BAT_1_FAULT",
+    "ata": 24,
+    "title": "ELEC BAT 1 FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:ELEC_BAT_1_FAULT",
+      "L:ELEC_BAT_1_PB_ON"
+    ],
+    "status": [
+      "BAT 1 FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ELEC_AC_BUS_1_FAULT",
+    "ata": 24,
+    "title": "ELEC AC BUS 1 FAULT",
+    "level": "Warning",
+    "confirm_s": 0.5,
+    "vars": [
+      "L:ELEC_AC_1_BUS_IS_POWERED",
+      "L:ELEC_AC_1_BUS_POTENTIAL"
+    ],
+    "status": [
+      "AC BUS 1 FAULT"
+    ],
+    "inop": [
+      "AC BUS 1 consumers"
+    ]
+  },
+  {
+    "key": "ELEC_EMER_CONFIG",
+    "ata": 24,
+    "title": "ELEC EMER CONFIG",
+    "level": "Warning",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:ELEC_AC_1_BUS_IS_POWERED",
+      "L:ELEC_AC_2_BUS_IS_POWERED",
+      "L:ELEC_AC_3_BUS_IS_POWERED",
+      "L:ELEC_AC_4_BUS_IS_POWERED",
+      "L:ELEC_RAT_DEPLOYED"
+    ],
+    "status": [
+      "EMER CONFIG"
+    ],
+    "inop": [
+      "Non-essential AC/DC buses"
+    ]
+  },
+  {
+    "key": "ELEC_GALLEY_SHED",
+    "ata": 24,
+    "title": "ELEC GALLEY SHED",
+    "level": "Advisory",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:ELEC_GALLEY_SHED_ACTIVE"
+    ],
+    "status": [
+      "GALLEY SHED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ELEC_COMMERCIAL_SHED",
+    "ata": 24,
+    "title": "ELEC COMMERCIAL SHED",
+    "level": "Advisory",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:ELEC_COMMERCIAL_SHED_ACTIVE"
+    ],
+    "status": [
+      "COML SHED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_FUEL_FILTER_CLOG",
+    "ata": 73,
+    "title": "ENG 1 FUEL FILTER CLOG",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_1_FUEL_FILTER_IMPENDING_BYPASS"
+    ],
+    "status": [
+      "ENG 1 FUEL FILTER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_FUEL_FILTER_BYPASS",
+    "ata": 73,
+    "title": "ENG 1 FUEL FILTER BYPASS",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_1_FUEL_FILTER_BYPASSED"
+    ],
+    "status": [
+      "ENG 1 FUEL FILTER BYPASS"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_HP_FUEL_PUMP_FAULT",
+    "ata": 73,
+    "title": "ENG 1 HP FUEL PUMP FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "GENERAL ENG STARTER:1",
+      "L:A32NX_ENG_1_FF_DISAGREE",
+      "L:A32NX_ENG_1_HP_PUMP_LOW_FLOW"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 1 HP FUEL PUMP"
+    ]
+  },
+  {
+    "key": "ENG_1_FADEC_FUEL_METERING_FAULT",
+    "ata": 73,
+    "title": "ENG 1 FADEC FUEL METERING FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "GENERAL ENG STARTER:1",
+      "L:A32NX_ENG_1_FMU_FAULT",
+      "L:A32NX_ENG_1_THRUST_ABNORMAL"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 1 FADEC METERING"
+    ]
+  },
+  {
+    "key": "ENG_1_HP_SOV_FAULT",
+    "ata": 73,
+    "title": "ENG 1 HP SOV FAULT",
+    "level": "Warning",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_1_HP_SOV_DISAGREE",
+      "L:FIRE_BUTTON_ENG1"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 1 HP SOV"
+    ]
+  },
+  {
+    "key": "ENG_1_FUEL_FLOW_DISAGREE",
+    "ata": 73,
+    "title": "ENG 1 FUEL FLOW DISAGREE",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_FF_CHANNEL_DISAGREE"
+    ],
+    "status": [
+      "ENG 1 FF CHANNEL FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_FUEL_NOZZLE_IMBALANCE",
+    "ata": 73,
+    "title": "ENG 1 FUEL NOZZLE",
+    "level": "Advisory",
+    "confirm_s": 30.0,
+    "vars": [
+      "L:A32NX_ENG_1_NOZZLE_IMBALANCE"
+    ],
+    "status": [
+      "ENG 1 FUEL NOZZLE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_FUEL_FILTER_CLOG",
+    "ata": 73,
+    "title": "ENG 2 FUEL FILTER CLOG",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_2_FUEL_FILTER_IMPENDING_BYPASS"
+    ],
+    "status": [
+      "ENG 2 FUEL FILTER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_FUEL_FILTER_BYPASS",
+    "ata": 73,
+    "title": "ENG 2 FUEL FILTER BYPASS",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_2_FUEL_FILTER_BYPASSED"
+    ],
+    "status": [
+      "ENG 2 FUEL FILTER BYPASS"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_HP_FUEL_PUMP_FAULT",
+    "ata": 73,
+    "title": "ENG 2 HP FUEL PUMP FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "GENERAL ENG STARTER:2",
+      "L:A32NX_ENG_2_FF_DISAGREE",
+      "L:A32NX_ENG_2_HP_PUMP_LOW_FLOW"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 2 HP FUEL PUMP"
+    ]
+  },
+  {
+    "key": "ENG_2_FADEC_FUEL_METERING_FAULT",
+    "ata": 73,
+    "title": "ENG 2 FADEC FUEL METERING FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "GENERAL ENG STARTER:2",
+      "L:A32NX_ENG_2_FMU_FAULT",
+      "L:A32NX_ENG_2_THRUST_ABNORMAL"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 2 FADEC METERING"
+    ]
+  },
+  {
+    "key": "ENG_2_HP_SOV_FAULT",
+    "ata": 73,
+    "title": "ENG 2 HP SOV FAULT",
+    "level": "Warning",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_2_HP_SOV_DISAGREE",
+      "L:FIRE_BUTTON_ENG2"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 2 HP SOV"
+    ]
+  },
+  {
+    "key": "ENG_2_FUEL_FLOW_DISAGREE",
+    "ata": 73,
+    "title": "ENG 2 FUEL FLOW DISAGREE",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_FF_CHANNEL_DISAGREE"
+    ],
+    "status": [
+      "ENG 2 FF CHANNEL FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_FUEL_NOZZLE_IMBALANCE",
+    "ata": 73,
+    "title": "ENG 2 FUEL NOZZLE",
+    "level": "Advisory",
+    "confirm_s": 30.0,
+    "vars": [
+      "L:A32NX_ENG_2_NOZZLE_IMBALANCE"
+    ],
+    "status": [
+      "ENG 2 FUEL NOZZLE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_FUEL_FILTER_CLOG",
+    "ata": 73,
+    "title": "ENG 3 FUEL FILTER CLOG",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_3_FUEL_FILTER_IMPENDING_BYPASS"
+    ],
+    "status": [
+      "ENG 3 FUEL FILTER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_FUEL_FILTER_BYPASS",
+    "ata": 73,
+    "title": "ENG 3 FUEL FILTER BYPASS",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_3_FUEL_FILTER_BYPASSED"
+    ],
+    "status": [
+      "ENG 3 FUEL FILTER BYPASS"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_HP_FUEL_PUMP_FAULT",
+    "ata": 73,
+    "title": "ENG 3 HP FUEL PUMP FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "GENERAL ENG STARTER:3",
+      "L:A32NX_ENG_3_FF_DISAGREE",
+      "L:A32NX_ENG_3_HP_PUMP_LOW_FLOW"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 3 HP FUEL PUMP"
+    ]
+  },
+  {
+    "key": "ENG_3_FADEC_FUEL_METERING_FAULT",
+    "ata": 73,
+    "title": "ENG 3 FADEC FUEL METERING FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "GENERAL ENG STARTER:3",
+      "L:A32NX_ENG_3_FMU_FAULT",
+      "L:A32NX_ENG_3_THRUST_ABNORMAL"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 3 FADEC METERING"
+    ]
+  },
+  {
+    "key": "ENG_3_HP_SOV_FAULT",
+    "ata": 73,
+    "title": "ENG 3 HP SOV FAULT",
+    "level": "Warning",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_3_HP_SOV_DISAGREE",
+      "L:FIRE_BUTTON_ENG3"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 3 HP SOV"
+    ]
+  },
+  {
+    "key": "ENG_3_FUEL_FLOW_DISAGREE",
+    "ata": 73,
+    "title": "ENG 3 FUEL FLOW DISAGREE",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_FF_CHANNEL_DISAGREE"
+    ],
+    "status": [
+      "ENG 3 FF CHANNEL FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_FUEL_NOZZLE_IMBALANCE",
+    "ata": 73,
+    "title": "ENG 3 FUEL NOZZLE",
+    "level": "Advisory",
+    "confirm_s": 30.0,
+    "vars": [
+      "L:A32NX_ENG_3_NOZZLE_IMBALANCE"
+    ],
+    "status": [
+      "ENG 3 FUEL NOZZLE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_FUEL_FILTER_CLOG",
+    "ata": 73,
+    "title": "ENG 4 FUEL FILTER CLOG",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_4_FUEL_FILTER_IMPENDING_BYPASS"
+    ],
+    "status": [
+      "ENG 4 FUEL FILTER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_FUEL_FILTER_BYPASS",
+    "ata": 73,
+    "title": "ENG 4 FUEL FILTER BYPASS",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_4_FUEL_FILTER_BYPASSED"
+    ],
+    "status": [
+      "ENG 4 FUEL FILTER BYPASS"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_HP_FUEL_PUMP_FAULT",
+    "ata": 73,
+    "title": "ENG 4 HP FUEL PUMP FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "GENERAL ENG STARTER:4",
+      "L:A32NX_ENG_4_FF_DISAGREE",
+      "L:A32NX_ENG_4_HP_PUMP_LOW_FLOW"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 4 HP FUEL PUMP"
+    ]
+  },
+  {
+    "key": "ENG_4_FADEC_FUEL_METERING_FAULT",
+    "ata": 73,
+    "title": "ENG 4 FADEC FUEL METERING FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "GENERAL ENG STARTER:4",
+      "L:A32NX_ENG_4_FMU_FAULT",
+      "L:A32NX_ENG_4_THRUST_ABNORMAL"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 4 FADEC METERING"
+    ]
+  },
+  {
+    "key": "ENG_4_HP_SOV_FAULT",
+    "ata": 73,
+    "title": "ENG 4 HP SOV FAULT",
+    "level": "Warning",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_4_HP_SOV_DISAGREE",
+      "L:FIRE_BUTTON_ENG4"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 4 HP SOV"
+    ]
+  },
+  {
+    "key": "ENG_4_FUEL_FLOW_DISAGREE",
+    "ata": 73,
+    "title": "ENG 4 FUEL FLOW DISAGREE",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_FF_CHANNEL_DISAGREE"
+    ],
+    "status": [
+      "ENG 4 FF CHANNEL FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_FUEL_NOZZLE_IMBALANCE",
+    "ata": 73,
+    "title": "ENG 4 FUEL NOZZLE",
+    "level": "Advisory",
+    "confirm_s": 30.0,
+    "vars": [
+      "L:A32NX_ENG_4_NOZZLE_IMBALANCE"
+    ],
+    "status": [
+      "ENG 4 FUEL NOZZLE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_IGNITION_FAULT",
+    "ata": 74,
+    "title": "ENG 1 IGNITION FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_1_NO_IGNITION_AVAILABLE"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 1 IGNITION"
+    ]
+  },
+  {
+    "key": "ENG_2_IGNITION_FAULT",
+    "ata": 74,
+    "title": "ENG 2 IGNITION FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_2_NO_IGNITION_AVAILABLE"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 2 IGNITION"
+    ]
+  },
+  {
+    "key": "ENG_3_IGNITION_FAULT",
+    "ata": 74,
+    "title": "ENG 3 IGNITION FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_3_NO_IGNITION_AVAILABLE"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 3 IGNITION"
+    ]
+  },
+  {
+    "key": "ENG_4_IGNITION_FAULT",
+    "ata": 74,
+    "title": "ENG 4 IGNITION FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_4_NO_IGNITION_AVAILABLE"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 4 IGNITION"
+    ]
+  },
+  {
+    "key": "ENG_1_START_VALVE_FAULT",
+    "ata": 80,
+    "title": "ENG 1 START VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "GENERAL ENG STARTER ACTIVE:1",
+      "L:A32NX_ENG_1_START_VALVE_DISAGREE"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 1 START VALVE"
+    ]
+  },
+  {
+    "key": "ENG_1_STARTER_CUTOUT_FAULT",
+    "ata": 80,
+    "title": "ENG 1 STARTER FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_1_STARTER_DISENGAGE_FAULT"
+    ],
+    "status": [
+      "ENG 1 STARTER"
+    ],
+    "inop": [
+      "ENG 1 STARTER"
+    ]
+  },
+  {
+    "key": "ENG_1_STARTER_DISINTEGRATED",
+    "ata": 80,
+    "title": "ENG 1 STARTER FAULT",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:A32NX_ENG_1_STARTER_DISINTEGRATED"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 1 STARTER"
+    ]
+  },
+  {
+    "key": "ENG_1_STARTER_OVERHEAT",
+    "ata": 80,
+    "title": "ENG 1 STARTER OVERHEAT",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "GENERAL ENG STARTER ACTIVE:1",
+      "L:A32NX_ENG_1_STARTER_OVERHEAT"
+    ],
+    "status": [
+      "ENG 1 STARTER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_START_VALVE_FAULT",
+    "ata": 80,
+    "title": "ENG 2 START VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "GENERAL ENG STARTER ACTIVE:2",
+      "L:A32NX_ENG_2_START_VALVE_DISAGREE"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 2 START VALVE"
+    ]
+  },
+  {
+    "key": "ENG_2_STARTER_CUTOUT_FAULT",
+    "ata": 80,
+    "title": "ENG 2 STARTER FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_2_STARTER_DISENGAGE_FAULT"
+    ],
+    "status": [
+      "ENG 2 STARTER"
+    ],
+    "inop": [
+      "ENG 2 STARTER"
+    ]
+  },
+  {
+    "key": "ENG_2_STARTER_DISINTEGRATED",
+    "ata": 80,
+    "title": "ENG 2 STARTER FAULT",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:A32NX_ENG_2_STARTER_DISINTEGRATED"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 2 STARTER"
+    ]
+  },
+  {
+    "key": "ENG_2_STARTER_OVERHEAT",
+    "ata": 80,
+    "title": "ENG 2 STARTER OVERHEAT",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "GENERAL ENG STARTER ACTIVE:2",
+      "L:A32NX_ENG_2_STARTER_OVERHEAT"
+    ],
+    "status": [
+      "ENG 2 STARTER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_START_VALVE_FAULT",
+    "ata": 80,
+    "title": "ENG 3 START VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "GENERAL ENG STARTER ACTIVE:3",
+      "L:A32NX_ENG_3_START_VALVE_DISAGREE"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 3 START VALVE"
+    ]
+  },
+  {
+    "key": "ENG_3_STARTER_CUTOUT_FAULT",
+    "ata": 80,
+    "title": "ENG 3 STARTER FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_3_STARTER_DISENGAGE_FAULT"
+    ],
+    "status": [
+      "ENG 3 STARTER"
+    ],
+    "inop": [
+      "ENG 3 STARTER"
+    ]
+  },
+  {
+    "key": "ENG_3_STARTER_DISINTEGRATED",
+    "ata": 80,
+    "title": "ENG 3 STARTER FAULT",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:A32NX_ENG_3_STARTER_DISINTEGRATED"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 3 STARTER"
+    ]
+  },
+  {
+    "key": "ENG_3_STARTER_OVERHEAT",
+    "ata": 80,
+    "title": "ENG 3 STARTER OVERHEAT",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "GENERAL ENG STARTER ACTIVE:3",
+      "L:A32NX_ENG_3_STARTER_OVERHEAT"
+    ],
+    "status": [
+      "ENG 3 STARTER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_START_VALVE_FAULT",
+    "ata": 80,
+    "title": "ENG 4 START VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "GENERAL ENG STARTER ACTIVE:4",
+      "L:A32NX_ENG_4_START_VALVE_DISAGREE"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 4 START VALVE"
+    ]
+  },
+  {
+    "key": "ENG_4_STARTER_CUTOUT_FAULT",
+    "ata": 80,
+    "title": "ENG 4 STARTER FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_4_STARTER_DISENGAGE_FAULT"
+    ],
+    "status": [
+      "ENG 4 STARTER"
+    ],
+    "inop": [
+      "ENG 4 STARTER"
+    ]
+  },
+  {
+    "key": "ENG_4_STARTER_DISINTEGRATED",
+    "ata": 80,
+    "title": "ENG 4 STARTER FAULT",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:A32NX_ENG_4_STARTER_DISINTEGRATED"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 4 STARTER"
+    ]
+  },
+  {
+    "key": "ENG_4_STARTER_OVERHEAT",
+    "ata": 80,
+    "title": "ENG 4 STARTER OVERHEAT",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "GENERAL ENG STARTER ACTIVE:4",
+      "L:A32NX_ENG_4_STARTER_OVERHEAT"
+    ],
+    "status": [
+      "ENG 4 STARTER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_VSV_FAULT",
+    "ata": 72,
+    "title": "ENG 1 VSV FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_VSV_SCHEDULE_ERROR_DEG"
+    ],
+    "status": [
+      "ENG 1 VSV"
+    ],
+    "inop": [
+      "ENG 1 VSV"
+    ]
+  },
+  {
+    "key": "ENG_2_VSV_FAULT",
+    "ata": 72,
+    "title": "ENG 2 VSV FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_VSV_SCHEDULE_ERROR_DEG"
+    ],
+    "status": [
+      "ENG 2 VSV"
+    ],
+    "inop": [
+      "ENG 2 VSV"
+    ]
+  },
+  {
+    "key": "ENG_3_VSV_FAULT",
+    "ata": 72,
+    "title": "ENG 3 VSV FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_VSV_SCHEDULE_ERROR_DEG"
+    ],
+    "status": [
+      "ENG 3 VSV"
+    ],
+    "inop": [
+      "ENG 3 VSV"
+    ]
+  },
+  {
+    "key": "ENG_4_VSV_FAULT",
+    "ata": 72,
+    "title": "ENG 4 VSV FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_VSV_SCHEDULE_ERROR_DEG"
+    ],
+    "status": [
+      "ENG 4 VSV"
+    ],
+    "inop": [
+      "ENG 4 VSV"
+    ]
+  },
+  {
+    "key": "ENG_1_IP_BLEED_VALVE_FAULT",
+    "ata": 75,
+    "title": "ENG 1 IP BLEED VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_IP_HANDLING_BLEED_DISAGREE"
+    ],
+    "status": [
+      "ENG 1 IP BLEED VALVE"
+    ],
+    "inop": [
+      "ENG 1 IP BLEED VALVE"
+    ]
+  },
+  {
+    "key": "ENG_1_HP_BLEED_VALVE_FAULT",
+    "ata": 75,
+    "title": "ENG 1 HP BLEED VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_HP_HANDLING_BLEED_DISAGREE"
+    ],
+    "status": [
+      "ENG 1 HP BLEED VALVE"
+    ],
+    "inop": [
+      "ENG 1 HP BLEED VALVE"
+    ]
+  },
+  {
+    "key": "ENG_2_IP_BLEED_VALVE_FAULT",
+    "ata": 75,
+    "title": "ENG 2 IP BLEED VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_IP_HANDLING_BLEED_DISAGREE"
+    ],
+    "status": [
+      "ENG 2 IP BLEED VALVE"
+    ],
+    "inop": [
+      "ENG 2 IP BLEED VALVE"
+    ]
+  },
+  {
+    "key": "ENG_2_HP_BLEED_VALVE_FAULT",
+    "ata": 75,
+    "title": "ENG 2 HP BLEED VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_HP_HANDLING_BLEED_DISAGREE"
+    ],
+    "status": [
+      "ENG 2 HP BLEED VALVE"
+    ],
+    "inop": [
+      "ENG 2 HP BLEED VALVE"
+    ]
+  },
+  {
+    "key": "ENG_3_IP_BLEED_VALVE_FAULT",
+    "ata": 75,
+    "title": "ENG 3 IP BLEED VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_IP_HANDLING_BLEED_DISAGREE"
+    ],
+    "status": [
+      "ENG 3 IP BLEED VALVE"
+    ],
+    "inop": [
+      "ENG 3 IP BLEED VALVE"
+    ]
+  },
+  {
+    "key": "ENG_3_HP_BLEED_VALVE_FAULT",
+    "ata": 75,
+    "title": "ENG 3 HP BLEED VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_HP_HANDLING_BLEED_DISAGREE"
+    ],
+    "status": [
+      "ENG 3 HP BLEED VALVE"
+    ],
+    "inop": [
+      "ENG 3 HP BLEED VALVE"
+    ]
+  },
+  {
+    "key": "ENG_4_IP_BLEED_VALVE_FAULT",
+    "ata": 75,
+    "title": "ENG 4 IP BLEED VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_IP_HANDLING_BLEED_DISAGREE"
+    ],
+    "status": [
+      "ENG 4 IP BLEED VALVE"
+    ],
+    "inop": [
+      "ENG 4 IP BLEED VALVE"
+    ]
+  },
+  {
+    "key": "ENG_4_HP_BLEED_VALVE_FAULT",
+    "ata": 75,
+    "title": "ENG 4 HP BLEED VALVE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_HP_HANDLING_BLEED_DISAGREE"
+    ],
+    "status": [
+      "ENG 4 HP BLEED VALVE"
+    ],
+    "inop": [
+      "ENG 4 HP BLEED VALVE"
+    ]
+  },
+  {
+    "key": "ENG_1_N1_VIB_HI",
+    "ata": 77,
+    "title": "ENG 1 N1 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_N1_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 1 N1 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_N2_VIB_HI",
+    "ata": 77,
+    "title": "ENG 1 N2 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_N2_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 1 N2 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_N3_VIB_HI",
+    "ata": 77,
+    "title": "ENG 1 N3 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_N3_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 1 N3 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_FAN_FRONT_VIB",
+    "ata": 77,
+    "title": "ENG 1 FAN FRONT BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_1_N1_FAN_FRONT_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 1 FAN FRONT BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_FAN_FRONT_CHIP",
+    "ata": 77,
+    "title": "ENG 1 FAN FRONT BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_1_FAN_FRONT_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 1 FAN FRONT BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_IP_FRONT_VIB",
+    "ata": 77,
+    "title": "ENG 1 IP FRONT BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_1_N2_IP_FRONT_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 1 IP FRONT BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_IP_FRONT_CHIP",
+    "ata": 77,
+    "title": "ENG 1 IP FRONT BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_1_IP_FRONT_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 1 IP FRONT BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_HP_TURBINE_VIB",
+    "ata": 77,
+    "title": "ENG 1 HP TURBINE BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_1_N3_HP_TURBINE_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 1 HP TURBINE BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_HP_TURBINE_CHIP",
+    "ata": 77,
+    "title": "ENG 1 HP TURBINE BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_1_HP_TURBINE_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 1 HP TURBINE BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_IP_TURBINE_VIB",
+    "ata": 77,
+    "title": "ENG 1 IP TURBINE BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_1_N2_IP_TURBINE_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 1 IP TURBINE BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_IP_TURBINE_CHIP",
+    "ata": 77,
+    "title": "ENG 1 IP TURBINE BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_1_IP_TURBINE_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 1 IP TURBINE BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_LP_TURBINE_REAR_VIB",
+    "ata": 77,
+    "title": "ENG 1 LP TURBINE REAR BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_1_N1_LP_TURBINE_REAR_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 1 LP TURBINE REAR BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_LP_TURBINE_REAR_CHIP",
+    "ata": 77,
+    "title": "ENG 1 LP TURBINE REAR BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_1_LP_TURBINE_REAR_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 1 LP TURBINE REAR BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_N1_VIB_HI",
+    "ata": 77,
+    "title": "ENG 2 N1 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_N1_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 2 N1 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_N2_VIB_HI",
+    "ata": 77,
+    "title": "ENG 2 N2 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_N2_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 2 N2 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_N3_VIB_HI",
+    "ata": 77,
+    "title": "ENG 2 N3 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_N3_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 2 N3 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_FAN_FRONT_VIB",
+    "ata": 77,
+    "title": "ENG 2 FAN FRONT BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_2_N1_FAN_FRONT_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 2 FAN FRONT BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_FAN_FRONT_CHIP",
+    "ata": 77,
+    "title": "ENG 2 FAN FRONT BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_2_FAN_FRONT_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 2 FAN FRONT BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_IP_FRONT_VIB",
+    "ata": 77,
+    "title": "ENG 2 IP FRONT BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_2_N2_IP_FRONT_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 2 IP FRONT BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_IP_FRONT_CHIP",
+    "ata": 77,
+    "title": "ENG 2 IP FRONT BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_2_IP_FRONT_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 2 IP FRONT BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_HP_TURBINE_VIB",
+    "ata": 77,
+    "title": "ENG 2 HP TURBINE BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_2_N3_HP_TURBINE_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 2 HP TURBINE BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_HP_TURBINE_CHIP",
+    "ata": 77,
+    "title": "ENG 2 HP TURBINE BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_2_HP_TURBINE_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 2 HP TURBINE BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_IP_TURBINE_VIB",
+    "ata": 77,
+    "title": "ENG 2 IP TURBINE BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_2_N2_IP_TURBINE_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 2 IP TURBINE BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_IP_TURBINE_CHIP",
+    "ata": 77,
+    "title": "ENG 2 IP TURBINE BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_2_IP_TURBINE_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 2 IP TURBINE BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_LP_TURBINE_REAR_VIB",
+    "ata": 77,
+    "title": "ENG 2 LP TURBINE REAR BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_2_N1_LP_TURBINE_REAR_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 2 LP TURBINE REAR BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_LP_TURBINE_REAR_CHIP",
+    "ata": 77,
+    "title": "ENG 2 LP TURBINE REAR BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_2_LP_TURBINE_REAR_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 2 LP TURBINE REAR BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_N1_VIB_HI",
+    "ata": 77,
+    "title": "ENG 3 N1 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_N1_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 3 N1 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_N2_VIB_HI",
+    "ata": 77,
+    "title": "ENG 3 N2 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_N2_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 3 N2 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_N3_VIB_HI",
+    "ata": 77,
+    "title": "ENG 3 N3 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_N3_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 3 N3 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_FAN_FRONT_VIB",
+    "ata": 77,
+    "title": "ENG 3 FAN FRONT BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_3_N1_FAN_FRONT_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 3 FAN FRONT BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_FAN_FRONT_CHIP",
+    "ata": 77,
+    "title": "ENG 3 FAN FRONT BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_3_FAN_FRONT_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 3 FAN FRONT BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_IP_FRONT_VIB",
+    "ata": 77,
+    "title": "ENG 3 IP FRONT BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_3_N2_IP_FRONT_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 3 IP FRONT BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_IP_FRONT_CHIP",
+    "ata": 77,
+    "title": "ENG 3 IP FRONT BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_3_IP_FRONT_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 3 IP FRONT BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_HP_TURBINE_VIB",
+    "ata": 77,
+    "title": "ENG 3 HP TURBINE BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_3_N3_HP_TURBINE_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 3 HP TURBINE BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_HP_TURBINE_CHIP",
+    "ata": 77,
+    "title": "ENG 3 HP TURBINE BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_3_HP_TURBINE_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 3 HP TURBINE BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_IP_TURBINE_VIB",
+    "ata": 77,
+    "title": "ENG 3 IP TURBINE BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_3_N2_IP_TURBINE_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 3 IP TURBINE BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_IP_TURBINE_CHIP",
+    "ata": 77,
+    "title": "ENG 3 IP TURBINE BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_3_IP_TURBINE_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 3 IP TURBINE BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_LP_TURBINE_REAR_VIB",
+    "ata": 77,
+    "title": "ENG 3 LP TURBINE REAR BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_3_N1_LP_TURBINE_REAR_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 3 LP TURBINE REAR BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_LP_TURBINE_REAR_CHIP",
+    "ata": 77,
+    "title": "ENG 3 LP TURBINE REAR BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_3_LP_TURBINE_REAR_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 3 LP TURBINE REAR BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_N1_VIB_HI",
+    "ata": 77,
+    "title": "ENG 4 N1 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_N1_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 4 N1 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_N2_VIB_HI",
+    "ata": 77,
+    "title": "ENG 4 N2 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_N2_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 4 N2 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_N3_VIB_HI",
+    "ata": 77,
+    "title": "ENG 4 N3 VIB HI",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_N3_VIB_INDEX"
+    ],
+    "status": [
+      "ENG 4 N3 VIB"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_FAN_FRONT_VIB",
+    "ata": 77,
+    "title": "ENG 4 FAN FRONT BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_4_N1_FAN_FRONT_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 4 FAN FRONT BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_FAN_FRONT_CHIP",
+    "ata": 77,
+    "title": "ENG 4 FAN FRONT BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_4_FAN_FRONT_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 4 FAN FRONT BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_IP_FRONT_VIB",
+    "ata": 77,
+    "title": "ENG 4 IP FRONT BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_4_N2_IP_FRONT_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 4 IP FRONT BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_IP_FRONT_CHIP",
+    "ata": 77,
+    "title": "ENG 4 IP FRONT BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_4_IP_FRONT_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 4 IP FRONT BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_HP_TURBINE_VIB",
+    "ata": 77,
+    "title": "ENG 4 HP TURBINE BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_4_N3_HP_TURBINE_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 4 HP TURBINE BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_HP_TURBINE_CHIP",
+    "ata": 77,
+    "title": "ENG 4 HP TURBINE BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_4_HP_TURBINE_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 4 HP TURBINE BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_IP_TURBINE_VIB",
+    "ata": 77,
+    "title": "ENG 4 IP TURBINE BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_4_N2_IP_TURBINE_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 4 IP TURBINE BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_IP_TURBINE_CHIP",
+    "ata": 77,
+    "title": "ENG 4 IP TURBINE BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_4_IP_TURBINE_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 4 IP TURBINE BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_LP_TURBINE_REAR_VIB",
+    "ata": 77,
+    "title": "ENG 4 LP TURBINE REAR BRG VIB",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_4_N1_LP_TURBINE_REAR_DEFECT_AMPLITUDE_MM_S"
+    ],
+    "status": [
+      "ENG 4 LP TURBINE REAR BRG"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_LP_TURBINE_REAR_CHIP",
+    "ata": 77,
+    "title": "ENG 4 LP TURBINE REAR BRG CHIP DET",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_4_LP_TURBINE_REAR_CHIP_DETECTED"
+    ],
+    "status": [
+      "ENG 4 LP TURBINE REAR BRG CHIP DETECTOR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_REVERSER_UNLOCKED",
+    "ata": 78,
+    "title": "ENG 2 REVERSER UNLOCKED",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "GENERAL ENG STARTER:2",
+      "L:A32NX_ENG_2_REV_UNCOMMANDED"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 2 REVERSER"
+    ]
+  },
+  {
+    "key": "ENG_2_REVERSER_FAULT",
+    "ata": 78,
+    "title": "ENG 2 REVERSER FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_2_REV_POSITION_DISAGREE"
+    ],
+    "status": [
+      "ENG 2 REVERSER"
+    ],
+    "inop": [
+      "ENG 2 REVERSER"
+    ]
+  },
+  {
+    "key": "ENG_3_REVERSER_UNLOCKED",
+    "ata": 78,
+    "title": "ENG 3 REVERSER UNLOCKED",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "GENERAL ENG STARTER:3",
+      "L:A32NX_ENG_3_REV_UNCOMMANDED"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 3 REVERSER"
+    ]
+  },
+  {
+    "key": "ENG_3_REVERSER_FAULT",
+    "ata": 78,
+    "title": "ENG 3 REVERSER FAULT",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:A32NX_ENG_3_REV_POSITION_DISAGREE"
+    ],
+    "status": [
+      "ENG 3 REVERSER"
+    ],
+    "inop": [
+      "ENG 3 REVERSER"
+    ]
+  },
+  {
+    "key": "ENG_1_EEC_CHANNEL_FAULT",
+    "ata": 73,
+    "title": "ENG 1 EEC CHANNEL FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_1_EEC_CHANNEL_FAULT"
+    ],
+    "status": [
+      "ENG 1 EEC"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_EEC_DUAL_FAULT",
+    "ata": 73,
+    "title": "ENG 1 EEC FAULT",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:A32NX_ENG_1_EEC_NO_VALID_CHANNEL"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 1 EEC"
+    ]
+  },
+  {
+    "key": "ENG_1_EEC_SENSOR_DISAGREE",
+    "ata": 73,
+    "title": "ENG 1 EEC SENSOR DISAGREE",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_EEC_SENSOR_DISAGREE"
+    ],
+    "status": [
+      "ENG 1 EEC SENSORS"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_EEC_CHANNEL_FAULT",
+    "ata": 73,
+    "title": "ENG 2 EEC CHANNEL FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_2_EEC_CHANNEL_FAULT"
+    ],
+    "status": [
+      "ENG 2 EEC"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_EEC_DUAL_FAULT",
+    "ata": 73,
+    "title": "ENG 2 EEC FAULT",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:A32NX_ENG_2_EEC_NO_VALID_CHANNEL"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 2 EEC"
+    ]
+  },
+  {
+    "key": "ENG_2_EEC_SENSOR_DISAGREE",
+    "ata": 73,
+    "title": "ENG 2 EEC SENSOR DISAGREE",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_EEC_SENSOR_DISAGREE"
+    ],
+    "status": [
+      "ENG 2 EEC SENSORS"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_EEC_CHANNEL_FAULT",
+    "ata": 73,
+    "title": "ENG 3 EEC CHANNEL FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_3_EEC_CHANNEL_FAULT"
+    ],
+    "status": [
+      "ENG 3 EEC"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_EEC_DUAL_FAULT",
+    "ata": 73,
+    "title": "ENG 3 EEC FAULT",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:A32NX_ENG_3_EEC_NO_VALID_CHANNEL"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 3 EEC"
+    ]
+  },
+  {
+    "key": "ENG_3_EEC_SENSOR_DISAGREE",
+    "ata": 73,
+    "title": "ENG 3 EEC SENSOR DISAGREE",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_EEC_SENSOR_DISAGREE"
+    ],
+    "status": [
+      "ENG 3 EEC SENSORS"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_EEC_CHANNEL_FAULT",
+    "ata": 73,
+    "title": "ENG 4 EEC CHANNEL FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:A32NX_ENG_4_EEC_CHANNEL_FAULT"
+    ],
+    "status": [
+      "ENG 4 EEC"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_EEC_DUAL_FAULT",
+    "ata": 73,
+    "title": "ENG 4 EEC FAULT",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:A32NX_ENG_4_EEC_NO_VALID_CHANNEL"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 4 EEC"
+    ]
+  },
+  {
+    "key": "ENG_4_EEC_SENSOR_DISAGREE",
+    "ata": 73,
+    "title": "ENG 4 EEC SENSOR DISAGREE",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_EEC_SENSOR_DISAGREE"
+    ],
+    "status": [
+      "ENG 4 EEC SENSORS"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_ANTI_ICE_FAULT",
+    "ata": 30,
+    "title": "ENG 1 ANTI ICE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_ANTI_ICE_DISAGREE"
+    ],
+    "status": [
+      "ENG 1 ANTI ICE"
+    ],
+    "inop": [
+      "ENG 1 ANTI ICE"
+    ]
+  },
+  {
+    "key": "ENG_2_ANTI_ICE_FAULT",
+    "ata": 30,
+    "title": "ENG 2 ANTI ICE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_ANTI_ICE_DISAGREE"
+    ],
+    "status": [
+      "ENG 2 ANTI ICE"
+    ],
+    "inop": [
+      "ENG 2 ANTI ICE"
+    ]
+  },
+  {
+    "key": "ENG_3_ANTI_ICE_FAULT",
+    "ata": 30,
+    "title": "ENG 3 ANTI ICE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_ANTI_ICE_DISAGREE"
+    ],
+    "status": [
+      "ENG 3 ANTI ICE"
+    ],
+    "inop": [
+      "ENG 3 ANTI ICE"
+    ]
+  },
+  {
+    "key": "ENG_4_ANTI_ICE_FAULT",
+    "ata": 30,
+    "title": "ENG 4 ANTI ICE FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_ANTI_ICE_DISAGREE"
+    ],
+    "status": [
+      "ENG 4 ANTI ICE"
+    ],
+    "inop": [
+      "ENG 4 ANTI ICE"
+    ]
+  },
+  {
+    "key": "ENG_1_NACELLE_VENT_LO",
+    "ata": 71,
+    "title": "ENG 1 NACELLE VENT LO",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_1_NACELLE_VAPOUR_RISK"
+    ],
+    "status": [
+      "ENG 1 NACELLE VENT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_NACELLE_VENT_LO",
+    "ata": 71,
+    "title": "ENG 2 NACELLE VENT LO",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_2_NACELLE_VAPOUR_RISK"
+    ],
+    "status": [
+      "ENG 2 NACELLE VENT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_NACELLE_VENT_LO",
+    "ata": 71,
+    "title": "ENG 3 NACELLE VENT LO",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_3_NACELLE_VAPOUR_RISK"
+    ],
+    "status": [
+      "ENG 3 NACELLE VENT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_NACELLE_VENT_LO",
+    "ata": 71,
+    "title": "ENG 4 NACELLE VENT LO",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:A32NX_ENG_4_NACELLE_VAPOUR_RISK"
+    ],
+    "status": [
+      "ENG 4 NACELLE VENT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_CORE_FIRE_LOOP_FAULT",
+    "ata": 26,
+    "title": "ENG 1 CORE FIRE DET FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_CORE_FIRE_LOOP_DISAGREE"
+    ],
+    "status": [
+      "ENG 1 CORE FIRE DET"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_FAN_FIRE_LOOP_FAULT",
+    "ata": 26,
+    "title": "ENG 1 FAN FIRE DET FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_1_FAN_FIRE_LOOP_DISAGREE"
+    ],
+    "status": [
+      "ENG 1 FAN FIRE DET"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_CORE_FIRE_LOOP_FAULT",
+    "ata": 26,
+    "title": "ENG 2 CORE FIRE DET FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_CORE_FIRE_LOOP_DISAGREE"
+    ],
+    "status": [
+      "ENG 2 CORE FIRE DET"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_FAN_FIRE_LOOP_FAULT",
+    "ata": 26,
+    "title": "ENG 2 FAN FIRE DET FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_2_FAN_FIRE_LOOP_DISAGREE"
+    ],
+    "status": [
+      "ENG 2 FAN FIRE DET"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_CORE_FIRE_LOOP_FAULT",
+    "ata": 26,
+    "title": "ENG 3 CORE FIRE DET FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_CORE_FIRE_LOOP_DISAGREE"
+    ],
+    "status": [
+      "ENG 3 CORE FIRE DET"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_FAN_FIRE_LOOP_FAULT",
+    "ata": 26,
+    "title": "ENG 3 FAN FIRE DET FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_3_FAN_FIRE_LOOP_DISAGREE"
+    ],
+    "status": [
+      "ENG 3 FAN FIRE DET"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_CORE_FIRE_LOOP_FAULT",
+    "ata": 26,
+    "title": "ENG 4 CORE FIRE DET FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_CORE_FIRE_LOOP_DISAGREE"
+    ],
+    "status": [
+      "ENG 4 CORE FIRE DET"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_FAN_FIRE_LOOP_FAULT",
+    "ata": 26,
+    "title": "ENG 4 FAN FIRE DET FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:A32NX_ENG_4_FAN_FIRE_LOOP_DISAGREE"
+    ],
+    "status": [
+      "ENG 4 FAN FIRE DET"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_ENG_1_BIRD_FAN_DAMAGE",
+    "ata": 72,
+    "title": "ENG 1 FAN DAMAGE",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:AUTOTHRUST_TLA:1",
+      "L:ENGINE_MASTER:1",
+      "L:ENV_BIRD_FAN_DAMAGE:1"
+    ],
+    "status": [
+      "ENG 1 ................ FAULT"
+    ],
+    "inop": [
+      "ENG 1 REVERSER"
+    ]
+  },
+  {
+    "key": "ENV_WINDSHIELD_1_DAMAGE",
+    "ata": 56,
+    "title": "L WINDSHIELD DAMAGE",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:AIRSPEED_KT",
+      "L:ENV_BIRD_WINDSHIELD_DAMAGE:1"
+    ],
+    "status": [
+      "L WINDSHIELD ......... PENETRATED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_RADOME_DAMAGE",
+    "ata": 53,
+    "title": "RADOME DAMAGE",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:ENV_BIRD_RADOME_DAMAGE",
+      "L:WXR_POWER"
+    ],
+    "status": [
+      "WXR ................... FAULT"
+    ],
+    "inop": [
+      "WEATHER RADAR"
+    ]
+  },
+  {
+    "key": "ENV_NOSE_GEAR_BIRD_DAMAGE",
+    "ata": 32,
+    "title": "NOSE L/G BIRD DAMAGE",
+    "level": "Caution",
+    "confirm_s": 0.5,
+    "vars": [
+      "L:ENV_BIRD_NOSE_GEAR_DAMAGE"
+    ],
+    "status": [
+      "L/G ................... FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_AIR_DATA_PROBE_BLOCKED",
+    "ata": 34,
+    "title": "AIR DATA DISAGREE",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:ENV_BIRD_PROBE_BLOCKED:1",
+      "L:ENV_BIRD_PROBE_BLOCKED:2",
+      "L:ENV_BIRD_PROBE_BLOCKED:3"
+    ],
+    "status": [
+      "AIR DATA .............. CHECK"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_LTG_RADOME_DAMAGE",
+    "ata": 53,
+    "title": "RADOME DAMAGE",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:ENV_LTG_RADOME_DAMAGE",
+      "L:WXR_POWER"
+    ],
+    "status": [
+      "WXR ................... FAULT"
+    ],
+    "inop": [
+      "WEATHER RADAR"
+    ]
+  },
+  {
+    "key": "ENV_LTG_COMPASS_FAULT",
+    "ata": 34,
+    "title": "STBY COMPASS FAULT",
+    "level": "Advisory",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:ENV_LTG_COMPASS_ERROR_DEG"
+    ],
+    "status": [
+      "STBY COMPASS SWING ..... REQUIRED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_LTG_FADEC_TRANSIENT",
+    "ata": 24,
+    "title": "ENG FADEC TRANSIENT",
+    "level": "Caution",
+    "confirm_s": 0.5,
+    "vars": [
+      "L:ENV_LTG_BUS_UPSET:EngineFadec"
+    ],
+    "status": [
+      "ENG FADEC ............. CHECK"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_HAIL_RADOME_DAMAGE",
+    "ata": 53,
+    "title": "RADOME DAMAGE",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:ENV_HAIL_RADOME_DAMAGE",
+      "L:WXR_POWER"
+    ],
+    "status": [
+      "WXR ................... FAULT"
+    ],
+    "inop": [
+      "WEATHER RADAR"
+    ]
+  },
+  {
+    "key": "ENV_HAIL_WINDOW_HEAT_FAULT",
+    "ata": 56,
+    "title": "WINDOW HEAT L FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:ENV_HAIL_WINDOW_HEAT_FAULT:1"
+    ],
+    "status": [
+      "L WINDOW HEAT ......... FAULT"
+    ],
+    "inop": [
+      "L WINDOW HEAT"
+    ]
+  },
+  {
+    "key": "ENV_HAIL_WINDSHIELD_DAMAGE",
+    "ata": 56,
+    "title": "WINDSHIELD DAMAGE",
+    "level": "Advisory",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:AIRSPEED_KT",
+      "L:ENV_HAIL_WINDSHIELD_DAMAGE:1"
+    ],
+    "status": [
+      "L WINDSHIELD .......... CHECK"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_HAIL_SLAT_JAM_RISK",
+    "ata": 57,
+    "title": "SLAT FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:ENV_HAIL_SLAT_JAM_RISK:1"
+    ],
+    "status": [
+      "SLAT ................... FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_HAIL_ENG_1_FLAMEOUT_RISK",
+    "ata": 72,
+    "title": "ENG 1 STALL",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:AUTOTHRUST_TLA:1",
+      "L:ENV_HAIL_FLAMEOUT_RISK:1"
+    ],
+    "status": [
+      "ENG 1 ................. DEGRADED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_ASH_ENG_1_DEGRADED",
+    "ata": 72,
+    "title": "ENG 1 ASH DEGRADED",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:ENV_ASH_COMPRESSOR_EFF_LOSS:1",
+      "L:ENV_ASH_FLAMEOUT_RISK:1",
+      "L:ENV_ASH_FLOW_CAPACITY_LOSS:1"
+    ],
+    "status": [
+      "ENG 1 ................. DEGRADED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_ASH_ENCOUNTER",
+    "ata": 21,
+    "title": "VOLCANIC ASH",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:ENV_ASH_CABIN_ODOR"
+    ],
+    "status": [
+      "AIR DATA .............. CHECK"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_ICE_ENG_1_ROLLBACK",
+    "ata": 72,
+    "title": "ENG 1 ICE ROLLBACK",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:ENGINE_ANTI_ICE:1",
+      "L:ENV_ICE_ROLLBACK_RISK:1"
+    ],
+    "status": [
+      "ENG 1 ................. DEGRADED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_RWY_HYDROPLANING",
+    "ata": 32,
+    "title": "RISK OF HYDROPLANING",
+    "level": "Advisory",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:ENV_RWY_HYDROPLANING"
+    ],
+    "status": [
+      "BRAKING ACTION ........ REDUCED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENV_WINDSHEAR_WARNING",
+    "ata": 34,
+    "title": "WINDSHEAR",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:ENV_F_FACTOR"
+    ],
+    "status": [
+      "WINDSHEAR DETECTED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_FIRE",
+    "ata": 26,
+    "title": "ENG 1 FIRE",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:AUTOTHRUST_TLA:1",
+      "L:DEEP_FIRE_DETECTED_ENG:1",
+      "L:DEEP_FIRE_SQUIB_1_ENG_1_IS_DISCHARGED",
+      "L:DEEP_FIRE_SQUIB_2_ENG_1_IS_DISCHARGED",
+      "L:ENGINE_MASTER:1",
+      "L:FIRE_BUTTON_ENG:1"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 1"
+    ]
+  },
+  {
+    "key": "ENG_2_FIRE",
+    "ata": 26,
+    "title": "ENG 2 FIRE",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:AUTOTHRUST_TLA:2",
+      "L:DEEP_FIRE_DETECTED_ENG:2",
+      "L:DEEP_FIRE_SQUIB_1_ENG_2_IS_DISCHARGED",
+      "L:DEEP_FIRE_SQUIB_2_ENG_2_IS_DISCHARGED",
+      "L:ENGINE_MASTER:2",
+      "L:FIRE_BUTTON_ENG:2"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 2"
+    ]
+  },
+  {
+    "key": "ENG_3_FIRE",
+    "ata": 26,
+    "title": "ENG 3 FIRE",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:AUTOTHRUST_TLA:3",
+      "L:DEEP_FIRE_DETECTED_ENG:3",
+      "L:DEEP_FIRE_SQUIB_1_ENG_3_IS_DISCHARGED",
+      "L:DEEP_FIRE_SQUIB_2_ENG_3_IS_DISCHARGED",
+      "L:ENGINE_MASTER:3",
+      "L:FIRE_BUTTON_ENG:3"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 3"
+    ]
+  },
+  {
+    "key": "ENG_4_FIRE",
+    "ata": 26,
+    "title": "ENG 4 FIRE",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:AUTOTHRUST_TLA:4",
+      "L:DEEP_FIRE_DETECTED_ENG:4",
+      "L:DEEP_FIRE_SQUIB_1_ENG_4_IS_DISCHARGED",
+      "L:DEEP_FIRE_SQUIB_2_ENG_4_IS_DISCHARGED",
+      "L:ENGINE_MASTER:4",
+      "L:FIRE_BUTTON_ENG:4"
+    ],
+    "status": [],
+    "inop": [
+      "ENG 4"
+    ]
+  },
+  {
+    "key": "APU_FIRE",
+    "ata": 26,
+    "title": "APU FIRE",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:APU_FIRE_LOOP_DETECTED",
+      "L:DEEP_FIRE_DETECTED_APU",
+      "L:DEEP_FIRE_SQUIB_1_APU_1_IS_DISCHARGED",
+      "L:FIRE_BUTTON_APU",
+      "L:OVHD_APU_MASTER_SW_PB_IS_ON",
+      "L:THERMAL_ZONE_APUCOMPARTMENT_TEMPERATURE_C"
+    ],
+    "status": [],
+    "inop": [
+      "APU"
+    ]
+  },
+  {
+    "key": "MLG_BAY_FIRE",
+    "ata": 26,
+    "title": "L/R WHEEL WELL FIRE",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:DEEP_FIRE_DETECTED_MLG"
+    ],
+    "status": [
+      "MLG bay fire detected, no dedicated extinguishing system fitted (matches FBW's own precedent)"
+    ],
+    "inop": []
+  },
+  {
+    "key": "CARGO_SMOKE_FWD",
+    "ata": 26,
+    "title": "CARGO SMOKE FWD",
+    "level": "Warning",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:CARGO_FWD_SMOKE_DETECTED",
+      "L:CARGO_FWD_SUPPRESSION_ARMED",
+      "L:CARGO_HEAT_SW:FWD",
+      "L:CARGO_VENT_SYS_SW",
+      "L:THERMAL_ZONE_CARGOFWD_SMOKE_CONCENTRATION"
+    ],
+    "status": [
+      "LAND ASAP",
+      "Suppression: high-rate knockdown then metered discharge for the extended diversion time (14 CFR/EASA CS-25.858)"
+    ],
+    "inop": [
+      "CARGO COMPT"
+    ]
+  },
+  {
+    "key": "CARGO_SMOKE_AFT",
+    "ata": 26,
+    "title": "CARGO SMOKE AFT",
+    "level": "Warning",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:CARGO_AFT_SMOKE_DETECTED",
+      "L:CARGO_AFT_SUPPRESSION_ARMED",
+      "L:CARGO_HEAT_SW:AFT",
+      "L:CARGO_VENT_SYS_SW",
+      "L:THERMAL_ZONE_CARGOAFT_SMOKE_CONCENTRATION"
+    ],
+    "status": [
+      "LAND ASAP",
+      "Suppression: high-rate knockdown then metered discharge for the extended diversion time (14 CFR/EASA CS-25.858)"
+    ],
+    "inop": [
+      "CARGO COMPT"
+    ]
+  },
+  {
+    "key": "CARGO_SMOKE_BULK",
+    "ata": 26,
+    "title": "CARGO SMOKE BULK",
+    "level": "Warning",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:CARGO_BULK_SMOKE_DETECTED",
+      "L:CARGO_BULK_SUPPRESSION_ARMED",
+      "L:CARGO_HEAT_SW:BULK",
+      "L:CARGO_VENT_SYS_SW",
+      "L:THERMAL_ZONE_CARGOBULK_SMOKE_CONCENTRATION"
+    ],
+    "status": [
+      "LAND ASAP",
+      "Suppression: high-rate knockdown then metered discharge for the extended diversion time (14 CFR/EASA CS-25.858)"
+    ],
+    "inop": [
+      "CARGO COMPT"
+    ]
+  },
+  {
+    "key": "ENG1_FIRE_DET_FAULT",
+    "ata": 26,
+    "title": "ENG 1 FIRE DET FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FIRE_LOOP_A_ENG1_FAULT",
+      "L:FIRE_LOOP_B_ENG1_FAULT",
+      "L:FIRE_LOOP_ENG1_DISAGREE"
+    ],
+    "status": [
+      "ENG 1 fire detection degraded to single loop"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG2_FIRE_DET_FAULT",
+    "ata": 26,
+    "title": "ENG 2 FIRE DET FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FIRE_LOOP_A_ENG2_FAULT",
+      "L:FIRE_LOOP_B_ENG2_FAULT",
+      "L:FIRE_LOOP_ENG2_DISAGREE"
+    ],
+    "status": [
+      "ENG 2 fire detection degraded to single loop"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG3_FIRE_DET_FAULT",
+    "ata": 26,
+    "title": "ENG 3 FIRE DET FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FIRE_LOOP_A_ENG3_FAULT",
+      "L:FIRE_LOOP_B_ENG3_FAULT",
+      "L:FIRE_LOOP_ENG3_DISAGREE"
+    ],
+    "status": [
+      "ENG 3 fire detection degraded to single loop"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG4_FIRE_DET_FAULT",
+    "ata": 26,
+    "title": "ENG 4 FIRE DET FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FIRE_LOOP_A_ENG4_FAULT",
+      "L:FIRE_LOOP_B_ENG4_FAULT",
+      "L:FIRE_LOOP_ENG4_DISAGREE"
+    ],
+    "status": [
+      "ENG 4 fire detection degraded to single loop"
+    ],
+    "inop": []
+  },
+  {
+    "key": "APU_FIRE_DET_FAULT",
+    "ata": 26,
+    "title": "APU FIRE DET FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FIRE_LOOP_APU_DISAGREE",
+      "L:FIRE_LOOP_A_APU_FAULT",
+      "L:FIRE_LOOP_B_APU_FAULT"
+    ],
+    "status": [
+      "APU fire detection degraded to single loop"
+    ],
+    "inop": []
+  },
+  {
+    "key": "MLG_FIRE_DET_FAULT",
+    "ata": 26,
+    "title": "MLG BAY FIRE DET FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FIRE_LOOP_A_MLG_FAULT",
+      "L:FIRE_LOOP_B_MLG_FAULT",
+      "L:FIRE_LOOP_MLG_DISAGREE"
+    ],
+    "status": [
+      "MLG BAY fire detection degraded to single loop"
+    ],
+    "inop": []
+  },
+  {
+    "key": "CARGO_FWD_FIRE_DET_FAULT",
+    "ata": 26,
+    "title": "CARGO FWD FIRE DET FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FIRE_LOOP_A_CARGO_FWD_FAULT",
+      "L:FIRE_LOOP_B_CARGO_FWD_FAULT",
+      "L:FIRE_LOOP_CARGO_FWD_DISAGREE"
+    ],
+    "status": [
+      "CARGO FWD fire detection degraded to single loop"
+    ],
+    "inop": []
+  },
+  {
+    "key": "CARGO_AFT_FIRE_DET_FAULT",
+    "ata": 26,
+    "title": "CARGO AFT FIRE DET FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FIRE_LOOP_A_CARGO_AFT_FAULT",
+      "L:FIRE_LOOP_B_CARGO_AFT_FAULT",
+      "L:FIRE_LOOP_CARGO_AFT_DISAGREE"
+    ],
+    "status": [
+      "CARGO AFT fire detection degraded to single loop"
+    ],
+    "inop": []
+  },
+  {
+    "key": "AVIONICS_FIRE_DET_FAULT",
+    "ata": 26,
+    "title": "AVIONICS FIRE DET FAULT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FIRE_LOOP_AVIONICS_DISAGREE",
+      "L:FIRE_LOOP_A_AVIONICS_FAULT",
+      "L:FIRE_LOOP_B_AVIONICS_FAULT"
+    ],
+    "status": [
+      "AVIONICS fire detection degraded to single loop"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_FIRE_AGENT_LO",
+    "ata": 26,
+    "title": "ENG 1 FIRE AGENT LO PR",
+    "level": "Advisory",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:FIRE_BOTTLE_ENG1_1_LOW_PRESSURE",
+      "L:FIRE_BOTTLE_ENG1_2_LOW_PRESSURE"
+    ],
+    "status": [
+      "ENG 1 fire bottle(s) below nominal pressure -- reduced/no agent available if fired"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_FIRE_AGENT_LO",
+    "ata": 26,
+    "title": "ENG 2 FIRE AGENT LO PR",
+    "level": "Advisory",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:FIRE_BOTTLE_ENG2_1_LOW_PRESSURE",
+      "L:FIRE_BOTTLE_ENG2_2_LOW_PRESSURE"
+    ],
+    "status": [
+      "ENG 2 fire bottle(s) below nominal pressure -- reduced/no agent available if fired"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_FIRE_AGENT_LO",
+    "ata": 26,
+    "title": "ENG 3 FIRE AGENT LO PR",
+    "level": "Advisory",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:FIRE_BOTTLE_ENG3_1_LOW_PRESSURE",
+      "L:FIRE_BOTTLE_ENG3_2_LOW_PRESSURE"
+    ],
+    "status": [
+      "ENG 3 fire bottle(s) below nominal pressure -- reduced/no agent available if fired"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_FIRE_AGENT_LO",
+    "ata": 26,
+    "title": "ENG 4 FIRE AGENT LO PR",
+    "level": "Advisory",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:FIRE_BOTTLE_ENG4_1_LOW_PRESSURE",
+      "L:FIRE_BOTTLE_ENG4_2_LOW_PRESSURE"
+    ],
+    "status": [
+      "ENG 4 fire bottle(s) below nominal pressure -- reduced/no agent available if fired"
+    ],
+    "inop": []
+  },
+  {
+    "key": "WING_L_A_ICE_ON",
+    "ata": 30,
+    "title": "L WING A-ICE",
+    "level": "Memo",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:ANTI_ICE_WING_L_VALVE_OPEN"
+    ],
+    "status": [],
+    "inop": []
+  },
+  {
+    "key": "WING_R_A_ICE_ON",
+    "ata": 30,
+    "title": "R WING A-ICE",
+    "level": "Memo",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:ANTI_ICE_WING_R_VALVE_OPEN"
+    ],
+    "status": [],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_NAI_FAULT",
+    "ata": 30,
+    "title": "ENG 1 NAI FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:ANTI_ICE_NACELLE1_OVERHEAT",
+      "L:ANTI_ICE_NACELLE1_VALVE_OPEN"
+    ],
+    "status": [],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_NAI_FAULT",
+    "ata": 30,
+    "title": "ENG 2 NAI FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:ANTI_ICE_NACELLE2_OVERHEAT",
+      "L:ANTI_ICE_NACELLE2_VALVE_OPEN"
+    ],
+    "status": [],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_NAI_FAULT",
+    "ata": 30,
+    "title": "ENG 3 NAI FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:ANTI_ICE_NACELLE3_OVERHEAT",
+      "L:ANTI_ICE_NACELLE3_VALVE_OPEN"
+    ],
+    "status": [],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_NAI_FAULT",
+    "ata": 30,
+    "title": "ENG 4 NAI FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:ANTI_ICE_NACELLE4_OVERHEAT",
+      "L:ANTI_ICE_NACELLE4_VALVE_OPEN"
+    ],
+    "status": [],
+    "inop": []
+  },
+  {
+    "key": "WING_A_ICE_OVHT",
+    "ata": 30,
+    "title": "WING A-ICE OVHT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:ANTI_ICE_WING_L_OVERHEAT",
+      "L:ANTI_ICE_WING_L_VALVE_OPEN",
+      "L:ANTI_ICE_WING_R_OVERHEAT",
+      "L:ANTI_ICE_WING_R_VALVE_OPEN"
+    ],
+    "status": [],
+    "inop": []
+  },
+  {
+    "key": "WINDSHIELD_HEAT_FAULT",
+    "ata": 30,
+    "title": "WINDSHIELD HEAT FAULT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:WINDOW_HEAT_L_FAULT",
+      "L:WINDOW_HEAT_R_FAULT"
+    ],
+    "status": [],
+    "inop": []
+  },
+  {
+    "key": "PROBE_HEAT_FAULT",
+    "ata": 30,
+    "title": "PROBE/WINDOW HEAT",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:PROBE_HEAT_PITOT1_FAULT",
+      "L:PROBE_HEAT_PITOT2_FAULT",
+      "L:PROBE_HEAT_PITOT3_FAULT"
+    ],
+    "status": [],
+    "inop": []
+  },
+  {
+    "key": "FCTL_AIL_FAULT",
+    "ata": 27,
+    "title": "F/CTL AIL FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FCTL_AIL_L1_FAULT",
+      "L:FCTL_AIL_L2_FAULT",
+      "L:FCTL_AIL_L3_FAULT",
+      "L:FCTL_AIL_R1_FAULT",
+      "L:FCTL_AIL_R2_FAULT",
+      "L:FCTL_AIL_R3_FAULT"
+    ],
+    "status": [
+      "F/CTL AIL SYS FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FCTL_SPLR_FAULT",
+    "ata": 27,
+    "title": "F/CTL SPLR FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FCTL_SPLR_L1_FAULT",
+      "L:FCTL_SPLR_L2_FAULT",
+      "L:FCTL_SPLR_L3_FAULT",
+      "L:FCTL_SPLR_L4_FAULT",
+      "L:FCTL_SPLR_L5_FAULT",
+      "L:FCTL_SPLR_L6_FAULT",
+      "L:FCTL_SPLR_L7_FAULT",
+      "L:FCTL_SPLR_L8_FAULT",
+      "L:FCTL_SPLR_R1_FAULT",
+      "L:FCTL_SPLR_R2_FAULT",
+      "L:FCTL_SPLR_R3_FAULT",
+      "L:FCTL_SPLR_R4_FAULT",
+      "L:FCTL_SPLR_R5_FAULT",
+      "L:FCTL_SPLR_R6_FAULT",
+      "L:FCTL_SPLR_R7_FAULT",
+      "L:FCTL_SPLR_R8_FAULT"
+    ],
+    "status": [
+      "F/CTL SPLR SYS FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FCTL_ELEV_FAULT",
+    "ata": 27,
+    "title": "F/CTL ELEV FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FCTL_ELEV_L_INBD_FAULT",
+      "L:FCTL_ELEV_L_OUTBD_FAULT",
+      "L:FCTL_ELEV_R_INBD_FAULT",
+      "L:FCTL_ELEV_R_OUTBD_FAULT"
+    ],
+    "status": [
+      "F/CTL ELEV SYS FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FCTL_RUD_FAULT",
+    "ata": 27,
+    "title": "F/CTL RUD FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FCTL_RUD_LOWER_FAULT",
+      "L:FCTL_RUD_UPPER_FAULT"
+    ],
+    "status": [
+      "F/CTL RUD SYS FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FCTL_THS_RUNAWAY",
+    "ata": 27,
+    "title": "F/CTL THS RUNAWAY",
+    "level": "Warning",
+    "confirm_s": 0.5,
+    "vars": [
+      "L:FCTL_THS_FAULT"
+    ],
+    "status": [
+      "F/CTL THS FAULT"
+    ],
+    "inop": [
+      "PITCH TRIM"
+    ]
+  },
+  {
+    "key": "FCTL_RUD_TRIM_FAULT",
+    "ata": 27,
+    "title": "F/CTL RUD TRIM FAULT",
+    "level": "Advisory",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FCTL_RUDDER_TRIM_FAULT"
+    ],
+    "status": [],
+    "inop": []
+  },
+  {
+    "key": "FCTL_FLAP_FAULT",
+    "ata": 27,
+    "title": "F/CTL FLAP FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FCTL_FLAP_L_FAULT",
+      "L:FCTL_FLAP_R_FAULT"
+    ],
+    "status": [
+      "F/CTL FLAP SYS FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FCTL_SLAT_FAULT",
+    "ata": 27,
+    "title": "F/CTL SLAT FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FCTL_SLAT_L_FAULT",
+      "L:FCTL_SLAT_R_FAULT"
+    ],
+    "status": [
+      "F/CTL SLAT SYS FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FCTL_DROOP_NOSE_FAULT",
+    "ata": 27,
+    "title": "F/CTL DROOP NOSE FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FCTL_DROOP_L_FAULT",
+      "L:FCTL_DROOP_R_FAULT"
+    ],
+    "status": [
+      "F/CTL DROOP NOSE SYS FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FCTL_GND_SPLR_FAULT",
+    "ata": 27,
+    "title": "F/CTL GND SPLR SYS FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FCTL_GND_SPLR_LOGIC_FAULT"
+    ],
+    "status": [
+      "F/CTL GND SPLR FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FUEL_LEAK",
+    "ata": 28,
+    "title": "FUEL LEAK",
+    "level": "Caution",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:FUEL_CROSSFEED_OPEN",
+      "L:FUEL_LEAK_DETECTED"
+    ],
+    "status": [
+      "FUEL LEAK: LAND ASAP"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FUEL_TRIM_TRANSFER_FAULT",
+    "ata": 28,
+    "title": "FUEL TRIM TK TRANSFER FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FUEL_TRIM_TRANSFER_FAULT"
+    ],
+    "status": [
+      "AUTO FUEL TRANSFER FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FUEL_CG_TRANSFER_DEGRADED",
+    "ata": 28,
+    "title": "FUEL AUTO CG XFR FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FUEL_CG_TRANSFER_DEGRADED"
+    ],
+    "status": [
+      "MAN FUEL TRANSFER MAY BE RQRD"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FUEL_FOB_LO_TEMP",
+    "ata": 28,
+    "title": "FUEL FOB LO TEMP",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:FUEL_FOB_LO_TEMP"
+    ],
+    "status": [
+      "MONITOR FUEL TEMP"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FUEL_FILTER_ICING",
+    "ata": 28,
+    "title": "FUEL FILTER ICING",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FUEL_FILTER_ICE_DETECTED"
+    ],
+    "status": [
+      "MONITOR FUEL FILTER DP"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FUEL_JETTISON_FAULT",
+    "ata": 28,
+    "title": "FUEL JETTISON FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:FUEL_JETTISON_L_VALVE_FAULT",
+      "L:FUEL_JETTISON_R_VALVE_FAULT"
+    ],
+    "status": [
+      "JETTISON RATE MAY BE REDUCED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FUEL_QTY_DEGRADED",
+    "ata": 28,
+    "title": "FUEL QTY INDICATION FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:FUEL_FQMS_LOW_CONFIDENCE"
+    ],
+    "status": [
+      "FOB ACCURACY DEGRADED"
+    ],
+    "inop": []
+  },
+  {
+    "key": "FUEL_TANK_SLOSH_ADVISORY",
+    "ata": 28,
+    "title": "FUEL TK STRUCTURE ADVISORY",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:FUEL_TANK_BAFFLE_DAMAGE_DETECTED"
+    ],
+    "status": [
+      "AVOID AGGRESSIVE MANOEUVRING"
+    ],
+    "inop": []
+  },
+  {
+    "key": "L_G_GEAR_NOT_DOWNLOCKED",
+    "ata": 32,
+    "title": "L/G GEAR NOT DOWNLOCKED",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:GEAR_DOWNLOCKED:1",
+      "L:GEAR_DOWNLOCKED:2",
+      "L:GEAR_DOWNLOCKED:3",
+      "L:GEAR_DOWNLOCKED:4",
+      "L:GEAR_DOWNLOCKED:5",
+      "L:GEAR_LEVER_SELECTED_DOWN"
+    ],
+    "status": [
+      "L/G GEAR NOT DOWNLOCKED"
+    ],
+    "inop": [
+      "L/G NORMAL EXTENSION"
+    ]
+  },
+  {
+    "key": "L_G_GEAR_DISAGREE",
+    "ata": 32,
+    "title": "L/G GEAR DISAGREE",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:GEAR_DOWNLOCKED:1",
+      "L:GEAR_DOWNLOCKED:2",
+      "L:GEAR_DOWNLOCKED:3",
+      "L:GEAR_DOWNLOCKED:4",
+      "L:GEAR_DOWNLOCKED:5",
+      "L:GEAR_UPLOCKED:1",
+      "L:GEAR_UPLOCKED:2",
+      "L:GEAR_UPLOCKED:3",
+      "L:GEAR_UPLOCKED:4",
+      "L:GEAR_UPLOCKED:5",
+      "L:SENSED_GEAR_DOWNLOCKED:1",
+      "L:SENSED_GEAR_DOWNLOCKED:2",
+      "L:SENSED_GEAR_DOWNLOCKED:3",
+      "L:SENSED_GEAR_DOWNLOCKED:4",
+      "L:SENSED_GEAR_DOWNLOCKED:5",
+      "L:SENSED_GEAR_UPLOCKED:1",
+      "L:SENSED_GEAR_UPLOCKED:2",
+      "L:SENSED_GEAR_UPLOCKED:3",
+      "L:SENSED_GEAR_UPLOCKED:4",
+      "L:SENSED_GEAR_UPLOCKED:5"
+    ],
+    "status": [
+      "L/G GEAR POSITION DISAGREE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "WHEEL_BRAKE_FIRE",
+    "ata": 32,
+    "title": "WHEEL L/G BRAKE FIRE",
+    "level": "Warning",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:BRAKE_FIRE:1",
+      "L:BRAKE_FIRE:10",
+      "L:BRAKE_FIRE:11",
+      "L:BRAKE_FIRE:12",
+      "L:BRAKE_FIRE:13",
+      "L:BRAKE_FIRE:14",
+      "L:BRAKE_FIRE:15",
+      "L:BRAKE_FIRE:16",
+      "L:BRAKE_FIRE:2",
+      "L:BRAKE_FIRE:3",
+      "L:BRAKE_FIRE:4",
+      "L:BRAKE_FIRE:5",
+      "L:BRAKE_FIRE:6",
+      "L:BRAKE_FIRE:7",
+      "L:BRAKE_FIRE:8",
+      "L:BRAKE_FIRE:9",
+      "L:PARK_BRAKE_HOLDING",
+      "L:PARK_BRAKE_SET"
+    ],
+    "status": [
+      "WHEEL BRAKE FIRE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "L_G_BRAKES_ANTISKID_FAULT",
+    "ata": 32,
+    "title": "L/G BRAKES ANTISKID N/U",
+    "level": "Caution",
+    "confirm_s": 0.0,
+    "vars": [
+      "L:ANTISKID_CHANNEL_FAULT:1",
+      "L:ANTISKID_CHANNEL_FAULT:10",
+      "L:ANTISKID_CHANNEL_FAULT:11",
+      "L:ANTISKID_CHANNEL_FAULT:12",
+      "L:ANTISKID_CHANNEL_FAULT:13",
+      "L:ANTISKID_CHANNEL_FAULT:14",
+      "L:ANTISKID_CHANNEL_FAULT:15",
+      "L:ANTISKID_CHANNEL_FAULT:16",
+      "L:ANTISKID_CHANNEL_FAULT:2",
+      "L:ANTISKID_CHANNEL_FAULT:3",
+      "L:ANTISKID_CHANNEL_FAULT:4",
+      "L:ANTISKID_CHANNEL_FAULT:5",
+      "L:ANTISKID_CHANNEL_FAULT:6",
+      "L:ANTISKID_CHANNEL_FAULT:7",
+      "L:ANTISKID_CHANNEL_FAULT:8",
+      "L:ANTISKID_CHANNEL_FAULT:9"
+    ],
+    "status": [
+      "ANTISKID FAULT"
+    ],
+    "inop": [
+      "AUTOBRAKE"
+    ]
+  },
+  {
+    "key": "L_G_PARK_BRK_LO_PR",
+    "ata": 32,
+    "title": "L/G PARK BRAKE LO PR",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:PARK_BRAKE_HOLDING",
+      "L:PARK_BRAKE_SET"
+    ],
+    "status": [
+      "PARK BRAKE ACCUMULATOR LOW"
+    ],
+    "inop": []
+  },
+  {
+    "key": "L_G_STEER_SHIMMY",
+    "ata": 32,
+    "title": "L/G STEERING SHIMMY",
+    "level": "Advisory",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:BODY_STEER_SHIMMY_UNSTABLE:1",
+      "L:BODY_STEER_SHIMMY_UNSTABLE:2",
+      "L:NW_STEER_SHIMMY_UNSTABLE"
+    ],
+    "status": [
+      "LANDING GEAR STEERING SHIMMY"
+    ],
+    "inop": []
+  },
+  {
+    "key": "HYD_GREEN_RSVR_LEVEL_LO",
+    "ata": 29,
+    "title": "HYD G RSVR LEVEL LO",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:HYD_GREEN_RESERVOIR_LEVEL_IS_LOW"
+    ],
+    "status": [
+      "HYD G RSVR LEVEL LO"
+    ],
+    "inop": []
+  },
+  {
+    "key": "HYD_GREEN_RSVR_AIR_PR_LO",
+    "ata": 29,
+    "title": "HYD G RSVR AIR PR LO",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:HYD_GREEN_RESERVOIR_AIR_PRESSURE_IS_LOW"
+    ],
+    "status": [
+      "HYD G RSVR AIR PR LO"
+    ],
+    "inop": []
+  },
+  {
+    "key": "HYD_GREEN_RSVR_OVHT",
+    "ata": 29,
+    "title": "HYD G RSVR OVHT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:HYD_GREEN_RESERVOIR_OVHT"
+    ],
+    "status": [
+      "HYD G RSVR OVHT"
+    ],
+    "inop": [
+      "HYD G"
+    ]
+  },
+  {
+    "key": "HYD_GREEN_SYS_LO_PR",
+    "ata": 29,
+    "title": "HYD G SYS LO PR",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:HYD_GREEN_MANIFOLD_PRESSURE_PSI"
+    ],
+    "status": [
+      "HYD G SYS LO PR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "HYD_YELLOW_RSVR_LEVEL_LO",
+    "ata": 29,
+    "title": "HYD Y RSVR LEVEL LO",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:HYD_YELLOW_RESERVOIR_LEVEL_IS_LOW"
+    ],
+    "status": [
+      "HYD Y RSVR LEVEL LO"
+    ],
+    "inop": []
+  },
+  {
+    "key": "HYD_YELLOW_RSVR_AIR_PR_LO",
+    "ata": 29,
+    "title": "HYD Y RSVR AIR PR LO",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:HYD_YELLOW_RESERVOIR_AIR_PRESSURE_IS_LOW"
+    ],
+    "status": [
+      "HYD Y RSVR AIR PR LO"
+    ],
+    "inop": []
+  },
+  {
+    "key": "HYD_YELLOW_RSVR_OVHT",
+    "ata": 29,
+    "title": "HYD Y RSVR OVHT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:HYD_YELLOW_RESERVOIR_OVHT"
+    ],
+    "status": [
+      "HYD Y RSVR OVHT"
+    ],
+    "inop": [
+      "HYD Y"
+    ]
+  },
+  {
+    "key": "HYD_YELLOW_SYS_LO_PR",
+    "ata": 29,
+    "title": "HYD Y SYS LO PR",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:HYD_YELLOW_MANIFOLD_PRESSURE_PSI"
+    ],
+    "status": [
+      "HYD Y SYS LO PR"
+    ],
+    "inop": []
+  },
+  {
+    "key": "OXY_CKPT_SYS_LO_PR",
+    "ata": 35,
+    "title": "OXYGEN CKPT SYS LO PR",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:DEEP_OXY_CREW_LOW_PRESSURE"
+    ],
+    "status": [
+      "CREW OXY - LO PR"
+    ],
+    "inop": [
+      "CKPT OXY"
+    ]
+  },
+  {
+    "key": "OXY_CREW_SUPPLY_LO_PR",
+    "ata": 35,
+    "title": "OXYGEN CREW SUPPLY LO PR",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:DEEP_OXY_CREW_BOTTLE_GAUGE_PSI",
+      "L:DEEP_OXY_CREW_SUPPLY_AVAILABLE"
+    ],
+    "status": [
+      "CREW OXY SUPPLY - LO PR"
+    ],
+    "inop": [
+      "CKPT OXY"
+    ]
+  },
+  {
+    "key": "OXY_PAX_SYS_ON",
+    "ata": 35,
+    "title": "OXYGEN PAX SYS ON",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:DEEP_OXY_PAX_CABIN_ALTITUDE_FT",
+      "L:DEEP_OXY_PAX_MASKS_DEPLOYED"
+    ],
+    "status": [
+      "PAX OXY - ON"
+    ],
+    "inop": []
+  },
+  {
+    "key": "DEEP_PNEU_ENG_1_BLEED_LEAK",
+    "ata": 36,
+    "title": "AIR ENG 1 BLEED LEAK",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:DEEP_PNEU_ENG_1_BLEED_PB_ON",
+      "L:DEEP_PNEU_ODLS_PylonEngine1_TRIP"
+    ],
+    "status": [
+      "AIR ENG 1 BLEED LEAK"
+    ],
+    "inop": [
+      "PACK 1 DEGRADED"
+    ]
+  },
+  {
+    "key": "DEEP_PNEU_ENG_2_BLEED_LEAK",
+    "ata": 36,
+    "title": "AIR ENG 2 BLEED LEAK",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:DEEP_PNEU_ENG_2_BLEED_PB_ON",
+      "L:DEEP_PNEU_ODLS_PylonEngine2_TRIP"
+    ],
+    "status": [
+      "AIR ENG 2 BLEED LEAK"
+    ],
+    "inop": [
+      "PACK 1 DEGRADED"
+    ]
+  },
+  {
+    "key": "DEEP_PNEU_ENG_3_BLEED_LEAK",
+    "ata": 36,
+    "title": "AIR ENG 3 BLEED LEAK",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:DEEP_PNEU_ENG_3_BLEED_PB_ON",
+      "L:DEEP_PNEU_ODLS_PylonEngine3_TRIP"
+    ],
+    "status": [
+      "AIR ENG 3 BLEED LEAK"
+    ],
+    "inop": [
+      "PACK 2 DEGRADED"
+    ]
+  },
+  {
+    "key": "DEEP_PNEU_ENG_4_BLEED_LEAK",
+    "ata": 36,
+    "title": "AIR ENG 4 BLEED LEAK",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:DEEP_PNEU_ENG_4_BLEED_PB_ON",
+      "L:DEEP_PNEU_ODLS_PylonEngine4_TRIP"
+    ],
+    "status": [
+      "AIR ENG 4 BLEED LEAK"
+    ],
+    "inop": [
+      "PACK 2 DEGRADED"
+    ]
+  },
+  {
+    "key": "DEEP_PNEU_APU_BLEED_LEAK",
+    "ata": 36,
+    "title": "AIR APU BLEED LEAK",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:DEEP_PNEU_APU_BLEED_PB_ON",
+      "L:DEEP_PNEU_ODLS_TailCone_TRIP"
+    ],
+    "status": [
+      "AIR APU BLEED LEAK"
+    ],
+    "inop": []
+  },
+  {
+    "key": "DEEP_PNEU_WING_L_LEAK",
+    "ata": 30,
+    "title": "AIR WING L DUCT LEAK",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:DEEP_PNEU_ODLS_WingLeLeft_TRIP",
+      "L:DEEP_PNEU_WAI_L_SELECTED"
+    ],
+    "status": [
+      "AIR WING L DUCT LEAK"
+    ],
+    "inop": [
+      "WING A ICE L SYS"
+    ]
+  },
+  {
+    "key": "DEEP_PNEU_WING_R_LEAK",
+    "ata": 30,
+    "title": "AIR WING R DUCT LEAK",
+    "level": "Warning",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:DEEP_PNEU_ODLS_WingLeRight_TRIP",
+      "L:DEEP_PNEU_WAI_R_SELECTED"
+    ],
+    "status": [
+      "AIR WING R DUCT LEAK"
+    ],
+    "inop": [
+      "WING A ICE R SYS"
+    ]
+  },
+  {
+    "key": "DEEP_PNEU_ENG_1_PRECOOLER_OVHT",
+    "ata": 36,
+    "title": "AIR ENG 1 PRECOOLER OVHT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:DEEP_PNEU_ENG_1_BLEED_PB_ON",
+      "L:DEEP_PNEU_ENG_1_PRECOOLER_OVHT"
+    ],
+    "status": [
+      "AIR ENG 1 PRECOOLER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "DEEP_PNEU_ENG_2_PRECOOLER_OVHT",
+    "ata": 36,
+    "title": "AIR ENG 2 PRECOOLER OVHT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:DEEP_PNEU_ENG_2_BLEED_PB_ON",
+      "L:DEEP_PNEU_ENG_2_PRECOOLER_OVHT"
+    ],
+    "status": [
+      "AIR ENG 2 PRECOOLER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "DEEP_PNEU_ENG_3_PRECOOLER_OVHT",
+    "ata": 36,
+    "title": "AIR ENG 3 PRECOOLER OVHT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:DEEP_PNEU_ENG_3_BLEED_PB_ON",
+      "L:DEEP_PNEU_ENG_3_PRECOOLER_OVHT"
+    ],
+    "status": [
+      "AIR ENG 3 PRECOOLER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "DEEP_PNEU_ENG_4_PRECOOLER_OVHT",
+    "ata": 36,
+    "title": "AIR ENG 4 PRECOOLER OVHT",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:DEEP_PNEU_ENG_4_BLEED_PB_ON",
+      "L:DEEP_PNEU_ENG_4_PRECOOLER_OVHT"
+    ],
+    "status": [
+      "AIR ENG 4 PRECOOLER"
+    ],
+    "inop": []
+  },
+  {
+    "key": "DEEP_PNEU_ODLS_FAULT",
+    "ata": 36,
+    "title": "AIR BLEED LEAK DET FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:DEEP_PNEU_ODLS_PylonEngine1_FAULT",
+      "L:DEEP_PNEU_ODLS_PylonEngine2_FAULT",
+      "L:DEEP_PNEU_ODLS_PylonEngine3_FAULT",
+      "L:DEEP_PNEU_ODLS_PylonEngine4_FAULT",
+      "L:DEEP_PNEU_ODLS_TailCone_FAULT",
+      "L:DEEP_PNEU_ODLS_WingLeLeft_FAULT",
+      "L:DEEP_PNEU_ODLS_WingLeRight_FAULT"
+    ],
+    "status": [
+      "AIR BLEED LEAK DET FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "DEEP_NAV_ADR_DISAGREE",
+    "ata": 34,
+    "title": "NAV ADR DISAGREE",
+    "level": "Caution",
+    "confirm_s": 3.0,
+    "vars": [
+      "L:DEEP_ADR_VOTE_DISAGREE",
+      "L:OVHD_ADIRS_ADR_1_PB_IS_ON",
+      "L:OVHD_ADIRS_ADR_2_PB_IS_ON",
+      "L:OVHD_ADIRS_ADR_3_PB_IS_ON"
+    ],
+    "status": [
+      "NAV ADR DISAGREE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "DEEP_NAV_PITOT_HEAT_FAULT",
+    "ata": 34,
+    "title": "PROBE PITOT HEAT FAULT",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:DEEP_PITOT_1_HEATER_FAILED",
+      "L:DEEP_PITOT_2_HEATER_FAILED",
+      "L:DEEP_PITOT_3_HEATER_FAILED",
+      "L:DEEP_PITOT_4_HEATER_FAILED"
+    ],
+    "status": [
+      "PROBE PITOT HEAT FAULT"
+    ],
+    "inop": [
+      "ONE PITOT PROBE HEATER"
+    ]
+  },
+  {
+    "key": "DEEP_NAV_AOA_DISAGREE",
+    "ata": 34,
+    "title": "NAV AOA DISAGREE",
+    "level": "Caution",
+    "confirm_s": 2.0,
+    "vars": [
+      "L:DEEP_AOA_1_JAMMED",
+      "L:DEEP_AOA_2_JAMMED",
+      "L:DEEP_AOA_3_JAMMED"
+    ],
+    "status": [
+      "NAV AOA DISAGREE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "DEEP_NAV_TAT_FAULT",
+    "ata": 34,
+    "title": "NAV TAT PROBE FAULT",
+    "level": "Advisory",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:DEEP_TAT_1_HEATER_FAILED",
+      "L:DEEP_TAT_2_HEATER_FAILED"
+    ],
+    "status": [
+      "NAV TAT PROBE FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "DEEP_NAV_RA_1_FAULT",
+    "ata": 34,
+    "title": "NAV RA 1 FAULT",
+    "level": "Caution",
+    "confirm_s": 1.0,
+    "vars": [
+      "L:DEEP_RA_1_VALID"
+    ],
+    "status": [
+      "NAV RA 1 FAULT"
+    ],
+    "inop": [
+      "RA 1"
+    ]
+  },
+  {
+    "key": "DEEP_NAV_GPS_1_FAULT",
+    "ata": 34,
+    "title": "NAV GPS 1 FAULT",
+    "level": "Advisory",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:DEEP_GPS_1_VALID"
+    ],
+    "status": [
+      "NAV GPS 1 FAULT"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_1_NAC_OVHT",
+    "ata": 71,
+    "title": "ENG 1 NAC OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:ENGINE_MASTER:1",
+      "L:THERMAL_ZONE_NACELLECOWL1_TEMPERATURE_C"
+    ],
+    "status": [
+      "INOP: ENG 1 A ICE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_2_NAC_OVHT",
+    "ata": 71,
+    "title": "ENG 2 NAC OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:ENGINE_MASTER:2",
+      "L:THERMAL_ZONE_NACELLECOWL2_TEMPERATURE_C"
+    ],
+    "status": [
+      "INOP: ENG 2 A ICE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_3_NAC_OVHT",
+    "ata": 71,
+    "title": "ENG 3 NAC OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:ENGINE_MASTER:3",
+      "L:THERMAL_ZONE_NACELLECOWL3_TEMPERATURE_C"
+    ],
+    "status": [
+      "INOP: ENG 3 A ICE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ENG_4_NAC_OVHT",
+    "ata": 71,
+    "title": "ENG 4 NAC OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:ENGINE_MASTER:4",
+      "L:THERMAL_ZONE_NACELLECOWL4_TEMPERATURE_C"
+    ],
+    "status": [
+      "INOP: ENG 4 A ICE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "APU_COMPT_OVHT",
+    "ata": 49,
+    "title": "APU COMPT OVHT",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:APU_MASTER_SW",
+      "L:THERMAL_ZONE_APUCOMPARTMENT_TEMPERATURE_C"
+    ],
+    "status": [
+      "APU INOP"
+    ],
+    "inop": []
+  },
+  {
+    "key": "L_WING_A_ICE_DUCT_LEAK",
+    "ata": 30,
+    "title": "L WING A ICE DUCT LEAK",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:THERMAL_ZONE_WINGLELEFT_TEMPERATURE_C",
+      "L:WING_ANTI_ICE_SW:L"
+    ],
+    "status": [
+      "INOP: WING A ICE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "R_WING_A_ICE_DUCT_LEAK",
+    "ata": 30,
+    "title": "R WING A ICE DUCT LEAK",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:THERMAL_ZONE_WINGLERIGHT_TEMPERATURE_C",
+      "L:WING_ANTI_ICE_SW:R"
+    ],
+    "status": [
+      "INOP: WING A ICE"
+    ],
+    "inop": []
+  },
+  {
+    "key": "ECS_PACK_BAY_OVHT",
+    "ata": 21,
+    "title": "ECS PACK BAY OVHT",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:PACK_1_SW",
+      "L:PACK_2_SW",
+      "L:THERMAL_ZONE_BELLYFAIRINGPACKS_TEMPERATURE_C"
+    ],
+    "status": [
+      "INOP: PACK 1+2"
+    ],
+    "inop": []
+  },
+  {
+    "key": "AVIONICS_VENT_FAULT",
+    "ata": 21,
+    "title": "AVIONICS VENT FAULT",
+    "level": "Caution",
+    "confirm_s": 10.0,
+    "vars": [
+      "L:AVIONICS_VENT_OVRD_SW",
+      "L:THERMAL_COMPONENT_MAINAVIONICSWIRINGBUNDLE_DAMAGE",
+      "L:THERMAL_ZONE_MAINAVIONICS_TEMPERATURE_C"
+    ],
+    "status": [
+      "INOP: AVNCS VENT SYS 1"
+    ],
+    "inop": []
+  },
+  {
+    "key": "WIRING_OVHT_MAIN_AVIONICS",
+    "ata": 91,
+    "title": "MAIN_AVIONICS WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_MAIN_AVIONICS_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "MAIN_AVIONICS WIRING -- OVHT"
+    ],
+    "inop": [
+      "MAIN_AVIONICS WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_WING_ROOT",
+    "ata": 91,
+    "title": "WING_ROOT WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_WING_ROOT_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "WING_ROOT WIRING -- OVHT"
+    ],
+    "inop": [
+      "WING_ROOT WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_ENGINE_1",
+    "ata": 91,
+    "title": "ENGINE_1 WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_ENGINE_1_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "ENGINE_1 WIRING -- OVHT"
+    ],
+    "inop": [
+      "ENGINE_1 WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_ENGINE_2",
+    "ata": 91,
+    "title": "ENGINE_2 WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_ENGINE_2_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "ENGINE_2 WIRING -- OVHT"
+    ],
+    "inop": [
+      "ENGINE_2 WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_ENGINE_3",
+    "ata": 91,
+    "title": "ENGINE_3 WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_ENGINE_3_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "ENGINE_3 WIRING -- OVHT"
+    ],
+    "inop": [
+      "ENGINE_3 WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_ENGINE_4",
+    "ata": 91,
+    "title": "ENGINE_4 WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_ENGINE_4_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "ENGINE_4 WIRING -- OVHT"
+    ],
+    "inop": [
+      "ENGINE_4 WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_APU",
+    "ata": 91,
+    "title": "APU WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_APU_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "APU WIRING -- OVHT"
+    ],
+    "inop": [
+      "APU WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_TAIL_CONE",
+    "ata": 91,
+    "title": "TAIL_CONE WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_TAIL_CONE_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "TAIL_CONE WIRING -- OVHT"
+    ],
+    "inop": [
+      "TAIL_CONE WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_MAIN_GEAR_BAY",
+    "ata": 91,
+    "title": "MAIN_GEAR_BAY WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_MAIN_GEAR_BAY_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "MAIN_GEAR_BAY WIRING -- OVHT"
+    ],
+    "inop": [
+      "MAIN_GEAR_BAY WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_NOSE_GEAR_BAY",
+    "ata": 91,
+    "title": "NOSE_GEAR_BAY WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_NOSE_GEAR_BAY_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "NOSE_GEAR_BAY WIRING -- OVHT"
+    ],
+    "inop": [
+      "NOSE_GEAR_BAY WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_CARGO_FWD",
+    "ata": 91,
+    "title": "CARGO_FWD WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_CARGO_FWD_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "CARGO_FWD WIRING -- OVHT"
+    ],
+    "inop": [
+      "CARGO_FWD WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_CARGO_AFT",
+    "ata": 91,
+    "title": "CARGO_AFT WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_CARGO_AFT_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "CARGO_AFT WIRING -- OVHT"
+    ],
+    "inop": [
+      "CARGO_AFT WIRING HARNESS"
+    ]
+  },
+  {
+    "key": "WIRING_OVHT_COCKPIT",
+    "ata": 91,
+    "title": "COCKPIT WIRE OVHT",
+    "level": "Caution",
+    "confirm_s": 5.0,
+    "vars": [
+      "L:WIRING_ZONE_COCKPIT_OVERHEAT_SEVERITY"
+    ],
+    "status": [
+      "COCKPIT WIRING -- OVHT"
+    ],
+    "inop": [
+      "COCKPIT WIRING HARNESS"
+    ]
+  }
+]

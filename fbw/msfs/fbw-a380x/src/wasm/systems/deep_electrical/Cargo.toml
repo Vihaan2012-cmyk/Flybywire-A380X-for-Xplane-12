@@ -1,0 +1,10 @@
+[package]
+name = "deep_electrical"
+version = "0.1.0"
+edition = "2021"
+description = "The A380's circuit protection (417 ELMS units), electrical network and wiring, shared by the X-Plane plugin and the MSFS systems module"
+publish = false
+
+[lib]
+test = false
+doctest = false

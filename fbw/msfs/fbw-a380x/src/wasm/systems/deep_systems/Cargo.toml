@@ -1,0 +1,11 @@
+[package]
+name = "deep_systems"
+version = "0.1.0"
+edition = "2021"
+description = "Every A380 deep area (the X-Plane plugin's src/deep), for FlyByWire's MSFS systems module"
+publish = false
+
+[lib]
+test = true
+doctest = false
+

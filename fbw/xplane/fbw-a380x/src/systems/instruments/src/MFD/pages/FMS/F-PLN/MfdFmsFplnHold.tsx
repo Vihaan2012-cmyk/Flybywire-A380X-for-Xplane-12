@@ -1,0 +1,330 @@
+﻿import {
+  FSComponent,
+  MappedSubject,
+  NumberFormatter,
+  NumberUnitSubject,
+  Subject,
+  UnitType,
+  VNode,
+} from '@microsoft/msfs-sdk';
+
+import './MfdFmsFpln.scss';
+import './MfdFmsFplnHold.scss';
+import { AbstractMfdPageProps } from '../../../MFD';
+import { Footer } from '../../common/Footer';
+import { Button } from '../../../../MsfsAvionicsCommon/UiWidgets/Button';
+import { FmsPage } from '../../common/FmsPage';
+import { InputField } from '../../../../MsfsAvionicsCommon/UiWidgets/InputField';
+import { HoldDistFormat, HoldTimeFormat, InboundCourseFormat } from '../../common/DataEntryFormats';
+import { RadioButtonColor, RadioButtonGroup } from '../../../../MsfsAvionicsCommon/UiWidgets/RadioButtonGroup';
+import { HoldData, HoldType } from '@fmgc/flightplanning/data/flightplan';
+import { NXDataStore, TurnDirection } from '@flybywiresim/fbw-sdk';
+import { FlightPlanIndex } from '@fmgc/flightplanning/FlightPlanManager';
+
+interface MfdFmsFplnHoldProps extends AbstractMfdPageProps {}
+
+export class MfdFmsFplnHold extends FmsPage<MfdFmsFplnHoldProps> {
+  private readonly weightUnit = NXDataStore.getSetting('CONFIG_USING_METRIC_UNIT').map((v) =>
+    v ? UnitType.KILOGRAM : UnitType.POUND,
+  );
+  private readonly weightUnitText = this.weightUnit.map((v) => (v === UnitType.KILOGRAM ? 'T' : 'KLB'));
+
+  private readonly weightFormatter = NumberFormatter.create({
+    nanString: '---.-',
+    precision: 0.1,
+  });
+
+  private readonly holdType = Subject.create<string>('MODIFIED HOLD AT');
+
+  private readonly waypointIdent = Subject.create<string>('WAYPOINT');
+
+  private readonly inboundCourse = Subject.create<number | null>(null);
+
+  private readonly turnSelectedIndex = Subject.create<number | null>(null);
+
+  private readonly legDefiningParameterSelectedIndex = Subject.create<number | null>(null);
+
+  private readonly legTime = Subject.create<number | null>(null);
+
+  private readonly legTimeRef = FSComponent.createRef<HTMLDivElement>();
+
+  private readonly legDistance = Subject.create<number | null>(null);
+
+  private readonly legDistanceRef = FSComponent.createRef<HTMLDivElement>();
+
+  private readonly lastExitUtc = Subject.create<string | null>(null);
+
+  private readonly lastExitEfob = NumberUnitSubject.create(UnitType.KILOGRAM.createNumber(NaN));
+  private readonly lastExitEfobText = MappedSubject.create(
+    ([value, weightUnit]) => this.weightFormatter(value.asUnit(weightUnit) / 1000),
+    this.lastExitEfob,
+    this.weightUnit,
+  );
+
+  private readonly returnButtonDiv = FSComponent.createRef<HTMLDivElement>();
+
+  private readonly tmpyInsertButtonDiv = FSComponent.createRef<HTMLDivElement>();
+
+  private readonly radioButtonColor = this.tmpyActive.map((it) =>
+    it ? RadioButtonColor.Yellow : RadioButtonColor.Cyan,
+  );
+
+  private readonly isActiveOrTmpy = this.loadedFlightPlanIndex.map(
+    (idx) => idx === FlightPlanIndex.Active || idx === FlightPlanIndex.Temporary,
+  );
+
+  protected onNewData(): void {
+    const revWptIdx = this.props.fmcService.master.revisedLegIndex.get();
+    if (this.props.fmcService.master.revisedWaypoint() && revWptIdx) {
+      const leg = this.loadedFlightPlan?.legElementAt(revWptIdx);
+      const hold = leg?.modifiedHold !== undefined ? leg.modifiedHold : leg?.defaultHold;
+      if (hold) {
+        switch (hold.type) {
+          case HoldType.Computed:
+            this.holdType.set('COMPUTED HOLD AT ');
+            break;
+          case HoldType.Pilot:
+            this.holdType.set('MODIFIED HOLD AT ');
+            break;
+          default:
+            this.holdType.set('');
+            break;
+        }
+        this.waypointIdent.set(leg?.ident ?? '');
+        this.inboundCourse.set(hold.inboundMagneticCourse ?? null);
+        this.turnSelectedIndex.set(hold?.turnDirection === TurnDirection.Left ? 0 : 1);
+        this.legDefiningParameterSelectedIndex.set(hold?.time !== undefined ? 0 : 1);
+        this.legTime.set(hold?.time ?? null);
+        this.legDistance.set(hold?.distance ?? null);
+
+        this.lastExitUtc.set('--:--');
+        this.lastExitEfob.set(NaN);
+      }
+    }
+  }
+
+  private async modifyHold() {
+    const revWptIdx = this.props.fmcService.master.revisedLegIndex.get();
+    const revPlanIdx = this.props.fmcService.master.revisedLegPlanIndex.get();
+    if (revWptIdx && revPlanIdx && this.props.fmcService.master.revisedWaypoint()) {
+      const desiredHold: HoldData = {
+        type: HoldType.Pilot,
+        distance: this.legDefiningParameterSelectedIndex.get() === 0 ? undefined : this.legDistance.get() ?? undefined,
+        time: this.legDefiningParameterSelectedIndex.get() === 0 ? this.legTime.get() ?? undefined : undefined,
+        inboundMagneticCourse: this.inboundCourse.get() ?? undefined,
+        turnDirection: this.turnSelectedIndex.get() === 0 ? TurnDirection.Left : TurnDirection.Right,
+      };
+
+      const fallbackDefaultHold: HoldData = {
+        type: HoldType.Database,
+        distance: 1,
+        time: 1,
+        inboundMagneticCourse: 0,
+        turnDirection: TurnDirection.Right,
+      };
+
+      await this.props.flightPlanInterface.addOrEditManualHold(
+        revWptIdx,
+        { ...desiredHold },
+        desiredHold,
+        this.loadedFlightPlan?.legElementAt(revWptIdx).defaultHold ?? fallbackDefaultHold,
+        revPlanIdx,
+        this.props.fmcService.master.revisedLegIsAltn.get() ?? false,
+      );
+      this.onNewData();
+    }
+  }
+
+  private showTimeOrDist() {
+    switch (this.legDefiningParameterSelectedIndex.get()) {
+      case 0: // TIME
+        this.legTimeRef.instance.style.visibility = 'visible';
+        this.legDistanceRef.instance.style.visibility = 'hidden';
+        break;
+      case 1: // DIST
+        this.legTimeRef.instance.style.visibility = 'hidden';
+        this.legDistanceRef.instance.style.visibility = 'visible';
+        break;
+      default:
+        this.legTimeRef.instance.style.visibility = 'hidden';
+        this.legDistanceRef.instance.style.visibility = 'hidden';
+        break;
+    }
+  }
+
+  public onAfterRender(node: VNode): void {
+    super.onAfterRender(node);
+
+    this.subs.push(
+      this.tmpyActive.sub((v) => {
+        if (this.returnButtonDiv.getOrDefault() && this.tmpyInsertButtonDiv.getOrDefault()) {
+          this.returnButtonDiv.instance.style.visibility = v ? 'hidden' : 'visible';
+          this.tmpyInsertButtonDiv.instance.style.visibility = v ? 'visible' : 'hidden';
+        }
+      }, true),
+      this.isActiveOrTmpy,
+    );
+
+    this.subs.push(
+      this.legDefiningParameterSelectedIndex.sub(() => {
+        this.showTimeOrDist();
+        this.modifyHold();
+      }),
+    );
+
+    this.subs.push(this.inboundCourse.sub(() => this.modifyHold()));
+    this.subs.push(this.turnSelectedIndex.sub(() => this.modifyHold()));
+    this.subs.push(this.legTime.sub(() => this.modifyHold()));
+    this.subs.push(this.legDistance.sub(() => this.modifyHold()));
+
+    this.subs.push(this.weightUnit, this.weightUnitText, this.lastExitEfobText);
+
+    this.showTimeOrDist();
+  }
+
+  render(): VNode {
+    return (
+      <>
+        {super.render()}
+        {/* begin page content */}
+        <div class="fr">
+          <div class="mfd-fms-fpln-labeled-box-container" style="flex-grow: 1;">
+            <span class="mfd-label mfd-spacing-right mfd-fms-fpln-labeled-box-label">
+              {this.holdType}{' '}
+              <span class={{ 'mfd-label': true, green: this.isActiveOrTmpy, bigger: true }}>{this.waypointIdent}</span>
+            </span>
+            <span class="mfd-label" style="margin-top: 50px; margin-bottom: 20px;">
+              INBOUND CRS
+            </span>
+            <div style="margin-left: 75px;">
+              <InputField<number>
+                value={this.inboundCourse}
+                dataEntryFormat={new InboundCourseFormat()}
+                tmpyActive={this.tmpyActive}
+                errorHandler={(e) => this.props.fmcService.master.showFmsErrorMessage(e.type, e.details)}
+                hEventConsumer={this.props.mfd.hEventConsumer}
+                interactionMode={this.props.mfd.interactionMode}
+              />
+            </div>
+            <span class="mfd-label" style="margin-top: 50px; margin-bottom: 20px;">
+              TURN
+            </span>
+            <div style="margin-left: 75px;">
+              <RadioButtonGroup
+                idPrefix={`${this.props.mfd.uiService.captOrFo}_MFD_holdTurnRadio`}
+                selectedIndex={this.turnSelectedIndex}
+                values={['LEFT', 'RIGHT']}
+                color={this.radioButtonColor}
+              />
+            </div>
+            <span class="mfd-label" style="margin-top: 50px; margin-bottom: 20px;">
+              LEG DEFINING PARAMETER
+            </span>
+            <div style="display: flex; flex-direction: row; margin-left: 75px;">
+              <RadioButtonGroup
+                idPrefix={`${this.props.mfd.uiService.captOrFo}_MFD_holdDefiningParameterRadio`}
+                selectedIndex={this.legDefiningParameterSelectedIndex}
+                values={['TIME', 'DIST']}
+                color={this.radioButtonColor}
+              />
+              <div class="mfd-fpln-hold-timedist-box">
+                <div ref={this.legTimeRef}>
+                  <InputField<number>
+                    dataEntryFormat={new HoldTimeFormat()}
+                    value={this.legTime}
+                    tmpyActive={this.tmpyActive}
+                    errorHandler={(e) => this.props.fmcService.master.showFmsErrorMessage(e.type, e.details)}
+                    hEventConsumer={this.props.mfd.hEventConsumer}
+                    interactionMode={this.props.mfd.interactionMode}
+                  />
+                </div>
+                <div ref={this.legDistanceRef}>
+                  <InputField<number>
+                    dataEntryFormat={new HoldDistFormat()}
+                    value={this.legDistance}
+                    tmpyActive={this.tmpyActive}
+                    errorHandler={(e) => this.props.fmcService.master.showFmsErrorMessage(e.type, e.details)}
+                    hEventConsumer={this.props.mfd.hEventConsumer}
+                    interactionMode={this.props.mfd.interactionMode}
+                  />
+                </div>
+              </div>
+            </div>
+            <span class="mfd-label mfd-fpln-hold-last-exit-label">LAST EXIT (FOR EXTRA FUEL 0 AT ALTN)</span>
+            <div class="mfd-fpln-hold-grid">
+              <div class="mfd-label">AT</div>
+              <div class="mfd-label" style="align-self: center;">
+                UTC
+              </div>
+              <div class="mfd-label">EFOB</div>
+              <div />
+              <div class={{ 'mfd-value': true, magenta: this.isActiveOrTmpy }}>{this.lastExitUtc}</div>
+              <div class="mfd-label-value-container">
+                <span class={{ 'mfd-value': true, magenta: this.isActiveOrTmpy }}>{this.lastExitEfobText}</span>
+                <span class="mfd-label-unit mfd-unit-trailing">{this.weightUnitText}</span>
+              </div>
+            </div>
+          </div>
+          <div class="fc" style="margin-top: 40px;">
+            <Button
+              label="DATABASE"
+              onClick={() => console.warn('DATABASE HOLD NOT IMPLEMENTED')}
+              buttonStyle="padding: 20px; margin: 5px;"
+              disabled={true}
+            />
+            <Button
+              label="COMPUTED"
+              onClick={() => {
+                const revWptIdx = this.props.fmcService.master.revisedLegIndex.get();
+                const revPlanIdx = this.props.fmcService.master.revisedLegPlanIndex.get();
+                if (revWptIdx && revPlanIdx && this.props.fmcService.master.revisedWaypoint()) {
+                  this.props.flightPlanInterface.revertHoldToComputed(
+                    revWptIdx,
+                    revPlanIdx,
+                    this.props.fmcService.master.revisedLegIsAltn.get() ?? false,
+                  );
+                }
+              }}
+              buttonStyle="padding: 20px; margin: 5px;"
+            />
+          </div>
+        </div>
+        <div style="flex-grow: 1;" />
+        <div class="fr" style="justify-content: space-between;">
+          <div
+            ref={this.returnButtonDiv}
+            class="mfd-fpln-hold-button-with-creative-class-name-which-is-as-long-as-style-attribute"
+          >
+            <Button
+              label="RETURN"
+              onClick={() => {
+                this.props.fmcService.master.resetRevisedWaypoint();
+                this.props.mfd.uiService.navigateTo('back');
+              }}
+            />
+          </div>
+          <div
+            ref={this.tmpyInsertButtonDiv}
+            class="mfd-fpln-hold-button-with-creative-class-name-which-is-as-long-as-style-attribute"
+          >
+            <Button
+              label="TMPY F-PLN"
+              onClick={() => {
+                this.props.fmcService.master.resetRevisedWaypoint();
+                this.props.mfd.uiService.navigateTo(`fms/${this.props.mfd.uiService.activeUri.get().category}/f-pln`);
+              }}
+              buttonStyle="color: yellow"
+            />
+          </div>
+        </div>
+        {/* end page content */}
+        <Footer
+          bus={this.props.bus}
+          mfd={this.props.mfd}
+          fmcService={this.props.fmcService}
+          flightPlanInterface={this.props.fmcService.master.flightPlanInterface}
+        />
+      </>
+    );
+  }
+}

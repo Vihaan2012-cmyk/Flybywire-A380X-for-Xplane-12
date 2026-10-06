@@ -14,3 +14,6 @@
 
 # Per-agent build directories (parallel work)
 target-*/
+
+# build.ps1 downloads, stages and builds here
+/build/

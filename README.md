@@ -209,31 +209,62 @@ sim uptime — that clock runs while the sim sits in a menu.
 
 ## Building
 
-The plugin builds with the GNU toolchain (no Visual Studio needed):
+Everything needed to build both simulators' aircraft is in this repository. The art
+(3D models, textures, sounds, liveries) and the CEF runtime are too big for git; they
+are on the release [`assets-2026-10-06`](../../releases/tag/assets-2026-10-06), and
+`build.ps1` downloads them and checks them against `assets.json`.
 
-    cargo +stable-x86_64-pc-windows-gnu build --release --features js
+    git clone -c core.longpaths=true https://github.com/Vihaan2012-cmyk/Flybywire-A380X-for-Xplane-12.git
+    cd Flybywire-A380X-for-Xplane-12
+    powershell -ExecutionPolicy Bypass -File build.ps1 -Sasl <path to the SASL 3 zip>
 
-`--features js` is not optional for a flyable build: it brings in QuickJS and the
+That builds and installs:
+
+- **MSFS 2020:** FlyByWire's instruments, hosts and WebAssembly from `fbw/msfs` (in
+  FlyByWire's own Docker image), laid over the released package, with the deep ECAM
+  bridge applied and `layout.json` regenerated. Installed into the Community folder.
+- **X-Plane 12:** FlyByWire's instruments from `fbw/xplane`, the plugin (GNU toolchain,
+  `--features js`), XPHFBW (MSVC + CEF), laid over the released converted aircraft.
+  Installed into `Aircraft/FlyByWire A380X`.
+
+Needs Windows 10/11 with Git, Python 3, Docker Desktop (running), Rust (`rustup`),
+MinGW-w64 `g++` (`winget install -e --id BrechtSanders.WinLibs.POSIX.UCRT`) and the
+Visual Studio 2022 C++ build tools. While the repository is private, also the GitHub CLI,
+signed in (`gh auth login`). SASL 3 is proprietary and not bundled; pass `-Sasl` once.
+
+| Option | |
+|---|---|
+| `-Only msfs` / `-Only xplane` | build one simulator |
+| `-Prebuilt` | install the released aircraft without building anything |
+| `-NoInstall` | build into `build/stage` only |
+| `-Reconvert` | regenerate the X-Plane model from the MSFS package with `msfs2xp-aircraft` (needs X-Plane's Laminar A330 as the `.acf` template, `-AcfTemplate`) |
+| `-XPlane`, `-Community` | install paths, when they are not found automatically |
+| `-CargoTargetDir` | Cargo's build folder (default `build/target`, or `CARGO_TARGET_DIR`) |
+
+A first build takes a long time: Docker pulls FlyByWire's image and both FlyByWire trees
+install their node modules.
+
+`--features js` is not optional for a flyable X-Plane build: it brings in QuickJS and the
 Oxc TypeScript loader that run FlyByWire's instruments. Without it the plugin still
-compiles and loads, but every cockpit display is dead — and the only outward sign is
-that `win.xpl` comes out around 15 MB instead of about 31 MB.
-
-The built `fbw_a380_systems.dll` is installed as
-`Aircraft/<aircraft>/plugins/fbw_a380_systems/64/win.xpl`. X-Plane scans every
+compiles and loads, but every cockpit display is dead, and the only outward sign is
+that `win.xpl` comes out around 15 MB instead of about 31 MB. X-Plane scans every
 sub-folder of `plugins/` for `64/win.xpl`, so renaming the *folder* does not disable
-the plugin; rename the `.xpl` itself. Windows will not let you replace it while
-X-Plane is running.
+the plugin; rename the `.xpl` itself.
 
-FlyByWire's sources are expected at `D:\fbw-aircraft` with the patches in
-`patches/fbw-rust` applied. The desktop app (`app/`) builds with the MSVC toolchain
-and CEF.
+## What is where
 
-## The aircraft
+| Path | |
+|---|---|
+| `src/`, `crates/`, `app/`, `emulator/`, `installer/` | the X-Plane plugin, its deep systems, XPHFBW, the test emulator and the installer |
+| `fbw/xplane/` | FlyByWire's aircraft repository as the X-Plane plugin builds against it (the `../fbw-aircraft` path dependency; `build.ps1` links it there) |
+| `fbw/msfs/` | FlyByWire's aircraft repository with the MSFS port: deep systems with authority over FlyByWire, ECAM, EFB Study pages, failures |
+| `Converter/`, `msfs2xp-aircraft/` | the MSFS to X-Plane converter (models, textures, cockpit, `.acf`) |
+| `msfs-tools/` | MSFS install scripts, the deep ECAM bridge (`ecam-bridge/apply.py`), EFB Study data, wiring and test campaign tools |
+| `patches/`, `tools/`, `distribution/`, `docs/` | FlyByWire patches, build and packaging tools, the release server, documentation |
 
-The X-Plane aircraft (3D models, textures, cockpit, liveries) is converted from
-FlyByWire's MSFS package by a separate converter tool. The converted aircraft is about
-3.6 GB, so it is distributed through GitHub Releases (split archives with a manifest and
-installer, see `distribution/`) rather than stored in git.
+Both FlyByWire trees leave out the A32NX's own textures, models and base package
+(1.2 GB, not used by the A380X) and FlyByWire's `large-files` submodule, whose A380X art
+comes from the release instead.
 
 ## Licence
 

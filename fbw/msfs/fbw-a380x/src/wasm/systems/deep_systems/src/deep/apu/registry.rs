@@ -1,0 +1,401 @@
+use crate::deep::api::*;
+
+pub mod ids {
+    use crate::deep::api::{failure_id, Area};
+
+    const ATA: u16 = 49;
+
+    pub const COMPRESSOR_EROSION: u64 = failure_id(Area::Apu, ATA, 1);
+    pub const TURBINE_DAMAGE: u64 = failure_id(Area::Apu, ATA, 2);
+    pub const LOAD_COMPRESSOR_EROSION: u64 = failure_id(Area::Apu, ATA, 3);
+    pub const IGV_JAM: u64 = failure_id(Area::Apu, ATA, 4);
+    pub const SCV_JAM: u64 = failure_id(Area::Apu, ATA, 5);
+    pub const STARTER_DEGRADATION: u64 = failure_id(Area::Apu, ATA, 6);
+    pub const IGNITER_FAILURE: u64 = failure_id(Area::Apu, ATA, 7);
+    pub const FCU_FAULT: u64 = failure_id(Area::Apu, ATA, 8);
+    pub const SPEED_SENSOR_FAULT: u64 = failure_id(Area::Apu, ATA, 9);
+    pub const OIL_LEAK: u64 = failure_id(Area::Apu, ATA, 10);
+    pub const INLET_DOOR_JAM: u64 = failure_id(Area::Apu, ATA, 11);
+    pub const GEN1_WEAR: u64 = failure_id(Area::Apu, ATA, 12);
+    pub const GEN1_OVERLOAD: u64 = failure_id(Area::Apu, ATA, 13);
+    pub const GEN2_WEAR: u64 = failure_id(Area::Apu, ATA, 14);
+    pub const GEN2_OVERLOAD: u64 = failure_id(Area::Apu, ATA, 15);
+    pub const EGT_SENSOR_FAULT: u64 = failure_id(Area::Apu, ATA, 16);
+    pub const FIRE_LOOP_FAILURE: u64 = failure_id(Area::Apu, ATA, 17);
+    pub const FIRE_SQUIB_FAILURE: u64 = failure_id(Area::Apu, ATA, 18);
+}
+
+pub fn register(r: &mut Registry) {
+    const ATA: u16 = 49;
+
+    let compressor_erosion = ids::COMPRESSOR_EROSION;
+    let turbine_damage = ids::TURBINE_DAMAGE;
+    let load_compressor_erosion = ids::LOAD_COMPRESSOR_EROSION;
+    let igv_jam = ids::IGV_JAM;
+    let scv_jam = ids::SCV_JAM;
+    let starter_degradation = ids::STARTER_DEGRADATION;
+    let igniter_failure = ids::IGNITER_FAILURE;
+    let fcu_fault = ids::FCU_FAULT;
+    let speed_sensor_fault = ids::SPEED_SENSOR_FAULT;
+    let oil_leak = ids::OIL_LEAK;
+    let inlet_door_jam = ids::INLET_DOOR_JAM;
+    let gen1_wear = ids::GEN1_WEAR;
+    let gen1_overload = ids::GEN1_OVERLOAD;
+    let gen2_wear = ids::GEN2_WEAR;
+    let gen2_overload = ids::GEN2_OVERLOAD;
+    let egt_sensor_fault = ids::EGT_SENSOR_FAULT;
+    let fire_loop_failure = ids::FIRE_LOOP_FAILURE;
+    let fire_squib_failure = ids::FIRE_SQUIB_FAILURE;
+
+    r.failure(FailureDef {
+        id: compressor_erosion,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU core compressor erosion".into(),
+        component: "49_apu.core_compressor".into(),
+        model_field: "power_section.rs::PowerSectionFaults.compressor_efficiency_loss".into(),
+        magnitude: "0..1 isentropic efficiency loss fraction".into(),
+        effect: "Same Euler blade work but less becomes useful pressure rise: compressor exit pressure falls for the same speed, and EGT rises for the same fuel flow/speed as the governor works to hold N under load.".into(),
+    });
+    r.failure(FailureDef {
+        id: turbine_damage,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU turbine damage".into(),
+        component: "49_apu.turbine".into(),
+        model_field: "power_section.rs::PowerSectionFaults.turbine_efficiency_loss".into(),
+        magnitude: "0..1 isentropic efficiency loss fraction".into(),
+        effect: "Less shaft work extracted per unit expansion: more of the gas's enthalpy survives to the exit (higher EGT) and the governor must burn more fuel to hold governed N under the same load.".into(),
+    });
+    r.failure(FailureDef {
+        id: load_compressor_erosion,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU load/bleed compressor erosion".into(),
+        component: "49_apu.load_compressor".into(),
+        model_field: "load_compressor.rs::LoadCompressorFaults.efficiency_loss".into(),
+        magnitude: "0..1 isentropic efficiency loss fraction".into(),
+        effect: "Lower delivered bleed pressure for the same demand and spool speed.".into(),
+    });
+    r.failure(FailureDef {
+        id: igv_jam,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU load compressor IGV actuator jam".into(),
+        component: "49_apu.igv_actuator".into(),
+        model_field: "load_compressor.rs::LoadCompressorFaults.igv_jam (actuator.rs::Actuator)".into(),
+        magnitude: "0..1 seizure fraction (0=free .. 1=frozen wherever it currently is)".into(),
+        effect: "Vanes freeze at their current opening; if that is closed relative to current demand, bleed delivery is starved even though the aircraft calls for more.".into(),
+    });
+    r.failure(FailureDef {
+        id: scv_jam,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU surge control valve actuator jam".into(),
+        component: "49_apu.scv_actuator".into(),
+        model_field: "load_compressor.rs::LoadCompressorFaults.scv_jam (actuator.rs::Actuator)".into(),
+        magnitude: "0..1 seizure fraction (freezes at whatever recirculation position it held, i.e. stuck open or stuck closed depending on demand history at the moment it jams)".into(),
+        effect: "Cannot open to recirculate flow when bleed demand drops faster than it can follow: the load compressor's operating point falls below its surge line and it genuinely surges (compressor_map.rs::Point.in_surge).".into(),
+    });
+    r.failure(FailureDef {
+        id: starter_degradation,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU starter motor degradation/failure".into(),
+        component: "49_apu.starter_motor".into(),
+        model_field: "starter.rs::StarterFaults.starter_degradation".into(),
+        magnitude: "0..1, weakens the shared back-EMF/torque constant (STARTER_KE_KT)".into(),
+        effect: "More current for less torque at the same speed: a slower, weaker start, and in severe cases the core never reaches light-off speed.".into(),
+    });
+    r.failure(FailureDef {
+        id: igniter_failure,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU igniter failure".into(),
+        component: "49_apu.igniter".into(),
+        model_field: "starter.rs::StarterFaults.igniter_failure".into(),
+        magnitude: "0..1, raises the effective light-off speed threshold".into(),
+        effect: "At full failure the threshold sits at/above self-sustaining speed, unreachable by the starter alone: a hung start with fuel never lit.".into(),
+    });
+    r.failure(FailureDef {
+        id: fcu_fault,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU fuel control unit (metering valve) fault".into(),
+        component: "49_apu.fuel_control_unit".into(),
+        model_field: "fuel_control.rs::FuelControlFaults.metering_valve_jam".into(),
+        magnitude: "0..1 seizure fraction".into(),
+        effect: "Fuel flow freezes at whatever it was delivering; over- or under-fuels the combustor from then on regardless of the governor's command.".into(),
+    });
+    r.failure(FailureDef {
+        id: speed_sensor_fault,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU ECB channel A/B speed pickup fault".into(),
+        component: "49_apu.governor_speed_sensor".into(),
+        model_field: "ecb.rs::EcbFaults.channel_a/b.speed_sensor (SensorFault{bias,failed})".into(),
+        magnitude: "0..1 bias (under-reads true N by up to params::N_SENSOR_MAX_BIAS_PERCENT), or an outright failed=true dropout".into(),
+        effect: "A single channel's bias is masked by the other, still-valid channel's own vote/average (ecb.rs::Ecb::step) -- only when both channels are biased the same way, or both fail outright (its own separate 'dual channel speed loss' condition), does the governor see a wrong or missing speed and either overfuel toward overspeed or lose control entirely.".into(),
+    });
+    r.failure(FailureDef {
+        id: oil_leak,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU oil leak".into(),
+        component: "49_apu.oil_system".into(),
+        model_field: "oil.rs::OilFaults.leak".into(),
+        magnitude: "0..1 fraction of MAX_LEAK_RATE_L_S".into(),
+        effect: "Tank level falls; the pump progressively starves as level drops below the low-level threshold, pressure falls, and sustained low pressure while running trips low oil pressure protection.".into(),
+    });
+    r.failure(FailureDef {
+        id: inlet_door_jam,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU inlet door actuator jam".into(),
+        component: "49_apu.inlet_door".into(),
+        model_field: "inlet_door.rs::InletDoorFaults.jam".into(),
+        magnitude: "0..1 seizure fraction".into(),
+        effect: "Door fails to reach fully open, imposing a continuing inlet total-pressure loss that reduces available power and raises EGT for the same demand.".into(),
+    });
+    r.failure(FailureDef {
+        id: gen1_wear,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU generator 1 winding/bearing wear".into(),
+        component: "49_apu.generator_1".into(),
+        model_field: "generators.rs::GeneratorFaults.efficiency_loss (Apu.faults.gen1)".into(),
+        magnitude: "0..1".into(),
+        effect: "More shaft power needed for the same electrical output, loading the core's torque balance.".into(),
+    });
+    r.failure(FailureDef {
+        id: gen1_overload,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU generator 1 overload protection failure".into(),
+        component: "49_apu.generator_1".into(),
+        model_field: "generators.rs::GeneratorFaults.overload_protection_failed (Apu.faults.gen1)".into(),
+        magnitude: "boolean, represented as 0/1".into(),
+        effect: "Removes the normal clamp at rated shaft power: an overloaded generator keeps demanding ever more shaft torque instead of being current-limited.".into(),
+    });
+    r.failure(FailureDef {
+        id: gen2_wear,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU generator 2 winding/bearing wear".into(),
+        component: "49_apu.generator_2".into(),
+        model_field: "generators.rs::GeneratorFaults.efficiency_loss (Apu.faults.gen2)".into(),
+        magnitude: "0..1".into(),
+        effect: "More shaft power needed for the same electrical output, loading the core's torque balance.".into(),
+    });
+    r.failure(FailureDef {
+        id: gen2_overload,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU generator 2 overload protection failure".into(),
+        component: "49_apu.generator_2".into(),
+        model_field: "generators.rs::GeneratorFaults.overload_protection_failed (Apu.faults.gen2)".into(),
+        magnitude: "boolean, represented as 0/1".into(),
+        effect: "Removes the normal clamp at rated shaft power: an overloaded generator keeps demanding ever more shaft torque instead of being current-limited.".into(),
+    });
+    r.failure(FailureDef {
+        id: egt_sensor_fault,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU ECB channel A/B EGT thermocouple fault".into(),
+        component: "49_apu.egt_sensor".into(),
+        model_field: "ecb.rs::EcbFaults.channel_a/b.egt_sensor (SensorFault{bias,failed})".into(),
+        magnitude: "0..1, under-reads true EGT by up to params::EGT_SENSOR_MAX_BIAS_C, or an outright dropout".into(),
+        effect: "Cockpit-indicated EGT reads low relative to the true turbine-exit temperature, masking a real overtemperature from the crew/ECAM; the true physics and the hard protective trip are unaffected.".into(),
+    });
+    r.failure(FailureDef {
+        id: fire_loop_failure,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU fire loop failure".into(),
+        component: "49_apu.fire_loop".into(),
+        model_field: "fire.rs::FireFaults.loop_failure".into(),
+        magnitude: "0..1".into(),
+        effect: "A real fire is never confirmed: automatic fuel/bleed shutoff never commands and the bottle cannot be commanded to discharge.".into(),
+    });
+    r.failure(FailureDef {
+        id: fire_squib_failure,
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU fire bottle squib failure".into(),
+        component: "49_apu.fire_bottle".into(),
+        model_field: "fire.rs::FireFaults.squib_failure".into(),
+        magnitude: "0..1".into(),
+        effect: "Fire is confirmed and shutoff still commands, but the extinguisher bottle never discharges.".into(),
+    });
+
+    r.component(ComponentDef {
+        id: "49_apu.core_compressor".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU core (power-section) compressor".into(),
+        params: vec![ParamDef { name: "efficiency_loss".into(), meaning: "isentropic efficiency loss fraction (erosion/damage)".into(), healthy: 0.0 }],
+        failures: vec![compressor_erosion],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.turbine".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU gas-generator turbine".into(),
+        params: vec![ParamDef { name: "efficiency_loss".into(), meaning: "isentropic efficiency loss fraction (blade erosion/FOD damage)".into(), healthy: 0.0 }],
+        failures: vec![turbine_damage],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.load_compressor".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU load (customer bleed) compressor".into(),
+        params: vec![ParamDef { name: "efficiency_loss".into(), meaning: "isentropic efficiency loss fraction".into(), healthy: 0.0 }],
+        failures: vec![load_compressor_erosion],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.igv_actuator".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU load compressor inlet guide vane actuator".into(),
+        params: vec![ParamDef { name: "jam".into(), meaning: "actuator seizure fraction, 0=free .. 1=frozen in place".into(), healthy: 0.0 }],
+        failures: vec![igv_jam],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.scv_actuator".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU surge control (anti-surge/recirculation) valve actuator".into(),
+        params: vec![ParamDef { name: "jam".into(), meaning: "actuator seizure fraction, 0=free .. 1=frozen in place".into(), healthy: 0.0 }],
+        failures: vec![scv_jam],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.starter_motor".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU starter motor".into(),
+        params: vec![ParamDef { name: "degradation".into(), meaning: "back-EMF/torque constant weakening fraction (brush/commutator wear)".into(), healthy: 0.0 }],
+        failures: vec![starter_degradation],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.igniter".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU igniter".into(),
+        params: vec![ParamDef { name: "failure".into(), meaning: "effective light-off speed threshold raise fraction".into(), healthy: 0.0 }],
+        failures: vec![igniter_failure],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.fuel_control_unit".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU fuel control unit (metering valve)".into(),
+        params: vec![ParamDef { name: "metering_valve_jam".into(), meaning: "metering valve actuator seizure fraction".into(), healthy: 0.0 }],
+        failures: vec![fcu_fault],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.governor_speed_sensor".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU governor speed sensor".into(),
+        params: vec![ParamDef { name: "bias".into(), meaning: "fractional under-read of true N, 0..1 of N_SENSOR_MAX_BIAS_PERCENT".into(), healthy: 0.0 }],
+        failures: vec![speed_sensor_fault],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.oil_system".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU oil system".into(),
+        params: vec![ParamDef { name: "leak".into(), meaning: "oil leak severity, fraction of MAX_LEAK_RATE_L_S".into(), healthy: 0.0 }],
+        failures: vec![oil_leak],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.inlet_door".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU inlet door actuator".into(),
+        params: vec![ParamDef { name: "jam".into(), meaning: "actuator seizure fraction, 0=free .. 1=frozen in place".into(), healthy: 0.0 }],
+        failures: vec![inlet_door_jam],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.generator_1".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU generator 1".into(),
+        params: vec![
+            ParamDef { name: "efficiency_loss".into(), meaning: "winding/bearing wear fraction".into(), healthy: 0.0 },
+            ParamDef { name: "overload_protection_failed".into(), meaning: "0=protected, 1=overcurrent protection failed".into(), healthy: 0.0 },
+        ],
+        failures: vec![gen1_wear, gen1_overload],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.generator_2".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU generator 2".into(),
+        params: vec![
+            ParamDef { name: "efficiency_loss".into(), meaning: "winding/bearing wear fraction".into(), healthy: 0.0 },
+            ParamDef { name: "overload_protection_failed".into(), meaning: "0=protected, 1=overcurrent protection failed".into(), healthy: 0.0 },
+        ],
+        failures: vec![gen2_wear, gen2_overload],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.egt_sensor".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU EGT sensor".into(),
+        params: vec![ParamDef { name: "bias".into(), meaning: "fractional under-read of true EGT, 0..1 of EGT_SENSOR_MAX_BIAS_C".into(), healthy: 0.0 }],
+        failures: vec![egt_sensor_fault],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.fire_loop".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU fire detection loop interface".into(),
+        params: vec![ParamDef { name: "loop_failure".into(), meaning: "loop failure fraction, 0..1".into(), healthy: 0.0 }],
+        failures: vec![fire_loop_failure],
+    });
+    r.component(ComponentDef {
+        id: "49_apu.fire_bottle".into(),
+        area: Area::Apu,
+        ata: ATA,
+        name: "APU fire extinguisher bottle".into(),
+        params: vec![ParamDef { name: "squib_failure".into(), meaning: "squib failure fraction, 0..1".into(), healthy: 0.0 }],
+        failures: vec![fire_squib_failure],
+    });
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registers_cleanly_with_no_validation_errors() {
+        let mut r = Registry::default();
+        register(&mut r);
+        let errors = r.validate_area();
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn every_component_has_at_least_one_failure_and_every_failure_names_a_registered_component() {
+        let mut r = Registry::default();
+        register(&mut r);
+        assert!(!r.components.is_empty());
+        assert!(!r.failures.is_empty());
+        for c in &r.components {
+            assert!(!c.failures.is_empty(), "{} has no failures", c.id);
+        }
+    }
+
+    #[test]
+    fn eighteen_distinct_failures_are_registered() {
+        let mut r = Registry::default();
+        register(&mut r);
+        assert_eq!(r.failures.len(), 18);
+        let mut ids: Vec<u64> = r.failures.iter().map(|f| f.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 18, "duplicate failure ids");
+    }
+}
