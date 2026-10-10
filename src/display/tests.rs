@@ -854,7 +854,7 @@ fn real_captured_stream_draws_its_vector_geometry() {
         return println!("the MSFS package is not on this machine; skipped");
     }
     let dir = std::env::var("FBW_STREAM_CAPTURES").unwrap_or_else(|_| {
-        r"C:\Users\bansa\AppData\Local\Temp\claude\d--Converter\2ab03b5e-47e8-485c-9ab0-6b1a7f42eaed\scratchpad\streams".to_string()
+        std::env::temp_dir().join("streams").to_string_lossy().into_owned()
     });
     let path = Path::new(&dir).join("SCREEN_DU_PFDL.json");
     if !path.is_file() {

@@ -29,7 +29,7 @@ each had a real, distinct defect.
    screen's `id` (e.g. `SCREEN_DU_MFD`), matching exactly what the converted
    OBJ writes. **Checked against both the installed aircraft**
    (`D:\Steam Games\...\FlyByWire A380X\objects\a380_cockpit_000.obj`) **and
-   the fresh conversion** (`C:\Users\bansa\Downloads\a380x-xp12\FlyByWire
+   the fresh conversion** (`%USERPROFILE%\Downloads\a380x-xp12\FlyByWire
    A380X\objects\a380_cockpit_000.obj`): every screen mesh already has, in
    order, `ATTR_cockpit_device <id> 0 0 0`, then `ATTR_manip_device hand <id>
    <id>`, then its `TRIS`, then `ATTR_manip_none` (e.g. lines 9708-9711 of the
@@ -276,6 +276,6 @@ imports.
   (not in this task's editable files); Bug 2 documented with an exact patch
   above for whoever owns them.
 - Installed aircraft (`D:\Steam Games\...\FlyByWire A380X`) and fresh
-  conversion (`C:\Users\bansa\Downloads\a380x-xp12\FlyByWire A380X`) OBJs,
+  conversion (`%USERPROFILE%\Downloads\a380x-xp12\FlyByWire A380X`) OBJs,
   and the `.acf` — inspected directly (read-only), no defect found; converter
   output is already correct for `ATTR_cockpit_device`/`ATTR_manip_device`.

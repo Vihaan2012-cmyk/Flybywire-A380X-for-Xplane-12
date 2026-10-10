@@ -999,7 +999,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::time::Instant;
 
-    const WAV_DIR: &str = "C:/Users/bansa/AppData/Local/Temp/claude/d--Converter/2ab03b5e-47e8-485c-9ab0-6b1a7f42eaed/scratchpad/wav";
+    const WAV_DIR: &str = "target/wav";
 
     /// sound.xml's main package and `WwiseEvent="..."` names.
     fn sound_xml_events() -> (String, Vec<String>) {
