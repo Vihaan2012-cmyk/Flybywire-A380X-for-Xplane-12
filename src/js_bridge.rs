@@ -336,6 +336,9 @@ impl VarsHost<'_> {
             return Resolved { target: Target::Game, conversion: Conversion::Raw };
         }
         let id = self.id(name);
+        if name.starts_with("L:") && self.vars.is_unwritten_named(&id) {
+            self.log_once(&format!("first read of unwritten L: var: {name}"));
+        }
         let conversion = if name.starts_with("L:") {
             // Aircraft variables are numbers, read as they were written.
             if matches!(units::kind(unit), Some(Kind::Bool)) {
@@ -352,12 +355,7 @@ impl VarsHost<'_> {
 
     pub(crate) fn read(&mut self, name: &str, r: Resolved) -> f64 {
         let raw = match r.target {
-            Target::Var(id) => {
-                if name.starts_with("L:") && self.vars.is_unwritten_named(&id) {
-                    self.log_once(&format!("first read of unwritten L: var: {name}"));
-                }
-                self.vars.read(&id)
-            }
+            Target::Var(id) => self.vars.read(&id),
             Target::Env(Env::SimulationTime) => self.time,
             // .NET DateTime ticks (100ns units) expressed in seconds since
             // 0000-01-01; 62_135_596_800 is the Unix epoch in that scale
