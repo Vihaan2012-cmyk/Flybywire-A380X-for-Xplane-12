@@ -38,7 +38,7 @@ export const AboutSettings: FC = () => {
         />
 
         <div className="flex flex-col gap-y-3">
-          <span className="font-manrope text-4xl font-bold">A380X X-Plane Installer</span>
+          <span className="font-manrope text-4xl font-bold">A380 for X-Plane 12 (Ported from FBW A380)</span>
           <a
             className="font-manrope text-2xl font-bold text-gray-400 hover:text-gray-600"
             onClick={() => {
@@ -57,7 +57,7 @@ export const AboutSettings: FC = () => {
         <span className="text-2xl">Licensed under the GNU General Public License Version 3</span>
 
         <span className="mt-4 text-2xl text-gray-200">
-          An unofficial port of FlyByWire Simulations&apos; A380X; FlyByWire&apos;s original 3D models are CC BY-NC 4.0.
+          Ported from FlyByWire Simulations&apos; A380X; FlyByWire&apos;s original 3D models are CC BY-NC 4.0.
           Not affiliated with or endorsed by FlyByWire Simulations, Laminar Research, Microsoft or Airbus.
         </span>
 

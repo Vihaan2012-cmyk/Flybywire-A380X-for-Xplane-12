@@ -1,4 +1,4 @@
-Unofficial FlyByWire A380X for X-Plane 12: licenses and notices
+A380 for X-Plane 12 (Ported from FBW A380): licenses and notices
 
 This is an unofficial, free, non-commercial port. It is not made, endorsed or
 supported by FlyByWire Simulations, Microsoft, Laminar Research or Airbus.

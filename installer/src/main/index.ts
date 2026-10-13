@@ -166,7 +166,7 @@ function initializeApp() {
 
   remote.initialize();
 
-  app.setAppUserModelId('A380X X-Plane Installer');
+  app.setAppUserModelId('A380 for X-Plane 12');
 
   let mainWindow: BrowserWindow;
 

@@ -24,7 +24,7 @@ echo "== installer engine"
 (cd "$ROOT/installer/engine" && CARGO_TARGET_DIR="$TARGET" RUSTFLAGS="-C target-feature=+crt-static --remap-path-prefix=$USERPROFILE=~" \
   cargo +stable-x86_64-pc-windows-msvc build --release --target x86_64-pc-windows-msvc)
 BUILT="$TARGET/x86_64-pc-windows-msvc/release/a380x-xp-engine.exe"
-SETUP="$(ls "$ROOT"/installer/dist/A380X-XP-Installer-*-x64.exe 2>/dev/null | tail -1)"
+SETUP="$(ls "$ROOT"/installer/dist/A380-for-X-Plane-12-Installer-*-x64.exe 2>/dev/null | tail -1)"
 
 if [ -f "$DIST/manifest.json" ] && ls "$DIST"/*.zip >/dev/null 2>&1; then
   echo "== using the existing package in $DIST (delete it to repackage)"
@@ -44,7 +44,7 @@ if gh release view "v$VERSION" --repo "$REPO" >/dev/null 2>&1; then
   gh release upload "v$VERSION" "$DIST"/*.zip "$DIST/tree.json" $INSTALLER --repo "$REPO" --clobber
 else
   gh release create "v$VERSION" "$DIST"/*.zip "$DIST/tree.json" $INSTALLER --repo "$REPO" $PRE \
-    --title "Unofficial FlyByWire A380X for X-Plane 12 $VERSION" --notes "${NOTES:-Release $VERSION}"
+    --title "A380 for X-Plane 12 (Ported from FBW A380) $VERSION" --notes "${NOTES:-Release $VERSION}"
 fi
 gh release upload "v$VERSION" "$DIST/manifest.json" --repo "$REPO" --clobber
 

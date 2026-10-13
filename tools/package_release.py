@@ -234,7 +234,7 @@ def main() -> None:
         if (ROOT / lic).exists():
             z.write(ROOT / lic, lic)
     z.writestr("NOTICE.txt", (
-        "Unofficial FlyByWire A380X for X-Plane 12. Free software: GNU GPL v3 (see LICENSE).\n"
+        "A380 for X-Plane 12 (Ported from FBW A380). Free software: GNU GPL v3 (see LICENSE).\n"
         "Built on FlyByWire Simulations' A380X (GPL-3.0 code; original 3D assets CC BY-NC 4.0).\n"
         "Not affiliated with or endorsed by Microsoft, Laminar Research or FlyByWire Simulations.\n"
         "Contains no Microsoft Flight Simulator content. Liveries remain their authors'.\n"

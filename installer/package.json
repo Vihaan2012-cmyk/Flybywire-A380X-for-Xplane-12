@@ -1,8 +1,8 @@
 {
   "name": "a380x-xp-installer",
-  "productName": "A380X X-Plane Installer",
+  "productName": "A380 for X-Plane 12",
   "version": "0.1.0",
-  "description": "Installs and updates the unofficial FlyByWire A380X port for X-Plane 12. A fork of the FlyByWire Installer.",
+  "description": "Installs and updates A380 for X-Plane 12 (Ported from FBW A380). A fork of the FlyByWire Installer.",
   "author": {
     "name": "A380X X-Plane port contributors"
   },
@@ -43,7 +43,7 @@
     ],
     "appId": "io.github.a380x-xp.installer",
     "nsis": {
-      "artifactName": "A380X-XP-Installer-${version}-${arch}.${ext}"
+      "artifactName": "A380-for-X-Plane-12-Installer-${version}-${arch}.${ext}"
     },
     "win": {
       "target": "nsis",

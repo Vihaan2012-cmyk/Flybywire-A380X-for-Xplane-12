@@ -40,7 +40,7 @@ export const defaultConfiguration: Configuration = {
   version: 1,
   publishers: [
     {
-      name: 'A380X for X-Plane',
+      name: 'A380 for X-Plane 12',
       key: 'a380x-xp',
       logoUrl: publisherLogo,
       logoSize: 36,
@@ -91,7 +91,7 @@ export const defaultConfiguration: Configuration = {
             'The A380 is the largest passenger airliner ever built: a full-length double-deck, four-engine ' +
             'wide-body with two hydraulic systems at 5,000 psi backed by electrical actuators, four variable-frequency ' +
             'generators and 22 wheels. The A380-842 flies on four Rolls-Royce Trent 972B-84 engines.\n\n' +
-            "This is an unofficial, study-level port of FlyByWire Simulations' A380X to X-Plane 12. FlyByWire's own " +
+            "Ported from FlyByWire Simulations' A380X, study level, to X-Plane 12. FlyByWire's own " +
             'A380 systems, fly-by-wire and instruments run inside X-Plane through a native plugin.',
           techSpecs: [
             { name: 'Engines', value: '4 × RR Trent 972B-84' },
