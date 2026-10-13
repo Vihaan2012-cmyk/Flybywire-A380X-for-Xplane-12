@@ -1,7 +1,9 @@
+/** @jsx FSComponent.h */
+/** @jsxFrag FSComponent.Fragment */
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { DisplayComponent, FSComponent, VNode } from '@microsoft/msfs-sdk';
+import { Widget as DisplayComponent, Kit as FSComponent, KitNode as VNode } from 'xp-kit';
 import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
 import { AbstractOitAvncsPageProps } from '../../../OIT';
 import { OitAvncsSubHeader } from '../OitAvncsSubHeader';
@@ -36,8 +38,8 @@ export class OitAvncsMaintenance extends DestroyableComponent<OitAvncsMaintenanc
     FSComponent.render(this.activePage, this.activePageRef?.getOrDefault());
   }
 
-  public onAfterRender(node: VNode): void {
-    super.onAfterRender(node);
+  public mounted(node: VNode): void {
+    super.mounted(node);
 
     MaintenanceData.instance().acquire();
     this.subscriptions.push(

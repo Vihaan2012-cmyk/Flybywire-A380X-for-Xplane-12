@@ -1,7 +1,9 @@
+/** @jsx FSComponent.h */
+/** @jsxFrag FSComponent.Fragment */
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { DisplayComponent, FSComponent, Subject, Subscription, VNode } from '@microsoft/msfs-sdk';
+import { Widget as DisplayComponent, Kit as FSComponent, Cell as Subject, Watch as Subscription, KitNode as VNode } from 'xp-kit';
 import { AbstractOitFltOpsPageProps } from '../../OIT';
 import { Button } from '../../../MsfsAvionicsCommon/UiWidgets/Button';
 import { AocFolder, AocMessage, AocMessageStore } from '../../System/AocMessageStore';
@@ -92,7 +94,7 @@ export class OitFltOpsAoc extends DisplayComponent<OitFltOpsAocProps> {
       return;
     }
 
-    const messages = this.store.messages.getArray().filter((m) => m.folder === folder);
+    const messages = this.store.messages.items().filter((m) => m.folder === folder);
     FSComponent.render(
       <>
         <div class="fr ass">
@@ -300,8 +302,8 @@ export class OitFltOpsAoc extends DisplayComponent<OitFltOpsAocProps> {
     this.renderViewer();
   }
 
-  public onAfterRender(node: VNode): void {
-    super.onAfterRender(node);
+  public mounted(node: VNode): void {
+    super.mounted(node);
 
     initLoadsheetBus(this.props.bus);
 

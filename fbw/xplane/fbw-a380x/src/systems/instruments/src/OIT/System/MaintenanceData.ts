@@ -1,7 +1,7 @@
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { ArraySubject, Subject } from '@microsoft/msfs-sdk';
+import { ListCell as ArraySubject, Cell as Subject, cell as $cell } from 'xp-kit';
 
 export interface MaintenanceEvent {
   readonly kind: MaintenanceEventKind;
@@ -76,7 +76,7 @@ export class MaintenanceData {
 
   readonly melDeferred = Subject.create<ReadonlyMap<number, number>>(new Map());
 
-  readonly catalogueLoaded = Subject.create(false);
+  readonly catalogueLoaded = $cell(false);
 
   private failures = new Map<number, CatalogueFailure>();
 

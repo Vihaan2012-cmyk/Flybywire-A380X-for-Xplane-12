@@ -1,7 +1,9 @@
+/** @jsx FSComponent.h */
+/** @jsxFrag FSComponent.Fragment */
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { FSComponent, VNode } from '@microsoft/msfs-sdk';
+import { Kit as FSComponent, KitNode as VNode } from 'xp-kit';
 import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
 import { AbstractOitAvncsPageProps } from '../../../OIT';
 import { MaintenanceData, MaintenanceEvent, MaintenanceEventKind } from '../../../System/MaintenanceData';
@@ -33,7 +35,7 @@ export class OitAvncsMaintenanceReport extends DestroyableComponent<OitAvncsMain
   private readonly bodyRef = FSComponent.createRef<HTMLDivElement>();
 
   private rows(): MaintenanceEvent[] {
-    const events = this.data.events.getArray();
+    const events = this.data.events.items();
     let rows: MaintenanceEvent[];
     if (this.props.mode === 'current') {
       const seen = new Set<string>();
@@ -94,8 +96,8 @@ export class OitAvncsMaintenanceReport extends DestroyableComponent<OitAvncsMain
     }
   }
 
-  public onAfterRender(node: VNode): void {
-    super.onAfterRender(node);
+  public mounted(node: VNode): void {
+    super.mounted(node);
     this.subscriptions.push(
       this.data.events.sub(() => this.redraw(), true),
       this.data.catalogueLoaded.sub(() => this.redraw()),

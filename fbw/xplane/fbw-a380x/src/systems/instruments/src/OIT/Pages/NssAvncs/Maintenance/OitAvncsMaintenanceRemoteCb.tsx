@@ -1,7 +1,9 @@
+/** @jsx FSComponent.h */
+/** @jsxFrag FSComponent.Fragment */
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { FSComponent, MappedSubject, Subject, VNode } from '@microsoft/msfs-sdk';
+import { Kit as FSComponent, DerivedCell as MappedSubject, Cell as Subject, KitNode as VNode, derive as $derive, cell as $cell } from 'xp-kit';
 import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
 import { Button } from '../../../../MsfsAvionicsCommon/UiWidgets/Button';
 import { InputField } from '../../../../MsfsAvionicsCommon/UiWidgets/InputField';
@@ -53,9 +55,9 @@ export class OitAvncsMaintenanceRemoteCb extends DestroyableComponent<OitAvncsMa
 
   private readonly bodyRef = FSComponent.createRef<HTMLDivElement>();
 
-  private readonly ctlOn = Subject.create(false);
+  private readonly ctlOn = $cell(false);
 
-  private readonly showAll = Subject.create(false);
+  private readonly showAll = $cell(false);
 
   private readonly search = Subject.create<string | null>(null);
 
@@ -67,19 +69,19 @@ export class OitAvncsMaintenanceRemoteCb extends DestroyableComponent<OitAvncsMa
     on ? 'REMOTE C/B CTL ON' : 'REMOTE C/B CTL OFF - SELECT ELEC REMOTE C/B CTL ON (OVHD MAINT PANEL)',
   );
 
-  private readonly commandsDisabled = MappedSubject.create(([on, b]) => !on || b === null, this.ctlOn, this.selected);
+  private readonly commandsDisabled = $derive(([on, b]) => !on || b === null, this.ctlOn, this.selected);
 
-  private readonly page = Subject.create(0);
+  private readonly page = $cell(0);
 
-  private readonly pageCount = Subject.create(1);
+  private readonly pageCount = $cell(1);
 
-  private readonly matchCount = Subject.create(0);
+  private readonly matchCount = $cell(0);
 
-  private readonly pageText = MappedSubject.create(([p, n, m]) => `${m} C/B  PAGE ${p + 1}/${n}`, this.page, this.pageCount, this.matchCount);
+  private readonly pageText = $derive(([p, n, m]) => `${m} C/B  PAGE ${p + 1}/${n}`, this.page, this.pageCount, this.matchCount);
 
   private readonly prevDisabled = this.page.map((p) => p <= 0);
 
-  private readonly nextDisabled = MappedSubject.create(([p, n]) => p >= n - 1, this.page, this.pageCount);
+  private readonly nextDisabled = $derive(([p, n]) => p >= n - 1, this.page, this.pageCount);
 
   private readonly clearDisabled = this.search.map((s) => s === null);
 
@@ -171,8 +173,8 @@ export class OitAvncsMaintenanceRemoteCb extends DestroyableComponent<OitAvncsMa
     }
   }
 
-  public onAfterRender(node: VNode): void {
-    super.onAfterRender(node);
+  public mounted(node: VNode): void {
+    super.mounted(node);
     this.subscriptions.push(
       this.selectedText,
       this.ctlText,

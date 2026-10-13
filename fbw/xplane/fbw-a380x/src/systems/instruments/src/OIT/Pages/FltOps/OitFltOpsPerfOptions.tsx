@@ -1,7 +1,9 @@
+/** @jsx FSComponent.h */
+/** @jsxFrag FSComponent.Fragment */
 //  Copyright (c) 2025 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { ComponentProps, FSComponent, MutableSubscribable, Subject, VNode } from '@microsoft/msfs-sdk';
+import { WidgetProps as ComponentProps, Kit as FSComponent, WritableWatchable as MutableSubscribable, Cell as Subject, KitNode as VNode } from 'xp-kit';
 import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
 import { RadioButtonGroup } from '../../../MsfsAvionicsCommon/UiWidgets/RadioButtonGroup';
 import { OisUnits } from './OitFltOpsPerfCommon';
@@ -15,8 +17,8 @@ export class OitFltOpsPerfOptions extends DestroyableComponent<OitFltOpsPerfOpti
   private readonly altimeterIndex = Subject.create<number | null>(this.props.units.get().altimeter === 'hpa' ? 0 : 1);
   private readonly distanceIndex = Subject.create<number | null>(this.props.units.get().distance === 'm' ? 0 : 1);
 
-  public onAfterRender(node: VNode): void {
-    super.onAfterRender(node);
+  public mounted(node: VNode): void {
+    super.mounted(node);
 
     this.subscriptions.push(
       this.weightIndex.sub((i) => this.props.units.set({ ...this.props.units.get(), weight: i === 1 ? 'klb' : 't' })),

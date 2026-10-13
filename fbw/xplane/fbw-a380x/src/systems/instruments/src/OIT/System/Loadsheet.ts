@@ -1,7 +1,7 @@
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { ConsumerSubject, EventBus, Subscription } from '@microsoft/msfs-sdk';
+import { FeedCell as ConsumerSubject, Hub as EventBus, Watch as Subscription, feed as $feed } from 'xp-kit';
 import { FmsData } from '@flybywiresim/fbw-sdk';
 
 const MAX_ZFW_KG = 373_000;
@@ -57,10 +57,10 @@ export function initLoadsheetBus(bus: EventBus): void {
   if (busSubs) {
     return;
   }
-  const sub = bus.getSubscriber<FmsData>();
-  const flightNumberSub = ConsumerSubject.create(sub.on('fmsFlightNumber'), null);
-  const originSub = ConsumerSubject.create(sub.on('fmsOrigin'), null);
-  const destinationSub = ConsumerSubject.create(sub.on('fmsDestination'), null);
+  const sub = bus.reader<FmsData>();
+  const flightNumberSub = $feed(sub.on('fmsFlightNumber'), null);
+  const originSub = $feed(sub.on('fmsOrigin'), null);
+  const destinationSub = $feed(sub.on('fmsDestination'), null);
   busSubs = [
     flightNumberSub.sub((v) => (flightNumber = v), true),
     originSub.sub((v) => (origin = v), true),

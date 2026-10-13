@@ -1,7 +1,9 @@
+/** @jsx FSComponent.h */
+/** @jsxFrag FSComponent.Fragment */
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { EventBus, FSComponent, VNode } from '@microsoft/msfs-sdk';
+import { Hub as EventBus, Kit as FSComponent, KitNode as VNode } from 'xp-kit';
 import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
 import { OitFile, OitFolder } from '../OitAvncsFolderNavigator';
 import { OitUiService } from '../../../OitUiService';

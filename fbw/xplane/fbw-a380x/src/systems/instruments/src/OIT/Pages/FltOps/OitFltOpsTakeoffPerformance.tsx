@@ -1,7 +1,9 @@
+/** @jsx FSComponent.h */
+/** @jsxFrag FSComponent.Fragment */
 //  Copyright (c) 2025 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { ArraySubject, FSComponent, MappedSubject, Subject, VNode } from '@microsoft/msfs-sdk';
+import { ListCell as ArraySubject, Kit as FSComponent, DerivedCell as MappedSubject, Cell as Subject, KitNode as VNode, list as $list, derive as $derive, cell as $cell } from 'xp-kit';
 import { DestroyableComponent } from '@flybywiresim/msfs-avionics-common';
 import { FmsData, getSimBriefOfp, ISimbriefData, ISimbriefTlrPhase } from '@flybywiresim/fbw-sdk';
 import { AbstractOitFltOpsPageProps } from '../../OIT';
@@ -43,29 +45,29 @@ const THRUST = ['FLEX [STD]', 'TOGA'];
 export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOitFltOpsPageProps> {
   private readonly units = Subject.create<OisUnits>(DEFAULT_UNITS);
 
-  private readonly sub = this.props.bus.getSubscriber<FmsData>();
+  private readonly sub = this.props.bus.reader<FmsData>();
 
   private readonly airport = Subject.create<string | null>(null);
   private readonly runwayIdents = ArraySubject.create<string>([]);
   private readonly selectedRunway = Subject.create<number | null>(null);
   private readonly runways = Subject.create<OisRunwayEnd[]>([]);
-  private readonly databaseMessage = Subject.create('');
+  private readonly databaseMessage = $cell('');
   private readonly takeoffShift = Subject.create<number | null>(null);
   private readonly entryAngle = Subject.create<number | null>(0);
 
-  private readonly runway = MappedSubject.create(
+  private readonly runway = $derive(
     ([list, index]) => (index === null ? null : (list[index] ?? null)),
     this.runways,
     this.selectedRunway,
   );
 
-  private readonly usableTora = MappedSubject.create(
+  private readonly usableTora = $derive(
     ([rwy, shift]) => (rwy === null ? null : Math.max(0, rwy.tora - (shift ?? 0))),
     this.runway,
     this.takeoffShift,
   );
 
-  private readonly usableAsda = MappedSubject.create(
+  private readonly usableAsda = $derive(
     ([rwy, shift]) => (rwy === null ? null : Math.max(0, rwy.asda - (shift ?? 0))),
     this.runway,
     this.takeoffShift,
@@ -73,11 +75,11 @@ export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOi
 
   private readonly oat = Subject.create<number | null>(null);
   private readonly qnh = Subject.create<number | null>(null);
-  private readonly windText = Subject.create('---°/---');
-  private readonly headwindText = Subject.create('---');
-  private readonly crosswindText = Subject.create('---');
-  private readonly pressureAltText = Subject.create('-----');
-  private readonly weatherSource = Subject.create('NO DATA');
+  private readonly windText = $cell('---°/---');
+  private readonly headwindText = $cell('---');
+  private readonly crosswindText = $cell('---');
+  private readonly pressureAltText = $cell('-----');
+  private readonly weatherSource = $cell('NO DATA');
 
   private readonly runwayCondition = Subject.create<number | null>(0);
   private readonly antiIce = Subject.create<number | null>(0);
@@ -85,31 +87,31 @@ export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOi
   private readonly flaps = Subject.create<number | null>(0);
   private readonly thrust = Subject.create<number | null>(0);
 
-  private readonly zfwText = Subject.create('---.-');
-  private readonly zfwCgText = Subject.create('--.-');
-  private readonly fobText = Subject.create('---.-');
-  private readonly towText = Subject.create('---.-');
-  private readonly toCgText = Subject.create('--.-');
-  private readonly weightWarning = Subject.create('');
+  private readonly zfwText = $cell('---.-');
+  private readonly zfwCgText = $cell('--.-');
+  private readonly fobText = $cell('---.-');
+  private readonly towText = $cell('---.-');
+  private readonly toCgText = $cell('--.-');
+  private readonly weightWarning = $cell('');
 
-  private readonly computed = Subject.create(false);
-  private readonly thrRedText = Subject.create('-----');
-  private readonly eoAccelText = Subject.create('-----');
-  private readonly resultRunwayText = Subject.create('----/---');
+  private readonly computed = $cell(false);
+  private readonly thrRedText = $cell('-----');
+  private readonly eoAccelText = $cell('-----');
+  private readonly resultRunwayText = $cell('----/---');
 
   private tlrTakeoff: ISimbriefTlrPhase | null = null;
   private tlrWeightUnits = '';
-  private readonly v1Text = Subject.create(UNAVAILABLE);
-  private readonly vrText = Subject.create(UNAVAILABLE);
-  private readonly v2Text = Subject.create(UNAVAILABLE);
-  private readonly flapsText = Subject.create(UNAVAILABLE);
-  private readonly flexText = Subject.create(UNAVAILABLE);
-  private readonly stopMarginText = Subject.create(UNAVAILABLE);
-  private readonly resultNote = Subject.create(UNAVAILABLE_REASON);
-  private readonly fromSimbrief = Subject.create(false);
+  private readonly v1Text = $cell(UNAVAILABLE);
+  private readonly vrText = $cell(UNAVAILABLE);
+  private readonly v2Text = $cell(UNAVAILABLE);
+  private readonly flapsText = $cell(UNAVAILABLE);
+  private readonly flexText = $cell(UNAVAILABLE);
+  private readonly stopMarginText = $cell(UNAVAILABLE);
+  private readonly resultNote = $cell(UNAVAILABLE_REASON);
+  private readonly fromSimbrief = $cell(false);
 
-  public onAfterRender(node: VNode): void {
-    super.onAfterRender(node);
+  public mounted(node: VNode): void {
+    super.mounted(node);
 
     this.subscriptions.push(
       this.runway,
@@ -380,7 +382,7 @@ export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOi
               <div class="oit-label bigger oit-perf-key">AIRPORT</div>
               <InputField<string>
                 dataEntryFormat={new AirportFormat()}
-                mandatory={Subject.create(true)}
+                mandatory={$cell(true)}
                 value={this.airport}
                 containerStyle="width: 160px; margin-right: 20px;"
                 alignText="center"
@@ -397,7 +399,7 @@ export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOi
                 containerStyle="width: 180px; margin-right: 20px;"
                 alignLabels="center"
                 numberOfDigitsForInputField={4}
-                tmpyActive={Subject.create(false)}
+                tmpyActive={$cell(false)}
                 hEventConsumer={this.props.container.hEventConsumer}
                 interactionMode={this.props.container.interactionMode}
               />
@@ -427,18 +429,18 @@ export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOi
 
               <div class="oit-label bigger">TORA</div>
               <div class="oit-label bigger oit-green-text">
-                {MappedSubject.create(([t, u]) => `${formatDistance(t, u)} ${distanceUnitLabel(u)}`, this.usableTora, units)}
+                {$derive(([t, u]) => `${formatDistance(t, u)} ${distanceUnitLabel(u)}`, this.usableTora, units)}
               </div>
               <div class="oit-label bigger">ASDA</div>
               <div class="oit-label bigger oit-green-text">
-                {MappedSubject.create(([a, u]) => `${formatDistance(a, u)} ${distanceUnitLabel(u)}`, this.usableAsda, units)}
+                {$derive(([a, u]) => `${formatDistance(a, u)} ${distanceUnitLabel(u)}`, this.usableAsda, units)}
               </div>
 
               <div class="oit-label bigger">TODA</div>
               <div class="oit-label bigger amber">{UNAVAILABLE}</div>
               <div class="oit-label bigger">WIDTH</div>
               <div class="oit-label bigger oit-green-text">
-                {MappedSubject.create(
+                {$derive(
                   ([r, u]) => (r === null ? '----' : `${formatDistance(r.width, u)} ${distanceUnitLabel(u)}`),
                   this.runway,
                   units,
@@ -450,19 +452,19 @@ export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOi
               <DropdownMenu
                 idPrefix={`${this.props.uiService.captOrFo}_OIT_toPerfEntryAngle`}
                 selectedIndex={this.entryAngle}
-                values={ArraySubject.create(ENTRY_ANGLES)}
+                values={$list(ENTRY_ANGLES)}
                 freeTextAllowed={false}
                 containerStyle="width: 150px; margin-right: 20px;"
                 alignLabels="center"
                 numberOfDigitsForInputField={3}
-                tmpyActive={Subject.create(false)}
+                tmpyActive={$cell(false)}
                 hEventConsumer={this.props.container.hEventConsumer}
                 interactionMode={this.props.container.interactionMode}
               />
               <div class="oit-label bigger oit-perf-key">T.O SHIFT</div>
               <InputField<number>
-                dataEntryFormat={new LengthFormat(Subject.create(0), Subject.create(6000))}
-                mandatory={Subject.create(false)}
+                dataEntryFormat={new LengthFormat($cell(0), $cell(6000))}
+                mandatory={$cell(false)}
                 value={this.takeoffShift}
                 containerStyle="width: 190px;"
                 alignText="center"
@@ -484,7 +486,7 @@ export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOi
               <div class="oit-label bigger oit-green-text">{this.oat.map((v) => (v === null ? '---' : `${v}°C`))}</div>
               <div class="oit-label bigger">QNH</div>
               <div class="oit-label bigger oit-green-text">
-                {MappedSubject.create(
+                {$derive(
                   ([q, u]) => (q === null ? '----' : `${formatPressure(q, u)} ${pressureUnitLabel(u)}`),
                   this.qnh,
                   units,
@@ -519,18 +521,18 @@ export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOi
             <div class="oit-perf-grid">
               <div class="oit-label bigger">ZFW</div>
               <div class="oit-label bigger oit-green-text">
-                {MappedSubject.create(([t, u]) => `${t} ${weightUnitLabel(u)}`, this.zfwText, units)}
+                {$derive(([t, u]) => `${t} ${weightUnitLabel(u)}`, this.zfwText, units)}
               </div>
               <div class="oit-label bigger">ZFWCG</div>
               <div class="oit-label bigger oit-green-text">{this.zfwCgText.map((v) => `${v} %`)}</div>
 
               <div class="oit-label bigger">FOB</div>
               <div class="oit-label bigger oit-green-text">
-                {MappedSubject.create(([t, u]) => `${t} ${weightUnitLabel(u)}`, this.fobText, units)}
+                {$derive(([t, u]) => `${t} ${weightUnitLabel(u)}`, this.fobText, units)}
               </div>
               <div class="oit-label bigger">TOW</div>
               <div class="oit-label bigger oit-green-text">
-                {MappedSubject.create(([t, u]) => `${t} ${weightUnitLabel(u)}`, this.towText, units)}
+                {$derive(([t, u]) => `${t} ${weightUnitLabel(u)}`, this.towText, units)}
               </div>
 
               <div class="oit-label bigger">TOCG</div>
@@ -550,7 +552,7 @@ export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOi
               <Button
                 label="RECHECK WITH AVNCS"
                 onClick={() => {}}
-                disabled={Subject.create(true)}
+                disabled={$cell(true)}
                 containerStyle="width: 320px;"
               />
               <div style="flex-grow: 1" />
@@ -616,12 +618,12 @@ export class OitFltOpsTakeoffPerformance extends DestroyableComponent<AbstractOi
         <DropdownMenu
           idPrefix={`${this.props.uiService.captOrFo}_OIT_${id}`}
           selectedIndex={selected}
-          values={ArraySubject.create(values)}
+          values={$list(values)}
           freeTextAllowed={false}
           containerStyle={`width: ${width}px;`}
           alignLabels="center"
           numberOfDigitsForInputField={Math.max(...values.map((v) => v.length))}
-          tmpyActive={Subject.create(false)}
+          tmpyActive={$cell(false)}
           hEventConsumer={this.props.container.hEventConsumer}
           interactionMode={this.props.container.interactionMode}
         />

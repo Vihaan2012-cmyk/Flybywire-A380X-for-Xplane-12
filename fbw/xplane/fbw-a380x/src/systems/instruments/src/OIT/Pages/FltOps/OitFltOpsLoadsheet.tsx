@@ -1,7 +1,9 @@
+/** @jsx FSComponent.h */
+/** @jsxFrag FSComponent.Fragment */
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { ClockEvents, DisplayComponent, FSComponent, Subject, Subscription, VNode } from '@microsoft/msfs-sdk';
+import { TickerSignals as ClockEvents, Widget as DisplayComponent, Kit as FSComponent, Cell as Subject, Watch as Subscription, KitNode as VNode } from 'xp-kit';
 import { AbstractOitFltOpsPageProps } from '../../OIT';
 import { Button } from '../../../MsfsAvionicsCommon/UiWidgets/Button';
 import { buildLoadsheet } from '../../System/Loadsheet';
@@ -54,14 +56,14 @@ export class OitFltOpsLoadsheet extends DisplayComponent<OitFltOpsLoadsheetPageP
     );
   }
 
-  public onAfterRender(node: VNode): void {
-    super.onAfterRender(node);
+  public mounted(node: VNode): void {
+    super.mounted(node);
 
-    const sub = this.props.bus.getSubscriber<ClockEvents>();
+    const sub = this.props.bus.reader<ClockEvents>();
     this.subs.push(
       sub
         .on('realTime')
-        .atFrequency(0.5)
+        .every(0.5)
         .handle(() => this.render_()),
       this.kind.sub(() => this.render_()),
     );

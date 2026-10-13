@@ -1,7 +1,7 @@
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { BasicConsumer, Consumer, Handler, Subscription } from '@microsoft/msfs-sdk';
+import { BasicTap as BasicConsumer, Tap as Consumer, Callback as Handler, Watch as Subscription } from 'xp-kit';
 import { Arinc429WordData } from './arinc429';
 
 type Subscribe<T> = (handler: Handler<T>, paused: boolean) => Subscription;

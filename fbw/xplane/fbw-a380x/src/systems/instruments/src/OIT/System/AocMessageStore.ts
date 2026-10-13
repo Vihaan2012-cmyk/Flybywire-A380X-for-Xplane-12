@@ -1,7 +1,7 @@
 // Copyright (c) 2026 FlyByWire Simulations
 // SPDX-License-Identifier: GPL-3.0
 
-import { ArraySubject, ClockEvents, ConsumerSubject, EventBus } from '@microsoft/msfs-sdk';
+import { ListCell as ArraySubject, TickerSignals as ClockEvents, FeedCell as ConsumerSubject, Hub as EventBus, feed as $feed } from 'xp-kit';
 
 export type AocFolder =
   | 'INBOX'
@@ -35,8 +35,8 @@ export class AocMessageStore {
   private readonly zuluTime: ConsumerSubject<number>;
 
   private constructor(private readonly bus: EventBus) {
-    const sub = this.bus.getSubscriber<ClockEvents>();
-    this.zuluTime = ConsumerSubject.create(sub.on('simTime'), Date.now());
+    const sub = this.bus.reader<ClockEvents>();
+    this.zuluTime = $feed(sub.on('simTime'), Date.now());
   }
 
   static instance(bus: EventBus): AocMessageStore {
@@ -69,7 +69,7 @@ export class AocMessageStore {
   }
 
   markRead(id: number): void {
-    const arr = this.messages.getArray();
+    const arr = this.messages.items();
     const index = arr.findIndex((m) => m.id === id);
     if (index >= 0 && arr[index].isNew) {
       const updated: AocMessage = { ...arr[index], isNew: false };
@@ -79,7 +79,7 @@ export class AocMessageStore {
   }
 
   clear(folder: AocFolder): void {
-    const arr = this.messages.getArray();
+    const arr = this.messages.items();
     for (let i = arr.length - 1; i >= 0; i--) {
       if (arr[i].folder === folder) {
         this.messages.removeAt(i);

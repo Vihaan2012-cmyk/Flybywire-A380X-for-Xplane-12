@@ -1,7 +1,7 @@
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { EventBus } from '@microsoft/msfs-sdk';
+import { Hub as EventBus } from 'xp-kit';
 import { ArincConsumer, BasicArincConsumer } from './ArincConsumer';
 
 export class ArincEventSubscriber<E> {

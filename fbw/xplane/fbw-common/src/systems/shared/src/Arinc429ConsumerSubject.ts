@@ -1,13 +1,13 @@
 //  Copyright (c) 2026 FlyByWire Simulations
 //  SPDX-License-Identifier: GPL-3.0
 
-import { AbstractSubscribable, Consumer, ReadonlyLifecycle, Subscription } from '@microsoft/msfs-sdk';
+import { AbstractWatchable as AbstractSubscribable, Tap as Consumer, LifeView as ReadonlyLifecycle, Watch as Subscription } from 'xp-kit';
 import { Arinc429Register, Arinc429WordData } from './arinc429';
 
 type Arinc429Input = Arinc429WordData;
 
 export class Arinc429ConsumerSubject extends AbstractSubscribable<Arinc429WordData> {
-  public readonly canInitialNotify = true;
+  public readonly canNotifyNow = true;
 
   private readonly word = Arinc429Register.empty();
 
@@ -19,7 +19,7 @@ export class Arinc429ConsumerSubject extends AbstractSubscribable<Arinc429WordDa
 
   private constructor(consumer: Consumer<Arinc429Input> | null | undefined) {
     super();
-    this.setConsumer(consumer ?? null);
+    this.follow(consumer ?? null);
   }
 
   public static create(consumer: Consumer<Arinc429Input> | null | undefined): Arinc429ConsumerSubject {
@@ -38,7 +38,7 @@ export class Arinc429ConsumerSubject extends AbstractSubscribable<Arinc429WordDa
     return this.word;
   }
 
-  public setConsumer(consumer: Consumer<Arinc429Input> | null): this {
+  public follow(consumer: Consumer<Arinc429Input> | null): this {
     if (!this.alive) {
       return this;
     }
@@ -51,7 +51,7 @@ export class Arinc429ConsumerSubject extends AbstractSubscribable<Arinc429WordDa
     this.consumerSub?.destroy();
     this.consumerSub = undefined;
     this.onValue(initialVal);
-    return this.setConsumer(consumer);
+    return this.follow(consumer);
   }
 
   public pause(): this {
@@ -70,7 +70,7 @@ export class Arinc429ConsumerSubject extends AbstractSubscribable<Arinc429WordDa
     return this;
   }
 
-  public withLifecycle(lifecycle: ReadonlyLifecycle): this {
+  public scoped(lifecycle: ReadonlyLifecycle): this {
     lifecycle.register(this);
     return this;
   }
@@ -90,7 +90,7 @@ export class Arinc429ConsumerSubject extends AbstractSubscribable<Arinc429WordDa
 }
 
 export class Arinc429LocalVarConsumerSubject extends AbstractSubscribable<Arinc429WordData> {
-  public readonly canInitialNotify = true;
+  public readonly canNotifyNow = true;
 
   private readonly word = Arinc429Register.empty();
 
@@ -105,7 +105,7 @@ export class Arinc429LocalVarConsumerSubject extends AbstractSubscribable<Arinc4
     if (initialVal !== null) {
       this.word.set(initialVal);
     }
-    this.setConsumer(consumer ?? null);
+    this.follow(consumer ?? null);
   }
 
   public static create(
@@ -127,7 +127,7 @@ export class Arinc429LocalVarConsumerSubject extends AbstractSubscribable<Arinc4
     return this.word;
   }
 
-  public setConsumer(consumer: Consumer<number> | null): this {
+  public follow(consumer: Consumer<number> | null): this {
     if (!this.alive) {
       return this;
     }
@@ -152,7 +152,7 @@ export class Arinc429LocalVarConsumerSubject extends AbstractSubscribable<Arinc4
     return this;
   }
 
-  public withLifecycle(lifecycle: ReadonlyLifecycle): this {
+  public scoped(lifecycle: ReadonlyLifecycle): this {
     lifecycle.register(this);
     return this;
   }
