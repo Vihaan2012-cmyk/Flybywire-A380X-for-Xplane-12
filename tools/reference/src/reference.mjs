@@ -18,7 +18,7 @@ import { listStates, loadState } from './state.mjs';
 const DEFAULT_SCREENS = ['PFD_L', 'PFD_R', 'ND_L', 'ND_R', 'EWD', 'SD', 'FCU', 'CLOCK'];
 
 function parseArgs(argv) {
-  const args = { state: 'all', screen: null, record: false, headed: false, settle: null, out: REFERENCE_PNG_DIR, verbose: false, dom: false, domEvery: 0 };
+  const args = { state: 'all', screen: null, record: false, headed: false, settle: null, out: REFERENCE_PNG_DIR, verbose: false, dom: false, domEvery: 0, vector: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i];
@@ -28,6 +28,7 @@ function parseArgs(argv) {
     else if (a === '--dom') args.dom = true;
     else if (a === '--dom-every') { args.dom = true; args.domEvery = Number(next()); }
     else if (a === '--headed') args.headed = true;
+    else if (a === '--vector') args.vector = true;
     else if (a === '--settle') args.settle = Number(next());
     else if (a === '--out') args.out = next();
     else if (a === '--verbose' || a === '-v') args.verbose = true;
@@ -90,6 +91,19 @@ async function renderScreen({ browser, server, screen, state, args, hostScripts 
   }
   const png = path.join(dir, `${screen.name}.png`);
   await page.screenshot({ path: png, animations: 'allow', caret: 'hide', scale: 'css', timeout: 60000 });
+  if (args.vector) {
+    await page.addScriptTag({ content: 'globalThis.__dom = globalThis.__dom || {};' });
+    await page.addScriptTag({ content: hostScripts.geometry });
+    await page.addScriptTag({ content: hostScripts.vector });
+    const v = await page.evaluate(() => {
+      const c = globalThis.__xphfbwVector.capture(document.documentElement);
+      return { ops: Array.from(c.ops), strings: c.strings, ms: c.ms };
+    });
+    const t0 = Date.now();
+    await page.evaluate(() => { for (let i = 0; i < 50; i++) globalThis.__xphfbwVector.capture(document.documentElement); });
+    const again = (Date.now() - t0) / 50;
+    fs.writeFileSync(path.join(dir, `${screen.name}.vector.json`), JSON.stringify({ screen: (screen.texture || '').replace(/^\$/, ''), width: screen.width, height: screen.height, ms: v.ms, warmMs: again, ops: v.ops, strings: v.strings }));
+  }
 
   const access = await page.evaluate(() => window.__refAccessLog());
   access.animationsFrozen = frozen;
@@ -122,6 +136,8 @@ async function main() {
   const hostScripts = {
     freeze: fs.readFileSync(path.join(TOOL_ROOT, 'host/freeze.js'), 'utf8'),
     recorder: fs.readFileSync(path.join(TOOL_ROOT, 'host/recorder.js'), 'utf8'),
+    geometry: fs.readFileSync(path.join(TOOL_ROOT, '../../src/js/dom/geometry.js'), 'utf8'),
+    vector: fs.readFileSync(path.join(TOOL_ROOT, '../../app/js/vector.js'), 'utf8'),
   };
 
   const server = await startServer({ log: (m) => args.verbose && console.log(`  [server] ${m}`) });

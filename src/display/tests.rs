@@ -918,3 +918,88 @@ fn real_captured_stream_draws_its_vector_geometry() {
     println!("real-captured-pfd: {lit} non-background pixels of {}", w * h);
     assert!(lit > 2000, "only {lit} non-background pixels in the whole captured PFD frame -- geometry did not draw offline either");
 }
+
+#[test]
+#[ignore]
+fn vector_golden() {
+    let dir = PathBuf::from(std::env::var("VECTOR_DIR").expect("set VECTOR_DIR"));
+    let screens = std::env::var("VECTOR_SCREENS").unwrap_or_else(|_| "PFD_L".into());
+    let samples: usize = std::env::var("VECTOR_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+    let mut res = resources();
+    for name in screens.split(',') {
+        let body: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(format!("{name}.vector.json"))).unwrap()).unwrap();
+        let ops: Vec<f64> = serde_json::from_value(body["ops"].clone()).unwrap();
+        let strings: Vec<String> = serde_json::from_value(body["strings"].clone()).unwrap();
+        let screen = body["screen"].as_str().unwrap_or("").to_string();
+        let (w, h) = (body["width"].as_u64().unwrap() as u32, body["height"].as_u64().unwrap() as u32);
+        let parsed = stream::parse(&ops, strings.len()).expect("parses");
+        let mut t = Tessellator::default();
+        let started = Instant::now();
+        let mut mesh = None;
+        for _ in 0..4 {
+            if let Ok(m) = t.run(&parsed, &strings, &screen, (w, h), (1., 1.), &mut res) {
+                mesh = Some(m);
+                break;
+            }
+        }
+        let mesh = mesh.expect("the atlas never settled");
+        let tess_ms = started.elapsed().as_secs_f64() * 1000.;
+        let ours = rgba_of(&soft::render(&mesh, &res, samples, &[], &[]));
+        let golden = sk::Pixmap::load_png(dir.join(format!("{name}.png"))).expect("golden png");
+        assert_eq!((golden.width(), golden.height()), (w, h));
+        let g = golden.data();
+        let over_black = |p: &[u8]| -> [i32; 3] {
+            let a = p[3] as i32;
+            [p[0] as i32 * a / 255, p[1] as i32 * a / 255, p[2] as i32 * a / 255]
+        };
+        let mut diff = vec![0u8; (w * h * 4) as usize];
+        let (mut bad, mut lit_g, mut lit_o, mut sum) = (0u64, 0u64, 0u64, 0u64);
+        for i in 0..(w * h) as usize {
+            let o = over_black(&ours[i * 4..i * 4 + 4]);
+            let gg = over_black(&g[i * 4..i * 4 + 4]);
+            let d = (0..3).map(|k| (o[k] - gg[k]).abs()).max().unwrap();
+            sum += d as u64;
+            if gg.iter().any(|&v| v > 24) {
+                lit_g += 1;
+            }
+            if o.iter().any(|&v| v > 24) {
+                lit_o += 1;
+            }
+            let px = &mut diff[i * 4..i * 4 + 4];
+            if d > 64 {
+                bad += 1;
+                let golden_brighter = gg.iter().sum::<i32>() > o.iter().sum::<i32>();
+                px.copy_from_slice(if golden_brighter { &[255, 0, 255, 255] } else { &[0, 255, 0, 255] });
+            } else {
+                let v = (gg.iter().sum::<i32>() / 9) as u8;
+                px.copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let save_to = |file: &str, rgba: Vec<u8>| {
+            let p = sk::Pixmap::from_vec(rgba, sk::IntSize::from_wh(w, h).unwrap()).unwrap();
+            p.save_png(dir.join(file)).unwrap();
+        };
+        let mut opaque = ours.clone();
+        opaque.chunks_exact_mut(4).for_each(|p| {
+            let a = p[3] as u32;
+            for k in 0..3 {
+                p[k] = (p[k] as u32 * a / 255) as u8;
+            }
+            p[3] = 255;
+        });
+        save_to(&format!("{name}.ours.png"), opaque);
+        save_to(&format!("{name}.diff.png"), diff);
+        let steps = plan::plan(&mesh);
+        println!(
+            "{name}: {} ops, {} strings, js {:.1} ms (warm {:.1}), tessellate {tess_ms:.1} ms, {} draw steps; lit golden {lit_g} ours {lit_o}; mismatched {bad} px ({:.3}%), mean abs {:.2}; problems {:?}",
+            ops.len(),
+            strings.len(),
+            body["ms"].as_f64().unwrap_or(0.),
+            body["warmMs"].as_f64().unwrap_or(0.),
+            steps.len(),
+            bad as f64 * 100. / (w * h) as f64,
+            sum as f64 / (w * h) as f64,
+            mesh.problems.iter().take(8).collect::<Vec<_>>()
+        );
+    }
+}

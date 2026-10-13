@@ -287,6 +287,52 @@
   for (const file of RUNTIME_FILES) {
     document.write(`<script src="${base}${file}"><\/script>`);
   }
+  if (native && native.submitDisplay) {
+    document.write('<script>globalThis.__dom = globalThis.__dom || {};<\/script>');
+    for (const file of ['geometry.js', 'vector.js']) document.write(`<script src="${base}${file}"><\/script>`);
+  }
+
+  let vectorOn = true;
+  let vectorRetryAt = 0;
+  let lastOps = null;
+  let lastStrings = '';
+  const sendVector = () => {
+    const v = globalThis.__xphfbwVector;
+    if (!vectorOn || !v) {
+      if (!vectorOn && performance.now() >= vectorRetryAt) vectorOn = true;
+      return;
+    }
+    let c;
+    try {
+      c = v.capture(document.documentElement);
+    } catch (e) {
+      native.log(2, `vector: ${e && e.stack ? e.stack : e}`);
+      native.submitDisplay(null);
+      vectorOn = false;
+      vectorRetryAt = performance.now() + 5000;
+      lastOps = null;
+      return;
+    }
+    const strings = c.strings.join('\0');
+    if (lastOps && lastOps.length === c.ops.length && strings === lastStrings) {
+      let same = true;
+      for (let i = 0; i < c.ops.length; i++) {
+        if (lastOps[i] !== c.ops[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return;
+    }
+    if (!native.submitDisplay(c.ops.buffer, c.ops.length, strings, c.strings.length)) {
+      vectorOn = false;
+      vectorRetryAt = performance.now() + 2000;
+      lastOps = null;
+      return;
+    }
+    lastOps = c.ops.slice();
+    lastStrings = strings;
+  };
 
   // ------------------------------------------------------------------
   // The tick loop: one requestAnimationFrame callback, registered before
@@ -365,6 +411,7 @@
 
   const tick = () => {
     requestAnimationFrame(tick);
+    if (native.submitDisplay) sendVector();
     try {
       native.snapshot();
     } catch (e) {

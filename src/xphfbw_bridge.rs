@@ -681,6 +681,109 @@ impl ScreenBlock {
     }
 }
 
+pub const STREAM_MAGIC: u64 = 0x5245_5453_4345_5644;
+pub const STREAM_OPS: usize = 384 << 10;
+pub const STREAM_STRING_BYTES: usize = 512 << 10;
+pub const STREAM_OFF: u32 = u32::MAX;
+
+#[repr(C)]
+pub struct StreamHeader {
+    pub magic: AtomicU64,
+    pub seq: AtomicU64,
+    pub writing: AtomicU32,
+    pub ops: AtomicU32,
+    pub string_bytes: AtomicU32,
+    pub strings: AtomicU32,
+}
+
+const STREAM_HEADER: usize = std::mem::size_of::<StreamHeader>();
+
+pub struct StreamBlock {
+    shared: Shared,
+}
+
+impl StreamBlock {
+    pub const BYTES: usize = STREAM_HEADER + STREAM_OPS * 8 + STREAM_STRING_BYTES;
+
+    pub fn create(tag: &str, screen_id: &str) -> Option<Self> {
+        let shared = Shared::create(&object_name(tag, &format!("stream_{screen_id}")), Self::BYTES)?;
+        let b = Self { shared };
+        b.header().magic.store(STREAM_MAGIC, Ordering::Release);
+        Some(b)
+    }
+
+    pub fn open(tag: &str, screen_id: &str) -> Option<Self> {
+        let shared = Shared::open(&object_name(tag, &format!("stream_{screen_id}")), Self::BYTES)?;
+        let b = Self { shared };
+        (b.header().magic.load(Ordering::Acquire) == STREAM_MAGIC).then_some(b)
+    }
+
+    pub fn header(&self) -> &StreamHeader {
+        unsafe { &*(self.shared.ptr() as *const StreamHeader) }
+    }
+
+    fn ops_ptr(&self) -> *mut f64 {
+        unsafe { self.shared.ptr().add(STREAM_HEADER) as *mut f64 }
+    }
+
+    fn strings_ptr(&self) -> *mut u8 {
+        unsafe { self.shared.ptr().add(STREAM_HEADER + STREAM_OPS * 8) }
+    }
+
+    /// `strings` joined by NUL. `None` for `ops` switches the screen back to pixels.
+    pub fn write(&self, ops: Option<&[f64]>, strings: &[u8], count: u32) -> bool {
+        let h = self.header();
+        if let Some(ops) = ops {
+            if ops.len() > STREAM_OPS || strings.len() > STREAM_STRING_BYTES {
+                return false;
+            }
+        }
+        h.writing.store(1, Ordering::Release);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        match ops {
+            Some(ops) => unsafe {
+                std::ptr::copy_nonoverlapping(ops.as_ptr(), self.ops_ptr(), ops.len());
+                std::ptr::copy_nonoverlapping(strings.as_ptr(), self.strings_ptr(), strings.len());
+                h.ops.store(ops.len() as u32, Ordering::Relaxed);
+                h.string_bytes.store(strings.len() as u32, Ordering::Relaxed);
+                h.strings.store(count, Ordering::Relaxed);
+            },
+            None => h.ops.store(STREAM_OFF, Ordering::Relaxed),
+        }
+        h.seq.fetch_add(1, Ordering::Release);
+        h.writing.store(0, Ordering::Release);
+        true
+    }
+
+    /// The stream published after `since`: `Some(None)` when the page switched
+    /// back to pixels, `None` when nothing new (or a write is in progress).
+    pub fn read(&self, since: u64) -> Option<(u64, Option<(Vec<f64>, Vec<String>)>)> {
+        let h = self.header();
+        let seq = h.seq.load(Ordering::Acquire);
+        if seq == since || h.writing.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        let n = h.ops.load(Ordering::Relaxed);
+        let out = if n == STREAM_OFF {
+            None
+        } else {
+            let n = (n as usize).min(STREAM_OPS);
+            let sb = (h.string_bytes.load(Ordering::Relaxed) as usize).min(STREAM_STRING_BYTES);
+            let count = h.strings.load(Ordering::Relaxed) as usize;
+            let ops = unsafe { std::slice::from_raw_parts(self.ops_ptr(), n) }.to_vec();
+            let bytes = unsafe { std::slice::from_raw_parts(self.strings_ptr(), sb) };
+            let mut strings: Vec<String> = if sb == 0 { Vec::new() } else { bytes.split(|b| *b == 0).map(|s| String::from_utf8_lossy(s).into_owned()).collect() };
+            strings.resize(count, String::new());
+            Some((ops, strings))
+        };
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if h.seq.load(Ordering::Acquire) != seq || h.writing.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        Some((seq, out))
+    }
+}
+
 /// The session's fixed objects, as the plugin creates them.
 pub struct Session {
     pub slots: SlotTable,
@@ -715,6 +818,20 @@ mod tests {
 
     fn tag() -> String {
         format!("test_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos())
+    }
+
+    #[test]
+    fn streams_round_trip() {
+        let tag = tag();
+        let plugin = StreamBlock::create(&tag, "SCREEN_DU_PFDL").unwrap();
+        let app = StreamBlock::open(&tag, "SCREEN_DU_PFDL").unwrap();
+        assert!(plugin.read(0).is_none());
+        assert!(app.write(Some(&[30., 0., 1., 6.]), b"SPEED\0Ecam", 2));
+        let (seq, got) = plugin.read(0).unwrap();
+        assert_eq!(got, Some((vec![30., 0., 1., 6.], vec!["SPEED".to_string(), "Ecam".to_string()])));
+        assert!(plugin.read(seq).is_none());
+        assert!(app.write(None, b"", 0));
+        assert_eq!(plugin.read(seq).unwrap().1, None);
     }
 
     #[test]

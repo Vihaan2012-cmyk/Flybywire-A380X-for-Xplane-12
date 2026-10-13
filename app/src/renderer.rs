@@ -25,13 +25,13 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 
 use cef::*;
-use fbw_a380_systems::xphfbw_bridge::{Downlink, Session, Uplink};
+use fbw_a380_systems::xphfbw_bridge::{Downlink, Session, StreamBlock, Uplink};
 
 /// Native functions installed on `window.__xphfbw` (contract rule list
 /// item 81-97 in the brief). Order does not matter; every one is bound to
 /// the same [`XphfbwV8Handler`], dispatched on `name`.
 const FUNCTIONS: &[&str] =
-    &["snapshot", "getVar", "setVar", "getString", "setString", "sendEvent", "call", "poll", "gameString", "storedData", "readFile", "log", "magVar", "loaded"];
+    &["snapshot", "getVar", "setVar", "getString", "setString", "sendEvent", "call", "poll", "gameString", "storedData", "readFile", "log", "magVar", "loaded", "submitDisplay"];
 
 fn cs(s: &str) -> CefString {
     CefString::from(s)
@@ -48,6 +48,7 @@ struct ProcessInfo {
     xp_root: PathBuf,
     aircraft_dir: PathBuf,
     session: Rc<Session>,
+    tag: String,
 }
 
 /// One gauge view's state: which slot values it last saw (rule 1), writes
@@ -78,6 +79,9 @@ struct ViewState {
     /// Downlink records drained while `gameString` waited for its answer,
     /// handed out by the next `poll()` in their original order (rule 4).
     stash: RefCell<Vec<Downlink>>,
+    tag: String,
+    stream: RefCell<Option<StreamBlock>>,
+    stream_tried: Cell<Option<std::time::Instant>>,
 }
 
 impl ViewState {
@@ -98,6 +102,9 @@ impl ViewState {
             strings: RefCell::new(HashMap::new()),
             slot_cache: RefCell::new(HashMap::new()),
             stash: RefCell::new(Vec::new()),
+            tag: process.tag.clone(),
+            stream: RefCell::new(None),
+            stream_tried: Cell::new(None),
         }
     }
 }
@@ -123,7 +130,7 @@ fn load_process_info() -> Option<Rc<ProcessInfo>> {
     let xp_root = PathBuf::from(switch_value(&cl, "xp-root")?);
     let aircraft_dir = PathBuf::from(switch_value(&cl, "aircraft")?);
     let session = open_session_with_retry(&tag)?;
-    Some(Rc::new(ProcessInfo { xp_root, aircraft_dir, session: Rc::new(session) }))
+    Some(Rc::new(ProcessInfo { xp_root, aircraft_dir, session: Rc::new(session), tag }))
 }
 
 /// How many times, and how far apart, to retry [`Session::open`] before
@@ -535,6 +542,7 @@ fn dispatch_inner(name: &str, args: &[Option<V8Value>]) -> Result<Option<V8Value
             view.session.uplink.push(&Uplink::Log { view: view.view, level, text }.encode());
             Ok(None)
         }
+        "submitDisplay" => Ok(v8_value_create_bool(submit_display(&view, args) as i32)),
         "loaded" => {
             let ok = arg(args, 0).map(|v| v.bool_value() != 0).unwrap_or(false);
             let text = arg_str(args, 1);
@@ -543,6 +551,32 @@ fn dispatch_inner(name: &str, args: &[Option<V8Value>]) -> Result<Option<V8Value
         }
         other => Err(format!("xphfbw: unknown native \"{other}\"")),
     }
+}
+
+fn submit_display(view: &ViewState, args: &[Option<V8Value>]) -> bool {
+    if view.stream.borrow().is_none() {
+        let now = std::time::Instant::now();
+        if view.stream_tried.get().is_some_and(|t| now.duration_since(t).as_secs_f64() < 2.) {
+            return false;
+        }
+        view.stream_tried.set(Some(now));
+        *view.stream.borrow_mut() = StreamBlock::open(&view.tag, &view.screen);
+    }
+    let guard = view.stream.borrow();
+    let Some(block) = guard.as_ref() else { return false };
+    let Some(buffer) = arg(args, 0).filter(|v| v.is_array_buffer() != 0) else {
+        return block.write(None, &[], 0);
+    };
+    let count = arg(args, 1).map(|v| v.uint_value()).unwrap_or(0) as usize;
+    let bytes = buffer.array_buffer_byte_length();
+    let data = buffer.array_buffer_data() as *const f64;
+    if data.is_null() || count * 8 > bytes {
+        return false;
+    }
+    let ops = unsafe { std::slice::from_raw_parts(data, count) };
+    let strings = arg_str(args, 2);
+    let n = arg(args, 3).map(|v| v.uint_value()).unwrap_or(0);
+    block.write(Some(ops), strings.as_bytes(), n)
 }
 
 wrap_v8_handler! {

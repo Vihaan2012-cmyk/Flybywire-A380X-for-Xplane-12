@@ -28,13 +28,13 @@ mod xphfbw;
 use std::collections::{HashSet, VecDeque};
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::cds_reconf::Du;
 use crate::xp::{self, AvionicsId, Xplm};
-use crate::xphfbw_bridge::{Input, InputKind, ScreenBlock, ScreenHeader, Session, MAX_DIRTY_RECTS};
+use crate::xphfbw_bridge::{Input, InputKind, ScreenBlock, ScreenHeader, Session, StreamBlock, MAX_DIRTY_RECTS};
 use crate::xphfbw_bridge_views::{ViewDef, EFB_SCREEN};
 use screens::{ScreenDef, SCREENS};
 use stream::Op;
@@ -172,6 +172,59 @@ struct Bridge {
     /// there is no need to recompute it every frame the way the per-screen
     /// loaded state itself does.
     view_for_screen: Vec<Option<u32>>,
+    vector_stop: Arc<AtomicBool>,
+    _vector_blocks: Vec<StreamBlock>,
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        self.vector_stop.store(true, Ordering::Relaxed);
+        VECTOR_LIVE.iter().for_each(|v| v.store(false, Ordering::Relaxed));
+    }
+}
+
+static VECTOR_LIVE: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
+
+fn vector_live(index: usize) -> bool {
+    VECTOR_LIVE.get(index).is_some_and(|v| v.load(Ordering::Relaxed))
+}
+
+fn vector_screens() -> Vec<String> {
+    match std::env::var("FBW_VECTOR_SCREENS") {
+        Ok(v) if matches!(v.trim().to_ascii_lowercase().as_str(), "off" | "0" | "no" | "false" | "") => Vec::new(),
+        Ok(v) => v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        Err(_) => vec!["SCREEN_DU_PFDL".into(), "SCREEN_DU_PFDR".into()],
+    }
+}
+
+fn vector_reader(tag: &'static str, screens: Vec<(usize, &'static str)>, stop: Arc<AtomicBool>) {
+    let blocks: Vec<(usize, &'static str, StreamBlock)> = screens.into_iter().filter_map(|(i, id)| StreamBlock::open(tag, id).map(|b| (i, id, b))).collect();
+    let mut seen = vec![0u64; blocks.len()];
+    let mut failed = vec![false; blocks.len()];
+    while !stop.load(Ordering::Relaxed) {
+        for (k, (index, id, block)) in blocks.iter().enumerate() {
+            let Some((seq, got)) = block.read(seen[k]) else { continue };
+            seen[k] = seq;
+            let live = match got {
+                Some((ops, strings)) => match submit(id, &ops, strings) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        if !failed[k] {
+                            failed[k] = true;
+                            log(&format!("vector {id}: {e}; back to pixels"));
+                        }
+                        false
+                    }
+                },
+                None => false,
+            };
+            if VECTOR_LIVE[*index].swap(live, Ordering::Relaxed) != live {
+                log(&format!("vector {id}: {}", if live { "drawing natively" } else { "pixels" }));
+            }
+        }
+        service();
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    }
 }
 
 /// What X-Plane's main thread draws from: the meshes tessellation made, a
@@ -581,12 +634,13 @@ impl Displays {
             }
         }
         if !self.draw_routed(index, target) {
+            let brightness = self.unit_brightness(index);
             let Some(Ok(renderer)) = self.renderer.as_mut() else { return };
             let s = &mut self.screens[index];
             let region = [0, 0, s.mesh.width as i32, s.mesh.height as i32];
             let natives: Vec<_> =
                 s.mesh.natives.iter().map(|id| crate::mapdata::plugin::native_image(id)).collect();
-            renderer.draw(&mut s.gpu, s.stream, &s.mesh, &s.steps, region, target, &s.brightness, &natives, &mut self.res);
+            renderer.draw(&mut s.gpu, s.stream, &s.mesh, &s.steps, region, target, &brightness, &natives, &mut self.res);
         }
         self.grab_device(index, target);
     }
@@ -690,7 +744,7 @@ impl Displays {
     }
 
     fn draw_bridge_source(&mut self, index: usize, crop: Option<[f32; 4]>, target: gl::Target, brightness: Vec<f32>, dimming: Vec<[f32; 4]>) -> bool {
-        if !self.bridge_active(index) {
+        if vector_live(index) || !self.bridge_active(index) {
             return false;
         }
         let def = self.screens[index].def;
@@ -1059,7 +1113,24 @@ impl Displays {
             }
         }
         log(&format!("XPHFBW bridge attached ({tag}), {}/{} screens", screens.iter().filter(|s| s.is_some()).count(), SCREENS.len()));
-        self.bridge = Some(Bridge { session, screens, view_for_screen });
+        let wanted = vector_screens();
+        let mut vector_blocks = Vec::new();
+        let mut vector_ids = Vec::new();
+        for (i, def) in SCREENS.iter().enumerate() {
+            if wanted.iter().any(|w| w == def.id) {
+                if let Some(b) = StreamBlock::create(tag, def.id) {
+                    vector_blocks.push(b);
+                    vector_ids.push((i, def.id));
+                }
+            }
+        }
+        let vector_stop = Arc::new(AtomicBool::new(false));
+        if !vector_ids.is_empty() {
+            log(&format!("vector screens: {}", vector_ids.iter().map(|(_, id)| *id).collect::<Vec<_>>().join(", ")));
+            let stop = vector_stop.clone();
+            let _ = std::thread::Builder::new().name("fbw-vector".into()).spawn(move || vector_reader(tag, vector_ids, stop));
+        }
+        self.bridge = Some(Bridge { session, screens, view_for_screen, vector_stop, _vector_blocks: vector_blocks });
     }
 }
 
@@ -1287,6 +1358,7 @@ pub fn set_bridge(tag: Option<&'static str>, session: Option<&'static Session>, 
 /// what lets the EFB notice XPHFBW is gone and return to the QuickJS
 /// placeholder like every other screen.
 pub fn mark_bridge_gone() {
+    VECTOR_LIVE.iter().for_each(|v| v.store(false, Ordering::Relaxed));
     let _ = with(|d| {
         if let Some(bridge) = d.bridge.as_mut() {
             for bs in bridge.screens.iter_mut().flatten() {
