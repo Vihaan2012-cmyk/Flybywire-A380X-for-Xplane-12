@@ -27,6 +27,13 @@ pub struct Screen {
 /// and no daylight boost; its brightness callback ignores the channel.
 pub const DEVICE_ARGS: &str = "0 0 0";
 
+/// [`DEVICE_ARGS`] plus the screen's full-brightness luminance in nits, as
+/// Laminar's own cockpits give their displays (the A330's 2000, ToLiss's
+/// 3000): without one X-Plane draws the device dim and washed out against a
+/// daylit cockpit. Only for the drawn screen; the click layer keeps
+/// [`DEVICE_ARGS`].
+pub const SCREEN_DEVICE_ARGS: &str = "0 0 0 3000";
+
 /// Screens the crew points at: the EFB tablets, the two OITs, the MFD and the
 /// NDs (OANS and BTV through the KCCU cursor). Everything else here (PFD,
 /// EWD, SD, ISIS, clock, RMPs, FCU) is operated through physical buttons and

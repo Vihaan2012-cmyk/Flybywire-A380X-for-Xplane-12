@@ -3160,7 +3160,7 @@ fn main() -> anyhow::Result<()> {
                         light_of(&animator, &rig, model.meshes[mi].node).0,
                         model.materials.get(model.meshes[mi].material).map_or([0.0; 3], |m| m.emissive_factor),
                     ),
-                    device: sc.map(|sc| format!("{} {}", sc.id, screens::DEVICE_ARGS)),
+                    device: sc.map(|sc| format!("{} {}", sc.id, screens::SCREEN_DEVICE_ARGS)),
                 }
             };
             // Meshes under a node with an emissive code glow as the code says,
