@@ -171,7 +171,7 @@ unsafe fn traces() -> &'static mut HashMap<String, Trace> {
 /// Build the aircraft menu and its Study tree.
 pub fn build_menu(xplm: &Xplm) {
     unsafe {
-        let root = xplm.menu("FlyByWire A380X", menu_handler);
+        let root = xplm.menu("A380 for X-Plane 12", menu_handler);
         if root.is_null() {
             crate::log("no study menu: X-Plane gave the aircraft no menu to hang it on");
             return;

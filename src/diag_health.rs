@@ -261,7 +261,7 @@ pub fn report(samples_csv: &str, events_log: &str, processes_csv: &str) -> Strin
         r.info(l.trim().to_string());
     }
 
-    let mut out = format!("FlyByWire A380X diagnostics health report: {} problem(s)\n", r.problems);
+    let mut out = format!("A380 for X-Plane 12 diagnostics health report: {} problem(s)\n", r.problems);
     out.push_str(&r.lines.join("\n"));
     out.push('\n');
     out
@@ -280,7 +280,7 @@ mod tests {
     fn a_healthy_parked_session_reports_no_problems_from_the_samples() {
         let samples = csv(&["1,30,3,1,1,0,0.1,-0.2,1,0.17,1,1,0", "2,30,3,1,1,0,0.2,-0.2,1,0.17,1,0,1"]);
         let out = report(&samples, "1 [log] sound: 150 voices (60 audible); loudest: media 1 trigger 2 -10 dB pitch x1.00\n", "1,XPHFBW.exe,27,1,1,1,1\n");
-        assert!(out.starts_with("FlyByWire A380X diagnostics health report: 0 problem(s)"), "{out}");
+        assert!(out.starts_with("A380 for X-Plane 12 diagnostics health report: 0 problem(s)"), "{out}");
     }
 
     #[test]

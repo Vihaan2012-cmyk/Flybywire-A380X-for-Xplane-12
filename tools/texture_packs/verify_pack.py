@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-INSTALLED = Path(r'D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\FlyByWire A380X')
+INSTALLED = Path(r'D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\A380 for X-Plane 12')
 ROOT = Path(r'E:\fbw-texpacks')
 
 

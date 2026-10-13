@@ -4,7 +4,7 @@
 # X-Plane must be closed (it locks win.xpl and XPHFBW.exe).
 #   tools/install.sh [aircraft folder]
 set -e
-AIRCRAFT="${1:-/d/Steam Games/steamapps/common/X-Plane 12/Aircraft/FlyByWire A380X}"
+AIRCRAFT="${1:-/d/Steam Games/steamapps/common/X-Plane 12/Aircraft/A380 for X-Plane 12}"
 # One shared build folder for every build (the user's preference,
 # 2026-09-27). The msvc app is built for an explicit --target, so its outputs
 # land in their own subfolder: without it, the app's msvc build of the
@@ -97,7 +97,7 @@ if [ ! -f "$PFD_HTML" ]; then
   echo "install.sh: FAIL: $PFD_HTML is missing after the html_ui merge -- every cockpit screen will be BLACK. Is $BUILD a real, current build (not stale/empty)? See docs/js-build.md." >&2
   exit 1
 fi
-MSFS_SDK_FILES=$(grep -rlE 'node_modules/@microsoft/msfs-sdk|msfssdk' "$AIRCRAFT/html_ui" --include='*.js' --include='*.map' 2>/dev/null)
+MSFS_SDK_FILES=$(grep -rlE 'node_modules/@microsoft/msfs-sdk|msfssdk' "$AIRCRAFT/html_ui" --include='*.js' --include='*.map' 2>/dev/null || true)
 if [ -n "$MSFS_SDK_FILES" ]; then
   echo "install.sh: FAIL: Microsoft's avionics library (MSFS-only license) is in these installed files; rebuild FlyByWire's instruments with XP_AVIONICS set to the xp-avionics build:" >&2
   echo "$MSFS_SDK_FILES" >&2

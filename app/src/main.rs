@@ -1,4 +1,4 @@
-//! XPHFBW: the FlyByWire A380X's companion app for X-Plane 12
+//! XPHFBW: the companion app of A380 for X-Plane 12
 //! (docs/briefs/xphfbw-app.md).
 //!
 //! One executable in several roles:

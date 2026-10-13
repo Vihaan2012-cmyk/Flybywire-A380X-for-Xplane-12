@@ -343,7 +343,7 @@ fn environment(started: SystemTime) -> String {
         line("aircraft", a.display().to_string());
         line("installed version", std::fs::read_to_string(a.join("fbw_xp_installed_version.txt")).unwrap_or_else(|_| "(none: not installed by the installer)".into()).trim().to_string());
         line("sasl", std::fs::read_to_string(a.join("plugins/sasl/version.txt")).unwrap_or_default().lines().find(|l| l.starts_with("Version")).unwrap_or("(missing)").to_string());
-        for f in ["plugins/fbw_a380_systems/64/win.xpl", "plugins/sasl/data/modules/main.lua", "objects/a380_cockpit_click.obj", "FlyByWire A380X.acf"] {
+        for f in ["plugins/fbw_a380_systems/64/win.xpl", "plugins/sasl/data/modules/main.lua", "objects/a380_cockpit_click.obj", "A380.acf"] {
             let p = a.join(f);
             let meta = std::fs::metadata(&p).ok();
             line(f, meta.map_or("(missing)".into(), |m| format!("{} bytes, modified {}", m.len(), m.modified().map(stamp).unwrap_or_default())));
@@ -365,7 +365,7 @@ fn environment(started: SystemTime) -> String {
 }
 
 fn test_plan() -> String {
-    let mut out = String::from("Unofficial FlyByWire A380X for X-Plane: diagnostics session\n\nOne launch, in this order. In the EFB Diagnostics tab press Capture on a step: that makes it the current step and saves a capture. Every X-Plane screenshot you take afterwards is saved as a capture of that step too, with every screen and every value at that moment (captures/ in this folder). The fbw/diag/mark command does the same from a key.\n\n");
+    let mut out = String::from("A380 for X-Plane 12: diagnostics session\n\nOne launch, in this order. In the EFB Diagnostics tab press Capture on a step: that makes it the current step and saves a capture. Every X-Plane screenshot you take afterwards is saved as a capture of that step too, with every screen and every value at that moment (captures/ in this folder). The fbw/diag/mark command does the same from a key.\n\n");
     for (i, (title, detail)) in STEPS.iter().enumerate() {
         out.push_str(&format!("{:>2}. {title}\n    {detail}\n", i + 1));
     }

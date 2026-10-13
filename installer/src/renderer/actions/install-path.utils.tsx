@@ -161,7 +161,7 @@ export const setupSimulatorBasePath = async (sim: TypeOfSimulator): Promise<stri
     availablePaths.push('Custom Directory');
 
     const { response } = await dialog.showMessageBox({
-      title: 'FlyByWire Installer',
+      title: 'A380 for X-Plane 12',
       message: `We found a possible MSFS ${sim.slice(-4)} installation.`,
       type: 'warning',
       buttons: availablePaths,

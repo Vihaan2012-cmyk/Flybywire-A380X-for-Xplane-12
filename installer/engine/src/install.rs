@@ -176,14 +176,16 @@ pub fn wipe_traces(xplane: &Path, local_appdata: Option<&Path>, temp: &Path, kee
             Err(e) => Err(format!("could not remove {}: {e}", p.display())),
         }
     };
-    let updater = xplane.join(AIRCRAFT_DIR).join(UPDATER_NAME);
-    if updater.exists() {
-        let old = xplane.join(OLD_UPDATER);
-        let _ = std::fs::create_dir_all(xplane.join("Output"));
-        let _ = std::fs::remove_file(&old);
-        std::fs::rename(&updater, &old).map_err(|e| format!("could not move {} out of the way: {e}", updater.display()))?;
+    for dir in [AIRCRAFT_DIR, LEGACY_AIRCRAFT_DIR] {
+        let updater = xplane.join(dir).join(UPDATER_NAME);
+        if updater.exists() {
+            let old = xplane.join(OLD_UPDATER);
+            let _ = std::fs::create_dir_all(xplane.join("Output"));
+            let _ = std::fs::remove_file(&old);
+            std::fs::rename(&updater, &old).map_err(|e| format!("could not move {} out of the way: {e}", updater.display()))?;
+        }
+        gone(xplane.join(dir))?;
     }
-    gone(xplane.join(AIRCRAFT_DIR))?;
     let prefs = xplane.join("Output").join("preferences");
     if let Ok(entries) = std::fs::read_dir(&prefs) {
         for e in entries.flatten() {
@@ -215,7 +217,7 @@ pub struct Remembered {
 }
 
 fn remembered_path() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var("LOCALAPPDATA").ok()?).join("FlyByWire A380X XP").join("installer.json"))
+    Some(PathBuf::from(std::env::var("LOCALAPPDATA").ok()?).join("A380 for X-Plane 12").join("installer.json"))
 }
 
 impl Remembered {
@@ -233,7 +235,8 @@ impl Remembered {
     }
 }
 
-const AIRCRAFT_DIR: &str = "Aircraft/FlyByWire A380X";
+const AIRCRAFT_DIR: &str = "Aircraft/A380 for X-Plane 12";
+const LEGACY_AIRCRAFT_DIR: &str = "Aircraft/FlyByWire A380X";
 const UPDATER_NAME: &str = "FlyByWire A380X Updater.exe";
 const OLD_UPDATER: &str = "Output/fbw-a380x-updater.old.exe";
 const TAKEOVER: &str = "--takeover";
@@ -299,6 +302,8 @@ enum Step {
         snd_template: String,
         snd_patch: String,
         snd_to: String,
+        #[serde(default)]
+        snd_also: Vec<String>,
     },
 }
 
@@ -654,7 +659,7 @@ fn run_steps(a: &Answers, ctx: &Ctx, steps: &Steps, release: &Path, aircraft: &P
                 fetch_verified(url, sha256, &aircraft.join(to))?;
                 ctx.log(format!("{to} downloaded and verified"));
             }
-            Step::SoundPack { url, zip_sha256, to, sha256, banks, copy, renames, snd_template, snd_patch, snd_to } => {
+            Step::SoundPack { url, zip_sha256, to, sha256, banks, copy, renames, snd_template, snd_patch, snd_to, snd_also } => {
                 let zip_sha256 = zip_sha256.as_deref().unwrap_or(SOUND_PACK_SHA256);
                 let local = a.sound_pack.clone().filter(|p| sha256_file(p).is_ok_and(|h| h.eq_ignore_ascii_case(zip_sha256)));
                 let zip = match local {
@@ -681,7 +686,9 @@ fn run_steps(a: &Answers, ctx: &Ctx, steps: &Steps, release: &Path, aircraft: &P
                 }
                 let patch = std::fs::read(aircraft.join(snd_patch)).map_err(|e| format!("{snd_patch}: {e}"))?;
                 let snd = apply_text_patch(&latin1(&patch), &files[snd_template])?;
-                std::fs::write(aircraft.join(snd_to), snd).map_err(|e| e.to_string())?;
+                for name in std::iter::once(snd_to).chain(snd_also) {
+                    std::fs::write(aircraft.join(name), &snd).map_err(|e| e.to_string())?;
+                }
             }
 
         }

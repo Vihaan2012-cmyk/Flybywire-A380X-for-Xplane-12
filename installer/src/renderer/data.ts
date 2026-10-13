@@ -112,7 +112,7 @@ export const defaultConfiguration: Configuration = {
             { name: 'Max operating Mach', value: 'M 0.89' },
             { name: 'Ceiling', value: 'FL430' },
           ],
-          targetDirectory: 'FlyByWire A380X',
+          targetDirectory: 'A380 for X-Plane 12',
           tracks: [
             {
               name: 'Stable (4K)',

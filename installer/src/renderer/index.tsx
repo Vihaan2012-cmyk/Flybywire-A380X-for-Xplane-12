@@ -91,7 +91,7 @@ InstallerConfiguration.obtain()
       <div className="flex h-screen flex-col items-center justify-center gap-y-5 bg-navy text-gray-100">
         <span className="text-5xl font-semibold">Something went very wrong.</span>
         <span className="w-3/5 text-center text-2xl">
-          We could not configure your installer. Please seek support on the Discord #support channel or on GitHub and
+          We could not configure your installer. Please report it on GitHub and
           provide a screenshot of the following information:
         </span>
         <pre className="mb-0 w-3/5 overflow-scroll rounded-lg bg-gray-700 px-6 py-2.5 font-mono text-2xl">

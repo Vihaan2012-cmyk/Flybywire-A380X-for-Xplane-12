@@ -188,13 +188,14 @@ fn action(shared: &Shared, name: &str) -> Value {
             json!({ "ok": version.is_some(), "version": version })
         }
         "run-updater" => {
-            let updater = shared.aircraft_dir.join("FlyByWire A380X Updater.exe");
+            let programs = std::env::var("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_default().join("Programs").join("a380x-xp-installer");
+            let updater = programs.join("A380 for X-Plane 12.exe");
             if !updater.is_file() {
-                return json!({ "ok": false, "message": "No updater in the aircraft folder yet: run the installer once and it puts one there" });
+                return json!({ "ok": false, "message": "The A380 for X-Plane 12 installer is not installed on this computer" });
             }
-            match std::process::Command::new(&updater).arg("--check").spawn() {
-                Ok(_) => json!({ "ok": true, "message": "The updater is checking GitHub; if you update, it waits for X-Plane to close" }),
-                Err(e) => json!({ "ok": false, "message": format!("Could not start the updater: {e}") }),
+            match std::process::Command::new(&updater).spawn() {
+                Ok(_) => json!({ "ok": true, "message": "The installer is open: update from there after closing X-Plane" }),
+                Err(e) => json!({ "ok": false, "message": format!("Could not start the installer: {e}") }),
             }
         }
         "restart-all" | "restart-systems" | "reset-airframe" | "licenses" => {

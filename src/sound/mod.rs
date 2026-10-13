@@ -107,6 +107,9 @@ static INSTRUMENT_QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub fn play_instrument_sound(name: &str) {
     if crate::sound_pack::installed() {
         crate::sound_pack::request(name);
+        if crate::sound_pack::replaces(name) {
+            return;
+        }
     }
     if let Ok(mut queue) = INSTRUMENT_QUEUE.lock() {
         queue.push(name.to_owned());

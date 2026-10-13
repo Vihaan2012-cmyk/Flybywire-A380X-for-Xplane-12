@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-INSTALLED = Path(r'D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\FlyByWire A380X')
+INSTALLED = Path(r'D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\A380 for X-Plane 12')
 ROOT = Path(r'E:\fbw-texpacks')
 BAKES = Path(r'E:\fbw-gse\decalbake\work')
 TEXPIPE = r'D:\A380\fbw-build\target\release\examples\texpipe.exe'
@@ -31,7 +31,7 @@ def pristine_set() -> set[str]:
 
 def main():
     label = sys.argv[1]
-    conv = ROOT / f'conv-{label}' / 'FlyByWire A380X'
+    conv = ROOT / f'conv-{label}' / 'A380 for X-Plane 12'
     pack = ROOT / f'pack-{label}'
     if pack.exists():
         shutil.rmtree(pack)

@@ -5,7 +5,7 @@ import struct
 import sys
 from pathlib import Path
 
-INSTALLED = Path(r'D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\FlyByWire A380X')
+INSTALLED = Path(r'D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\A380 for X-Plane 12')
 ROOT = Path(r'E:\fbw-texpacks')
 
 
@@ -34,7 +34,7 @@ def digest(p: Path) -> str:
 
 
 def main():
-    conv = ROOT / f'conv-{sys.argv[1]}' / 'FlyByWire A380X'
+    conv = ROOT / f'conv-{sys.argv[1]}' / 'A380 for X-Plane 12'
     installed = textures(INSTALLED)
     converted = textures(conv)
     report = {'same': [], 'edited': [], 'only_converted': [], 'only_installed': []}

@@ -6,7 +6,7 @@ run() {
   local name=$1 pkg=$2; shift 2
   local out="E:\fbw-texpacks\conv-$name"
   echo "== $name start $(date +%T)"
-  "$EXE" "$pkg" --out "$out" --name 'FlyByWire A380X' --full-cabin --livery "$pkg\SimObjects\AirPlanes\_FlyByWire_A380_842-PRIDE" "$@" > "/e/fbw-texpacks/conv-$name.log" 2>&1
+  "$EXE" "$pkg" --out "$out" --name 'A380 for X-Plane 12' --full-cabin --livery "$pkg\SimObjects\AirPlanes\_FlyByWire_A380_842-PRIDE" "$@" > "/e/fbw-texpacks/conv-$name.log" 2>&1
   echo "== $name exit $? $(date +%T)"
 }
 case "${1:-}" in

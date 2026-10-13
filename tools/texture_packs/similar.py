@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-INSTALLED = Path(r'D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\FlyByWire A380X')
+INSTALLED = Path(r'D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\A380 for X-Plane 12')
 ROOT = Path(r'E:\fbw-texpacks')
 
 
@@ -30,7 +30,7 @@ def compare(installed: Path, converted: Path) -> dict:
 def main():
     name = sys.argv[1]
     report = json.loads((ROOT / f'compare-{name}.json').read_text())
-    conv = ROOT / f'conv-{name}' / 'FlyByWire A380X'
+    conv = ROOT / f'conv-{name}' / 'A380 for X-Plane 12'
     out = {}
     for rel, a_size, b_size in report['edited']:
         try:

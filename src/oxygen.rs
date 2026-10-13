@@ -253,7 +253,7 @@ impl Oxygen {
     /// `sim/cockpit2/oxygen/indicators/pilot_felt_altitude_ft`, computed by
     /// X-Plane's own independent stock pressurization/oxygen model when not
     /// overridden -- the `.acf` has `_auto_pressurization 1`
-    /// (`FlyByWire A380X.acf:38116`) and grepping this whole crate for
+    /// (`A380.acf:38116`) and grepping this whole crate for
     /// `sim/cockpit2/pressurization`/`sim/cockpit2/oxygen` found zero prior
     /// references -- so X-Plane's blackout effect could trigger off its own
     /// schedule while FlyByWire's CPCS (the very `cabin_altitude_ft` this

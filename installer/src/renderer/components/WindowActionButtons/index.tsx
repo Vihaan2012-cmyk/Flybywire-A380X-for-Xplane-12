@@ -26,7 +26,7 @@ export const Button: React.FC<ButtonProps> = ({ id, className, onClick, isClose,
 export const WindowButtons: React.FC = () => {
   const { showModal } = useModals();
 
-  const openGithub = () => shell.openExternal('https://github.com/flybywiresim/a32nx/issues/new/choose');
+  const openGithub = () => shell.openExternal('https://github.com/Vihaan2012-cmyk/Flybywire-A380X-for-Xplane-12/issues');
 
   const handleMinimize = () => {
     ipcRenderer.send(channels.window.minimize);

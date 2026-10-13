@@ -30,12 +30,13 @@ import subprocess
 import hashlib
 import json
 import os
+import re
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_AIRCRAFT = Path(r"D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\FlyByWire A380X")
-AIRCRAFT_IN_XPLANE = "Aircraft/FlyByWire A380X"
+DEFAULT_AIRCRAFT = Path(r"D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\A380 for X-Plane 12")
+AIRCRAFT_IN_XPLANE = "Aircraft/A380 for X-Plane 12"
 REPO = "Vihaan2012-cmyk/Flybywire-A380X-for-Xplane-12"
 
 # What the installer runs, in order: an updater from before the chain hands
@@ -48,7 +49,7 @@ TAKEOVER = {"kind": "run", "program": INSTALLER_IN_ARCHIVE, "args": ["--takeover
 DEFAULT_INSTALLER = Path(r"D:\A380\fbw-build\target\x86_64-pc-windows-msvc\release\a380x-xp-engine.exe")
 LAMINAR_A330 = "Aircraft/Laminar Research/Airbus A330-300"
 AIRFOILS = ["Airbus Root (high subsonic).afl", "Airbus Mid (high subsonic).afl", "Airbus Tip (high subsonic).afl"]
-SHIPPED_ACFS = ["FlyByWire A380X.acf", "FlyByWire A380X Clean Cockpit.acf"]
+SHIPPED_ACFS = ["A380.acf", "A380 Clean Cockpit.acf"]
 FCU_FONT = "html_ui/Fonts/fbw-a380x/A380X_FCU.ttf"
 FCU_FONT_URL = (
     "https://raw.githubusercontent.com/flybywiresim/aircraft/607e0612d63e81ac7a4942cdb1b6f181c73cab60/"
@@ -58,7 +59,8 @@ FCU_FONT_SHA256 = "fab287f184145206289a04085758e1a6f19c8330b89649ba7fc59f072c049
 SASL_URL = "https://1-sim.com/files/SASL-v3.23.3.zip"
 SASL_SHA256 = "f48d71adde3244e091c561ac6f9892b1dead3d98508d779ffb538224a50cceec"
 SOUND_PACK_URL = "https://mega.nz/file/a4IUHByK#0a5HymbXbkhJYQfphs9SYyTBduyRgXJI36C3UiRtlJQ"
-SND = "fmod/FlyByWire A380X.snd"
+SND = "fmod/A380.snd"
+SND_ALSO = ["fmod/A380 Clean Cockpit.snd"]
 DEFAULT_SOUND_PACK = Path.home() / "Downloads" / "A380_Sp(RR)(P)(C).zip"
 FROM_XPLANE = [
     {"kind": "from_xplane", "from": f"{LAMINAR_A330}/airfoils", "files": AIRFOILS, "to": "airfoils"},
@@ -83,24 +85,32 @@ OURS_IN_SASL = {
     "plugins/sasl/data/modules/main.lua",
     "plugins/sasl/data/modules/configuration/configuration.ini",
 }
-OURS_IN_SASL_DIRS = ("plugins/sasl/data/modules/sounds/",)
 
 
 # Never in the release: SASL's own files, and the two files the installer
 # itself writes into every install.
 INSTALLER_OWNED = {"fbw_xp_installed_version.txt", "FlyByWire A380X Updater.exe"}
 
+# Never in the release either: the converter's own notes, dev pages and test
+# fixtures, source maps, logs, backups, and the user's own X-Plane state.
+DEV_FILES = {"README.txt", "cockpit_bindings.txt", "plugins/fbw_a380_systems/XPHFBW/ui/harness.html"}
+DEV_DIRS = ("Output/", "html_ui/Pages/VCockpit/Instruments/A380X/EFB/", "plugins/fbw_a380_systems/XPHFBW/ui/test/", "plugins/fbw_a380_systems/XPHFBW/js/test/")
+BACKUP = re.compile(r"\.(before|with|bak|orig|old)\b|\.(map|log|tmp|pdb)$|~$|_prefs\.txt$", re.I)
+
 PATCH_INSTALL = {"aircraft": AIRCRAFT_IN_XPLANE, "steps": [TAKEOVER, {"kind": "copy", "from": "aircraft", "to": ""}, *FROM_XPLANE]}
 
 
 def excluded(rel: str) -> bool:
     rel = rel.replace("\\", "/")
-    if rel.startswith("plugins/sasl/") and rel not in OURS_IN_SASL and not rel.startswith(OURS_IN_SASL_DIRS):
+    if rel.startswith("plugins/sasl/") and rel not in OURS_IN_SASL:
         return True
     name = rel.rsplit("/", 1)[-1]
     return (
         rel in INSTALLER_OWNED
-        or rel.endswith(".acf")
+        or rel in DEV_FILES
+        or rel.startswith(DEV_DIRS)
+        or BACKUP.search(name) is not None
+        or ".acf" in name.lower()
         or (rel.startswith("airfoils/") and name in AIRFOILS)
         or rel == FCU_FONT
         or (rel.startswith("fmod/") and (rel.endswith(".bank") or rel.endswith(".snd") or rel == "fmod/GUIDs.txt"))
@@ -139,6 +149,7 @@ def generated(aircraft: Path, sound_pack: Path, work: Path) -> tuple[dict[str, b
         "snd_template": "A388.snd",
         "snd_patch": f"{SND}patch",
         "snd_to": SND,
+        "snd_also": SND_ALSO,
     }
     return out, step
 

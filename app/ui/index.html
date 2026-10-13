@@ -550,7 +550,7 @@
       <label class="row"><input type="checkbox" data-key="xphfbw.persistence"><span class="label">Airframe wear &amp; damage persistence</span></label>
       <div class="row reset-row"><button type="button" class="small grey" data-plugin-action="resetAircraftState">Reset aircraft state</button><button type="button" class="small" data-plugin-action="resetAirframe">New airframe</button></div>
       <div class="row"><span class="label dim">Reset aircraft state clears every failure, repairs all damage, resets the breakers and starts every system again the way this start begins. New airframe also clears wear, hours, MEL deferrals, the tech log and the walkaround; the old save is kept as a backup.</span></div>
-      <label class="row"><input type="checkbox" data-key="xphfbw.stateDumps"><span class="label">State dumps</span><span class="help" title="Every variable written to D:\A380\fbw-build\state-dumps every N frames, for diagnosing problems.">?</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.stateDumps"><span class="label">State dumps</span><span class="help" title="Every variable written to %LOCALAPPDATA%\XPHFBW\state-dumps every N frames, for diagnosing problems.">?</span></label>
       <div class="grid2" data-show="xphfbw.stateDumps=true">
         <div class="field"><span class="label">Every N frames</span><input type="number" min="10" max="10000" data-key="xphfbw.stateDumpFrames"></div>
         <div class="field"><span class="label">Keep dumps</span><input type="number" min="1" max="1000" data-key="xphfbw.stateDumpKeep"></div>
@@ -772,7 +772,7 @@
     <img src="/xplane12-logo.png" alt="X-Plane 12" onerror="this.hidden=true">
     <span>XPHFBW</span>
   </div>
-  <div class="legal">&copy; 2026 XPHFBW &middot; FlyByWire A380X (GPL-3.0)<br>Airport maps &copy; OpenStreetMap contributors (ODbL)<br><a href="#" data-action="licenses">LICENSES</a></div>
+  <div class="legal">&copy; 2026 XPHFBW &middot; A380 for X-Plane 12, ported from FBW A380 (GPL-3.0)<br>Airport maps &copy; OpenStreetMap contributors (ODbL)<br><a href="#" data-action="licenses">LICENSES</a></div>
   <div class="server">Systems link: <span class="dot" id="dot-link" style="margin:0 0 0 4px"></span></div>
 </footer>
 <div class="toast" id="toast"></div>

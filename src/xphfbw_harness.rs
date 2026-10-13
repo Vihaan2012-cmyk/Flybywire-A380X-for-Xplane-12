@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! XPHFBW_EXE=".../plugins/fbw_a380_systems/XPHFBW/XPHFBW.exe" \
-//! XPHFBW_AIRCRAFT=".../Aircraft/FlyByWire A380X" \
+//! XPHFBW_AIRCRAFT=".../Aircraft/A380 for X-Plane 12" \
 //! XPHFBW_XP_ROOT=".../X-Plane 12" XPHFBW_OUT="D:/A380/fbw-build/xphfbw-harness" \
 //! XPHFBW_SECONDS=90 cargo test --release --features js --lib xphfbw_harness -- --ignored --nocapture
 //! ```

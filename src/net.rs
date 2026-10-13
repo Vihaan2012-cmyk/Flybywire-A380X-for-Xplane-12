@@ -209,7 +209,7 @@ pub(crate) fn request_with(method: &str, url: &str, body: &str, receive_ms: u32)
     let (secure, host, port, path) = split_url(url)?;
 
     unsafe {
-        let agent = wide("FlyByWire A380X (X-Plane)");
+        let agent = wide("A380 for X-Plane 12");
         let session = Owned(open(agent.as_ptr(), ACCESS_TYPE_AUTOMATIC_PROXY, std::ptr::null(), std::ptr::null(), 0), close);
         if session.0.is_null() {
             return None;

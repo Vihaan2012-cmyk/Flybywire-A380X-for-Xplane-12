@@ -138,7 +138,7 @@ def main() -> int:
     a = parser.parse_args()
 
     out = [
-        'FlyByWire A380X for X-Plane 12: third-party software licences\n',
+        'A380 for X-Plane 12 (Ported from FBW A380): third-party software licences\n',
         'The instrument pages (html_ui) bundle the npm packages listed first; the plugin, XPHFBW and the',
         'installer are built from the Rust crates listed after them. Each entry is the package\'s own licence',
         'and notice text. Chromium and its components: plugins/fbw_a380_systems/XPHFBW/CREDITS.html.',

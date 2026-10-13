@@ -2,7 +2,7 @@
 name = "xphfbw"
 version = "0.1.0"
 edition = "2021"
-description = "XPHFBW: FlyByWire A380X's systems and instruments host for X-Plane 12"
+description = "XPHFBW: systems and instruments host for A380 for X-Plane 12"
 license = "GPL-3.0-or-later"
 publish = false
 

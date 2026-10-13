@@ -496,7 +496,7 @@ pub fn parse_ini(text: &str) -> BTreeMap<String, String> {
 }
 
 pub fn write_ini(values: &BTreeMap<String, String>) -> String {
-    let mut out = String::from("; FlyByWire A380X flyPad settings (NXDataStore keys)\n");
+    let mut out = String::from("; A380 for X-Plane 12 flyPad settings (NXDataStore keys)\n");
     for (k, v) in values {
         out.push_str(&format!("{k}={v}\n"));
     }

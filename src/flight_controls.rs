@@ -95,7 +95,7 @@ const RUDDER_SPANS_M: [f64; 2] = [9.63, 4.72];
 const SPOILER_SPANS_M: [f64; 8] = [1.785; 8];
 
 // ---------------------------------------------------------------------------
-// The converted .acf ("FlyByWire A380X.acf"), read-only reference.
+// The converted .acf ("A380.acf"), read-only reference.
 // Wing indices are the .acf's `_wing/N`; even N is the left wing
 // (`_is_right_mult -1`). Element widths assume Plane-Maker's equal split of
 // `_semilen_SEG` over `_els`.

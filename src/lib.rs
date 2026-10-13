@@ -3073,9 +3073,9 @@ pub unsafe extern "C" fn XPluginStart(
     signature: *mut c_char,
     description: *mut c_char,
 ) -> c_int {
-    write_into(name, "FBW A380X systems");
+    write_into(name, "A380 systems");
     write_into(signature, "msfs2xp.fbw.a380.systems");
-    write_into(description, "FlyByWire's A380X systems simulation in X-Plane");
+    write_into(description, "A380 for X-Plane 12 (Ported from FBW A380): systems");
     xp::remember_main_thread();
 
     let Some(xplm) = Xplm::load() else { return 0 };

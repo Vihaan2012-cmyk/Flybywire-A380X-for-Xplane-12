@@ -122,7 +122,7 @@ mod tests {
         let argv = [
             "XPHFBW.exe".to_string(),
             "sometag".to_string(),
-            "--aircraft=D:/Steam Games/steamapps/common/X-Plane 12/Aircraft/FlyByWire A380X".to_string(),
+            "--aircraft=D:/Steam Games/steamapps/common/X-Plane 12/Aircraft/A380 for X-Plane 12".to_string(),
             "--xp-root=D:/Steam Games/steamapps/common/X-Plane 12".to_string(),
         ];
         let xp_root = xp_root_arg(argv.into_iter()).expect("--xp-root= is parsed");

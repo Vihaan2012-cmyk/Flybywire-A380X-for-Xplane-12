@@ -26,7 +26,7 @@ fn main() {
     let mut res = winresource::WindowsResource::new();
     res.set_icon(ico_path.to_str().expect("ico path is not valid UTF-8"));
     res.set("ProductName", "XPHFBW");
-    res.set("FileDescription", "FlyByWire A380X companion app for X-Plane 12");
+    res.set("FileDescription", "A380 for X-Plane 12 companion app");
     if let Err(e) = res.compile() {
         // Missing Windows SDK / rc.exe shouldn't fail the whole build (the
         // app still runs, just without an exe/taskbar icon); the tray icon

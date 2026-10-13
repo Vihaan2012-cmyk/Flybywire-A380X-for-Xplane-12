@@ -73,7 +73,7 @@ export const ErrorDialog: FC<ErrorDialogProps> = ({ error, onAcknowledge }) => {
         errorVisualisation = (
           <ErrorVisualisationBox icon={<ShieldExclamation className="text-utility-red" size={36} />}>
             <span className="font-manrope text-4xl font-bold">An error has occurred!</span>
-            <span className="text-2xl">Please contact FlyByWire support on Discord. See below. </span>
+            <span className="text-2xl">Please report it on GitHub. See below.</span>
           </ErrorVisualisationBox>
         );
         break;
