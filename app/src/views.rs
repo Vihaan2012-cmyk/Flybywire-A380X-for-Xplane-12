@@ -99,6 +99,9 @@ struct State {
     governed: (i32, i32),
     /// X-Plane's frame counter and when the governor last read it.
     governor_last: Option<(u64, std::time::Instant)>,
+    /// The plugin's confirmed spawns (`SlotHeader::ready`) these views were
+    /// last loaded for.
+    spawns_seen: u32,
 }
 
 /// Starts opening the plugin's session for `tag` (with retries) and, once it
@@ -196,6 +199,7 @@ fn create_views(tag: &str, session: Session, aircraft_root: PathBuf) {
 
     let count = browsers.len();
     publish_status(screen_browsers.iter().flatten().count(), fps);
+    let spawns_seen = session.slots.header().ready.load(Ordering::Acquire);
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
             aircraft_root,
@@ -208,6 +212,7 @@ fn create_views(tag: &str, session: Session, aircraft_root: PathBuf) {
             layer_browsers,
             governed: (0, 0),
             governor_last: None,
+            spawns_seen,
         })
     });
     crate::logging::log(&format!("views: {count} browsers created"));
@@ -968,10 +973,30 @@ wrap_task! {
 
     impl Task {
         fn execute(&self) {
+            reload_on_new_spawn();
             govern();
             start_governor_timer();
         }
     }
+}
+
+/// Every view again, from scratch, once the plugin has confirmed a spawn's
+/// start state: the instruments then start on the aircraft as it really is.
+fn reload_on_new_spawn() {
+    STATE.with(|s| {
+        let mut borrow = s.borrow_mut();
+        let Some(state) = borrow.as_mut() else { return };
+        let spawns = state.session.slots.header().ready.load(Ordering::Acquire);
+        if spawns == state.spawns_seen {
+            return;
+        }
+        state.spawns_seen = spawns;
+        for browser in &state.browsers {
+            browser.reload();
+        }
+        state.governed = (0, 0);
+        crate::logging::log(&format!("views: spawn {spawns} confirmed, reloaded all {} views", state.browsers.len()));
+    });
 }
 
 fn govern() {

@@ -105,6 +105,8 @@ pub struct XphfbwHost {
     gone: bool,
     /// Records waiting for room in each view's downlink, oldest first.
     backlog: std::cell::RefCell<Vec<std::collections::VecDeque<Vec<u8>>>>,
+    /// [`Self::mark_ready`] was called; `ready` goes up after the next publish.
+    ready_pending: bool,
 }
 
 const BACKLOG_BYTES: usize = 4 * DOWNLINK_BYTES;
@@ -184,7 +186,14 @@ impl XphfbwHost {
             process: xphfbw_pid.and_then(win::Process::open),
             gone: false,
             backlog: std::cell::RefCell::new(vec![std::collections::VecDeque::new(); MAX_VIEWS]),
+            ready_pending: false,
         })
+    }
+
+    /// A spawn's start state is confirmed: XPHFBW reloads every view once
+    /// this frame's values are published.
+    pub fn mark_ready(&mut self) {
+        self.ready_pending = true;
     }
 
     pub fn view_count(&self) -> usize {
@@ -252,6 +261,9 @@ impl XphfbwHost {
         self.flush_backlog();
         self.apply_deferred(vars);
         self.publish(vars, time);
+        if std::mem::take(&mut self.ready_pending) {
+            self.session.slots.header().ready.fetch_add(1, Ordering::Release);
+        }
         for name in h_events {
             self.broadcast(Downlink::HEvent { name: name.clone() });
         }
@@ -793,6 +805,30 @@ htmlgauge00=A380X/SystemsHost/index.html, 0,0,1,1
         // Published under the lock: the header's frame is even (published),
         // never left odd (mid-write) after post_tick returns.
         assert_eq!(host.session.slots.header().frame.load(Ordering::Relaxed) % 2, 0);
+    }
+
+    #[test]
+    fn every_confirmed_spawn_is_counted_once_its_values_are_published() {
+        let t = tag();
+        let mut host = XphfbwHost::start(&t, xplm(), PANEL_CFG, None).unwrap();
+        let view = FakeView::open(&t, 0);
+        let mut vars = vars();
+        let spawns = || view.session.slots.header().ready.load(Ordering::Relaxed);
+        host.pre_tick(&mut vars);
+        host.post_tick(&mut vars, 0.1, &[], &[]);
+        assert_eq!(spawns(), 0);
+        host.mark_ready();
+        assert_eq!(spawns(), 0, "not before the values are published");
+        host.pre_tick(&mut vars);
+        host.post_tick(&mut vars, 0.2, &[], &[]);
+        assert_eq!(spawns(), 1);
+        host.pre_tick(&mut vars);
+        host.post_tick(&mut vars, 0.3, &[], &[]);
+        assert_eq!(spawns(), 1, "once per spawn");
+        host.mark_ready();
+        host.pre_tick(&mut vars);
+        host.post_tick(&mut vars, 0.4, &[], &[]);
+        assert_eq!(spawns(), 2);
     }
 
     #[test]

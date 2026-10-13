@@ -466,7 +466,9 @@ pub struct SlotHeader {
     pub time_ms: AtomicU64,
     /// Slots the plugin has resolved so far (values valid below this).
     pub resolved: AtomicU32,
-    pub _pad: AtomicU32,
+    /// Spawns whose start state the plugin has confirmed (values published
+    /// for it): XPHFBW reloads every view each time this changes.
+    pub ready: AtomicU32,
     /// Each view's last `Uplink::Loaded` report, indexed like
     /// `Uplink::Loaded.view`/`Session.downlinks`: 0 not yet reported, 1
     /// reported `ok: true`, 2 reported `ok: false`. Written by the plugin

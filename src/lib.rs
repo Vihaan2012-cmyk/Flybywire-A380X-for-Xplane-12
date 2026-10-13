@@ -1818,32 +1818,25 @@ impl Plugin {
         // The walkaround decides here, not at load: see `Walkaround::new`.
         self.walkaround.confirm_start(!start_state::engines_running_state(state), &self.persistence.state.walkaround_installed);
         let built = self.start_state_built;
-        if respawn {
-            self.simulation.rebuild(state, &mut self.vars);
-            self.prims.set_start_state(state.into());
-            if start_state::engines_running_state(state) {
-                self.engine_commands.spawn_at_idle();
-            } else {
-                self.engine_commands.spawn_stopped();
-            }
-            self.start_state_built = state;
-            log(&format!("new spawn: systems rebuilt for start state {} ({})", f64::from(state), start_state::name(state)));
-        } else if state != built {
-            log(&format!(
-                "start state revised now X-Plane has placed the aircraft: {} ({}) instead of {} ({})",
-                f64::from(state),
-                start_state::name(state),
-                f64::from(built),
-                start_state::name(built)
-            ));
-            self.prims.set_start_state(state.into());
-            if start_state::engines_running_state(state) && !start_state::engines_running_state(built) {
-                self.engine_commands.spawn_at_idle();
-            } else if !start_state::engines_running_state(state) && start_state::engines_running_state(built) {
-                self.engine_commands.spawn_stopped();
-            }
-            self.start_state_built = state;
+        self.simulation.rebuild(state, &mut self.vars);
+        self.prims = prim::Prims::new(&mut self.vars, state.into());
+        self.correctness = correctness::Correctness::new(&mut self.vars, xplm, state);
+        self.fadec = fadec::Fadec::new(&mut self.vars, xplm);
+        self.deep = deep::plugin::DeepLayer::new(&mut self.vars, Some(xplm));
+        if start_state::engines_running_state(state) {
+            self.engine_commands.spawn_at_idle();
+        } else {
+            self.engine_commands.spawn_stopped();
         }
+        self.start_state_built = state;
+        log(&format!(
+            "{}: start state {} ({}), built as {} ({}); every system rebuilt and every instrument reloaded",
+            if respawn { "new spawn" } else { "aircraft placed" },
+            f64::from(state),
+            start_state::name(state),
+            f64::from(built),
+            start_state::name(built)
+        ));
         // Every start, cold or hot: the gear lever the flight file selects
         // (down on the ground). It is an input only gear commands move, so
         // without this it starts at 0, selected up, and the gear retracts
@@ -1870,6 +1863,10 @@ impl Plugin {
                 }
                 log(&format!("start state {}: set {} cockpit controls from FlyByWire's flight file", start_state::name(state), controls.len()));
             }
+        }
+        #[cfg(feature = "js")]
+        if let Some(host) = self.xphfbw.as_mut() {
+            host.mark_ready();
         }
         true
     }
