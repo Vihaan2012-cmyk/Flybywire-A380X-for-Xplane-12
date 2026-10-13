@@ -313,6 +313,9 @@ pub(crate) fn snapshot() -> &'static std::sync::Mutex<Snapshot> {
 /// Where the panel listens. X-Plane's own plugins leave this range alone.
 // 8380 is SimBridge's (FlyByWire's own local server), which runs alongside.
 const PANEL_PORT: u16 = 8390;
+/// Long enough for XPHFBW to make every view again after a confirmed spawn
+/// (it checks once a second) and for the new instruments to read it.
+const COLD_AND_DARK_HOLD_S: f64 = 15.;
 
 /// Identifier types, as FlyByWire's MSFS layer numbers them: variables it
 /// asks for unprefixed are the simulator's own (`AIRSPEED INDICATED`),
@@ -1055,6 +1058,11 @@ struct Plugin {
     spawn_epoch_at_build: u64,
     confirmed_epoch: u64,
     start_state_wait_s: f64,
+    /// `A32NX_COLD_AND_DARK_SPAWN` as the flight file sets it, and how much
+    /// longer it is held there against the instruments XPHFBW has yet to
+    /// make again (their FMS, started before the aircraft was placed, sets
+    /// it on reaching DONE).
+    cold_and_dark: (f64, f64),
     /// The FCU and autothrust key events, as X-Plane commands.
     commands: afs_events::Commands,
     priority_takeover_commands: afs_events::PriorityTakeoverCommands,
@@ -1705,6 +1713,7 @@ impl Plugin {
             spawn_epoch_at_build: crate::spawn::epoch(),
             confirmed_epoch: crate::spawn::epoch(),
             start_state_wait_s: 0.,
+            cold_and_dark: (0., 0.),
             commands,
             priority_takeover_commands,
             crossfeed_commands,
@@ -1829,6 +1838,8 @@ impl Plugin {
             self.engine_commands.spawn_stopped();
         }
         self.start_state_built = state;
+        self.cold_and_dark = (if start_state::engines_running_state(state) { 0. } else { 1. }, COLD_AND_DARK_HOLD_S);
+        self.hold_cold_and_dark(0.);
         log(&format!(
             "{}: start state {} ({}), built as {} ({}); every system rebuilt and every instrument reloaded",
             if respawn { "new spawn" } else { "aircraft placed" },
@@ -1869,6 +1880,16 @@ impl Plugin {
             host.mark_ready();
         }
         true
+    }
+
+    fn hold_cold_and_dark(&mut self, delta: f64) {
+        let (value, left) = self.cold_and_dark;
+        if left <= 0. {
+            return;
+        }
+        let id = self.vars.get("COLD_AND_DARK_SPAWN".to_owned());
+        self.vars.write(&id, value);
+        self.cold_and_dark.1 = left - delta.max(0.);
     }
 
     fn reset_aircraft(&mut self, kind: aircraft_reset::Kind) {
@@ -1923,6 +1944,7 @@ impl Plugin {
         if !self.start_state_confirmed && !self.confirm_start_state(delta) {
             return;
         }
+        self.hold_cold_and_dark(delta);
         for (name, value) in study::web::take_writes() {
             let id = self.vars.get(name.to_owned());
             self.vars.write(&id, value);
