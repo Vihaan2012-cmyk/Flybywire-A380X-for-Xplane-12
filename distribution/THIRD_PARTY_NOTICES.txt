@@ -1,0 +1,68 @@
+Unofficial FlyByWire A380X for X-Plane 12: licenses and notices
+
+This is an unofficial, free, non-commercial port. It is not made, endorsed or
+supported by FlyByWire Simulations, Microsoft, Laminar Research or Airbus.
+
+
+1. FlyByWire A380X
+   FlyByWire Simulations, https://github.com/flybywiresim/aircraft
+   - Source code, and everything compiled from it (the systems plugin, the
+     instrument pages): GNU General Public License v3, see LICENSE.txt.
+   - FlyByWire's original 3D assets and textures: Creative Commons
+     Attribution-NonCommercial 4.0 International,
+     https://creativecommons.org/licenses/by-nc/4.0/
+     Changes made for this port: the models are converted from MSFS glTF to
+     X-Plane OBJ8, textures are re-encoded and resized, and animations, click
+     spots and lighting are rebuilt for X-Plane.
+
+2. Microsoft Flight Simulator
+   FlyByWire's A380X is an add-on for Microsoft Flight Simulator. This port
+   contains no Microsoft Flight Simulator content: its models and textures
+   are FlyByWire's own, and its instruments run on xp-avionics, this port's
+   own implementation of the avionics framework they are written for, not on
+   Microsoft's MSFS avionics library.
+   Microsoft Flight Simulator (c) Microsoft Corporation.
+
+3. The port's own software
+   The systems plugin, the display host (XPHFBW), xp-avionics, the aircraft
+   converter and the installer: GNU General Public License v3.
+   Source: https://github.com/Vihaan2012-cmyk/Flybywire-A380X-for-Xplane-12
+
+4. Third-party libraries
+   The npm packages bundled into the instrument pages and the Rust crates
+   built into the systems plugin, XPHFBW and the installer are under MIT,
+   Apache-2.0, BSD, ISC, Zlib, Unicode and similar licenses. Each one's
+   license text is in THIRD_PARTY_LICENSES.txt.
+
+5. Chromium Embedded Framework (plugins/fbw_a380_systems/XPHFBW)
+   BSD license, see XPHFBW/CEF-LICENSE.txt. Chromium and its third-party
+   components: see XPHFBW/CREDITS.html.
+
+6. Fonts (html_ui/Fonts/fbw-a380x)
+   Inter, JetBrains Mono, Manrope, Noto Sans (Arabic, Devanagari, Hebrew, JP,
+   KR, SC, Thai) and Poppins: SIL Open Font License 1.1, see
+   html_ui/Fonts/fbw-a380x/OFL-FONTS.txt. The other fonts there are
+   FlyByWire's and their contributors'. The FCU display font
+   (A380X_FCU.ttf) is not in the release: the installer downloads it from
+   FlyByWire's repository.
+
+7. Sounds
+   Engine, ground and weather sounds (fmod/): x_A380 Sound Pack (RR) by
+   X-Plane Sounds, https://x-plane-sounds.blogspot.com/. The pack is not in
+   the release: the installer takes it from your own download of
+   A380_Sp(RR)(P)(C).zip and adapts it to this aircraft (its sound
+   parameters renamed to this aircraft's, and this aircraft's own sound
+   positions applied to its A388.snd).
+
+8. Laminar Research
+   The aircraft's .acf is built on Laminar Research's Airbus A330-300, and
+   its wing uses that aircraft's airfoils. Neither is in the release: the
+   installer builds the .acf from your own X-Plane 12's A330.acf and this
+   aircraft's own settings, and copies the airfoils from your own X-Plane.
+
+9. SASL
+   SASL is 1-sim's (https://1-sim.com) and is not included: the installer
+   copies it from your own download.
+
+10. Trademarks
+   Airbus and A380 are Airbus trademarks, used only to identify the aircraft.

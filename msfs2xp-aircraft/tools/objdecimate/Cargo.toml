@@ -1,0 +1,10 @@
+[package]
+name = "objdecimate"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+meshopt = "0.6.2"
+
+[workspace]

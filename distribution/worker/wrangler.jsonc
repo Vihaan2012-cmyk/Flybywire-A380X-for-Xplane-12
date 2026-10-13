@@ -1,0 +1,15 @@
+{
+  // Release distribution for the FlyByWire A380X X-Plane port (GPL-3.0).
+  // Serves the release manifest and redirects downloads to the release's
+  // GitHub Release assets; the installer asks for the manifest, then
+  // downloads and verifies. The repository is public at release; a
+  // GITHUB_TOKEN secret (`wrangler secret put GITHUB_TOKEN`) is only for
+  // testing against it while it is still private.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fbw-a380x-xp-releases",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "GITHUB_REPO": "Vihaan2012-cmyk/Flybywire-A380X-for-Xplane-12" },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

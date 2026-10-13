@@ -1,0 +1,212 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/hydraulic/electrical_pump_physics.rs b/fbw-common/src/wasm/systems/systems/src/hydraulic/electrical_pump_physics.rs
+index b7725d4..784b248 100644
+--- a/fbw-common/src/wasm/systems/systems/src/hydraulic/electrical_pump_physics.rs
++++ b/fbw-common/src/wasm/systems/systems/src/hydraulic/electrical_pump_physics.rs
+@@ -30,6 +30,15 @@ use std::time::Duration;
+ pub(super) struct ElectricalPumpPhysics {
+     active_id: VariableIdentifier,
+     rpm_id: VariableIdentifier,
++    // hyperrealism.md physics workstream 5 (fluids): `consumed_power` and
++    // `output_current` below were already computed (real current draw from
++    // pressure x displacement through `ELECTRICAL_EFFICIENCY`, already fed
++    // into the electrical bus via `consume_power`) but never published as
++    // their own variables, so nothing outside this module -- the plugin's
++    // Study panel included -- could show a pump's real power/current. No
++    // FBW shortcut here to fix, only a missing publish.
++    current_id: VariableIdentifier,
++    power_id: VariableIdentifier,
+     powered_by: ElectricalBusType,
+     is_powered: bool,
+     available_potential: ElectricPotential,
+@@ -87,6 +96,8 @@ impl ElectricalPumpPhysics {
+         Self {
+             active_id: context.get_identifier(format!("HYD_{}_EPUMP_ACTIVE", id)),
+             rpm_id: context.get_identifier(format!("HYD_{}_EPUMP_RPM", id)),
++            current_id: context.get_identifier(format!("HYD_{}_EPUMP_CURRENT", id)),
++            power_id: context.get_identifier(format!("HYD_{}_EPUMP_POWER_W", id)),
+             powered_by: bus_type,
+             is_powered: false,
+             available_potential: ElectricPotential::new::<volt>(0.),
+@@ -273,6 +284,8 @@ impl SimulationElement for ElectricalPumpPhysics {
+                     > Self::MIN_SPEED_TO_REPORT_ACTIVE_RPM,
+         );
+         writer.write(&self.rpm_id, self.speed());
++        writer.write(&self.current_id, self.output_current);
++        writer.write(&self.power_id, self.consumed_power.get::<watt>());
+     }
+ 
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+diff --git a/fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs b/fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs
+index 7df3533..8ffc328 100644
+--- a/fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/hydraulic/mod.rs
+@@ -25,6 +25,7 @@ use uom::si::{
+     angular_velocity::{radian_per_second, revolution_per_minute},
+     f64::*,
+     length::meter,
++    power::watt,
+     pressure::{pascal, psi},
+     ratio::ratio,
+     torque::{newton_meter, pound_force_inch},
+@@ -2640,6 +2641,10 @@ impl PressureSource for Pump {
+ pub struct ElectricPump {
+     cavitation_id: VariableIdentifier,
+     overheat_id: VariableIdentifier,
++    // hyperrealism.md physics workstream 5: the Study panel's pump flow
++    // quantity, previously unpublished (see the matching `EngineDrivenPump`
++    // comment).
++    flow_id: VariableIdentifier,
+     pump: Pump,
+     pump_physics: ElectricalPumpPhysics,
+ }
+@@ -2655,6 +2660,7 @@ impl ElectricPump {
+         Self {
+             cavitation_id: context.get_identifier(format!("HYD_{}_EPUMP_CAVITATION", id)),
+             overheat_id: context.get_identifier(format!("HYD_{}_EPUMP_OVHT", id)),
++            flow_id: context.get_identifier(format!("HYD_{}_EPUMP_FLOW", id)),
+             pump: Pump::new(pump_characteristics),
+             pump_physics: ElectricalPumpPhysics::new(
+                 context,
+@@ -2739,6 +2745,7 @@ impl SimulationElement for ElectricPump {
+             self.cavitation_efficiency().get::<ratio>(),
+         );
+         writer.write(&self.overheat_id, self.is_overheating());
++        writer.write(&self.flow_id, self.flow());
+     }
+ }
+ impl HeatingElement for ElectricPump {
+@@ -2754,10 +2761,17 @@ impl HeatingPressureSource for ElectricPump {}
+ 
+ pub struct EngineDrivenPump {
+     active_id: VariableIdentifier,
++    shaft_power_id: VariableIdentifier,
++    // hyperrealism.md physics workstream 5: the Study panel's pump flow
++    // quantity; no var previously published a pump's own flow (only the
++    // section/system pressures did, e.g. `HYD_GREEN_PUMP_1_SECTION_PRESSURE`
++    // above the `edp_tests` module).
++    flow_id: VariableIdentifier,
+ 
+     is_active: bool,
+     speed: AngularVelocity,
+     pump: Pump,
++    last_pressure: Pressure,
+ 
+     overheat_failure: Failure,
+     heat_state: HeatingProperties,
+@@ -2773,6 +2787,20 @@ impl EngineDrivenPump {
+ 
+     const SPEED_SPOOLDOWN_WHEN_DECLUTCHED_RPM_PER_S: f64 = 800.;
+ 
++    // hyperrealism.md physics workstream 5 (fluids): overall (volumetric x
++    // mechanical) efficiency of an aviation engine-driven axial piston
++    // hydraulic pump. Power & Motion Technology's efficiency survey of
++    // aviation-grade axial piston pumps gives ~92% for a pump "in good
++    // condition" and up to 94% for modern designs
++    // (https://www.powermotiontech.com/hydraulics/hydraulic-pumps-motors/article/21886525/how-efficient-are-your-hydraulic-machines).
++    // No A380 EDP-specific test-stand figure is publicly available, so 0.90
++    // is used: the same order of magnitude, slightly derated to cover the
++    // pump's full pressure/speed envelope rather than only its best point.
++    // This is the divisor the shared engine-load contract
++    // (docs/briefs/hyperrealism.md, "ENGINE_GEARBOX_HYD_LOAD_W:n") calls for:
++    // "pressure x flow / efficiency".
++    const SHAFT_EFFICIENCY: f64 = 0.90;
++
+     pub fn new(
+         context: &mut InitContext,
+         id: AirbusEngineDrivenPumpId,
+@@ -2780,9 +2808,12 @@ impl EngineDrivenPump {
+     ) -> Self {
+         Self {
+             active_id: context.get_identifier(format!("HYD_{}_EDPUMP_ACTIVE", id)),
++            shaft_power_id: context.get_identifier(format!("HYD_{}_EDPUMP_SHAFT_POWER_W", id)),
++            flow_id: context.get_identifier(format!("HYD_{}_EDPUMP_FLOW", id)),
+             is_active: false,
+             speed: AngularVelocity::new::<revolution_per_minute>(0.),
+             pump: Pump::new(pump_characteristics),
++            last_pressure: Pressure::new::<psi>(0.),
+             overheat_failure: Failure::new(FailureType::EnginePumpOverheat(id)),
+             heat_state: HeatingProperties::new(
+                 Duration::from_secs_f64(
+@@ -2823,11 +2854,28 @@ impl EngineDrivenPump {
+         };
+         self.speed = self.speed.max(AngularVelocity::default());
+ 
++        // hyperrealism.md physics workstream 5: cache the section pressure
++        // this pump is working against so `shaft_power` can turn it into a
++        // real mechanical load on the engine (pressure x flow / efficiency)
++        // once `flow()` below reflects the same tick's demand.
++        self.last_pressure = section.pressure();
++
+         self.pump
+             .update(context, section, reservoir, self.speed, controller);
+ 
+         self.is_active = controller.should_pressurise();
+     }
++
++    /// The mechanical shaft power this pump draws from the engine gearbox:
++    /// hydraulic output power (pressure x flow) divided by the pump's
++    /// overall efficiency (`SHAFT_EFFICIENCY`), i.e. hydraulic power plus
++    /// the pump's own internal losses (dissipated as heat into the fluid).
++    /// This is the number the plugin's `ENGINE_GEARBOX_HYD_LOAD_W:n`
++    /// contract (docs/briefs/hyperrealism.md) expects; previously nothing
++    /// fed the engine-driven pumps' load back to the engine model at all.
++    pub fn shaft_power(&self) -> Power {
++        (self.last_pressure * self.pump.flow()) / Self::SHAFT_EFFICIENCY
++    }
+ }
+ impl PressureSource for EngineDrivenPump {
+     fn delta_vol_max(&self) -> Volume {
+@@ -2865,6 +2913,8 @@ impl SimulationElement for EngineDrivenPump {
+ 
+     fn write(&self, writer: &mut SimulatorWriter) {
+         writer.write(&self.active_id, self.is_active);
++        writer.write(&self.shaft_power_id, self.shaft_power().get::<watt>());
++        writer.write(&self.flow_id, self.flow());
+     }
+ }
+ impl HeatingElement for EngineDrivenPump {
+@@ -3788,5 +3838,44 @@ mod tests {
+ 
+             assert!(test_bed.query_element(|e| !e.is_active));
+         }
++
++        // hyperrealism.md physics workstream 5 (fluids): the engine gearbox
++        // load contract (`ENGINE_GEARBOX_HYD_LOAD_W:n`) is "pressure x flow
++        // / efficiency" -- exercise the pump's own private state directly
++        // (this test module is a descendant of `hydraulic`, so it may) to
++        // check the arithmetic without needing a full hydraulic circuit.
++        #[test]
++        fn shaft_power_is_pressure_times_flow_over_efficiency() {
++            use uom::si::volume_rate::cubic_meter_per_second;
++
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            let pressure = Pressure::new::<psi>(3000.);
++            let flow = VolumeRate::new::<gallon_per_second>(0.05);
++            test_bed.command_element(|e| {
++                e.last_pressure = pressure;
++                e.pump.current_flow = flow;
++            });
++
++            let power = test_bed.query_element(|e| e.shaft_power());
++
++            let expected_w = pressure.get::<pascal>() * flow.get::<cubic_meter_per_second>()
++                / EngineDrivenPump::SHAFT_EFFICIENCY;
++            assert!(
++                (power.get::<watt>() - expected_w).abs() < expected_w * 1e-9 + 1e-6,
++                "expected {expected_w} W, got {} W",
++                power.get::<watt>()
++            );
++        }
++
++        #[test]
++        fn shaft_power_is_zero_with_no_flow() {
++            let mut test_bed = SimulationTestBed::from(ElementCtorFn(engine_driven_pump));
++
++            test_bed.command_element(|e| e.last_pressure = Pressure::new::<psi>(3000.));
++
++            let power = test_bed.query_element(|e| e.shaft_power());
++            assert_eq!(power.get::<watt>(), 0.);
++        }
+     }
+ }

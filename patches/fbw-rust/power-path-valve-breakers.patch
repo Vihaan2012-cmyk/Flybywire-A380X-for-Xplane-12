@@ -1,0 +1,728 @@
+diff --git a/fbw-a32nx/src/wasm/systems/a320_systems/src/pneumatic.rs b/fbw-a32nx/src/wasm/systems/a320_systems/src/pneumatic.rs
+index 7b2096d..8f1ee61 100644
+--- a/fbw-a32nx/src/wasm/systems/a320_systems/src/pneumatic.rs
++++ b/fbw-a32nx/src/wasm/systems/a320_systems/src/pneumatic.rs
+@@ -1136,7 +1136,11 @@ impl EngineBleedAirSystem {
+                 ),
+                 powered_by,
+             ),
+-            pressure_regulating_valve: ElectroPneumaticValve::new(powered_by),
++            pressure_regulating_valve: ElectroPneumaticValve::new(
++                context,
++                powered_by,
++                &format!("BLEED_ENG_{}", number),
++            ),
+             overpressure_valve: OverpressureValve::new(
+                 PneumaticValveCharacteristics::new(
+                     Pressure::new::<psi>(0.), // psig
+@@ -1146,7 +1150,11 @@ impl EngineBleedAirSystem {
+                 ),
+                 Pressure::new::<psi>(80.),
+             ),
+-            fan_air_valve: ElectroPneumaticValve::new(powered_by),
++            fan_air_valve: ElectroPneumaticValve::new(
++                context,
++                powered_by,
++                &format!("BLEED_ENG_{}", number),
++            ),
+             transfer_pressure_pipe: PneumaticPipe::new(
+                 Volume::new::<cubic_meter>(1.),
+                 Pressure::new::<psi>(14.7),
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/mod.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/mod.rs
+index 46debd3..fc1dbe1 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/mod.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/mod.rs
+@@ -5,7 +5,7 @@ use systems::{
+         acs_controller::Pack,
+         cabin_air::CabinAirSimulation,
+         pressure_valve::{NegativeRelieveValveSignal, SafetyValve},
+-        AdirsToAirCondInterface, Air, AirConditioningOverheadShared, AirConditioningPack,
++        AdirsToAirCondInterface, Air, AirConditioningOverheadShared,
+         AirHeater, CabinFan, DuctTemperature, FdacId, MixerUnit, OcsmId, OutletAir,
+         OverheadFlowSelector, PackFlow, PackFlowControllers, PressurizationConstants,
+         PressurizationOverheadShared, TrimAirSystem, VcmId, VcmShared, ZoneType,
+@@ -51,9 +51,12 @@ use self::{
+     },
+ };
+ 
++mod air_cycle_machine;
+ mod cpiom_b;
+ mod local_controllers;
+ 
++use air_cycle_machine::AirCycleMachine;
++
+ pub(super) struct A380AirConditioning {
+     a380_cabin: A380Cabin,
+     a380_air_conditioning_system: A380AirConditioningSystem,
+@@ -377,8 +380,9 @@ pub(super) struct A380AirConditioningSystem {
+     cabin_fans: [CabinFan; 4],
+     cargo_air_heater: AirHeater,
+     mixer_unit: MixerUnit<18>,
+-    // Temporary structure until packs are simulated
+-    packs: [AirConditioningPack; 2],
++    // Real bootstrap air cycle machine model (see air_cycle_machine.rs); replaces the common
++    // crate's `AirConditioningPack` placeholder.
++    packs: [AirCycleMachine; 2],
+     trim_air_system: TrimAirSystem<18, 4>,
+ 
+     air_conditioning_overhead: A380AirConditioningSystemOverhead,
+@@ -441,6 +445,7 @@ impl A380AirConditioningSystem {
+             ]
+             .map(|id| {
+                 CabinFan::new(
++                    context,
+                     id,
+                     VolumeRate::new::<liter_per_second>(Self::CAB_FAN_DESIGN_FLOW_RATE_L_S),
+                     ElectricalBusType::AlternatingCurrent(id),
+@@ -450,8 +455,8 @@ impl A380AirConditioningSystem {
+             cargo_air_heater: AirHeater::new(ElectricalBusType::AlternatingCurrent(2)), // 200XP4
+             mixer_unit: MixerUnit::new(cabin_zones),
+             packs: [
+-                AirConditioningPack::new(context, Pack(1)),
+-                AirConditioningPack::new(context, Pack(2)),
++                AirCycleMachine::new(context, Pack(1)),
++                AirCycleMachine::new(context, Pack(2)),
+             ],
+             trim_air_system: TrimAirSystem::new(
+                 context,
+@@ -492,7 +497,7 @@ impl A380AirConditioningSystem {
+ 
+         self.update_fans(cabin_simulation, cpiom_b);
+ 
+-        self.update_packs(context, cpiom_b);
++        self.update_packs(context, cabin_simulation, cpiom_b, pneumatic);
+ 
+         self.update_mixer_unit();
+ 
+@@ -570,21 +575,49 @@ impl A380AirConditioningSystem {
+     fn update_packs(
+         &mut self,
+         context: &UpdateContext,
++        cabin_simulation: &impl CabinSimulation,
+         cpiom_b: &[CoreProcessingInputOutputModuleB; 4],
++        pneumatic: &impl PackFlowValveState,
+     ) {
++        let ram_air_pb_is_on = self.air_conditioning_overhead.ram_air_pb_is_on();
+         for (id, (pack, pack_flow)) in self
+             .packs
+             .iter_mut()
+             .zip(self.fdac.iter().map(|fdac| fdac.pack_flow()))
+             .enumerate()
+         {
+-            let duct_demand = if !cpiom_b[id].tcs_has_fault() {
++            let duct_demand_temperatures = if !cpiom_b[id].tcs_has_fault() {
+                 cpiom_b[id].duct_demand_temperature()
+             } else {
+                 cpiom_b[id + 2].duct_demand_temperature()
+             };
++            // The TCS computes one duct demand per zone fed from this pack; the pack itself
++            // (and its single hot air bypass valve) can only aim for one outlet temperature, so
++            // it targets the coldest of its zones' demands, same as the placeholder it replaces
++            // did, and lets the downstream trim air valves warm individual zones back up.
++            let duct_demand = duct_demand_temperatures
++                .iter()
++                .copied()
++                .fold(ThermodynamicTemperature::new::<degree_celsius>(f64::INFINITY), |acc, t| {
++                    if t.get::<degree_celsius>() < acc.get::<degree_celsius>() {
++                        t
++                    } else {
++                        acc
++                    }
++                });
++            // pack id is 1 or 2
++            let pack_id = id + 1;
+             // TODO: Failures
+-            pack.update(context, pack_flow, &duct_demand, false)
++            pack.update(
++                context,
++                pack_flow,
++                pneumatic.pack_inlet_pressure(pack_id),
++                pneumatic.pack_inlet_temperature(pack_id),
++                duct_demand,
++                cabin_simulation.cabin_pressure(),
++                ram_air_pb_is_on,
++                false,
++            )
+         }
+     }
+ 
+@@ -873,6 +906,14 @@ impl A380AirConditioningSystemOverhead {
+     fn set_cargo_heater_fault(&mut self, cargo_heater_fault: bool) {
+         self.cargo_heater_pb.set_fault(cargo_heater_fault);
+     }
++
++    /// The RAM AIR pushbutton commands the ram air inlet door fully open regardless of the
++    /// automatic ACM cooling demand (used on the ground, or to force cabin ventilation with the
++    /// packs off). It does not by itself provide flow: with no forward speed and the ACM shaft
++    /// not turning there is no ram air fan to draw air through the open door.
++    fn ram_air_pb_is_on(&self) -> bool {
++        self.ram_air_pb.is_on()
++    }
+ }
+ 
+ impl AirConditioningOverheadShared for A380AirConditioningSystemOverhead {
+@@ -1500,8 +1541,8 @@ mod tests {
+                 cross_bleed_valve: DefaultValve::new_closed(),
+                 fadec: TestFadec::new(context),
+                 packs: [
+-                    TestPneumaticPackComplex::new(1),
+-                    TestPneumaticPackComplex::new(2),
++                    TestPneumaticPackComplex::new(context, 1),
++                    TestPneumaticPackComplex::new(context, 2),
+                 ],
+             }
+         }
+@@ -1581,6 +1622,17 @@ mod tests {
+                 self.packs[id].left_pack_flow_valve_inlet_pressure()
+             }
+         }
++        // pack_id: 1 or 2. Mirrors the real `A380Pneumatic` impl (pneumatic.rs): the pack's own
++        // inlet plenum, mixed from both flow valves by `TestPneumaticPackComplex::pack_container`'s
++        // own mass/energy balance from the (also realistic, engine-N1-gated) `TestEngineBleed`
++        // precooler outlet. Without this override the air cycle machine would see the trait's
++        // sea-level-ISA default instead of this test rig's actual ~200 C / 44 psi bleed air.
++        fn pack_inlet_pressure(&self, pack_id: usize) -> Pressure {
++            self.packs[pack_id - 1].pressure()
++        }
++        fn pack_inlet_temperature(&self, pack_id: usize) -> ThermodynamicTemperature {
++            self.packs[pack_id - 1].temperature()
++        }
+     }
+     impl SimulationElement for TestPneumatic {
+         fn accept<V: SimulationElementVisitor>(&mut self, visitor: &mut V) {
+@@ -1608,18 +1660,28 @@ mod tests {
+         }
+ 
+         fn update(&mut self, context: &UpdateContext, engine_bleed: [&impl EngineCorrectedN1; 2]) {
++            // Volume chosen large relative to the pack's own draw so this rebuilt-every-tick pipe
++            // behaves like the real, PRV-regulated bleed manifold it stands in for: the real
++            // manifold's source capacity (engine bleed port plus HP/IP ducting) is far larger
++            // than what two packs draw, which is exactly why the real PRV holds ~40 psig
++            // (`pressure_regulating_valve_regulates_to_40_psig`) essentially independent of pack
++            // demand. At the previous 8 m^3 this pipe was comparable in size to the receiver it
++            // feeds, so `get_mass_flow_for_equilibrium`'s finite-volume mixing pulled the shared
++            // equilibrium pressure well below the regulated 44 psi whenever the pack flow valves
++            // drew a realistic fraction open, which is why the pack plenum settled near 23 psi
++            // instead of a realistic ~44 psi (see docs/physics/air.md Limitation 1).
+             let mut precooler_inlet_pipe = if engine_bleed
+                 .iter()
+                 .any(|e| e.corrected_n1() > Ratio::new::<percent>(10.))
+             {
+                 PneumaticPipe::new(
+-                    Volume::new::<cubic_meter>(8.),
++                    Volume::new::<cubic_meter>(800.),
+                     Pressure::new::<psi>(44.),
+                     ThermodynamicTemperature::new::<degree_celsius>(200.),
+                 )
+             } else {
+                 PneumaticPipe::new(
+-                    Volume::new::<cubic_meter>(8.),
++                    Volume::new::<cubic_meter>(800.),
+                     Pressure::new::<psi>(14.7),
+                     ThermodynamicTemperature::new::<degree_celsius>(15.),
+                 )
+@@ -1693,7 +1755,7 @@ mod tests {
+         right_inlet_pressure_sensor: PressureTransducer,
+     }
+     impl TestPneumaticPackComplex {
+-        fn new(pack_number: usize) -> Self {
++        fn new(context: &mut InitContext, pack_number: usize) -> Self {
+             Self {
+                 pack_number,
+                 pack_container: PneumaticPipe::new(
+@@ -1703,10 +1765,14 @@ mod tests {
+                 ),
+                 exhaust: PneumaticExhaust::new(0.3, 0.3, Pressure::default()),
+                 left_pack_flow_valve: ElectroPneumaticValve::new(
++                    context,
+                     ElectricalBusType::DirectCurrentEssential,
++                    &format!("PACK_{}_FLOW_VALVE_1", pack_number),
+                 ),
+                 right_pack_flow_valve: ElectroPneumaticValve::new(
++                    context,
+                     ElectricalBusType::DirectCurrentEssential,
++                    &format!("PACK_{}_FLOW_VALVE_2", pack_number),
+                 ),
+                 left_inlet_pressure_sensor: PressureTransducer::new(
+                     ElectricalBusType::DirectCurrentEssentialShed,
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs
+index 3a14d05..81e157d 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs
+@@ -2,6 +2,7 @@ use core::panic;
+ use std::{f64::consts::PI, time::Duration};
+ 
+ use uom::si::{
++    area::square_meter,
+     f64::*,
+     pressure::psi,
+     ratio::ratio,
+@@ -395,6 +396,13 @@ impl PackFlowValveState for A380Pneumatic {
+             self.packs[id].left_pack_flow_valve_inlet_pressure()
+         }
+     }
++    // pack_id: 1 or 2 (one shared inlet plenum per pack, downstream of both its flow valves)
++    fn pack_inlet_pressure(&self, pack_id: usize) -> Pressure {
++        self.packs[pack_id - 1].pack_inlet_pressure()
++    }
++    fn pack_inlet_temperature(&self, pack_id: usize) -> ThermodynamicTemperature {
++        self.packs[pack_id - 1].pack_inlet_temperature()
++    }
+ }
+ impl SimulationElement for A380Pneumatic {
+     fn accept<T: SimulationElementVisitor>(&mut self, visitor: &mut T) {
+@@ -698,6 +706,7 @@ struct EngineBleedAirSystem {
+     transfer_pressure_transducer_pressure_id: VariableIdentifier,
+     regulated_pressure_transducer_pressure_id: VariableIdentifier,
+     differential_pressure_transducer_pressure_id: VariableIdentifier,
++    bleed_extraction_flow_id: VariableIdentifier,
+ 
+     fan_compression_chamber_controller: EngineCompressionChamberController, // Controls pressure just behind the main fan
+     intermediate_pressure_compression_chamber_controller: EngineCompressionChamberController,
+@@ -724,6 +733,19 @@ struct EngineBleedAirSystem {
+     differential_pressure_transducer: DifferentialPressureTransducer,
+ }
+ impl EngineBleedAirSystem {
++    // Effective flow areas (Cd * geometric throat area) for the compressible-orifice flow law
++    // (`compressible_orifice_mass_flow_rate`) now used by the HP valve and PRV. GENERIC: no
++    // published A380-specific bleed duct diameter or valve Cv was found by this workstream.
++    // Sized from typical large-transport engine bleed duct diameters (main HP/PR bleed ducts on
++    // wide-body engines commonly run 3.5-4 in) and a typical butterfly/globe bleed valve
++    // discharge coefficient (0.6-0.8 range); first-principles area from that cited diameter, per
++    // docs/briefs/hyperrealism.md's "first-principles derivation from cited geometry" allowance.
++    // See docs/physics/air.md for the full derivation and what remains GENERIC.
++    const HP_VALVE_ORIFICE_AREA_M2: f64 = 0.006207; // pi/4 * (3.5 in)^2
++    const HP_VALVE_DISCHARGE_COEFFICIENT: f64 = 0.65;
++    const PR_VALVE_ORIFICE_AREA_M2: f64 = 0.008107; // pi/4 * (4 in)^2
++    const PR_VALVE_DISCHARGE_COEFFICIENT: f64 = 0.65;
++
+     fn new(context: &mut InitContext, number: usize, powered_by: ElectricalBusType) -> Self {
+         Self {
+             high_pressure_id: context.get_identifier(format!("PNEU_ENG_{}_HP_PRESSURE", number)),
+@@ -761,6 +783,13 @@ impl EngineBleedAirSystem {
+                 "PNEU_ENG_{}_DIFFERENTIAL_TRANSDUCER_PRESSURE",
+                 number
+             )),
++            // The mass flow this engine's compressor actually loses to the bleed system (the
++            // pressure regulating valve's own flow, which is the single path bleed air leaves
++            // the engine through in normal operation). Published under the plugin's
++            // `ENGINE_BLEED_EXTRACTION_KG_S:n` shared-contract name by the XP plugin's own
++            // glue, not by this crate directly (docs/briefs/hyperrealism.md).
++            bleed_extraction_flow_id: context
++                .get_identifier(format!("PNEU_ENG_{}_BLEED_EXTRACTION_FLOW", number)),
+             // TODO: These constants are copied from the A320
+             fan_compression_chamber_controller: EngineCompressionChamberController::new(2., 0.),
+             intermediate_pressure_compression_chamber_controller:
+@@ -776,9 +805,21 @@ impl EngineBleedAirSystem {
+                 1.,
+             )),
+             intermediate_pressure_valve: PurelyPneumaticValve::new(),
+-            high_pressure_valve: ElectroPneumaticValve::new(powered_by),
+-            pressure_regulating_valve: ElectroPneumaticValve::new(powered_by),
+-            fan_air_valve: ElectroPneumaticValve::new(powered_by),
++            high_pressure_valve: ElectroPneumaticValve::new(
++                context,
++                powered_by,
++                &format!("BLEED_ENG_{}", number),
++            ),
++            pressure_regulating_valve: ElectroPneumaticValve::new(
++                context,
++                powered_by,
++                &format!("BLEED_ENG_{}", number),
++            ),
++            fan_air_valve: ElectroPneumaticValve::new(
++                context,
++                powered_by,
++                &format!("BLEED_ENG_{}", number),
++            ),
+             transfer_pressure_pipe: PneumaticPipe::new(
+                 Volume::new::<cubic_meter>(1.),
+                 Pressure::new::<psi>(14.7),
+@@ -852,20 +893,24 @@ impl EngineBleedAirSystem {
+             &mut self.intermediate_pressure_compression_chamber,
+             &mut self.transfer_pressure_pipe,
+         );
+-        self.high_pressure_valve.update_move_fluid(
++        self.high_pressure_valve.update_move_fluid_with_orifice(
+             context,
+             &mut self.high_pressure_compression_chamber,
+             &mut self.transfer_pressure_pipe,
++            Area::new::<square_meter>(Self::HP_VALVE_ORIFICE_AREA_M2),
++            Self::HP_VALVE_DISCHARGE_COEFFICIENT,
+         );
+         self.fan_air_valve.update_move_fluid(
+             context,
+             &mut self.fan_compression_chamber,
+             &mut self.precooler_supply_pipe,
+         );
+-        self.pressure_regulating_valve.update_move_fluid(
++        self.pressure_regulating_valve.update_move_fluid_with_orifice(
+             context,
+             &mut self.transfer_pressure_pipe,
+             &mut self.precooler_inlet_pipe,
++            Area::new::<square_meter>(Self::PR_VALVE_ORIFICE_AREA_M2),
++            Self::PR_VALVE_DISCHARGE_COEFFICIENT,
+         );
+         self.precooler.update(
+             context,
+@@ -941,6 +986,15 @@ impl EngineBleedAirSystem {
+         self.pressure_regulating_valve.is_open()
+     }
+ 
++    /// Total mass flow leaving this engine's compressor for the bleed system: the PRV's own
++    /// flow, plus the HP valve's when it is the PRV's own upstream source is the HP stage
++    /// (`high_pressure_valve` feeds the same `transfer_pressure_pipe` the PRV draws from, so
++    /// double counting is avoided by reading the one flow that actually crosses into the bleed
++    /// duct, the PRV).
++    fn bleed_extraction_flow(&self) -> MassRate {
++        self.pressure_regulating_valve.fluid_flow()
++    }
++
+     fn intermediate_pressure_transducer_pressure(&self) -> Option<Pressure> {
+         self.intermediate_pressure_transducer.signal()
+     }
+@@ -1027,6 +1081,7 @@ impl SimulationElement for EngineBleedAirSystem {
+             &self.pressure_regulating_valve_open_id,
+             self.pressure_regulating_valve.is_open(),
+         );
++        writer.write(&self.bleed_extraction_flow_id, self.bleed_extraction_flow());
+         writer.write(
+             &self.starter_valve_open_id,
+             self.engine_starter_valve.is_open(),
+@@ -1240,10 +1295,14 @@ impl PackComplex {
+             // These valves are pneumatically operated but will fall closed in case of reverse flow.
+             // They can also be electrically closed by DC ESS BUS.
+             left_pack_flow_valve: ElectroPneumaticValve::new(
++                context,
+                 ElectricalBusType::DirectCurrentEssential,
++                &format!("PACK_{}_FLOW_VALVE_1", pack_number),
+             ),
+             right_pack_flow_valve: ElectroPneumaticValve::new(
++                context,
+                 ElectricalBusType::DirectCurrentEssential,
++                &format!("PACK_{}_FLOW_VALVE_2", pack_number),
+             ),
+             left_inlet_pressure_sensor: PressureTransducer::new(
+                 ElectricalBusType::DirectCurrentEssential, // TODO: This is almost definitely not correct, just copied from the A320
+@@ -1307,6 +1366,18 @@ impl PackComplex {
+     fn right_pack_flow_valve_inlet_pressure(&self) -> Option<Pressure> {
+         self.right_inlet_pressure_sensor.signal()
+     }
++
++    /// Pressure of the air actually sitting in the pack's own inlet plenum, mixed from both flow
++    /// control valves by `pack_container`'s own mass/energy balance. This is the real bleed
++    /// condition the air cycle machine sees, as opposed to `*_inlet_pressure`'s upstream sensor
++    /// reading ahead of the valve.
++    fn pack_inlet_pressure(&self) -> Pressure {
++        self.pack_container.pressure()
++    }
++
++    fn pack_inlet_temperature(&self) -> ThermodynamicTemperature {
++        self.pack_container.temperature()
++    }
+ }
+ impl PneumaticContainer for PackComplex {
+     fn pressure(&self) -> Pressure {
+diff --git a/fbw-common/src/wasm/systems/systems/src/pneumatic/valve.rs b/fbw-common/src/wasm/systems/systems/src/pneumatic/valve.rs
+index 8d2851d..c9ba24b 100644
+--- a/fbw-common/src/wasm/systems/systems/src/pneumatic/valve.rs
++++ b/fbw-common/src/wasm/systems/systems/src/pneumatic/valve.rs
+@@ -3,12 +3,16 @@ use std::f64::consts::PI;
+ use crate::{
+     pneumatic::{Solenoid, SolenoidSignal},
+     shared::{interpolation, ControllerSignal, ElectricalBusType, ElectricalBuses, PneumaticValve},
+-    simulation::{SimulationElement, SimulationElementVisitor, UpdateContext},
++    simulation::{
++        InitContext, Read, SimulationElement, SimulationElementVisitor, SimulatorReader,
++        UpdateContext, VariableIdentifier,
++    },
+ };
+ 
+ use uom::si::{
++    area::square_meter,
+     f64::*,
+-    pressure::psi,
++    pressure::{pascal, psi},
+     ratio::{percent, ratio},
+     temperature_interval,
+     thermodynamic_temperature::kelvin,
+@@ -16,6 +20,64 @@ use uom::si::{
+ 
+ use super::{ControllablePneumaticValve, PneumaticContainer, PneumaticValveSignal};
+ 
++/// Standard compressible (isentropic) flow of an ideal gas through a converging orifice/valve
++/// throat: choked above the critical pressure ratio, subsonic (but still compressible, i.e. not
++/// the incompressible sqrt(dP) form) below it. This is the flow law a real HP/PR/crossbleed/pack
++/// bleed valve obeys; it replaces the crate's `PneumaticContainerConnector` "relax exponentially
++/// toward the equilibrium mass" approximation for the valves this pass converts.
++///
++/// Source: Anderson, *Modern Compressible Flow*, 3rd ed., section 3.6 (isentropic flow through a
++/// converging nozzle); the identical functional form (mass flow ~ discharge coefficient * throat
++/// area * upstream stagnation pressure * f(pressure ratio), choked below the critical ratio) is
++/// the basis of the IEC 60534-2-3 valve gas-sizing standard used for real pneumatic valve Cv/Kv
++/// ratings.
++///
++/// `orifice_area` is the valve's fully-open effective flow area (discharge coefficient is passed
++/// separately so callers can size the two independently, matching how real valve data sheets
++/// separate geometric area from Cd). Returns the (always non-negative) mass flow rate from the
++/// upstream side to the downstream side; the caller is responsible for picking which container is
++/// upstream (this function does not look at which container is "container_one"/"container_two").
++pub fn compressible_orifice_mass_flow_rate(
++    upstream_pressure: Pressure,
++    upstream_temperature: ThermodynamicTemperature,
++    downstream_pressure: Pressure,
++    orifice_area: Area,
++    discharge_coefficient: f64,
++) -> MassRate {
++    use uom::si::mass_rate::kilogram_per_second;
++
++    // Matches PneumaticContainer::HEAT_CAPACITY_RATIO / GAS_CONSTANT_DRY_AIR (private to that
++    // trait, so duplicated here, same as air_cycle_machine.rs already does for CP_AIR/GAMMA/R_AIR).
++    const GAMMA: f64 = 1.4;
++    const R: f64 = 287.057005;
++    // Critical pressure ratio for choked flow: (2/(gamma+1))^(gamma/(gamma-1)), gamma = 1.4.
++    const CRITICAL_PRESSURE_RATIO: f64 = 0.528_281_787_717_685_7;
++
++    let p1 = upstream_pressure.get::<pascal>();
++    let p2 = downstream_pressure.get::<pascal>();
++    let t1 = upstream_temperature.get::<kelvin>().max(1.);
++    let a = orifice_area.get::<square_meter>().max(0.);
++
++    if p1 <= 0. || a <= 0. || p2 >= p1 {
++        return MassRate::default();
++    }
++
++    let pressure_ratio = (p2 / p1).max(0.);
++
++    let flow_function = if pressure_ratio <= CRITICAL_PRESSURE_RATIO {
++        (GAMMA * (2. / (GAMMA + 1.)).powf((GAMMA + 1.) / (GAMMA - 1.))).sqrt()
++    } else {
++        (2. * GAMMA / (GAMMA - 1.)
++            * (pressure_ratio.powf(2. / GAMMA) - pressure_ratio.powf((GAMMA + 1.) / GAMMA)))
++        .max(0.)
++        .sqrt()
++    };
++
++    MassRate::new::<kilogram_per_second>(
++        discharge_coefficient * a * p1 / (R * t1).sqrt() * flow_function,
++    )
++}
++
+ /// A valve only controlled by the physical forces due to the pressure gradient. This does not accept any signals.
+ pub struct PurelyPneumaticValve {
+     open_amount: Ratio,
+@@ -189,16 +251,26 @@ pub struct ElectroPneumaticValve {
+     connector: PneumaticContainerConnector,
+     is_powered: bool,
+     powered_by: ElectricalBusType,
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md): the X-Plane plugin's
++    // breaker catalogue registers this variable, default closed. ANDed into `receive_power`
++    // below, so an open breaker really drops this valve's own solenoid/torque-motor power (it
++    // falls back to `set_open_amount_from_pressure_difference`'s spring-loaded pneumatic
++    // fallback, the same behaviour bus loss already produces), not a synthetic failure flag.
++    breaker_id: VariableIdentifier,
++    breaker_closed: bool,
+ }
+ impl ElectroPneumaticValve {
+     const SPRING_CHARACTERISTIC: f64 = 1.;
+ 
+-    pub fn new(powered_by: ElectricalBusType) -> Self {
++    pub fn new(context: &mut InitContext, powered_by: ElectricalBusType, breaker_name: &str) -> Self {
+         Self {
+             open_amount: Ratio::default(),
+             connector: PneumaticContainerConnector::new(),
+             is_powered: false,
+             powered_by,
++            breaker_id: context
++                .get_identifier(format!("ELEC_{}_BREAKER_CLOSED", breaker_name)),
++            breaker_closed: true,
+         }
+     }
+ 
+@@ -219,6 +291,32 @@ impl ElectroPneumaticValve {
+             .update_move_fluid(context, container_one, container_two);
+     }
+ 
++    /// Same as `update_move_fluid` but using real compressible orifice flow
++    /// (`PneumaticContainerConnector::update_move_fluid_with_orifice`) instead of the
++    /// exponential relaxation approximation.
++    pub fn update_move_fluid_with_orifice(
++        &mut self,
++        context: &UpdateContext,
++        container_one: &mut impl PneumaticContainer,
++        container_two: &mut impl PneumaticContainer,
++        orifice_area: Area,
++        discharge_coefficient: f64,
++    ) {
++        if !self.is_powered {
++            self.set_open_amount_from_pressure_difference(
++                container_one.pressure() - container_two.pressure(),
++            )
++        }
++
++        self.connector.with_transfer_speed_factor(self.open_amount).update_move_fluid_with_orifice(
++            context,
++            container_one,
++            container_two,
++            orifice_area,
++            discharge_coefficient,
++        );
++    }
++
+     fn set_open_amount_from_pressure_difference(&mut self, pressure_difference: Pressure) {
+         self.open_amount = Ratio::new::<ratio>(
+             2. / PI
+@@ -263,7 +361,11 @@ impl SimulationElement for ElectroPneumaticValve {
+     }
+ 
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+-        self.is_powered = buses.is_powered(self.powered_by)
++        self.is_powered = self.breaker_closed && buses.is_powered(self.powered_by)
++    }
++
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.breaker_closed = reader.read(&self.breaker_id);
+     }
+ }
+ 
+@@ -399,6 +501,26 @@ impl DefaultValve {
+             );
+     }
+ 
++    /// Same as `update_move_fluid` but using real compressible orifice flow instead of the
++    /// exponential relaxation approximation. See `PneumaticContainerConnector::
++    /// update_move_fluid_with_orifice`.
++    pub fn update_move_fluid_with_orifice(
++        &mut self,
++        context: &UpdateContext,
++        container_one: &mut impl PneumaticContainer,
++        container_two: &mut impl PneumaticContainer,
++        orifice_area: Area,
++        discharge_coefficient: f64,
++    ) {
++        self.connector.with_transfer_speed_factor(self.open_amount).update_move_fluid_with_orifice(
++            context,
++            container_one,
++            container_two,
++            orifice_area,
++            discharge_coefficient,
++        );
++    }
++
+     pub fn fluid_flow(&self) -> MassRate {
+         self.connector.fluid_flow()
+     }
+@@ -460,6 +582,79 @@ impl PneumaticContainerConnector {
+         self.update_move_fluid_internal(context, container_one, container_two, transfer_speed);
+     }
+ 
++    /// Real compressible-orifice flow law (see `compressible_orifice_mass_flow_rate`) instead of
++    /// the exponential-relaxation-to-equilibrium approximation `update_move_fluid` above uses.
++    /// `orifice_area` is the valve's fully-open effective area; the connector's own
++    /// `transfer_speed_factor` (set via `with_transfer_speed_factor`, the valve's open_amount
++    /// ratio) scales it down the same way every other valve already scales its flow by open
++    /// amount.
++    ///
++    /// An explicit, single-evaluation-per-step orifice equation is only the *instantaneous* rate;
++    /// integrated over a finite step it can overshoot pressure equalisation between two small
++    /// volumes (unlike the old relaxation model, which could not overshoot by construction). The
++    /// same non-negotiable stability bound the old model enforced structurally is kept explicitly
++    /// here: the mass moved this step is clamped to the equilibrium-limited mass
++    /// (`get_mass_flow_for_equilibrium`, already used elsewhere in this crate and unconditionally
++    /// stable/NaN-free). This does not change the flow *law* (still real compressible orifice
++    /// flow away from equilibrium, which is where the choked/unchoked distinction actually
++    /// matters); it only prevents a single large step from reversing the pressure gradient.
++    pub fn update_move_fluid_with_orifice(
++        &mut self,
++        context: &UpdateContext,
++        container_one: &mut impl PneumaticContainer,
++        container_two: &mut impl PneumaticContainer,
++        orifice_area: Area,
++        discharge_coefficient: f64,
++    ) {
++        self.heat_conduction(context, container_one, container_two);
++
++        let dt = context.delta_as_secs_f64();
++        if dt <= 0. {
++            self.fluid_flow = MassRate::default();
++            return;
++        }
++
++        let open_amount = self.transfer_speed_factor.get::<ratio>().clamp(0., 1.);
++        let effective_area = orifice_area * open_amount;
++
++        // `move_mass(container_one, container_two, air_mass)` below ADDS `air_mass` to
++        // container_one (same convention `get_mass_flow_for_equilibrium` already uses) -- so
++        // when container_one is the higher-pressure/upstream side, mass must be REMOVED from it
++        // (negative), not added. (Previous version of this method had this backwards: it added
++        // flow to the upstream/higher-pressure container, which the equilibrium clamp below then
++        // crushed to near nothing -- the actual cause of the PRV-regulation regression this was
++        // reverted for, not the assumed orifice area.)
++        let mut air_mass = if container_one.pressure() >= container_two.pressure() {
++            let rate = compressible_orifice_mass_flow_rate(
++                container_one.pressure(),
++                container_one.temperature(),
++                container_two.pressure(),
++                effective_area,
++                discharge_coefficient,
++            );
++            -Mass::new::<uom::si::mass::kilogram>(rate.get::<uom::si::mass_rate::kilogram_per_second>() * dt)
++        } else {
++            let rate = compressible_orifice_mass_flow_rate(
++                container_two.pressure(),
++                container_two.temperature(),
++                container_one.pressure(),
++                effective_area,
++                discharge_coefficient,
++            );
++            Mass::new::<uom::si::mass::kilogram>(rate.get::<uom::si::mass_rate::kilogram_per_second>() * dt)
++        };
++
++        let equilibrium_mass = container_one.get_mass_flow_for_equilibrium(container_two);
++        air_mass = if equilibrium_mass >= Mass::default() {
++            air_mass.max(Mass::default()).min(equilibrium_mass)
++        } else {
++            air_mass.min(Mass::default()).max(equilibrium_mass)
++        };
++
++        self.move_mass(container_one, container_two, air_mass);
++        self.fluid_flow = -air_mass / context.delta_as_time();
++    }
++
+     fn update_move_fluid_internal(
+         &mut self,
+         context: &UpdateContext,
+@@ -866,7 +1061,15 @@ mod tests {
+     fn electropneumatic_valve_does_not_accept_signal_when_unpowered() {
+         let controller = TestValveController::new(Ratio::new::<percent>(100.));
+ 
+-        let mut valve = ElectroPneumaticValve::new(ElectricalBusType::DirectCurrent(2));
++        let mut electricity = Electricity::new();
++        let mut registry: TestVariableRegistry = Default::default();
++        let mut init_context =
++            InitContext::new(Default::default(), &mut electricity, &mut registry);
++        let mut valve = ElectroPneumaticValve::new(
++            &mut init_context,
++            ElectricalBusType::DirectCurrent(2),
++            "TEST_VALVE",
++        );
+ 
+         valve.update_open_amount(&controller);
+ 
+@@ -900,7 +1103,15 @@ mod tests {
+         let controller = TestValveController::new(Ratio::new::<percent>(1.));
+ 
+         // The electrical bus doesn't really matter here
+-        let mut valve = ElectroPneumaticValve::new(ElectricalBusType::DirectCurrent(2));
++        let mut electricity = Electricity::new();
++        let mut registry: TestVariableRegistry = Default::default();
++        let mut init_context =
++            InitContext::new(Default::default(), &mut electricity, &mut registry);
++        let mut valve = ElectroPneumaticValve::new(
++            &mut init_context,
++            ElectricalBusType::DirectCurrent(2),
++            "TEST_VALVE",
++        );
+ 
+         // We fake it being open for due to it having moved fluid previously
+         valve.open_amount = Ratio::new::<ratio>(0.5);

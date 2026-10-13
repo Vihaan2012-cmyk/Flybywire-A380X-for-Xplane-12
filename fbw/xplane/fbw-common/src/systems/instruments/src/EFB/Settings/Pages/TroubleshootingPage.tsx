@@ -1,0 +1,50 @@
+// @ts-strict-ignore
+// Copyright (c) 2025 FlyByWire Simulations
+// SPDX-License-Identifier: GPL-3.0
+
+import React, { useEffect, useState } from 'react';
+import { t, useAppSelector } from '@flybywiresim/flypad';
+import { SettingsPage } from '../Settings';
+// @ts-ignore
+import { useTroubleshooting } from '../../TroubleshootingContext';
+import { AiracCycleFormatter, FacilityLoader } from '@microsoft/msfs-sdk';
+import { AircraftGithubVersionChecker, BuildInfo } from '../../../../../shared/src/AircraftGithubVersionChecker';
+
+export const TroubleshootingPage = () => {
+  const errorLog = useTroubleshooting();
+  const [navDates, setNavDates] = useState('');
+  const [naviInstalled, setNaviInstalled] = useState(false);
+  const [buildInfo, setBuildInfo] = useState<BuildInfo | undefined>(undefined);
+  const { mismatches: fileHashMismatches } = useAppSelector((state) => state.fileHashes);
+
+  useEffect(() => {
+    fetch('/VFS/scenery/fs-base-jep/scenery/world/airaccycle.bgl', { method: 'HEAD' }).then((r) =>
+      setNaviInstalled(r.ok),
+    );
+
+    const formatter = AiracCycleFormatter.create('{eff({dd}{MON}{YY})}-{exp({dd}{MON}{YY})}({YYCC})');
+    setNavDates(formatter(FacilityLoader.getDatabaseCycles().current));
+
+    AircraftGithubVersionChecker.getBuildInfo(process.env.AIRCRAFT_PROJECT_PREFIX).then((info) => setBuildInfo(info));
+  }, []);
+
+  return (
+    <SettingsPage name={t('Settings.Troubleshooting.Title')}>
+      <pre className="w-full whitespace-pre-wrap font-mono text-base">
+        Aircraft Version: {buildInfo?.version}
+        {'\n'}
+        MSFS2024: True
+        {'\n'}
+        NavData Dates: {navDates + '\n'}
+        Navigraph NavData: {naviInstalled ? 'True\n' : 'False\n'}
+        {fileHashMismatches.length > 0
+          ? fileHashMismatches.map(
+              (m) => `File tampered: ${m.vfsPath}; expected ${m.expectedHash}, actual ${m.actualHash}\n`,
+            )
+          : 'No critical files tampered.'}
+        {'\n'}
+        {errorLog.map((msg) => msg + '\n')}
+      </pre>
+    </SettingsPage>
+  );
+};

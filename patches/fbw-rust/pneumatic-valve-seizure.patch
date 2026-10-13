@@ -1,0 +1,271 @@
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/pneumatic.rs
+@@ -50,6 +50,69 @@
+     };
+ }
+ 
++/// A valve seized by a failure: the XP port's `PNEU_VALVE_FAILED:n`, 0
++/// healthy .. 1 fully seized, written every tick from its failure's
++/// magnitude. A seized valve loses that fraction of its authority, measured
++/// from where it stood when it seized: at 1 it no longer moves at all.
++/// Valve numbers: 1-4 engine HP valves, 5-8 engine pressure regulating
++/// (shut-off) valves, 9-11 left/centre/right cross bleed valves, 12 the
++/// APU bleed valve, 13-16 pack 1 flow valves 1/2 and pack 2 flow valves 1/2.
++struct ValveSeizure {
++    failed_id: VariableIdentifier,
++    magnitude: f64,
++    seized_at: Option<Ratio>,
++}
++impl ValveSeizure {
++    fn new(context: &mut InitContext, number: usize) -> Self {
++        Self {
++            failed_id: context.get_identifier(format!("PNEU_VALVE_FAILED:{}", number)),
++            magnitude: 0.,
++            seized_at: None,
++        }
++    }
++
++    /// The open amount the valve may take, given where it stood before this
++    /// tick's command and where the command put it.
++    fn limit(&mut self, before: Ratio, commanded: Ratio) -> Ratio {
++        if self.magnitude <= 0. {
++            self.seized_at = None;
++            return commanded;
++        }
++        let seized = *self.seized_at.get_or_insert(before);
++        seized + (commanded - seized) * (1. - self.magnitude.min(1.))
++    }
++}
++impl SimulationElement for ValveSeizure {
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        let magnitude: f64 = systems::simulation::Read::read(reader, &self.failed_id);
++        self.magnitude = magnitude.clamp(0., 1.);
++    }
++}
++
++/// A fixed open amount, to hold a seized valve where its seizure allows.
++struct HoldOpenAmount(Ratio);
++impl<T: PneumaticValveSignal> ControllerSignal<T> for HoldOpenAmount {
++    fn signal(&self) -> Option<T> {
++        Some(T::new(self.0))
++    }
++}
++
++/// Command `valve` with `controller`, then hold it where `seizure` allows.
++fn update_seizable<T: PneumaticValveSignal, V: ControllablePneumaticValve + ?Sized>(
++    valve: &mut V,
++    open_amount: impl Fn(&V) -> Ratio,
++    controller: &(impl ControllerSignal<T> + ?Sized),
++    seizure: &mut ValveSeizure,
++) {
++    let before = open_amount(valve);
++    valve.update_open_amount(controller);
++    let commanded = open_amount(valve);
++    let allowed = seizure.limit(before, commanded);
++    if allowed != commanded {
++        valve.update_open_amount::<T, _>(&HoldOpenAmount(allowed));
++    }
++}
++
+ struct HighPressureValveSignal {
+     target_open_amount: Ratio,
+ }
+@@ -118,6 +181,7 @@
+ 
+     apu_compression_chamber: CompressionChamber,
+     apu_bleed_air_valve: DefaultValve,
++    apu_bleed_air_valve_seizure: ValveSeizure,
+ 
+     hydraulic_reservoir_bleed_air_valves: [PurelyPneumaticValve; 2],
+     hydraulic_reservoir_bleed_air_pipe: PneumaticPipe,
+@@ -149,9 +213,9 @@
+                 EngineBleedAirSystem::new(context, 4, ElectricalBusType::DirectCurrent(2)),
+             ],
+             cross_bleed_valves: [
+-                CrossBleedValve::new(context.get_identifier("PNEU_XBLEED_VALVE_L_OPEN".to_owned())),
+-                CrossBleedValve::new(context.get_identifier("PNEU_XBLEED_VALVE_C_OPEN".to_owned())),
+-                CrossBleedValve::new(context.get_identifier("PNEU_XBLEED_VALVE_R_OPEN".to_owned())),
++                CrossBleedValve::new(context, "PNEU_XBLEED_VALVE_L_OPEN", 9),
++                CrossBleedValve::new(context, "PNEU_XBLEED_VALVE_C_OPEN", 10),
++                CrossBleedValve::new(context, "PNEU_XBLEED_VALVE_R_OPEN", 11),
+             ],
+             fadec: FullAuthorityDigitalEngineControl::new(context),
+             engine_starter_valve_controllers: [
+@@ -162,6 +226,7 @@
+             ],
+             apu_compression_chamber: CompressionChamber::new(Volume::new::<cubic_meter>(5.)),
+             apu_bleed_air_valve: DefaultValve::new_closed(),
++            apu_bleed_air_valve_seizure: ValveSeizure::new(context, 12),
+             hydraulic_reservoir_bleed_air_valves: [
+                 PurelyPneumaticValve::new(),
+                 PurelyPneumaticValve::new(),
+@@ -268,6 +333,18 @@
+ 
+         let [engine_1_system, engine_2_system, engine_3_system, engine_4_system] =
+             &mut self.engine_systems;
++        // The APU commanded its bleed valve before this update
++        // (`apu_bleed_air_valve`); a seized one stays where it seized.
++        let before = self
++            .apu_bleed_air_valve_seizure
++            .seized_at
++            .unwrap_or(self.apu_bleed_air_valve.open_amount());
++        let commanded = self.apu_bleed_air_valve.open_amount();
++        let allowed = self.apu_bleed_air_valve_seizure.limit(before, commanded);
++        if allowed != commanded {
++            self.apu_bleed_air_valve
++                .update_open_amount::<HighPressureValveSignal, _>(&HoldOpenAmount(allowed));
++        }
+         self.apu_bleed_air_valve.update_move_fluid(
+             context,
+             &mut self.apu_compression_chamber,
+@@ -411,6 +488,7 @@
+         accept_iterable!(self.cross_bleed_valves, visitor);
+         accept_iterable!(self.engine_systems, visitor);
+         accept_iterable!(self.packs, visitor);
++        self.apu_bleed_air_valve_seizure.accept(visitor);
+ 
+         self.yellow_hydraulic_reservoir_with_valve.accept(visitor);
+         self.green_hydraulic_reservoir_with_valve.accept(visitor);
+@@ -717,6 +795,8 @@
+     intermediate_pressure_valve: PurelyPneumaticValve,
+     high_pressure_valve: ElectroPneumaticValve,
+     pressure_regulating_valve: ElectroPneumaticValve,
++    high_pressure_valve_seizure: ValveSeizure,
++    pressure_regulating_valve_seizure: ValveSeizure,
+     transfer_pressure_pipe: PneumaticPipe,
+     precooler_inlet_pipe: PneumaticPipe,
+     precooler_outlet_pipe: PneumaticPipe,
+@@ -790,6 +870,8 @@
+             // glue, not by this crate directly (docs/briefs/hyperrealism.md).
+             bleed_extraction_flow_id: context
+                 .get_identifier(format!("PNEU_ENG_{}_BLEED_EXTRACTION_FLOW", number)),
++            high_pressure_valve_seizure: ValveSeizure::new(context, number),
++            pressure_regulating_valve_seizure: ValveSeizure::new(context, 4 + number),
+             // TODO: These constants are copied from the A320
+             fan_compression_chamber_controller: EngineCompressionChamberController::new(2., 0.),
+             intermediate_pressure_compression_chamber_controller:
+@@ -879,10 +961,18 @@
+         self.high_pressure_compression_chamber
+             .update(&self.high_pressure_compression_chamber_controller);
+ 
+-        self.high_pressure_valve
+-            .update_open_amount(high_pressure_valve_controller);
+-        self.pressure_regulating_valve
+-            .update_open_amount(pressure_regulating_valve_controller);
++        update_seizable(
++            &mut self.high_pressure_valve,
++            ElectroPneumaticValve::open_amount,
++            high_pressure_valve_controller,
++            &mut self.high_pressure_valve_seizure,
++        );
++        update_seizable(
++            &mut self.pressure_regulating_valve,
++            ElectroPneumaticValve::open_amount,
++            pressure_regulating_valve_controller,
++            &mut self.pressure_regulating_valve_seizure,
++        );
+         self.engine_starter_valve
+             .update_open_amount(engine_starter_valve_controller);
+         self.fan_air_valve
+@@ -1016,6 +1106,8 @@
+         self.high_pressure_valve.accept(visitor);
+         self.pressure_regulating_valve.accept(visitor);
+         self.fan_air_valve.accept(visitor);
++        self.high_pressure_valve_seizure.accept(visitor);
++        self.pressure_regulating_valve_seizure.accept(visitor);
+ 
+         self.intermediate_pressure_transducer.accept(visitor);
+         self.transfer_pressure_transducer.accept(visitor);
+@@ -1271,6 +1363,8 @@
+     exhaust: PneumaticExhaust,
+     left_pack_flow_valve: ElectroPneumaticValve,
+     right_pack_flow_valve: ElectroPneumaticValve,
++    left_pack_flow_valve_seizure: ValveSeizure,
++    right_pack_flow_valve_seizure: ValveSeizure,
+     left_inlet_pressure_sensor: PressureTransducer,
+     right_inlet_pressure_sensor: PressureTransducer,
+ }
+@@ -1304,6 +1398,8 @@
+                 ElectricalBusType::DirectCurrentEssential,
+                 &format!("PACK_{}_FLOW_VALVE_2", pack_number),
+             ),
++            left_pack_flow_valve_seizure: ValveSeizure::new(context, 11 + pack_number * 2),
++            right_pack_flow_valve_seizure: ValveSeizure::new(context, 12 + pack_number * 2),
+             left_inlet_pressure_sensor: PressureTransducer::new(
+                 ElectricalBusType::DirectCurrentEssential, // TODO: This is almost definitely not correct, just copied from the A320
+             ),
+@@ -1320,14 +1416,19 @@
+         right_input: &mut impl PneumaticContainer,
+         pack_flow_valve_signals: &impl PackFlowControllers,
+     ) {
+-        self.left_pack_flow_valve.update_open_amount(
++        update_seizable(
++            &mut self.left_pack_flow_valve,
++            ElectroPneumaticValve::open_amount,
+             pack_flow_valve_signals
+                 .pack_flow_controller(1 + ((self.pack_number == 2) as usize * 2)),
++            &mut self.left_pack_flow_valve_seizure,
+         );
+-
+-        self.right_pack_flow_valve.update_open_amount(
++        update_seizable(
++            &mut self.right_pack_flow_valve,
++            ElectroPneumaticValve::open_amount,
+             pack_flow_valve_signals
+                 .pack_flow_controller(2 + ((self.pack_number == 2) as usize * 2)),
++            &mut self.right_pack_flow_valve_seizure,
+         );
+ 
+         self.left_pack_flow_valve
+@@ -1417,6 +1518,8 @@
+     {
+         self.left_pack_flow_valve.accept(visitor);
+         self.right_pack_flow_valve.accept(visitor);
++        self.left_pack_flow_valve_seizure.accept(visitor);
++        self.right_pack_flow_valve_seizure.accept(visitor);
+ 
+         self.left_inlet_pressure_sensor.accept(visitor);
+         self.right_inlet_pressure_sensor.accept(visitor);
+@@ -1452,13 +1555,15 @@
+     connector: PneumaticContainerConnector,
+     is_powered_for_manual_control: bool,
+     is_powered_for_automatic_control: bool,
++    seizure: ValveSeizure,
+ }
+ impl CrossBleedValve {
+     const SPRING_CHARACTERISTIC: f64 = 1.;
+ 
+-    pub fn new(valve_id: VariableIdentifier) -> Self {
++    fn new(context: &mut InitContext, name: &str, number: usize) -> Self {
+         Self {
+-            valve_id,
++            valve_id: context.get_identifier(name.to_owned()),
++            seizure: ValveSeizure::new(context, number),
+             open_amount: Ratio::new::<ratio>(0.),
+             connector: PneumaticContainerConnector::new(),
+             is_powered_for_manual_control: false,
+@@ -1493,6 +1598,12 @@
+     }
+ 
+     fn update_open_amount(&mut self, controller: &impl ControllerSignal<CrossBleedValveSignal>) {
++        let before = self.open_amount;
++        self.command_open_amount(controller);
++        self.open_amount = self.seizure.limit(before, self.open_amount);
++    }
++
++    fn command_open_amount(&mut self, controller: &impl ControllerSignal<CrossBleedValveSignal>) {
+         if let Some(signal) = controller.signal() {
+             if signal.signal_type == CrossBleedValveSignalType::Manual
+                 && self.is_powered_for_manual_control
+@@ -1510,6 +1621,11 @@
+     }
+ }
+ impl SimulationElement for CrossBleedValve {
++    fn accept<T: SimulationElementVisitor>(&mut self, visitor: &mut T) {
++        self.seizure.accept(visitor);
++        visitor.visit(self);
++    }
++
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+         self.is_powered_for_manual_control =
+             buses.is_powered(ElectricalBusType::DirectCurrentEssentialShed);

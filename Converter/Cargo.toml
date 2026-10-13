@@ -1,0 +1,59 @@
+[package]
+name = "msfs2xp"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.86"
+description = "Convert Microsoft Flight Simulator 2020/2024 airports to X-Plane 12 apt.dat scenery"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+geo = "0.30"
+gltf = { version = "1", features = ["extras", "names", "utils"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+indicatif = "0.17"
+md-5 = "0.10"
+rayon = "1"
+roxmltree = "0.20"
+ruzstd = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+texpresso = "2.0.2"
+texture2ddecoder = "0.1.2"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
+
+[target.'cfg(windows)'.dependencies]
+native-windows-gui = { version = "1.0.13", default-features = false, features = [
+    "file-dialog",
+    "progress-bar",
+    "notice",
+    "list-view",
+    "image-decoder",
+    "image-list",
+    "tabs",
+    "listbox",
+    "combobox",
+    "textbox",
+    "frame",
+    "high-dpi",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[[bin]]
+name = "msfs2xp"
+path = "src/main.rs"
+
+[lib]
+name = "msfs2xp"
+path = "src/lib.rs"

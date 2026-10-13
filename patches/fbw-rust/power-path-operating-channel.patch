@@ -1,0 +1,233 @@
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/full_digital_agu_controller.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/full_digital_agu_controller.rs
+index 18cada9..c72123d 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/full_digital_agu_controller.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/full_digital_agu_controller.rs
+@@ -58,13 +58,17 @@ impl<const ENGINES: usize> FullDigitalAGUController<ENGINES> {
+             fdac_channel_2_failure_id: context
+                 .get_identifier(format!("COND_FDAC_{}_CHANNEL_2_FAILURE", fdac_id)),
+ 
+-            active_channel: OperatingChannel::new(
++            active_channel: OperatingChannel::new_with_breaker(
++                context,
+                 1,
++                format!("ELEC_FDAC_{}_1_BREAKER_CLOSED", fdac_id),
+                 Some(FailureType::Fdac(fdac_id, Channel::ChannelOne)),
+                 &[powered_by[0]],
+             ),
+-            stand_by_channel: OperatingChannel::new(
++            stand_by_channel: OperatingChannel::new_with_breaker(
++                context,
+                 2,
++                format!("ELEC_FDAC_{}_2_BREAKER_CLOSED", fdac_id),
+                 Some(FailureType::Fdac(fdac_id, Channel::ChannelTwo)),
+                 &[powered_by[1]],
+             ),
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/outflow_valve_control_module.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/outflow_valve_control_module.rs
+index fdb1f8d..64cd85c 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/outflow_valve_control_module.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/outflow_valve_control_module.rs
+@@ -83,13 +83,17 @@ impl OutflowValveControlModule {
+                 outflow_valve_id
+             )),
+ 
+-            active_channel: OperatingChannel::new(
++            active_channel: OperatingChannel::new_with_breaker(
++                context,
+                 1,
++                format!("ELEC_OCSM_{}_1_BREAKER_CLOSED", outflow_valve_id),
+                 Some(FailureType::Ocsm(outflow_valve_id, Channel::ChannelOne)),
+                 &powered_by[0..1],
+             ),
+-            stand_by_channel: OperatingChannel::new(
++            stand_by_channel: OperatingChannel::new_with_breaker(
++                context,
+                 2,
++                format!("ELEC_OCSM_{}_2_BREAKER_CLOSED", outflow_valve_id),
+                 Some(FailureType::Ocsm(outflow_valve_id, Channel::ChannelTwo)),
+                 &powered_by[1..2],
+             ),
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/trim_air_drive_device.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/trim_air_drive_device.rs
+index ad4cd0c..f59a08c 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/trim_air_drive_device.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/trim_air_drive_device.rs
+@@ -55,13 +55,17 @@ impl<const ZONES: usize, const ENGINES: usize> TrimAirDriveDevice<ZONES, ENGINES
+             tadd_channel_2_failure_id: context
+                 .get_identifier("COND_TADD_CHANNEL_2_FAILURE".to_owned()),
+ 
+-            active_channel: OperatingChannel::new(
++            active_channel: OperatingChannel::new_with_breaker(
++                context,
+                 1,
++                "ELEC_TADD_1_BREAKER_CLOSED",
+                 Some(FailureType::Tadd(Channel::ChannelOne)),
+                 &[powered_by[0]],
+             ),
+-            stand_by_channel: OperatingChannel::new(
++            stand_by_channel: OperatingChannel::new_with_breaker(
++                context,
+                 2,
++                "ELEC_TADD_2_BREAKER_CLOSED",
+                 Some(FailureType::Tadd(Channel::ChannelTwo)),
+                 &[powered_by[1]],
+             ),
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/ventilation_control_module.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/ventilation_control_module.rs
+index a0ef023..7735909 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/ventilation_control_module.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/air_conditioning/local_controllers/ventilation_control_module.rs
+@@ -49,13 +49,17 @@ impl VentilationControlModule {
+                 .get_identifier("VENT_OVERPRESSURE_RELIEF_VALVE_IS_OPEN".to_owned()),
+ 
+             id,
+-            active_channel: OperatingChannel::new(
++            active_channel: OperatingChannel::new_with_breaker(
++                context,
+                 1,
++                format!("ELEC_VCM_{}_1_BREAKER_CLOSED", id),
+                 Some(FailureType::Vcm(id, Channel::ChannelOne)),
+                 &[powered_by[0]],
+             ),
+-            stand_by_channel: OperatingChannel::new(
++            stand_by_channel: OperatingChannel::new_with_breaker(
++                context,
+                 2,
++                format!("ELEC_VCM_{}_2_BREAKER_CLOSED", id),
+                 Some(FailureType::Vcm(id, Channel::ChannelTwo)),
+                 &[powered_by[1]],
+             ),
+diff --git a/fbw-common/src/wasm/systems/systems/src/air_conditioning/mod.rs b/fbw-common/src/wasm/systems/systems/src/air_conditioning/mod.rs
+index 20f0d5f..2a2fbac 100644
+--- a/fbw-common/src/wasm/systems/systems/src/air_conditioning/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/air_conditioning/mod.rs
+@@ -11,8 +11,8 @@ use crate::{
+         ConsumePower, ControllerSignal, ElectricalBusType, ElectricalBuses,
+     },
+     simulation::{
+-        InitContext, SimulationElement, SimulationElementVisitor, SimulatorWriter, UpdateContext,
+-        VariableIdentifier, Write,
++        InitContext, Read, SimulationElement, SimulationElementVisitor, SimulatorReader,
++        SimulatorWriter, UpdateContext, VariableIdentifier, Write,
+     },
+ };
+ 
+@@ -390,6 +390,20 @@ pub struct OperatingChannel {
+     is_powered: bool,
+     failure: Option<Failure>,
+     fault: OperatingChannelFault,
++
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md):
++    // shared by every FDAC/TADD/VCM/OCSM channel in the A380's air-
++    // conditioning LRUs. The X-Plane plugin's breaker catalogue registers
++    // one `<breaker_var>` simulation variable per channel, default closed.
++    // ANDed into `receive_power` below, so an open breaker really drops
++    // this channel's own power the same as losing its bus (its
++    // active/standby fault logic reacts exactly as if unpowered), not a
++    // synthetic failure flag. `breaker_id` is `None` for a caller that
++    // does not yet register a variable (e.g. the A320's ACSC channels,
++    // out of this workstream's A380 remit) -- `breaker_closed` then just
++    // stays `true`, purely additive.
++    breaker_id: Option<VariableIdentifier>,
++    breaker_closed: bool,
+ }
+ 
+ impl OperatingChannel {
+@@ -404,6 +418,29 @@ impl OperatingChannel {
+             is_powered: false,
+             failure: failure_type.map(Failure::new),
+             fault: OperatingChannelFault::NoFault,
++            breaker_id: None,
++            breaker_closed: true,
++        }
++    }
++
++    /// Same as [`Self::new`], but also registers a real power-path breaker
++    /// variable (`docs/physics/breakers.md`): `breaker_var` is written/read
++    /// as `<breaker_var>`, default closed, and ANDed into `receive_power`.
++    pub fn new_with_breaker(
++        context: &mut InitContext,
++        id: usize,
++        breaker_var: impl Into<String>,
++        failure_type: Option<FailureType>,
++        powered_by: &[ElectricalBusType],
++    ) -> Self {
++        Self {
++            channel_id: id.into(),
++            powered_by: powered_by.to_vec(),
++            is_powered: false,
++            failure: failure_type.map(Failure::new),
++            fault: OperatingChannelFault::NoFault,
++            breaker_id: Some(context.get_identifier(breaker_var.into())),
++            breaker_closed: true,
+         }
+     }
+ 
+@@ -438,7 +475,14 @@ impl SimulationElement for OperatingChannel {
+     }
+ 
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+-        self.is_powered = self.powered_by.iter().all(|&p| buses.is_powered(p));
++        self.is_powered =
++            self.breaker_closed && self.powered_by.iter().all(|&p| buses.is_powered(p));
++    }
++
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        if let Some(id) = &self.breaker_id {
++            self.breaker_closed = reader.read(id);
++        }
+     }
+ }
+ 
+@@ -479,13 +523,28 @@ pub struct CabinFan {
+     is_powered: bool,
+     powered_by: ElectricalBusType,
+     failure: Failure,
++
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md):
++    // the X-Plane plugin's breaker catalogue registers one
++    // `ELEC_CABIN_FAN_<id>_BREAKER_CLOSED` variable per fan, default closed.
++    // ANDed into `receive_power` below, so an open one really drops this
++    // fan's own power (it stops moving air, same as losing its bus), not a
++    // synthetic failure flag. Unread outside the plugin, so purely
++    // additive.
++    breaker_id: VariableIdentifier,
++    breaker_closed: bool,
+ }
+ 
+ impl CabinFan {
+     const PRESSURE_RISE_HPA: f64 = 22.; // hPa
+     const FAN_EFFICIENCY: f64 = 0.75; // Ratio - so output matches AMM numbers
+ 
+-    pub fn new(id: u8, design_flow_rate: VolumeRate, powered_by: ElectricalBusType) -> Self {
++    pub fn new(
++        context: &mut InitContext,
++        id: u8,
++        design_flow_rate: VolumeRate,
++        powered_by: ElectricalBusType,
++    ) -> Self {
+         Self {
+             design_flow_rate,
+             is_on: false,
+@@ -494,6 +553,10 @@ impl CabinFan {
+             is_powered: false,
+             powered_by,
+             failure: Failure::new(FailureType::CabinFan(id as usize)),
++
++            breaker_id: context
++                .get_identifier(format!("ELEC_CABIN_FAN_{}_BREAKER_CLOSED", id)),
++            breaker_closed: true,
+         }
+     }
+ 
+@@ -562,8 +625,12 @@ impl SimulationElement for CabinFan {
+         visitor.visit(self);
+     }
+ 
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.breaker_closed = reader.read(&self.breaker_id);
++    }
++
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+-        self.is_powered = buses.is_powered(self.powered_by);
++        self.is_powered = self.breaker_closed && buses.is_powered(self.powered_by);
+     }
+ 
+     fn consume_power<T: ConsumePower>(&mut self, _: &UpdateContext, consumption: &mut T) {

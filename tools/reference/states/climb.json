@@ -1,0 +1,8 @@
+{
+  "name": "climb",
+  "description": "See docs/reference-harness.md, States.",
+  "extends": ["parts/common", "parts/systems-climb", "parts/avionics-climb"],
+  "flt": "Climb.flt",
+  "time": { "utc": "2026-06-21T12:00:00Z", "settleMs": 20000 },
+  "vars": {}
+}

@@ -1,0 +1,210 @@
+#include <dirent.h>
+#include <ini.h>
+#include <ini_type_conversion.h>
+#include <stdio.h>
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <vector>
+
+#include "FlightDataRecorder.h"
+
+using namespace mINI;
+
+void FlightDataRecorder::initialize() {
+  // create local variables
+  idIsEnabled = std::make_unique<LocalVariable>("A32NX_FDR_ENABLED");
+
+  // load configuration
+  loadConfiguration();
+
+  // print configuration
+  std::cout << "WASM: Flight Data Recorder Configuration : Enabled                        = " << idIsEnabled->get() << std::endl;
+  std::cout << "WASM: Flight Data Recorder Configuration : Interface Version              = " << INTERFACE_VERSION << std::endl;
+}
+
+void FlightDataRecorder::update(const BaseData& baseData,
+                                const AircraftSpecificData& aircraftSpecificData,
+                                Prim (&prims)[3],
+                                Sec (&secs)[3],
+                                const FuelSystemData& fuelSystemData) {
+  // check if enabled
+  if (!idIsEnabled->get()) {
+    return;
+  }
+
+  // do file management
+  manageFlightDataRecorderFiles();
+
+  // write base data
+  fileStream->write((char*)(&baseData), sizeof(baseData));
+
+  // write aircraft specific data
+  fileStream->write((char*)(&aircraftSpecificData), sizeof(aircraftSpecificData));
+
+  // write PRIM data
+  for (int i = 0; i < NUMBER_OF_PRIM_TO_WRITE; ++i) {
+    writePrimOutputs(prims[i]);
+  }
+
+  int masterPrim = 0;
+  if (prims[0].getDebugOutputs().fctl_logic.is_master_prim) {
+    masterPrim = 0;
+  } else if (prims[1].getDebugOutputs().fctl_logic.is_master_prim) {
+    masterPrim = 1;
+  } else if (prims[2].getDebugOutputs().fctl_logic.is_master_prim) {
+    masterPrim = 2;
+  } else {
+    masterPrim = 0;
+  }
+
+  writeMasterPrim(masterPrim, prims[masterPrim]);
+
+  // write SEC data
+  for (int i = 0; i < NUMBER_OF_SEC_TO_WRITE; ++i) {
+    writeSec(secs[i]);
+  }
+
+  // write fuel system data
+  fileStream->write((char*)(&fuelSystemData), sizeof(fuelSystemData));
+}
+
+void FlightDataRecorder::writePrimOutputs(Prim& prim) {
+  auto bus_outputs = prim.getBusOutputs();
+  fileStream->write((char*)(&bus_outputs), sizeof(bus_outputs));
+  auto discrete_outputs = prim.getDiscreteOutputs();
+  fileStream->write((char*)(&discrete_outputs), sizeof(discrete_outputs));
+  auto analog_outputs = prim.getAnalogOutputs();
+  fileStream->write((char*)(&analog_outputs), sizeof(analog_outputs));
+}
+
+void FlightDataRecorder::writeMasterPrim(int masterPrim, Prim& prim) {
+  auto primDebugOutputs = prim.getDebugOutputs();
+  fileStream->write((char*)(&masterPrim), sizeof(masterPrim));
+  fileStream->write((char*)(&primDebugOutputs.general_logic), sizeof(primDebugOutputs.general_logic));
+  fileStream->write((char*)(&primDebugOutputs.flight_envelope), sizeof(primDebugOutputs.flight_envelope));
+  fileStream->write((char*)(&primDebugOutputs.fg_logic), sizeof(primDebugOutputs.fg_logic));
+  fileStream->write((char*)(&primDebugOutputs.fg_mode_logic), sizeof(primDebugOutputs.fg_mode_logic));
+  fileStream->write((char*)(&primDebugOutputs.fg_laws), sizeof(primDebugOutputs.fg_laws));
+  fileStream->write((char*)(&primDebugOutputs.fctl_logic), sizeof(primDebugOutputs.fctl_logic));
+  fileStream->write((char*)(&primDebugOutputs.laws), sizeof(primDebugOutputs.laws));
+}
+
+void FlightDataRecorder::writeSec(Sec& sec) {
+  auto bus_outputs = sec.getBusOutputs();
+  fileStream->write((char*)(&bus_outputs), sizeof(bus_outputs));
+  auto discrete_outputs = sec.getDiscreteOutputs();
+  fileStream->write((char*)(&discrete_outputs), sizeof(discrete_outputs));
+  auto analog_outputs = sec.getAnalogOutputs();
+  fileStream->write((char*)(&analog_outputs), sizeof(analog_outputs));
+}
+
+void FlightDataRecorder::terminate() {
+  if (fileStream) {
+    fileStream->close();
+    fileStream.reset();
+  }
+}
+
+void FlightDataRecorder::loadConfiguration() {
+  // read configuration
+  INIStructure iniStructure;
+  INIFile iniFile(CONFIGURATION_FILEPATH);
+  if (!iniFile.read(iniStructure)) {
+    // file does not exist yet -> store the default configuration in a file
+    iniStructure["FLIGHT_DATA_RECORDER"]["MAXIMUM_NUMBER_OF_FILES"] = "15";
+    iniStructure["FLIGHT_DATA_RECORDER"]["MAXIMUM_NUMBER_OF_ENTRIES_PER_FILE"] = "864000";
+    iniFile.write(iniStructure, true);
+  }
+
+  // read basic configuration
+  maximumSampleCounter = INITypeConversion::getInteger(iniStructure, "FLIGHT_DATA_RECORDER", "MAXIMUM_NUMBER_OF_ENTRIES_PER_FILE", 864000);
+  maximumFileCount = INITypeConversion::getInteger(iniStructure, "FLIGHT_DATA_RECORDER", "MAXIMUM_NUMBER_OF_FILES", 15);
+
+  if (maximumSampleCounter <= 0) {
+    maximumSampleCounter = 864000;
+  }
+  if (maximumFileCount <= 0) {
+    maximumFileCount = 15;
+  }
+}
+
+void FlightDataRecorder::manageFlightDataRecorderFiles() {
+  // increase sample counter
+  sampleCounter++;
+
+  // check if file is considered full
+  if (sampleCounter >= maximumSampleCounter) {
+    // close file and delete
+    if (fileStream) {
+      fileStream->close();
+      fileStream.reset();
+    }
+    // reset counter
+    sampleCounter = 0;
+  }
+
+  if (!fileStream) {
+    // create new file
+    fileStream = std::make_shared<gzofstream>(getFlightDataRecorderFilename().c_str());
+    // write version to file
+    fileStream->write((char*)&INTERFACE_VERSION, sizeof(INTERFACE_VERSION));
+    // clean up directory
+    cleanUpFlightDataRecorderFiles();
+  }
+}
+
+std::string FlightDataRecorder::getFlightDataRecorderFilename() {
+  // get time
+  auto in_time_t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+
+  // get filepath based on time
+  std::stringstream result;
+  result << std::put_time(std::gmtime(&in_time_t), "\\work\\%Y-%m-%d-%H-%M-%S.fdr");
+
+  // return result
+  return result.str();
+}
+
+void FlightDataRecorder::cleanUpFlightDataRecorderFiles() {
+  // std::vector for directory entries
+  std::vector<std::string> files;
+
+  // extension
+  std::string extension = "fdr";
+
+  // structure representing an directory entry
+  struct dirent* directoryEntry;
+
+  // open directory
+  DIR* directory = opendir("\\work");
+  if (!directory) {
+    fprintf(stderr, "[FlightDataRecorder::getFlightDataRecorderFilename] Failed to open work dir!");
+    return;
+  }
+
+  // read directory until end
+  while ((directoryEntry = readdir(directory)) != NULL) {
+    // get filename as std::string
+    std::string filename = directoryEntry->d_name;
+
+    // check if file has right extension
+    if (filename.find(extension, (filename.length() - extension.length())) != std::string::npos) {
+      files.push_back(std::move(filename));
+    }
+  }
+
+  // close directory
+  closedir(directory);
+
+  // sort std::vector
+  std::sort(files.begin(), files.end(), std::greater<>());
+
+  // remove older files
+  while (files.size() > maximumFileCount) {
+    bool result = remove(("\\work\\" + files.back()).c_str());
+    files.pop_back();
+  }
+}

@@ -1,0 +1,149 @@
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs
+index 7d99308..a69c403 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs
+@@ -367,6 +367,14 @@ struct FireDetectionLoop {
+     is_powered: bool,
+     was_powered_before: bool,
+     failures: [Failure; 6],
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md): one real breaker
++    // per zone per loop (12 total: loops A/B x 6 zones), registered by the X-Plane plugin's
++    // breaker catalogue, default closed. ANDed into each zone's own detection result below, so
++    // pulling one really drops that zone's own loop power instead of setting a synthetic
++    // FailureType::FireDetectionLoop -- matching this loop's real per-zone independence (a real
++    // A380 fire loop has a breaker per zone, not one breaker for the whole loop).
++    breaker_ids: [VariableIdentifier; 6],
++    breaker_closed: [bool; 6],
+ 
+     fire_detectors: [FireDetector; 6],
+ }
+@@ -378,6 +386,10 @@ impl FireDetectionLoop {
+         fire_detection_zones: &[FireDetectionZone; 6],
+         powered_by: ElectricalBusType,
+     ) -> Self {
++        let loop_letter = match loop_id {
++            FireDetectionLoopID::A => "A",
++            FireDetectionLoopID::B => "B",
++        };
+         Self {
+             loop_id,
+             powered_by,
+@@ -385,11 +397,26 @@ impl FireDetectionLoop {
+             was_powered_before: false,
+             failures: fire_detection_zones
+                 .map(|zone| Failure::new(FailureType::FireDetectionLoop(loop_id, zone))),
++            breaker_ids: fire_detection_zones.map(|zone| {
++                context.get_identifier(format!(
++                    "ELEC_FIRE_LOOP_{}_{}_BREAKER_CLOSED",
++                    loop_letter, zone
++                ))
++            }),
++            breaker_closed: [true; 6],
+ 
+             fire_detectors: fire_detection_zones.map(|zone| FireDetector::new(context, zone)),
+         }
+     }
+ 
++    fn zone_breaker_closed(&self, fire_detection_zone: FireDetectionZone) -> bool {
++        self.fire_detectors
++            .iter()
++            .position(|detector| detector.zone_id() == fire_detection_zone)
++            .map(|index| self.breaker_closed[index])
++            .unwrap_or(false)
++    }
++
+     fn fire_detected_in_loop(
+         &self,
+         fire_detection_zone: FireDetectionZone,
+@@ -406,6 +433,7 @@ impl FireDetectionLoop {
+ 
+         !failure.is_active()
+             && self.is_powered
++            && self.zone_breaker_closed(fire_detection_zone)
+             && (self
+                 .fire_detectors
+                 .iter()
+@@ -425,7 +453,9 @@ impl FireDetectionLoop {
+             })
+             .unwrap();
+ 
+-        failure.is_active() || (!self.is_powered && self.was_powered_before)
++        failure.is_active()
++            || (!self.is_powered && self.was_powered_before)
++            || !self.zone_breaker_closed(fire_detection_zone)
+     }
+ 
+     /// This is to avoid a fire detection on initial load
+@@ -444,6 +474,12 @@ impl SimulationElement for FireDetectionLoop {
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+         self.is_powered = buses.is_powered(self.powered_by);
+     }
++
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        for (index, breaker_id) in self.breaker_ids.iter().enumerate() {
++            self.breaker_closed[index] = reader.read(breaker_id);
++        }
++    }
+ }
+ 
+ // Electro-pneumatic fire detectors. There are multiple detectors in 3 fire zones per engine, one per pylon, one in the APU and one in the MLG
+@@ -748,7 +784,21 @@ impl SetOnFireModule {
+             });
+     }
+ 
+-    /// We check any "new" bottle discharges and then add a random factor on whether it should extinguish a fire
++    /// A zone extinguishes when one of its bottles newly discharges: the
++    /// squib can only arm once the engine (or APU) fire pushbutton is
++    /// released (`ExtinguishingAgentBottle::update`, squib_is_armed requires
++    /// it), which is the same input that cuts the LP fuel valve (xp plugin's
++    /// aspects.rs, engine_commands.rs's `master`/fuel_valve_open) and the
++    /// hydraulic/bleed fire shutoff valves and trips the generator
++    /// (electrical/mod.rs, hydraulic/mod.rs, pneumatic.rs) -- so by the time
++    /// a bottle can discharge, the zone's fuel source is already isolated,
++    /// and a full Halon 1301 bottle discharged into that now fuel-starved,
++    /// sealed nacelle/APU bay reliably smothers the fire. There is no
++    /// physical reason for a properly discharged bottle to sometimes fail,
++    /// so this is deterministic rather than a coin flip; two bottles per
++    /// engine exist for redundancy against a squib or bottle that failed to
++    /// discharge at all (bottle_discharge false), not against agent that
++    /// discharged but somehow wasn't "enough".
+     /// We also use this function to "extinguish" a fire if the user deselects the failure
+     fn zone_extinguishing_determination(&self, bottle_discharge: [bool; 9]) -> [bool; 6] {
+         [
+@@ -756,31 +806,27 @@ impl SetOnFireModule {
+                 bottle_discharge[..2].iter(),
+                 self.bottle_already_discharged[..2].iter(),
+             )
+-            .any(|(discharge, already_discharged)| *discharge && !already_discharged)
+-                && rand::random())
++            .any(|(discharge, already_discharged)| *discharge && !already_discharged))
+                 || (self.was_on_fire[0] && !self.fire[0].is_active()),
+             (zip(
+                 bottle_discharge[2..4].iter(),
+                 self.bottle_already_discharged[2..4].iter(),
+             )
+-            .any(|(discharge, already_discharged)| *discharge && !already_discharged)
+-                && rand::random())
++            .any(|(discharge, already_discharged)| *discharge && !already_discharged))
+                 || (self.was_on_fire[1] && !self.fire[1].is_active()),
+             (zip(
+                 bottle_discharge[4..6].iter(),
+                 self.bottle_already_discharged[4..6].iter(),
+             )
+-            .any(|(discharge, already_discharged)| *discharge && !already_discharged)
+-                && rand::random())
++            .any(|(discharge, already_discharged)| *discharge && !already_discharged))
+                 || (self.was_on_fire[2] && !self.fire[2].is_active()),
+             (zip(
+                 bottle_discharge[6..8].iter(),
+                 self.bottle_already_discharged[6..8].iter(),
+             )
+-            .any(|(discharge, already_discharged)| *discharge && !already_discharged)
+-                && rand::random())
++            .any(|(discharge, already_discharged)| *discharge && !already_discharged))
+                 || (self.was_on_fire[3] && !self.fire[3].is_active()),
+-            (bottle_discharge[8] && !self.bottle_already_discharged[8] && rand::random())
++            (bottle_discharge[8] && !self.bottle_already_discharged[8])
+                 || (self.was_on_fire[4] && !self.fire[4].is_active()),
+             // MLG does not have a fire extinguishing system
+             false,

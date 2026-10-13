@@ -1,0 +1,20 @@
+{
+  "name": "fbw-reference-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Renders FlyByWire A380X instruments in Chromium for a given simulator state, as MSFS's Coherent GT would, and compares them with our native pipeline.",
+  "type": "module",
+  "scripts": {
+    "reference": "node src/reference.mjs",
+    "compare": "node compare/compare.mjs",
+    "dom-usage": "node src/dom-usage.mjs",
+    "install-browser": "node src/install-browser.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0",
+    "pngjs": "^7.0.0"
+  }
+}

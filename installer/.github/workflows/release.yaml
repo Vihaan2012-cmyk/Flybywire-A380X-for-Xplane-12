@@ -1,0 +1,111 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+      - '!v*-rc*'
+      - '!v*-dev*'
+
+jobs:
+  build:
+    name: Upload Release Asset
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      PACKAGE_NAME: FlyByWire-Installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Create .sentrydsn file
+        run: |
+          echo ${{ secrets.SENTRY_DSN_INSTALLER }} >> ./extraResources/.sentrydsn
+
+      - name: Install NPM dependencies
+        run: npm ci
+
+      - name: Install system requirements
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades libc6:i386 libgcc-s1:i386 libstdc++6:i386
+          sudo apt-get install -y wine32 wine64
+          sudo apt-get install -y flatpak
+          sudo apt-get install -y flatpak-builder
+          sudo apt-get install -y rclone
+      - name: Add Flathub Flatpak remote
+        run: flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Package installer
+        run: |
+          npm run package:all
+          mkdir -p upload/github/
+          cp ./dist/latest.yml ./upload/github/
+          cp ./dist/latest-linux.yml ./upload/github/
+          cp ./dist/${{ env.PACKAGE_NAME }}-*-*.* ./upload/github/ || true
+          mkdir -p upload/cdn/
+          # Copy and modify latest.yml to use static filenames
+          sed -E "s/${{ env.PACKAGE_NAME }}-[0-9]+\.[0-9]+\.[0-9]+(-[^-]+)?-/${{ env.PACKAGE_NAME }}-/g" ./dist/latest.yml > ./upload/cdn/latest.yml
+          # Copy and modify latest-linux.yml to use static filenames
+          sed -E "s/${{ env.PACKAGE_NAME }}-[0-9]+\.[0-9]+\.[0-9]+(-[^-]+)?-/${{ env.PACKAGE_NAME }}-/g" ./dist/latest-linux.yml > ./upload/cdn/latest-linux.yml
+          for file in ./dist/${{ env.PACKAGE_NAME }}-*-*.*; do
+            [ -e "$file" ] || continue
+            filename=$(basename "$file")
+            
+            # Remove version from filename to create static filename
+            staticname=$(echo "$filename" | sed -E "s/${{ env.PACKAGE_NAME }}-[0-9]+\.[0-9]+\.[0-9]+(-[^-]+)?-/${{ env.PACKAGE_NAME }}-/")
+            
+            cp "$file" "./upload/cdn/$staticname"
+          done
+      - name: Configure rclone for Cloudflare R2
+        run: |
+            mkdir -p ~/.config/rclone
+            cat > ~/.config/rclone/rclone.conf <<EOF
+            [cloudflare-r2]
+            type = s3
+            provider = Cloudflare
+            env_auth = false
+            access_key_id = ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+            secret_access_key = ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+            endpoint = ${{ secrets.CLOUDFLARE_R2_ENDPOINT }}
+            region = auto
+            EOF
+
+      - name: Upload to CloudFlare CDN
+        env:
+          CLOUDFLARE_CDN_ZONE_ID: ${{ secrets.CLOUDFLARE_CDN_ZONE_ID }}
+          CLOUDFLARE_PURGE_TOKEN: ${{ secrets.CLOUDFLARE_PURGE_TOKEN }}
+        run: |
+          ./scripts/cdn-cf.sh upload/cdn/ installer/release
+          ./scripts/cdn-cf.sh upload/cdn/ installer/rc
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+
+      - name: Upload all release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPLOAD_URL: ${{ steps.create_release.outputs.upload_url }}
+        run: |
+          base_url="${UPLOAD_URL%\{*}"
+          for file in upload/github/*; do
+            [ -e "$file" ] || continue
+            name=$(basename "$file")
+            echo "Uploading $name"
+            curl --request POST \
+              --url "$base_url?name=$name" \
+              --header "authorization: Bearer $GITHUB_TOKEN" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary @"$file"
+          done

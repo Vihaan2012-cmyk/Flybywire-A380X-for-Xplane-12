@@ -1,0 +1,13 @@
+# The SDK-path-independent half of FlyByWire's wasm32-wasip1 link setup
+# (D:\fbw-aircraft\.cargo\config.toml). The other half -- the sysroot paths and
+# the MSFS-required symbol exports -- is emitted by build.rs, which resolves the
+# SDK location at build time so the same crate builds both inside FlyByWire's
+# Docker dev-env (/workdir/MSFS_SDK) and against a native install (C:\MSFS SDK).
+[net]
+git-fetch-with-cli = true
+
+[target.wasm32-wasip1]
+rustflags = [
+  "-Ctarget-feature=-crt-static,+bulk-memory",
+  "-Clink-self-contained=no",
+]

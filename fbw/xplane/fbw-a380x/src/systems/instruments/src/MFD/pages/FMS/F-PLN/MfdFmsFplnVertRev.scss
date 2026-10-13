@@ -1,0 +1,81 @@
+﻿@import "../../../../MsfsAvionicsCommon/definitions";
+
+.mfd-vert-rev-spd-cstr-line {
+  display: flex;
+  width: 100%;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 50px;
+  padding-left: 10px;
+  padding-bottom: 50px;
+  border-bottom: 2px solid $display-light-grey;
+}
+
+.mfd-vert-rev-alt-cstr-line {
+  display: flex;
+  width: 100%;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 50px;
+  padding-left: 10px;
+  border-bottom: 2px solid $display-light-grey;
+}
+
+.mfd-vert-rev-alt-cstr-rb {
+  padding-bottom: 20px;
+  padding-right: 25px;
+  border-right: 2px solid $display-light-grey;
+}
+
+.mfd-vert-rev-alt-cstr-sel {
+  display: flex;
+  flex-direction: column;
+  align-self: flex-end;
+  justify-content: center;
+  align-items: center;
+  padding-bottom: 20px;
+}
+
+.mfd-vert-rev-alt-window-label {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: 20px;
+  visibility: hidden;
+}
+
+.mfd-vert-rev-alt-window-value {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: 20px;
+  visibility: hidden;
+}
+
+.mfd-vert-rev-alt-right-container {
+  display: flex;
+  flex-direction: column;
+  margin: 0px 20px 20px 0px;
+}
+
+.mfd-vert-rev-clbdes {
+  margin-top: 20px;
+}
+
+.mfd-vert-rev-spd-lim-header {
+  width: 100%;
+  margin-top: 20px;
+  padding-left: 10px;
+}
+
+.mfd-vert-rev-spd-lim {
+  display: flex;
+  width: 100%;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 30px;
+  padding-left: 10px;
+}

@@ -1,0 +1,719 @@
+{
+  "description": "Systems part of cold-dark-powered: engines off, A/THR off, ECAM memos and SD page for FWC phase 1. Engine readings/limits use FBW FADEC maths at ISA sea level.",
+  "vars": {
+    "L:A32NX_CPIOM_A1_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_A2_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_A3_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_A4_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_B1_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_B2_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_B3_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_B4_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_C1_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_C2_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_D1_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_D3_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_E1_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_E2_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_F1_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_F2_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_F3_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_F4_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_G1_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_G2_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_G3_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_CPIOM_G4_AVAIL": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-common/src/wasm/systems/systems/src/integrated_modular_avionics/core_processing_input_output_module.rs:61-63,129-131; buses a380_systems/src/avionics_data_communication_network.rs:197-221",
+      "why": "powered, no failure"
+    },
+    "L:A32NX_AFDX_3_3_REACHABLE": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/systems/a380_systems/src/avionics_data_communication_network.rs:34-51",
+      "why": "all AFDX switches powered, no failure"
+    },
+    "L:A32NX_AFDX_13_13_REACHABLE": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/systems/a380_systems/src/avionics_data_communication_network.rs:34-51",
+      "why": "all AFDX switches powered, no failure"
+    },
+    "L:A32NX_AFDX_4_3_REACHABLE": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/systems/a380_systems/src/avionics_data_communication_network.rs:34-51",
+      "why": "all AFDX switches powered, no failure"
+    },
+    "L:A32NX_AFDX_14_13_REACHABLE": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/systems/a380_systems/src/avionics_data_communication_network.rs:34-51",
+      "why": "all AFDX switches powered, no failure"
+    },
+    "L:A32NX_AFDX_4_4_REACHABLE": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/systems/a380_systems/src/avionics_data_communication_network.rs:34-51",
+      "why": "all AFDX switches powered, no failure"
+    },
+    "L:A32NX_AFDX_14_14_REACHABLE": {
+      "value": 1,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/systems/a380_systems/src/avionics_data_communication_network.rs:34-51",
+      "why": "all AFDX switches powered, no failure"
+    },
+    "L:A32NX_FIRE_BUTTON_ENG1": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs:1035",
+      "why": "fire handle not released"
+    },
+    "L:A32NX_REVERSER_1_DEPLOYED": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x reverser (not deployed)",
+      "why": "reversers stowed"
+    },
+    "L:A32NX_REVERSER_1_DEPLOYING": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x reverser (not deploying)",
+      "why": "reversers stowed"
+    },
+    "L:A32NX_AUTOTHRUST_REVERSE:1": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3032-3035 (is_in_reverse = TLA < 0, fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1086)",
+      "why": "TLA >= 0"
+    },
+    "A:ENG ANTI ICE:1": {
+      "value": 0,
+      "unit": "bool",
+      "src": "flight file [Engine Parameters.N.0] CarbHeat/DeiceSwitch=False",
+      "why": "engine anti-ice off"
+    },
+    "L:A32NX_FIRE_BUTTON_ENG2": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs:1035",
+      "why": "fire handle not released"
+    },
+    "L:A32NX_REVERSER_2_DEPLOYED": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x reverser (not deployed)",
+      "why": "reversers stowed"
+    },
+    "L:A32NX_REVERSER_2_DEPLOYING": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x reverser (not deploying)",
+      "why": "reversers stowed"
+    },
+    "L:A32NX_AUTOTHRUST_REVERSE:2": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3032-3035 (is_in_reverse = TLA < 0, fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1086)",
+      "why": "TLA >= 0"
+    },
+    "A:ENG ANTI ICE:2": {
+      "value": 0,
+      "unit": "bool",
+      "src": "flight file [Engine Parameters.N.0] CarbHeat/DeiceSwitch=False",
+      "why": "engine anti-ice off"
+    },
+    "L:A32NX_FIRE_BUTTON_ENG3": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs:1035",
+      "why": "fire handle not released"
+    },
+    "L:A32NX_REVERSER_3_DEPLOYED": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x reverser (not deployed)",
+      "why": "reversers stowed"
+    },
+    "L:A32NX_REVERSER_3_DEPLOYING": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x reverser (not deploying)",
+      "why": "reversers stowed"
+    },
+    "L:A32NX_AUTOTHRUST_REVERSE:3": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3032-3035 (is_in_reverse = TLA < 0, fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1086)",
+      "why": "TLA >= 0"
+    },
+    "A:ENG ANTI ICE:3": {
+      "value": 0,
+      "unit": "bool",
+      "src": "flight file [Engine Parameters.N.0] CarbHeat/DeiceSwitch=False",
+      "why": "engine anti-ice off"
+    },
+    "L:A32NX_FIRE_BUTTON_ENG4": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/systems/a380_systems/src/fire_and_smoke_protection.rs:1035",
+      "why": "fire handle not released"
+    },
+    "L:A32NX_REVERSER_4_DEPLOYED": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x reverser (not deployed)",
+      "why": "reversers stowed"
+    },
+    "L:A32NX_REVERSER_4_DEPLOYING": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x reverser (not deploying)",
+      "why": "reversers stowed"
+    },
+    "L:A32NX_AUTOTHRUST_REVERSE:4": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3032-3035 (is_in_reverse = TLA < 0, fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1086)",
+      "why": "TLA >= 0"
+    },
+    "A:ENG ANTI ICE:4": {
+      "value": 0,
+      "unit": "bool",
+      "src": "flight file [Engine Parameters.N.0] CarbHeat/DeiceSwitch=False",
+      "why": "engine anti-ice off"
+    },
+    "A:STRUCTURAL DEICE SWITCH": {
+      "value": 0,
+      "unit": "bool",
+      "src": "flight file [Systems.0] StructuralDeiceSwitch=False",
+      "why": "wing anti-ice off"
+    },
+    "L:A32NX_ECAM_SD_MORE_SHOWN": {
+      "value": 0,
+      "unit": "bool",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsSystemDisplayLogic.ts:29,93",
+      "why": "MORE not requested"
+    },
+    "L:A32NX_ECAM_SD_STS_PAGE_TO_SHOW": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsSystemDisplayLogic.ts:59,80",
+      "why": "first STS page"
+    },
+    "E:TIME OF DAY": {
+      "value": 1,
+      "unit": "enum",
+      "src": "fbw-common/src/systems/instruments/src/Clock/Clock.tsx:29-33 (1|2 = day)",
+      "why": "state time 12:00 local (time.localOffsetHours 0); harness does not derive TIME OF DAY"
+    },
+    "L:A32NX_ENGINE_IDLE_N1": {
+      "value": 18.6011,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:300-313 generateIdleParameters (Table1502_A380X.hpp iCN1/iCN3, Polynomials_A380X.hpp correctedFuelFlow/correctedEGT); values from FBW headers compiled unmodified (Table1502_A380X.hpp, Polynomials_A380X.hpp, ThrustLimits_A380X.hpp, EngineRatios.hpp, Fadec.cpp) with ISA inputs",
+      "why": "ISA sea level, mach 0: idle CN1 18.6011; FADEC computes idle parameters every frame regardless of engine state"
+    },
+    "L:A32NX_ENGINE_STATE:1": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:315-399; enum EngineControl_A380X.h:87-93",
+      "why": "OFF: no starter/ignition since spawn (initial OFF at :221-224)"
+    },
+    "L:A32NX_ENGINE_N1:1": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:93,569 (sim N1 of a stopped engine)",
+      "why": "engine stopped"
+    },
+    "L:A32NX_ENGINE_N2:1": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:570 (N3 + 0.7)",
+      "why": "engine stopped (N3 0 -> N2 0)"
+    },
+    "L:A32NX_ENGINE_N3:1": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:571; fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:300-313 generateIdleParameters (Table1502_A380X.hpp iCN1/iCN3, Polynomials_A380X.hpp correctedFuelFlow/correctedEGT)",
+      "why": "engine stopped"
+    },
+    "L:A32NX_ENGINE_EGT:1": {
+      "value": 15,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:595-618 updateEGT; values from FBW headers compiled unmodified (Table1502_A380X.hpp, Polynomials_A380X.hpp, ThrustLimits_A380X.hpp, EngineRatios.hpp, Fadec.cpp) with ISA inputs",
+      "why": "on ground and OFF: EGT = ambient (:610-611), ISA sea level 15 C"
+    },
+    "L:A32NX_ENGINE_FF:1": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:534-560 updateFF (kg/h); values from FBW headers compiled unmodified (Table1502_A380X.hpp, Polynomials_A380X.hpp, ThrustLimits_A380X.hpp, EngineRatios.hpp, Fadec.cpp) with ISA inputs",
+      "why": "correctedFuelFlow < 1 at CN1 0 -> 0 (:548-553)"
+    },
+    "L:A32NX_ENGINE_STATE:2": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:315-399; enum EngineControl_A380X.h:87-93",
+      "why": "OFF: no starter/ignition since spawn (initial OFF at :221-224)"
+    },
+    "L:A32NX_ENGINE_N1:2": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:93,569 (sim N1 of a stopped engine)",
+      "why": "engine stopped"
+    },
+    "L:A32NX_ENGINE_N2:2": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:570 (N3 + 0.7)",
+      "why": "engine stopped (N3 0 -> N2 0)"
+    },
+    "L:A32NX_ENGINE_N3:2": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:571; fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:300-313 generateIdleParameters (Table1502_A380X.hpp iCN1/iCN3, Polynomials_A380X.hpp correctedFuelFlow/correctedEGT)",
+      "why": "engine stopped"
+    },
+    "L:A32NX_ENGINE_EGT:2": {
+      "value": 15,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:595-618 updateEGT; values from FBW headers compiled unmodified (Table1502_A380X.hpp, Polynomials_A380X.hpp, ThrustLimits_A380X.hpp, EngineRatios.hpp, Fadec.cpp) with ISA inputs",
+      "why": "on ground and OFF: EGT = ambient (:610-611), ISA sea level 15 C"
+    },
+    "L:A32NX_ENGINE_FF:2": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:534-560 updateFF (kg/h); values from FBW headers compiled unmodified (Table1502_A380X.hpp, Polynomials_A380X.hpp, ThrustLimits_A380X.hpp, EngineRatios.hpp, Fadec.cpp) with ISA inputs",
+      "why": "correctedFuelFlow < 1 at CN1 0 -> 0 (:548-553)"
+    },
+    "L:A32NX_ENGINE_STATE:3": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:315-399; enum EngineControl_A380X.h:87-93",
+      "why": "OFF: no starter/ignition since spawn (initial OFF at :221-224)"
+    },
+    "L:A32NX_ENGINE_N1:3": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:93,569 (sim N1 of a stopped engine)",
+      "why": "engine stopped"
+    },
+    "L:A32NX_ENGINE_N2:3": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:570 (N3 + 0.7)",
+      "why": "engine stopped (N3 0 -> N2 0)"
+    },
+    "L:A32NX_ENGINE_N3:3": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:571; fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:300-313 generateIdleParameters (Table1502_A380X.hpp iCN1/iCN3, Polynomials_A380X.hpp correctedFuelFlow/correctedEGT)",
+      "why": "engine stopped"
+    },
+    "L:A32NX_ENGINE_EGT:3": {
+      "value": 15,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:595-618 updateEGT; values from FBW headers compiled unmodified (Table1502_A380X.hpp, Polynomials_A380X.hpp, ThrustLimits_A380X.hpp, EngineRatios.hpp, Fadec.cpp) with ISA inputs",
+      "why": "on ground and OFF: EGT = ambient (:610-611), ISA sea level 15 C"
+    },
+    "L:A32NX_ENGINE_FF:3": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:534-560 updateFF (kg/h); values from FBW headers compiled unmodified (Table1502_A380X.hpp, Polynomials_A380X.hpp, ThrustLimits_A380X.hpp, EngineRatios.hpp, Fadec.cpp) with ISA inputs",
+      "why": "correctedFuelFlow < 1 at CN1 0 -> 0 (:548-553)"
+    },
+    "L:A32NX_ENGINE_STATE:4": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:315-399; enum EngineControl_A380X.h:87-93",
+      "why": "OFF: no starter/ignition since spawn (initial OFF at :221-224)"
+    },
+    "L:A32NX_ENGINE_N1:4": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:93,569 (sim N1 of a stopped engine)",
+      "why": "engine stopped"
+    },
+    "L:A32NX_ENGINE_N2:4": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:570 (N3 + 0.7)",
+      "why": "engine stopped (N3 0 -> N2 0)"
+    },
+    "L:A32NX_ENGINE_N3:4": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:571; fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:300-313 generateIdleParameters (Table1502_A380X.hpp iCN1/iCN3, Polynomials_A380X.hpp correctedFuelFlow/correctedEGT)",
+      "why": "engine stopped"
+    },
+    "L:A32NX_ENGINE_EGT:4": {
+      "value": 15,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:595-618 updateEGT; values from FBW headers compiled unmodified (Table1502_A380X.hpp, Polynomials_A380X.hpp, ThrustLimits_A380X.hpp, EngineRatios.hpp, Fadec.cpp) with ISA inputs",
+      "why": "on ground and OFF: EGT = ambient (:610-611), ISA sea level 15 C"
+    },
+    "L:A32NX_ENGINE_FF:4": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:534-560 updateFF (kg/h); values from FBW headers compiled unmodified (Table1502_A380X.hpp, Polynomials_A380X.hpp, ThrustLimits_A380X.hpp, EngineRatios.hpp, Fadec.cpp) with ISA inputs",
+      "why": "correctedFuelFlow < 1 at CN1 0 -> 0 (:548-553)"
+    },
+    "L:A32NX_AUTOTHRUST_STATUS": {
+      "value": 0,
+      "unit": "enum",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:1896-1901,1975",
+      "why": "A/THR not engaged"
+    },
+    "L:A32NX_AUTOTHRUST_MODE": {
+      "value": 0,
+      "unit": "enum",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:1903-1928,1976; fbw-a380x/src/systems/shared/src/autopilot.ts:66-82",
+      "why": "NONE"
+    },
+    "L:A32NX_AUTOTHRUST_MODE_MESSAGE": {
+      "value": 0,
+      "unit": "enum",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:1930-1937,1977",
+      "why": "no THR LK / LVR message"
+    },
+    "L:A32NX_AUTOTHRUST_THRUST_LIMIT_TYPE": {
+      "value": 1,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3036; fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1134-1174; enum model/A380FadecComputer_types.h:147-155",
+      "why": "CLB: engine not operative and TLA 0 (>= 0) -> CLB branch (A380FadecComputer.cpp:1136,1151-1153)"
+    },
+    "L:A32NX_AUTOTHRUST_THRUST_LIMIT": {
+      "value": 82.5842,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3037; fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1134-1174,1674",
+      "why": "CLB limit at ISA sea level, packs not operating (A32NX_COND_PACK_n_IS_OPERATING 0: no bleed air), ThrustLimits_A380X::limitN1(2,...)"
+    },
+    "L:A32NX_AUTOTHRUST_THRUST_LIMIT_IDLE": {
+      "value": 18.6011,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:1038 (= A32NX_ENGINE_IDLE_N1)",
+      "why": "idle N1"
+    },
+    "L:A32NX_AUTOTHRUST_THRUST_LIMIT_TOGA": {
+      "value": 83.832,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fadec_a380x/src/Fadec/EngineControl_A380X.cpp:970-1039; values from FBW headers compiled unmodified (Table1502_A380X.hpp, Polynomials_A380X.hpp, ThrustLimits_A380X.hpp, EngineRatios.hpp, Fadec.cpp) with ISA inputs",
+      "why": "TO limit at 0 ft ISA packs 0, mach 0 (machFactorLow 0)"
+    },
+    "L:A32NX_AUTOTHRUST_THRUST_LIMIT_REV": {
+      "value": 68.1554,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:224-225,2923 (TOGA x THRUST_LIMIT_REVERSE_PERCENTAGE_TOGA default 0.813, not overridden in the package)",
+      "why": "reverse limit"
+    },
+    "L:A32NX_AUTOTHRUST_TLA:1": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:397 (throttle axis); detents src/throttle.rs TLA_IDLE 0 / TLA_CLIMB 25 from FBW ThrottleAxisMapping",
+      "why": "levers at IDLE (apron.FLT ThrottleLeverPct=0)"
+    },
+    "L:A32NX_AUTOTHRUST_TLA_N1:1": {
+      "value": 18.6011,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3028-3031; fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1086-1128,1671",
+      "why": "TLA 0 -> THRUST_LIMIT_IDLE (A380FadecComputer.cpp:1094-1098,1127)"
+    },
+    "L:A32NX_AUTOTHRUST_N1_COMMANDED:1": {
+      "value": 18.6011,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3038-3041; fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1205-1241,1675",
+      "why": "A/THR not active -> N1_c = N1 of TLA (A380FadecComputer.cpp:1238,1241)"
+    },
+    "L:A32NX_AUTOTHRUST_TLA:2": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:397 (throttle axis); detents src/throttle.rs TLA_IDLE 0 / TLA_CLIMB 25 from FBW ThrottleAxisMapping",
+      "why": "levers at IDLE (apron.FLT ThrottleLeverPct=0)"
+    },
+    "L:A32NX_AUTOTHRUST_TLA_N1:2": {
+      "value": 18.6011,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3028-3031; fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1086-1128,1671",
+      "why": "TLA 0 -> THRUST_LIMIT_IDLE (A380FadecComputer.cpp:1094-1098,1127)"
+    },
+    "L:A32NX_AUTOTHRUST_N1_COMMANDED:2": {
+      "value": 18.6011,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3038-3041; fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1205-1241,1675",
+      "why": "A/THR not active -> N1_c = N1 of TLA (A380FadecComputer.cpp:1238,1241)"
+    },
+    "L:A32NX_AUTOTHRUST_TLA:3": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:397 (throttle axis); detents src/throttle.rs TLA_IDLE 0 / TLA_CLIMB 25 from FBW ThrottleAxisMapping",
+      "why": "levers at IDLE (apron.FLT ThrottleLeverPct=0)"
+    },
+    "L:A32NX_AUTOTHRUST_TLA_N1:3": {
+      "value": 18.6011,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3028-3031; fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1086-1128,1671",
+      "why": "TLA 0 -> THRUST_LIMIT_IDLE (A380FadecComputer.cpp:1094-1098,1127)"
+    },
+    "L:A32NX_AUTOTHRUST_N1_COMMANDED:3": {
+      "value": 18.6011,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3038-3041; fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1205-1241,1675",
+      "why": "A/THR not active -> N1_c = N1 of TLA (A380FadecComputer.cpp:1238,1241)"
+    },
+    "L:A32NX_AUTOTHRUST_TLA:4": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:397 (throttle axis); detents src/throttle.rs TLA_IDLE 0 / TLA_CLIMB 25 from FBW ThrottleAxisMapping",
+      "why": "levers at IDLE (apron.FLT ThrottleLeverPct=0)"
+    },
+    "L:A32NX_AUTOTHRUST_TLA_N1:4": {
+      "value": 18.6011,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3028-3031; fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1086-1128,1671",
+      "why": "TLA 0 -> THRUST_LIMIT_IDLE (A380FadecComputer.cpp:1094-1098,1127)"
+    },
+    "L:A32NX_AUTOTHRUST_N1_COMMANDED:4": {
+      "value": 18.6011,
+      "unit": "number",
+      "src": "fbw-a380x/src/wasm/fbw_a380/src/FlyByWireInterface.cpp:3038-3041; fbw-a380x/src/wasm/fbw_a380/src/model/A380FadecComputer.cpp:1205-1241,1675",
+      "why": "A/THR not active -> N1_c = N1 of TLA (A380FadecComputer.cpp:1238,1241)"
+    },
+    "L:XMLVAR_ENG_MODE_SEL": {
+      "value": 1,
+      "unit": "enum",
+      "src": "apron.FLT [LocalVars.0] XMLVAR_ENG_MODE_SEL=1 (flight file already applies it)",
+      "why": "NORM"
+    },
+    "L:A32NX_EWD_LOWER_LEFT_LINE_1": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_LEFT_LINE_2": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_LEFT_LINE_3": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_LEFT_LINE_4": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_LEFT_LINE_5": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_LEFT_LINE_6": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_LEFT_LINE_7": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_LEFT_LINE_8": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_LEFT_LINE_9": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_LEFT_LINE_10": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_RIGHT_LINE_1": {
+      "value": 320000002,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "320000002: PARK BRK ON: A32NX_PARK_BRAKE_LEVER_POS=1 (apron.FLT), FwsCore.ts:3527-3528, FwsMemos.ts:392-399 (phase 1 not inhibited)"
+    },
+    "L:A32NX_EWD_LOWER_RIGHT_LINE_2": {
+      "value": 241000002,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "241000002: ELEC EXT PWR, green variant (<2 engines running): external power contactor closed, FwsCore.ts:4436-4441, FwsMemos.ts:290-306"
+    },
+    "L:A32NX_EWD_LOWER_RIGHT_LINE_3": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_RIGHT_LINE_4": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_RIGHT_LINE_5": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_RIGHT_LINE_6": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_RIGHT_LINE_7": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_RIGHT_LINE_8": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_RIGHT_LINE_9": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_EWD_LOWER_RIGHT_LINE_10": {
+      "value": 0,
+      "unit": "number",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsCore.ts:5984-5986 (lines), fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsMemos.ts",
+      "why": "empty line"
+    },
+    "L:A32NX_ECAM_SD_PAGE_TO_SHOW": {
+      "value": 5,
+      "unit": "enum",
+      "src": "fbw-a380x/src/systems/systems-host/CpiomC/FlightWarningSystem/FwsSystemDisplayLogic.ts:154-163,259; fbw-a380x/src/systems/shared/src/EcamSystemPages.ts",
+      "why": "FWC phase 1 -> DOOR (5); APU master off and ENG MODE NORM so no APU/ENG override; no failure page"
+    }
+  }
+}

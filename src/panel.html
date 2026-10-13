@@ -1,0 +1,137 @@
+<!-- The A380X systems panel: FlyByWire's simulation, read from outside the sim. -->
+<title>A380X systems</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d1117; --card: #161b22; --line: #263040; --text: #d7dde5;
+    --dim: #7d8794; --on: #38d66b; --warn: #e8b13a; --off: #39414f; --accent: #5aa9e6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 12px;
+           align-items: baseline; padding: 12px 16px; background: #0d1117ee;
+           border-bottom: 1px solid var(--line); backdrop-filter: blur(6px); }
+  h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .04em; }
+  .state { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .state b { color: var(--text); font-weight: 600; }
+  #filter { margin-left: auto; min-width: 200px; padding: 6px 10px; border-radius: 6px;
+            border: 1px solid var(--line); background: #0b0f14; color: var(--text); }
+  main { display: grid; gap: 12px; padding: 16px;
+         grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+            overflow: hidden; }
+  h2 { margin: 0; padding: 8px 12px; font-size: 11px; letter-spacing: .12em;
+       text-transform: uppercase; color: var(--accent); background: #11161d;
+       border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
+  h2 span { color: var(--dim); letter-spacing: 0; text-transform: none; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 3px 12px; border-top: 1px solid #1d232c; }
+  td.n { color: var(--dim); word-break: break-word; }
+  td.v { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; width: 92px; }
+  .lamp { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+          background: var(--off); vertical-align: middle; }
+  .lamp.on { background: var(--on); box-shadow: 0 0 7px #38d66b88; }
+  .changed { color: var(--warn); }
+  footer { padding: 0 16px 20px; color: var(--dim); }
+  @media (max-width: 500px) { main { padding: 10px; } #filter { min-width: 0; width: 100%; } }
+</style>
+
+<header>
+  <h1>A380X SYSTEMS</h1>
+  <div class="state">plugin <b id="link">connecting…</b></div>
+  <div class="state">sim time <b id="time">—</b></div>
+  <div class="state">ticks <b id="ticks">—</b></div>
+  <div class="state"><b id="count">0</b> variables</div>
+  <input id="filter" placeholder="filter, e.g. ELEC or HYD_GREEN">
+</header>
+<main id="panels"></main>
+<footer id="note"></footer>
+
+<script>
+  // Variables are grouped by the system their name begins with; the rest fall
+  // into "other" so nothing is hidden from view.
+  const GROUPS = [
+    ["ELEC", /ELEC|BAT|GEN|TR_|APU_GEN|EMER_ELEC/],
+    ["HYDRAULIC", /HYD|GREEN|YELLOW|EBHA|EHA/],
+    ["ENGINE", /^ENG|ENGINE|N1|N2|THRUST|AUTOTHRUST|REVERSER|FADEC|IGNITION|STARTER/],
+    ["APU", /APU/],
+    ["FUEL", /FUEL|FQMS|REFUEL/],
+    ["BLEED / AIR", /PNEU|BLEED|PACK|XBLEED/],
+    ["AIR COND / PRESS", /COND|PRESS|CABIN|VENT|TADD|OCSM|VCM/],
+    ["FIRE", /FIRE|SMOKE|AGENT/],
+    ["GEAR / BRAKES", /GEAR|BRAKE|LG_|WHEEL|TILLER|ANTISKID|BTV|ROW_ROP/],
+    ["FLIGHT CONTROLS", /FLAPS|SLAT|AIL|ELEV|RUD|SPOILER|THS|SFCC|PRIM|SEC_/],
+    ["AIR DATA / NAV", /ADIRS|ADR|IR_|AIRSPEED|ALTITUDE|MACH|GPS|LATITUDE|HEADING|VERTICAL/],
+    ["COCKPIT", /^fbw\/cockpit|^cockpit/i],
+  ];
+
+  const state = new Map();     // name -> { value, changedAt }
+  let built = "";
+
+  const groupOf = name => {
+    for (const [title, re] of GROUPS) if (re.test(name)) return title;
+    return "OTHER";
+  };
+
+  const format = v =>
+    Number.isInteger(v) ? String(v) : Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(2);
+
+  const isLamp = (name, v) =>
+    (v === 0 || v === 1) && /IS_|_ON$|_OPEN|POWERED|ACTIVE|ARMED|FAULT|AVAIL|VALID|PRESSED|CLOSED|RUNNING/.test(name);
+
+  function render(vars) {
+    const filter = document.getElementById("filter").value.trim().toUpperCase();
+    const groups = new Map();
+    for (const [name, value] of Object.entries(vars)) {
+      if (filter && !name.toUpperCase().includes(filter)) continue;
+      const g = groupOf(name);
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push([name, value]);
+    }
+    const order = [...GROUPS.map(g => g[0]), "OTHER"].filter(g => groups.has(g));
+    const signature = order.map(g => g + groups.get(g).length).join("|") + filter;
+    const panels = document.getElementById("panels");
+    if (signature !== built) {          // only rebuild when the shape changes
+      built = signature;
+      panels.innerHTML = order.map(g => {
+        const rows = groups.get(g).sort((a, b) => a[0].localeCompare(b[0]));
+        return `<section><h2>${g}<span>${rows.length}</span></h2><table>${rows.map(([n]) =>
+          `<tr><td class="n">${n.replace(/^A32NX_|^fbw\//, "")}</td><td class="v" data-k="${n}"></td></tr>`
+        ).join("")}</table></section>`;
+      }).join("");
+    }
+    const now = performance.now();
+    for (const cell of panels.querySelectorAll("td.v")) {
+      const name = cell.dataset.k, v = vars[name];
+      if (v === undefined) continue;
+      const prev = state.get(name);
+      if (!prev || prev.value !== v) state.set(name, { value: v, changedAt: now });
+      const fresh = now - (state.get(name).changedAt) < 1200;
+      cell.className = "v" + (fresh ? " changed" : "");
+      cell.innerHTML = isLamp(name, v)
+        ? `<span class="lamp${v ? " on" : ""}"></span>`
+        : format(v);
+    }
+    document.getElementById("count").textContent = Object.keys(vars).length;
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch("/vars", { cache: "no-store" });
+      const d = await r.json();
+      document.getElementById("link").textContent = d.running ? "connected" : "idle";
+      document.getElementById("time").textContent = d.time?.toFixed?.(1) ?? "—";
+      document.getElementById("ticks").textContent = d.ticks ?? "—";
+      render(d.vars || {});
+      document.getElementById("note").textContent = "";
+    } catch (e) {
+      document.getElementById("link").textContent = "no plugin";
+      document.getElementById("note").textContent =
+        "Waiting for X-Plane: load the A380X, and the panel fills in by itself.";
+    }
+  }
+  poll();
+  setInterval(poll, 250);
+  document.getElementById("filter").addEventListener("input", () => { built = ""; poll(); });
+</script>

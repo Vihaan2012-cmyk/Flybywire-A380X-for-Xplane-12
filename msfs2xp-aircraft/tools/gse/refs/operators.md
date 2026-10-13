@@ -1,0 +1,85 @@
+# Operator notes
+
+Compiled 2026-10-12 from background knowledge of airport service providers; NOT verified by live web search (time limit). Treat medium/low entries as needing a check. Sources to verify: airport websites (ground handling pages), dnata.com, swissport.com, menziesaviation.com, gategroup.com, lsgskychefs.com, sats.com.sg, airbp.com, shell.com/aviation, IATA airport handling lists.
+
+- OMDB (high): caterer Emirates Flight Catering, dnata; handler dnata; fueller ENOC, Emarat
+- OMDW (low): caterer Emirates Flight Catering, dnata; handler dnata; fueller ENOC
+- OMAA (medium): caterer Etihad Airways Catering; handler Etihad Airport Services; fueller ADNOC Distribution, Air BP
+- OTHH (high): caterer Qatar Aircraft Catering Company; handler Qatar Aviation Services, Mathar; fueller Woqod
+- OERK (medium): caterer Saudi Airlines Catering; handler Saudi Ground Services; fueller Saudi Aramco
+- OEJN (medium): caterer Saudi Airlines Catering; handler Saudi Ground Services; fueller Saudi Aramco
+- OKBK (low): caterer Kuwait Catering; handler KGAC; fueller KAFCO
+- OBBI (low): caterer Gate Gourmet; handler Bahrain Airport Services; fueller Bahrain Airport Company fuelling
+- OOMS (low): caterer Oman Air Catering; handler Oman Aviation Services; fueller Oman Aviation Fuelling Services
+- OJAI (low): caterer Gate Gourmet; handler Jordan Aircraft Handling; fueller Shell Aviation
+- HECA (low): caterer Egypt Air Catering; handler EgyptAir Ground Services; fueller Misr Petroleum
+- HAAB (low): caterer Ethiopian Catering; handler Ethiopian Ground Services; fueller Total Ethiopia
+- FAOR (medium): caterer Gate Gourmet; handler Menzies Aviation, Swissport; fueller Shell Aviation, Engen
+- FACT (low): caterer Gate Gourmet; handler Menzies Aviation, Swissport; fueller Shell Aviation
+- HKJK (low): caterer Kenya Airways Catering; handler Kenya Airways Ground, Swissport; fueller Vivo Energy, Total Kenya
+- GMMN (low): caterer Casa Catering; handler Royal Air Maroc Handling; fueller Shell Aviation
+- EGLL (high): caterer Gate Gourmet, Do & Co; handler Swissport, Menzies Aviation, dnata, Aviator; fueller Shell Aviation, Air BP, ExxonMobil Aviation
+- EGCC (medium): caterer Gate Gourmet; handler Swissport, Menzies Aviation, dnata; fueller Shell Aviation, Air BP
+- EGKK (low): caterer Gate Gourmet; handler Menzies Aviation, Swissport; fueller Shell Aviation, Air BP
+- EDDF (high): caterer LSG Sky Chefs, Gate Gourmet; handler Fraport Ground Handling; fueller Skytanking
+- EDDM (high): caterer LSG Sky Chefs, Gate Gourmet; handler Aerogate Munich; fueller Skytanking
+- EDDB (low): caterer LSG Sky Chefs; handler Swissport, Aeroground; fueller Skytanking
+- EDDH (low): caterer LSG Sky Chefs; handler Hamburg Airport Ground Handling; fueller Skytanking
+- EDDK (low): caterer LSG Sky Chefs; handler Swissport; fueller Skytanking
+- LFPG (medium): caterer Servair, Alpha Flight Services; handler Aeroports de Paris handling, Groupe 3S, Swissport; fueller TotalEnergies Aviation, ExxonMobil Aviation, Air BP
+- LFPO (low): caterer Servair; handler Aeroports de Paris handling; fueller TotalEnergies Aviation
+- EHAM (medium): caterer Aviapartner, Gate Gourmet, KLM Catering Services; handler KLM Ground Services, Menzies Aviation; fueller Skytanking, Shell Aviation
+- LSZH (high): caterer Gate Gourmet; handler Swissport; fueller Skytanking
+- LSGG (low): caterer Gate Gourmet; handler Geneva Airport Ground Handling, Swissport; fueller Skytanking
+- LEMD (medium): caterer Servair, Iberia Airport Services; handler Iberia Airport Services, Groundforce, Aviapartner; fueller CLH Aviacion
+- LEBL (low): caterer Gate Gourmet, Servair; handler Iberia Airport Services, Groundforce, Aviapartner; fueller CLH Aviacion
+- LIRF (low): caterer Gate Gourmet, Alha Airport Services; handler Aviation Services, Aeroporti di Roma handling; fueller Eni Air, Skytanking
+- LIMC (low): caterer Gate Gourmet, Alpha Flight Services; handler Aviation Services, SEA Handling; fueller Eni Air, Skytanking
+- LOWW (low): caterer Do & Co, Vienna Airport Catering; handler Vienna Airport Ground Handling; fueller Skytanking
+- LTFM (medium): caterer Do & Co; handler Havaist, TGS Ground Services, Celebi; fueller Petrol Ofisi, Shell & Turcas, Opet
+- UUEE (low): caterer Aeromar, Aeroflot Catering; handler Sheremetyevo Ground Handling; fueller TZK Sheremetyevo
+- EKCH (low): caterer Gate Gourmet, Sky Cafe; handler Swissport; fueller Skytanking, Air BP
+- ESSA (low): caterer Gate Gourmet, Sky Cafe; handler Swissport, Menzies Aviation; fueller Air BP, Skytanking
+- EIDW (low): caterer Gate Gourmet; handler Swissport, Aer Lingus Ground Handling; fueller Shell Aviation, Air BP
+- WSSS (high): caterer SATS, Singapore Airlines Catering; handler SATS, dnata; fueller SATS Aviation Fuel Services, Mobil
+- VHHH (high): caterer Cathay Pacific Catering Services, Gate Gourmet; handler HAS (Hong Kong Airport Services), Jardine Aviation Services, Swissport; fueller HAFCO (Hong Kong Aircraft Fueling Company), Shell Aviation
+- VTBS (medium): caterer Thai Airways Catering, Thai Flight Kitchen; handler Thai Airways Ground, Bangkok Flight Services, AOT Ground Aviation Services; fueller BAFS (Bangchak Aviation Fuel Services)
+- WMKK (medium): caterer Brahims Airline Catering, Malaysia Airlines Catering; handler Malaysia Airports Handling Services, Malaysia Airlines Ground, Swissport; fueller Petronas, Shell Aviation
+- WIII (low): caterer Aerofood ACS; handler Gapura Angkasa, Garuda Ground; fueller Pertamina Aviation
+- RPLL (low): caterer Philippine Airlines Catering, MacroAsia Catering; handler PAL Ground Handling; fueller Petron, Shell Aviation, Chevron
+- VVTS (low): caterer Vietnam Airlines Catering; handler Saigon Ground Services; fueller Skypec
+- RKSI (medium): caterer LSG Sky Chefs, Gate Gourmet; handler Korean Air Ground, Asiana Airport Services, Swissport; fueller Hyundai Oilbank, SK Energy
+- RJAA (medium): caterer TFK (Tokyo Flight Kitchen), JAL Catering, Narita Catering, Gate Gourmet; handler JAL Ground Service, ANA Narita Ground, Narita Airport Services; fueller Showa Shell, Eneos, Idemitsu
+- RJTT (medium): caterer Japan Flight Catering, ANA Catering; handler JAL Sky, ANA Airport Services; fueller Showa Shell, Eneos
+- RJBB (low): caterer Kansai Flight Catering, Gate Gourmet; handler JAL Sky Kansai, ANA Kansai; fueller Eneos, Idemitsu
+- ZBAA (medium): caterer Air China Inflight Services, Beijing Aviation Food; handler Beijing Capital Airport Ground Services, Air China Ground; fueller CNAF
+- ZSPD (medium): caterer Shanghai Eastern Air Catering; handler Shanghai Airport Ground Services, Eastern Air Ground Services; fueller CNAF
+- ZGGG (medium): caterer Southern Airlines Catering; handler China Southern Ground Services; fueller CNAF
+- ZUUU (low): caterer Sichuan Airlines Catering; handler Chengdu Shuangliu Ground Handling; fueller CNAF
+- RCTP (medium): caterer Taiwan Air Cargo Catering, EGS Evergreen Sky Catering; handler Evergreen Airline Services, TAISCO; fueller CPC Corporation Aviation
+- VIDP (low): caterer Taj SATS, Oberoi Flight Services; handler Air India SATS, Celebi Delhi Cargo; fueller Indian Oil, Bharat Petroleum
+- VABB (low): caterer Taj SATS, Oberoi Flight Services; handler Air India SATS, Celebi, Bird Group; fueller Indian Oil, HPCL
+- VCBI (low): caterer SriLankan Catering; handler SriLankan Airport Services; fueller Ceylon Petroleum
+- OPKC (low): caterer Pakistan International Catering; handler PIA Ground Services; fueller Pakistan State Oil
+- YSSY (high): caterer Qantas Catering, Gate Gourmet; handler Swissport, Qantas Ground Services, Menzies Aviation, dnata; fueller Viva Energy, Air BP
+- YMML (medium): caterer Qantas Catering, Gate Gourmet; handler Swissport, Qantas Ground Services, Menzies Aviation; fueller Viva Energy, Air BP
+- YPPH (low): caterer Qantas Catering, Gate Gourmet; handler Swissport, Qantas Ground Services; fueller Viva Energy, Air BP
+- YBBN (low): caterer Qantas Catering, Gate Gourmet; handler Swissport, Qantas Ground Services; fueller Viva Energy, Air BP
+- NZAA (low): caterer Gate Gourmet; handler Air New Zealand Ground Handling, Swissport, Menzies Aviation; fueller Air BP, Z Energy
+- KLAX (medium): caterer Gate Gourmet, LSG Sky Chefs, Flying Food Group; handler Swissport, Menzies Aviation, Worldwide Flight Services; fueller Allied Aviation Services, World Fuel Services, Air BP
+- KJFK (medium): caterer Gate Gourmet, LSG Sky Chefs, Flying Food Group; handler Swissport, Menzies Aviation, Worldwide Flight Services; fueller Allied Aviation Services, World Fuel Services, Aircraft Service International
+- KSFO (medium): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation, Worldwide Flight Services; fueller Mercury Air, Aircraft Service International
+- KORD (medium): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation, Worldwide Flight Services; fueller Aircraft Service International, Allied Aviation Services
+- KIAD (medium): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation, Worldwide Flight Services; fueller Aircraft Service International, World Fuel Services
+- KIAH (medium): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation, Worldwide Flight Services; fueller Aircraft Service International, World Fuel Services
+- KDFW (medium): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation, Worldwide Flight Services; fueller Aircraft Service International, World Fuel Services
+- KMIA (medium): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation, Worldwide Flight Services; fueller Aircraft Service International, World Fuel Services
+- KSEA (low): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation; fueller Aircraft Service International, Air BP
+- KBOS (low): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation, Worldwide Flight Services; fueller Aircraft Service International, World Fuel Services
+- KATL (low): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation, Worldwide Flight Services; fueller Aircraft Service International, World Fuel Services
+- KLAS (low): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation; fueller Aircraft Service International
+- CYYZ (low): caterer Gate Gourmet; handler Swissport, Menzies Aviation, Air Canada Ground; fueller Aircraft Service International, Shell Aviation, Mercury Air
+- CYVR (low): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation; fueller Shell Aviation, Aircraft Service International
+- MMMX (low): caterer Gate Gourmet Mexico, Alpha Flight Services; handler Swissport, Menzies Aviation; fueller ASA fuelling
+- SBGR (low): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, Menzies Aviation, dnata; fueller Raizen, BR Distribuidora, Air BP
+- SCEL (low): caterer Gate Gourmet, LSG Sky Chefs; handler Swissport, SCL Ground Handling; fueller Copec, Shell Aviation

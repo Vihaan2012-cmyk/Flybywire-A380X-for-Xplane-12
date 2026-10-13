@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>XPHFBW MSFS runtime — standalone test</title>
+<style>
+  body { font: 13px/1.4 Consolas, monospace; margin: 0; display: flex; height: 100vh; background: #111; color: #ddd; }
+  #left { flex: 1; padding: 8px; overflow: auto; border-right: 1px solid #444; }
+  #right { width: 420px; padding: 8px; overflow: auto; }
+  h1 { font-size: 14px; margin: 0 0 8px; color: #7cf; }
+  #log { white-space: pre-wrap; font-size: 12px; }
+  .lvl0 { color: #9c9; } .lvl1 { color: #dc6; } .lvl2 { color: #e77; }
+  button { margin: 2px 4px 2px 0; }
+  #gaugeHost { border: 1px solid #555; padding: 8px; margin-bottom: 8px; background: #1b1b1b; }
+  .pass { color: #6f6; } .fail { color: #f66; font-weight: bold; }
+</style>
+
+<!--
+  Fake window.__xphfbw, installed BEFORE msfs-runtime.js runs. It has to be
+  synchronous script content (not a src file) so it executes before the
+  first <head> script below — exactly the ordering agent G relies on in
+  production (msfs-runtime.js is always the first thing in <head>, ahead of
+  everything the runtime itself, and the gauge's own bundle, depend on).
+
+  This stands in for what agent E's on_context_created installs in a real
+  view: the same shape (docs/briefs/xphfbw-js-bridge.md's "renderer-side API
+  contract"), backed here by in-memory maps instead of the bridge's
+  SlotTable/uplink/downlink rings.
+-->
+<script>
+(() => {
+  const vars = new Map();     // "NAME|UNIT" -> number
+  const strings = new Map();  // NAME -> string
+  const stored = new Map();   // key -> string
+  const pollQueue = [];       // [kind, name, payload][]
+  const gameStrings = new Map();
+  let pendingRequests = new Set();
+
+  const logEl = () => document.getElementById('log');
+  const levelName = (l) => (l === 2 ? 'ERROR' : l === 1 ? 'WARN' : 'INFO');
+
+  // A couple of variables pre-seeded so the fake gauge below has something
+  // believable to read, matching real defaults roughly.
+  vars.set('TURB ENG N1:1|percent', 21.4);
+  vars.set('CIRCUIT AVIONICS ON|Bool', 1);
+  vars.set('E:ABSOLUTE TIME|seconds', 63000000000 + Date.now() / 1000);
+  vars.set('E:SIMULATION TIME|seconds', 0);
+
+  window.__xphfbw = {
+    view: 1,
+    screen: 'TEST_SCREEN',
+    aircraftDir: 'C:/fake-aircraft',
+
+    snapshot() {
+      // A real snapshot would seqlock-copy the plugin's slots; the fake
+      // store is already always-consistent (single-threaded JS), so there
+      // is nothing to do here besides existing for API parity.
+    },
+
+    getVar(name, unit) {
+      return vars.get(`${name}|${unit}`) ?? vars.get(name) ?? 0;
+    },
+    setVar(name, unit, value) {
+      vars.set(`${name}|${unit}`, value);
+      vars.set(name, value);
+    },
+    getString(name) {
+      return strings.get(name) ?? '';
+    },
+    setString(name, value) {
+      strings.set(name, String(value));
+    },
+
+    sendEvent(name, values) {
+      window.__xphfbw.log(0, `sendEvent ${name} ${JSON.stringify(values)}`);
+      if (name.startsWith('H:')) {
+        // Loop it straight back as a cockpit event, matching the plugin's
+        // "H: events reach every instrument" rule — the fake stands in for
+        // both the sender and the broadcaster here.
+        pollQueue.push(['h', name.slice(2), '']);
+      }
+    },
+
+    call(name, argsJson) {
+      window.__xphfbw.log(0, `call ${name} ${argsJson}`);
+      return new Promise((resolve, reject) => {
+        setTimeout(() => {
+          switch (name) {
+            case 'PLAY_INSTRUMENT_SOUND':
+              resolve('null');
+              break;
+            case 'FAIL_ON_PURPOSE':
+              reject(new Error('fake rejection for the test button'));
+              break;
+            default:
+              resolve('{}');
+          }
+        }, 30);
+      });
+    },
+
+    poll() {
+      const out = pollQueue.splice(0, pollQueue.length);
+      return out;
+    },
+
+    gameString(name) {
+      if (!gameStrings.has(name)) {
+        gameStrings.set(name, '');
+        pendingRequests.add(name);
+        // "requests it on first use": arrives a couple of frames later, as
+        // a kind "game" downlink item, same as the real bridge would push.
+        setTimeout(() => {
+          gameStrings.set(name, `fake-${name.toLowerCase()}`);
+          pollQueue.push(['game', name, gameStrings.get(name)]);
+        }, 200);
+      }
+      return gameStrings.get(name);
+    },
+
+    storedData(op, key, value) {
+      switch (op) {
+        case 'get':
+          return stored.get(key) ?? '';
+        case 'set':
+          stored.set(key, value);
+          return value;
+        case 'delete':
+          stored.delete(key);
+          return '';
+        case 'search': {
+          const found = [];
+          for (const [k, v] of stored) {
+            if (k.startsWith(key)) found.push({ key: k, data: v });
+          }
+          return JSON.stringify(found);
+        }
+        default:
+          return '';
+      }
+    },
+
+    // Serves the fake gauge's own fragment pieces that Include.addScript
+    // needs to read (the template/link/import-script elements the test
+    // gauge below is made of are already in this document; only the
+    // *script* text itself needs to come from readFile, same as
+    // coui://html_ui/... would in production).
+    readFile(path) {
+      const files = {
+        '/Fake/gauge.js': document.getElementById('fake-gauge-source').textContent,
+      };
+      if (path in files) return files[path];
+      window.__xphfbw.log(1, `readFile ${path}: not found (fake)`);
+      return null;
+    },
+
+    log(level, text) {
+      const line = document.createElement('div');
+      line.className = `lvl${level}`;
+      line.textContent = `[${levelName(level)}] ${text}`;
+      logEl().appendChild(line);
+      logEl().scrollTop = logEl().scrollHeight;
+    },
+
+    magVar(lat, lon) {
+      // Not WMM2025 (agent E owns that); a small deterministic fake so
+      // Facilities.getMagVar has *something* plausible to return.
+      return Math.max(-30, Math.min(30, lon / 10));
+    },
+
+    loaded(ok, text) {
+      window.__xphfbw.log(ok ? 0 : 2, `loaded(${ok}, ${JSON.stringify(text)})`);
+      const el = document.getElementById('loadedStatus');
+      el.textContent = ok ? `loaded: ${text}` : `load FAILED: ${text}`;
+      el.className = ok ? 'pass' : 'fail';
+      window.__xphfbwTestState.loaded = ok;
+    },
+  };
+
+  window.__xphfbwTestState = { loaded: false };
+})();
+</script>
+
+<!-- The one thing production loads by URL; everything above is only the
+     fake native layer, and everything below is the fake gauge fragment
+     this runtime should bootstrap exactly like a real htmlgauge00 page. -->
+<script src="../msfs-runtime.js"></script>
+
+<script type="text/html" id="TEST_GAUGE">
+  <div id="gaugeHost">
+    <div><b>test-gauge</b> (BaseInstrument/TemplateElement/Update loop)</div>
+    <div id="value">(not updated yet)</div>
+    <div>last onInteractionEvent: <span id="events">(none)</span></div>
+  </div>
+</script>
+
+<script type="text/html" import-script="/JS/dataStorage.js" import-async="false"></script>
+<script type="text/html" import-script="/Fake/gauge.js" import-async="false"></script>
+
+<script type="text/plain" id="fake-gauge-source">
+class TestGauge extends BaseInstrument {
+  get templateID() { return 'TEST_GAUGE'; }
+  get instrumentAlias() { return 'TESTGAUGE'; }
+  connectedCallback() {
+    super.connectedCallback();
+    this.valueEl = this.querySelector('#value');
+    this.eventsEl = this.querySelector('#events');
+  }
+  onInteractionEvent(args) {
+    if (this.eventsEl) this.eventsEl.textContent = JSON.stringify(args);
+  }
+  Update() {
+    super.Update();
+    const n1 = SimVar.GetSimVarValue('TURB ENG N1:1', 'percent');
+    if (this.valueEl) {
+      this.valueEl.textContent = `N1: ${n1.toFixed(1)}  frame ${this.frameCount}  screenState ${this.screenState}`;
+    }
+  }
+}
+window.__testGaugeClass = TestGauge;
+registerInstrument('test-gauge', TestGauge);
+</script>
+
+</head>
+<body>
+  <div id="left">
+    <h1>Log (window.__xphfbw.log)</h1>
+    <div id="log"></div>
+  </div>
+  <div id="right">
+    <h1>Status</h1>
+    <div>bootstrap: <span id="loadedStatus">(waiting)</span></div>
+    <div>document.body[gamestate]: <span id="gamestateAttr">?</span></div>
+    <div>document.body[quality]: <span id="qualityAttr">?</span></div>
+    <hr>
+    <h1>Self-test (runs automatically ~1.5s after load)</h1>
+    <div id="results"></div>
+    <hr>
+    <h1>Manual checks</h1>
+    <button id="btnH">sendEvent H:TEST_BUTTON_PRESSED</button><br>
+    <button id="btnK">SimVar.SetSimVarValue K:TEST_KEY</button><br>
+    <button id="btnStore">SetStoredData/GetStoredData round trip</button><br>
+    <button id="btnCall">Coherent.call('PLAY_INSTRUMENT_SOUND', 'click')</button><br>
+    <button id="btnCallFail">Coherent.call('FAIL_ON_PURPOSE') (expect rejection log)</button><br>
+    <button id="btnMagVar">Facilities.getMagVar(47.4, 8.5)</button><br>
+    <button id="btnListener">RegisterViewListener('JS_LISTENER_FACILITY')</button><br>
+  </div>
+
+<script>
+  const results = document.getElementById('results');
+  const report = (name, ok, detail) => {
+    const line = document.createElement('div');
+    line.className = ok ? 'pass' : 'fail';
+    line.textContent = `${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ' — ' + detail : ''}`;
+    results.appendChild(line);
+  };
+
+  // These bindings only make sense once msfs-runtime.js and its helpers
+  // (loaded via document.write above) have actually run and the gauge has
+  // bootstrapped, so everything below is deferred.
+  window.addEventListener('load', () => {
+    setTimeout(runSelfTest, 1500);
+  });
+
+  document.getElementById('btnH').onclick = () => window.__xphfbw.sendEvent('H:TEST_BUTTON_PRESSED', [1]);
+  document.getElementById('btnK').onclick = () => SimVar.SetSimVarValue('K:TEST_KEY', 'number', 1);
+  document.getElementById('btnStore').onclick = () => {
+    SetStoredData('TEST_KEY', 'hello-world');
+    const back = GetStoredData('TEST_KEY');
+    report('manual: stored data round trip', back === 'hello-world', `got ${JSON.stringify(back)}`);
+  };
+  document.getElementById('btnCall').onclick = () => Coherent.call('PLAY_INSTRUMENT_SOUND', 'click').then((v) => console.log('PLAY_INSTRUMENT_SOUND resolved', v));
+  document.getElementById('btnCallFail').onclick = () => Coherent.call('FAIL_ON_PURPOSE').catch((e) => console.log('FAIL_ON_PURPOSE rejected as expected:', e.message));
+  document.getElementById('btnMagVar').onclick = () => console.log('Facilities.getMagVar(47.4, 8.5) =', Facilities.getMagVar(47.4, 8.5));
+  document.getElementById('btnListener').onclick = () => {
+    const l = RegisterViewListener('JS_LISTENER_FACILITY', () => console.log('JS_LISTENER_FACILITY connected'));
+    console.log('listener', l);
+  };
+
+  function runSelfTest() {
+    document.getElementById('gamestateAttr').textContent = document.body.getAttribute('gamestate');
+    document.getElementById('qualityAttr').textContent = document.body.getAttribute('quality');
+
+    report('window.__xphfbw present', !!window.__xphfbw);
+    report('SimVar global installed', typeof SimVar === 'object' && typeof SimVar.GetSimVarValue === 'function');
+    report('Coherent global installed', typeof Coherent === 'object' && typeof Coherent.call === 'function');
+    report('BaseInstrument/TemplateElement installed', typeof BaseInstrument === 'function' && typeof TemplateElement === 'function');
+    report('GameState/Quality enums installed', GameState && GameState.ingame === 3 && Quality && Quality.high === 1);
+    report('bootstrap set gamestate=ingame', document.body.getAttribute('gamestate') === 'ingame');
+    report('bootstrap set quality=high', document.body.getAttribute('quality') === 'high');
+    report('loaded(ok=true) reported', window.__xphfbwTestState.loaded === true);
+
+    const el = document.querySelector('test-gauge');
+    report('registerInstrument created <test-gauge>', !!el);
+    if (el) {
+      report('instrument connected (created attribute)', el.hasAttribute('created'));
+      report('BaseInstrument.allInstrumentsLoaded flipped', BaseInstrument.allInstrumentsLoaded === true);
+      // These two need requestAnimationFrame to actually be scheduled by
+      // the browser, which a real window (or `chrome --headless=new
+      // --screenshot`) does but `chrome --headless=new --dump-dom
+      // --virtual-time-budget=...` does not reliably do (confirmed with an
+      // isolated rAF-only page during development: rAF fires at most once
+      // under that combination, never on a steady cadence) — expect these
+      // to read FAIL under that specific invocation and PASS in a normal
+      // tab or inside XPHFBW's own CEF view.
+      report('Update() is running (frameCount > 0)', el.frameCount > 0, `frameCount=${el.frameCount}`);
+      report('SimVar read reaches getVar (N1 shown)', /N1: 21\.4/.test(el.querySelector('#value').textContent), el.querySelector('#value').textContent);
+      report('instrumentIdentifier set from templateID', el.instrumentIdentifier === 'TEST_GAUGE');
+      report('electricity default via CIRCUIT AVIONICS ON', !!el.isElectricityAvailable());
+    }
+
+    // H: event round trip through sendEvent -> poll() -> onInteractionEvent.
+    // (500ms, not one rAF tick: headless/off-screen Chromium can coalesce or
+    // throttle requestAnimationFrame well below 60Hz, and the tick loop only
+    // needs to catch this within "soon", not within one frame.)
+    window.__xphfbw.sendEvent('H:SELFTEST_EVENT', [1]);
+    setTimeout(() => {
+      const eventsEl = document.querySelector('test-gauge #events');
+      report('H: event reached onInteractionEvent via poll()', eventsEl && eventsEl.textContent.includes('SELFTEST_EVENT'), eventsEl && eventsEl.textContent);
+    }, 500);
+
+    // Registered-id fast path (SimVar.GetRegisteredId / GetSimVarValueFastReg).
+    const id = SimVar.GetRegisteredId('TURB ENG N1:1', 'percent');
+    report('SimVar.GetRegisteredId returns an id', typeof id === 'number' && id > 0);
+    report('SimVar.GetSimVarValueFastReg matches getVar', SimVar.GetSimVarValueFastReg(id) === 21.4);
+
+    // Stored data through the global functions environment.js installs.
+    SetStoredData('SELFTEST_KEY', 'abc');
+    report('GetStoredData round trip', GetStoredData('SELFTEST_KEY') === 'abc');
+    report('SearchStoredData finds it', SearchStoredData('SELFTEST').some((e) => e.key === 'SELFTEST_KEY'));
+
+    // gameString: "" until requested, then filled a couple of frames later.
+    const g1 = SimVar.GetGameVarValue('GetGameState', 'string');
+    report('gameString starts empty then fills async', g1 === '', `first read = ${JSON.stringify(g1)}`);
+    setTimeout(() => {
+      const g2 = SimVar.GetGameVarValue('GetGameState', 'string');
+      report('gameString filled after the fake plugin answers', g2 !== '', `second read = ${JSON.stringify(g2)}`);
+    }, 400);
+
+    // LaunchFlowEvent / Coherent.trigger plumbing (no throw is the bar here;
+    // agent C's real fan-out isn't present in this fake).
+    try {
+      LaunchFlowEvent('ON_HTMLEVENT_TO_ALL_VIEWS', 'SELFTEST_FLOW', '1');
+      report('LaunchFlowEvent does not throw', true);
+    } catch (e) {
+      report('LaunchFlowEvent does not throw', false, e.message);
+    }
+
+    report('Facilities.getMagVar callable', typeof Facilities.getMagVar(47.4, 8.5) === 'number');
+    report('Avionics.Utils present', typeof Avionics.Utils.computeDistance === 'function');
+  }
+</script>
+</body>
+</html>

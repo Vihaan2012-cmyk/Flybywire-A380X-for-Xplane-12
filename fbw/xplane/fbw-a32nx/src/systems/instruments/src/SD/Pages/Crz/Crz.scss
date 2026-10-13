@@ -1,0 +1,117 @@
+@import "../../style";
+@import "../../Common/definitions";
+
+@mixin GenericPulsingFill($name, $color) {
+    @keyframes #{$name} {
+        0%, 100% {
+            fill: $color;
+        }
+        50% {
+            fill: scale-color($color, $lightness: -50%);
+        }
+    }
+    animation: #{$name} 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+#crz-page {
+
+    text {
+        fill: $display-white;
+
+        &.Title {
+            font-size: 24px;
+            fill: $display-white;
+            text-decoration: underline;
+            text-anchor: middle !important;
+        }
+
+        &.SubTitle {
+            font-size: 22px;
+            fill: $display-white;
+            text-decoration: underline;
+            text-anchor: middle !important;
+        }
+
+        &.Standard {
+            font-size: 17px;
+        }
+
+        &.Medium {
+            font-size: 16px;
+        }
+
+        &.Large {
+            font-size: 20px;
+        }
+
+        &.Cyan {
+            fill: $display-cyan !important;
+        }
+
+        &.Green {
+            fill: $display-green !important;
+        }
+
+        &.Amber {
+            fill: $display-amber;
+        }
+
+        &.Red {
+            fill: $display-red;
+        }
+
+        &.Center {
+            text-anchor: middle !important;
+        }
+
+        &.GreenTextPulse {
+            @include GenericPulsingFill(green-pulse, $display-green);
+        }
+
+        &.AmberTextPulse {
+            @include GenericPulsingFill(amber-pulse, $display-amber);
+        }
+
+        &.RedTextPulse {
+            @include GenericPulsingFill(red-pulse, $display-red);
+        }
+    }
+
+    .Show {
+        display:block;
+    }
+
+    .Hide {
+        display: none;
+    }
+
+    .Gauge {
+        stroke: $display-white;
+        stroke-width: 2;
+        fill: none;
+    }
+
+    .GaugeText {
+        stroke: $display-white;
+        font-size: 17px;
+    }
+
+    .GaugeIndicator {
+        stroke: $display-green;
+        stroke-width: 2;
+        fill: none;
+    }
+
+    .VsIndicator {
+        stroke: $display-green;
+        stroke-width: 2;
+        fill: none;
+    }
+
+    .WingPlaneSym {
+        stroke: $display-grey;
+        stroke-width: 2;
+        fill: none;
+    }
+
+}

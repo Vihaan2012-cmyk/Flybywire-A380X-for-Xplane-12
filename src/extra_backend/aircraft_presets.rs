@@ -1,0 +1,755 @@
+//! FlyByWire's AircraftPresets (fbw-common/src/wasm/extra-backend/
+//! AircraftPresets/AircraftPresets.cpp), line for line: the flyPad's
+//! "Aircraft Presets" (cold and dark, powered, ready for pushback, taxi,
+//! takeoff) run as FlyByWire's own procedure steps.
+//!
+//! Control variables (AircraftPresets.h:27-35), all `A32NX_` prefixed:
+//! `AIRCRAFT_PRESET_LOAD` (1-5 to load, 0 to cancel), `_LOAD_PROGRESS`,
+//! `_VERBOSE`, `_LOAD_EXPEDITE`, `_LOAD_EXPEDITE_DELAY` (ms) and
+//! `_QUICK_MODE`, which the FADEC reads.
+//!
+//! The one MSFS-only call: updateProgress also sends the progress and step
+//! name to the flyPad over the CommBus (`AIRCRAFT_PRESET_WASM_CALLBACK`,
+//! AircraftPresets.cpp:179-186). There is no CommBus here; the same
+//! `"<progress>;<step name>"` text is kept in [`AircraftPresets::progress_text`]
+//! and logged.
+
+use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
+
+use super::procedures::{self, ProcedureStep, CONDITION, ECON, EXON, EXPEDITED_DELAY, NCON, PROC};
+use super::rpn;
+use super::sim::PresetHost;
+use super::{named, XplaneIo};
+
+/// A feed tank below this many gallons cannot reliably keep an engine
+/// running through an expedited start -- well under FlyByWire's own full
+/// feed-tank default of 1233.9 gal (`crate::fuel::DEFAULT_GALLONS`), and
+/// far above what a merely-thirsty-but-workable tank would read.
+const MIN_FEED_TANK_GALLONS_TO_START: f64 = 100.;
+
+/// The four engine feed tanks' network tank numbers (`crate::fuel`'s own
+/// `ENGINE_FEED_TANKS`, duplicated here rather than exposed to avoid
+/// widening fuel.rs's own surface for one constant array).
+const FEED_TANK_NETWORK_INDEXES: [usize; 4] = [2, 5, 6, 9];
+
+/// How many procedure steps an expedited load may run within one call to
+/// `update`. Every step either advances `current_step` (bounded by
+/// `current_procedure.len()`, at most a few hundred) or stops the loop, so
+/// this is a generous safety cap against a runaway loop, not a limit meant
+/// to ever bind in practice.
+const MAX_EXPEDITED_STEPS_PER_TICK: usize = 2000;
+
+/// How long `AIRCRAFT_PRESET_QUICK_MODE` stays at 1 (real seconds) after an
+/// expedited load finishes, before `update`'s unconditional top-of-function
+/// check clears it back to 0.
+///
+/// Every JS gauge that reads this var (FwsCore, CdsDisplayUnit,
+/// OitDisplayUnit, LegacyCdsDisplayUnit -- see `E:/fbw-debug/fixes/W21.md`
+/// -- and the pre-existing ISISDisplayUnit.tsx precedent) does it through
+/// the XPHFBW bridge's shared-memory snapshot, which is published once per
+/// plugin/X-Plane frame (`xphfbw_host.rs`'s `publish`, called from
+/// `post_tick` right after this module's `update` runs) and only sampled
+/// once per gauge's own `requestAnimationFrame` tick
+/// (`app/js/msfs-runtime.js`'s `tick()`/`native.snapshot()`). An expedited
+/// load sets this to 1, runs its whole procedure, and clears it back to 0
+/// inside one call to `update` -- one plugin frame -- so without a hold
+/// those two independently-clocked sample points could straddle the pulse
+/// and never observe it at all. 2 s comfortably outlives the worst single
+/// plugin-frame stall measured so far (live_log's registry-generation
+/// re-dump, ~1.6 s -- see the W63 fix report) and any GPU-starved rAF
+/// cadence, while staying unnoticeable next to the 12-60 s self-tests it
+/// exists to let a preset skip.
+const QUICK_MODE_HOLD_SECONDS: f64 = 2.0;
+
+const CONDITION_TIMEOUT_MS: f64 = 60_000.;
+
+pub struct AircraftPresets {
+    load_request: VariableIdentifier,
+    progress: VariableIdentifier,
+    verbose: VariableIdentifier,
+    expedite: VariableIdentifier,
+    expedite_delay: VariableIdentifier,
+    quick_mode: VariableIdentifier,
+    is_ready: VariableIdentifier,
+    on_ground: VariableIdentifier,
+
+    current_procedure_id: i64,
+    current_procedure: Vec<ProcedureStep>,
+    loading_is_active: bool,
+    /// Milliseconds.
+    current_loading_time: f64,
+    current_delay: f64,
+    current_step: usize,
+    /// The last progress message the flyPad would have been sent.
+    pub progress_text: String,
+    /// The procedure XML: FlyByWire's, or a copy beside the plugin.
+    xml: Option<String>,
+    /// Whether this load has already checked/topped up the feed tanks
+    /// (once per load, not every tick).
+    fuel_checked_this_load: bool,
+    /// A fuel top-up wrote `REFUEL_STARTED_BY_USR` = 1 last tick; clear it
+    /// back to 0 the next time `update` runs so fuel.rs sees a real,
+    /// one-tick refuel pulse (its own "refuel end detected" path) rather
+    /// than a refuel left stuck open.
+    clear_refuel_started: bool,
+    /// Real seconds left before `quick_mode` gets written back to 0, once
+    /// an expedited load has finished; 0 when nothing is being held (see
+    /// `QUICK_MODE_HOLD_SECONDS`).
+    quick_mode_hold_remaining: f64,
+    condition_wait: Option<(usize, f64)>,
+}
+
+fn logged(message: &str) {
+    crate::log(&format!("extra backend: {message}"));
+}
+
+impl AircraftPresets {
+    /// AircraftPresets::initialize (cpp:43-61).
+    pub fn new<V: VariableRegistry + SimulatorReaderWriter>(vars: &mut V) -> Self {
+        let load_request = named(vars, "AIRCRAFT_PRESET_LOAD");
+        let progress = named(vars, "AIRCRAFT_PRESET_LOAD_PROGRESS");
+        vars.write(&load_request, 0.);
+        let quick_mode = named(vars, "AIRCRAFT_PRESET_QUICK_MODE");
+        vars.write(&quick_mode, 0.);
+        // Expedited by default: a preset runs every one of its steps within
+        // the tick it is asked for, so "ready for takeoff" *is* ready for
+        // takeoff by the time the button comes back up.
+        //
+        // FlyByWire paces the unexpedited path one step per frame with a
+        // delay between them because in MSFS a preset is something you watch
+        // happen. Here it is how a session is set up before flying, and
+        // watching a few hundred switches move one frame at a time is not
+        // the point of it. The `AIRCRAFT_PRESET_LOAD_EXPEDITE` variable
+        // still turns the paced behaviour back on for anyone who does want
+        // to watch, and the Study panel still has its own toggle for it --
+        // this only changes which way round the default sits.
+        let expedite = named(vars, "AIRCRAFT_PRESET_LOAD_EXPEDITE");
+        vars.write(&expedite, 1.);
+        Self {
+            load_request,
+            progress,
+            verbose: named(vars, "AIRCRAFT_PRESET_VERBOSE"),
+            expedite,
+            expedite_delay: named(vars, "AIRCRAFT_PRESET_LOAD_EXPEDITE_DELAY"),
+            quick_mode,
+            is_ready: named(vars, "IS_READY"),
+            on_ground: vars.get("SIM ON GROUND".to_string()),
+            current_procedure_id: 0,
+            current_procedure: Vec::new(),
+            loading_is_active: false,
+            current_loading_time: 0.,
+            current_delay: 0.,
+            current_step: 0,
+            progress_text: String::new(),
+            xml: None,
+            fuel_checked_this_load: false,
+            clear_refuel_started: false,
+            quick_mode_hold_remaining: 0.,
+            condition_wait: None,
+        }
+    }
+
+    /// Use this procedure text instead of FlyByWire's file (tests, or an
+    /// edited copy).
+    pub fn with_xml(mut self, xml: String) -> Self {
+        self.xml = Some(xml);
+        self
+    }
+
+    fn procedure_xml(&self) -> String {
+        if let Some(xml) = &self.xml {
+            return xml.clone();
+        }
+        // FlyByWire re-reads its file on each request so it can be edited
+        // live (PresetProcedures.hpp:71-95); a copy beside the plugin plays
+        // that part.
+        #[cfg(feature = "js")]
+        if let Some(text) = crate::js_bridge::plugin_dir()
+            .and_then(|d| std::fs::read_to_string(d.join("aircraft_preset_procedures.xml")).ok())
+        {
+            return text;
+        }
+        procedures::PROCEDURES_XML.to_string()
+    }
+
+    /// AircraftPresets::update (cpp:63-167). `delta` is the frame's seconds
+    /// (`pData->dt`).
+    ///
+    /// Normal mode keeps FlyByWire's own timed pacing exactly: at most one
+    /// step per frame, gated by `current_delay`. Expedited mode instead
+    /// runs every step back to back within this one call (`run_step` in a
+    /// bounded loop, below) -- no artificial per-step pacing -- stopping
+    /// only when the load finishes/is cancelled or a COND step's condition
+    /// genuinely is not yet true, which the very next tick simply checks
+    /// again rather than waiting out an additional delay on top.
+    pub fn update<V: VariableRegistry + SimulatorReaderWriter, X: XplaneIo>(&mut self, vars: &mut V, xplane: &mut X, delta: f64) {
+        // Unconditional and first: an expedited load that already finished
+        // (`finish_loading`, below) leaves `quick_mode` at 1 and starts this
+        // countdown so the XPHFBW bridge publishes at least one snapshot a
+        // gauge's own frame can actually observe (see
+        // `QUICK_MODE_HOLD_SECONDS`). Runs ahead of the `is_ready`/
+        // `load_request` gates so the hold always finishes even if
+        // `is_ready` drops or another load starts/cancels mid-hold.
+        if self.quick_mode_hold_remaining > 0. {
+            self.quick_mode_hold_remaining -= delta;
+            if self.quick_mode_hold_remaining <= 0. {
+                self.quick_mode_hold_remaining = 0.;
+                vars.write(&self.quick_mode, 0.);
+            }
+        }
+        if self.clear_refuel_started {
+            // The one-tick refuel pulse `ensure_fuel_for_engine_start` sent
+            // last tick: end it now so fuel.rs sees a real, momentary
+            // refuel (its own "refuel end detected" path), not one left
+            // stuck open.
+            let refuel = named(vars, "REFUEL_STARTED_BY_USR");
+            vars.write(&refuel, 0.);
+            self.clear_refuel_started = false;
+        }
+        if vars.read(&self.is_ready) == 0. {
+            return;
+        }
+        let request = vars.read(&self.load_request) as i64;
+        if request <= 0 {
+            if self.loading_is_active {
+                self.finish_loading(vars);
+            }
+            return;
+        }
+        if vars.read(&self.on_ground) == 0. {
+            logged("AircraftPresets: Aircraft must be on the ground to load a preset!");
+            self.finish_loading(vars);
+            return;
+        }
+        if !self.loading_is_active {
+            match procedures::preset(&self.procedure_xml(), request) {
+                Ok(steps) => self.initialize_new_loading_process(vars, request, steps),
+                Err(e) => {
+                    logged(&e);
+                    logged(&format!("AircraftPresets: Preset {request} not found!"));
+                    self.finish_loading(vars);
+                }
+            }
+            return;
+        }
+        if request != self.current_procedure_id {
+            match procedures::preset(&self.procedure_xml(), request) {
+                Ok(steps) => {
+                    logged(&format!("AircraftPresets: Aircraft Preset {request} replaces preset {}", self.current_procedure_id));
+                    self.initialize_new_loading_process(vars, request, steps);
+                }
+                Err(e) => {
+                    logged(&e);
+                    vars.write(&self.load_request, self.current_procedure_id as f64);
+                }
+            }
+            return;
+        }
+        vars.write(&self.load_request, self.current_procedure_id as f64);
+        let expedited = vars.read(&self.expedite) != 0.;
+        vars.write(&self.quick_mode, if expedited { 1. } else { 0. });
+
+        if !expedited {
+            self.current_loading_time += delta * 1000.;
+            if self.current_loading_time <= self.current_delay {
+                return;
+            }
+            self.run_step(vars, xplane, false);
+            return;
+        }
+
+        if !self.fuel_checked_this_load {
+            self.ensure_fuel_for_engine_start(vars);
+            self.fuel_checked_this_load = true;
+        }
+        self.current_loading_time += delta * 1000.;
+        for _ in 0..MAX_EXPEDITED_STEPS_PER_TICK {
+            if vars.read(&self.load_request) as i64 <= 0 {
+                return;
+            }
+            if !self.run_step(vars, xplane, true) {
+                return;
+            }
+        }
+    }
+
+    /// Runs one step of the active procedure (the body of the old `update`,
+    /// cpp:139-167, past its pacing gate). Returns whether the caller may
+    /// immediately try another step in the same call: false once the load
+    /// has finished (`check_completion` already called `finish_loading`) or
+    /// a COND step's condition read false and must wait for a later tick.
+    fn run_step<V: VariableRegistry + SimulatorReaderWriter, X: XplaneIo>(&mut self, vars: &mut V, xplane: &mut X, expedited: bool) -> bool {
+        if self.check_completion(vars) {
+            return false;
+        }
+        let step = self.current_procedure[self.current_step].clone();
+        if self.check_step_type_skipping(expedited, &step) {
+            return true;
+        }
+        self.current_delay = self.current_loading_time + step.delay_after;
+        let mut host = PresetHost { vars, xplane };
+        if step.step_type & CONDITION != 0 {
+            let before = self.current_step;
+            self.handle_condition_step(&mut host, &step);
+            return self.current_step != before;
+        }
+        if expedited && step.step_type & EXPEDITED_DELAY == 0 {
+            self.current_delay = self.current_loading_time + host.vars.read(&self.expedite_delay);
+        }
+        if self.check_expected_state(&mut host, &step) {
+            return true;
+        }
+        self.update_progress(host.vars, &step);
+        self.execute_action(&mut host, &step);
+        true
+    }
+
+    /// Before an expedited load's engine-start steps run: if a feed tank is
+    /// too low to actually keep an engine running (feed tanks can end up
+    /// drained by repeated on-ground engine runs with nothing refilling
+    /// them, since FlyByWire's own transfer logic only runs in flight --
+    /// `fuel_transfer.rs`'s `!on_ground` gate, ported from LegacyFuel.ts),
+    /// fill every tank to FlyByWire's own FADEC default (`crate::fuel::
+    /// DEFAULT_GALLONS`: the four feed tanks at 1233.9 gal, the rest empty --
+    /// not an invented number). Written through `FUEL_TANK_QUANTITY_n` and a
+    /// one-tick `REFUEL_STARTED_BY_USR` pulse, the same path a real EFB
+    /// refuel uses (`fuel.rs::update`), so fuel.rs's network -- and through
+    /// it X-Plane's own tanks -- follow normally; nothing here pokes the
+    /// network or the ini directly.
+    fn ensure_fuel_for_engine_start<V: VariableRegistry + SimulatorReaderWriter>(&mut self, vars: &mut V) {
+        let feed_low = FEED_TANK_NETWORK_INDEXES.iter().any(|&i| {
+            let id = named(vars, &format!("FUEL_TANK_QUANTITY_{i}"));
+            vars.read(&id) < MIN_FEED_TANK_GALLONS_TO_START
+        });
+        if !feed_low {
+            return;
+        }
+        logged(
+            "AircraftPresets: expedited load found a feed tank too low to start the engines from; \
+             filling to FlyByWire's own default fuel load before the engine steps run.",
+        );
+        for (i, gallons) in crate::fuel::DEFAULT_GALLONS.iter().enumerate() {
+            let id = named(vars, &format!("FUEL_TANK_QUANTITY_{}", i + 1));
+            vars.write(&id, *gallons);
+        }
+        let refuel = named(vars, "REFUEL_STARTED_BY_USR");
+        vars.write(&refuel, 1.);
+        self.clear_refuel_started = true;
+    }
+
+    /// cpp:179-186.
+    fn update_progress<V: SimulatorReaderWriter>(&mut self, vars: &mut V, step: &ProcedureStep) {
+        let fraction = self.current_step as f64 / self.current_procedure.len() as f64;
+        vars.write(&self.progress, fraction);
+        self.progress_text = format!("{fraction};{}", step.description);
+    }
+
+    /// cpp:188-195.
+    fn check_completion<V: SimulatorReaderWriter>(&mut self, vars: &mut V) -> bool {
+        if self.current_step >= self.current_procedure.len() {
+            logged(&format!("AircraftPresets: Aircraft Preset {} done!", self.current_procedure_id));
+            self.finish_loading(vars);
+            return true;
+        }
+        false
+    }
+
+    /// cpp:197-206.
+    fn initialize_new_loading_process<V: SimulatorReaderWriter>(&mut self, vars: &mut V, id: i64, steps: Vec<ProcedureStep>) {
+        logged(&format!("AircraftPresets: Aircraft Preset {id} starting procedure!"));
+        self.current_procedure_id = id;
+        self.current_procedure = steps;
+        self.current_loading_time = 0.;
+        self.current_delay = 0.;
+        self.current_step = 0;
+        self.loading_is_active = true;
+        self.fuel_checked_this_load = false;
+        self.condition_wait = None;
+        vars.write(&self.progress, 0.);
+    }
+
+    /// cpp:208-218.
+    fn check_step_type_skipping(&mut self, expedited: bool, step: &ProcedureStep) -> bool {
+        let t = step.step_type;
+        if (expedited && t == PROC) || (!expedited && t == EXON) || (expedited && t == NCON) || (!expedited && t == ECON) {
+            self.current_step += 1;
+            return true;
+        }
+        false
+    }
+
+    /// cpp:220-234.
+    fn handle_condition_step<V: VariableRegistry + SimulatorReaderWriter, X: XplaneIo>(
+        &mut self,
+        host: &mut PresetHost<'_, V, X>,
+        step: &ProcedureStep,
+    ) {
+        self.update_progress(host.vars, step);
+        if host.vars.read(&self.verbose) != 0. {
+            logged(&format!("AircraftPresets: Aircraft Preset Step Condition: [{}]", step.expected_state_check_code));
+        }
+        let value = rpn::execute(&step.expected_state_check_code, host);
+        if value != 0. {
+            self.condition_wait = None;
+            self.current_delay = 0.;
+            self.current_step += 1;
+            return;
+        }
+        let started = match self.condition_wait {
+            Some((step_index, at)) if step_index == self.current_step => at,
+            _ => {
+                self.condition_wait = Some((self.current_step, self.current_loading_time));
+                self.current_loading_time
+            }
+        };
+        if self.current_loading_time - started >= CONDITION_TIMEOUT_MS {
+            logged(&format!(
+                "AircraftPresets: Aircraft Preset Step {} [{}] still not true after {:.0} s; moving on",
+                self.current_step,
+                step.description,
+                CONDITION_TIMEOUT_MS / 1000.
+            ));
+            self.condition_wait = None;
+            self.current_delay = 0.;
+            self.current_step += 1;
+        }
+    }
+
+    /// cpp:236-261.
+    fn check_expected_state<V: VariableRegistry + SimulatorReaderWriter, X: XplaneIo>(
+        &mut self,
+        host: &mut PresetHost<'_, V, X>,
+        step: &ProcedureStep,
+    ) -> bool {
+        if step.expected_state_check_code.is_empty() {
+            return false;
+        }
+        let value = rpn::execute(&step.expected_state_check_code, host);
+        if value != 0. {
+            if host.vars.read(&self.verbose) != 0. {
+                logged(&format!("AircraftPresets: Aircraft Preset Step {} Skipping: {}", self.current_step, step.description));
+            }
+            self.current_delay = 0.;
+            self.current_step += 1;
+            return true;
+        }
+        false
+    }
+
+    /// cpp:263-271.
+    fn execute_action<V: VariableRegistry + SimulatorReaderWriter, X: XplaneIo>(
+        &mut self,
+        host: &mut PresetHost<'_, V, X>,
+        step: &ProcedureStep,
+    ) {
+        logged(&format!(
+            "AircraftPresets: Aircraft Preset Step {} Execute: {} (delay after: {})",
+            self.current_step,
+            step.description,
+            (self.current_delay - self.current_loading_time) as i64
+        ));
+        rpn::execute(&step.action_code, host);
+        self.current_step += 1;
+    }
+
+    /// cpp:273-280.
+    fn finish_loading<V: SimulatorReaderWriter>(&mut self, vars: &mut V) {
+        logged(&format!("AircraftPresets:update() Aircraft Preset {} loading finished or cancelled!", self.current_procedure_id));
+        vars.write(&self.load_request, 0.);
+        vars.write(&self.progress, 0.);
+        // An expedited load leaves `quick_mode` at 1 here (set earlier this
+        // same `update()` call): hold it instead of clearing it in the same
+        // frame it was set in, so the bridge/gauges get a real chance to see
+        // it (see `QUICK_MODE_HOLD_SECONDS`). A paced load, or one that
+        // never got past `initialize_new_loading_process`, never set it, so
+        // this is unchanged: straight to 0.
+        if vars.read(&self.quick_mode) != 0. {
+            self.quick_mode_hold_remaining = QUICK_MODE_HOLD_SECONDS;
+        } else {
+            vars.write(&self.quick_mode, 0.);
+        }
+        self.loading_is_active = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aspects::test_vars::TestVars;
+    use crate::extra_backend::sim::test_xplane::FakeXplane;
+
+    const XML: &str = r#"<AircraftPresetProcedures>
+        <Procedure Name="POWERUP_CONFIG_ON">
+            <Step Name="BAT1 On" Type="STEP" Delay="1000">
+                <Condition>(L:A32NX_OVHD_ELEC_BAT_1_PB_IS_AUTO)</Condition>
+                <Action>1 (&gt;L:A32NX_OVHD_ELEC_BAT_1_PB_IS_AUTO)</Action>
+            </Step>
+            <Step Name="Await AC BUS ON" Type="COND" Delay="2000">
+                <Condition>(L:A32NX_ELEC_AC_1_BUS_IS_POWERED)</Condition>
+            </Step>
+            <Step Name="Only expedited" Type="EXON" Delay="0">
+                <Action>1 (&gt;L:A32NX_EXPEDITED_ONLY)</Action>
+            </Step>
+            <Step Name="Beacon On" Type="STEP" Delay="1000">
+                <Condition>(A:LIGHT BEACON, Bool)</Condition>
+                <Action>0 (&gt;K:BEACON_LIGHTS_ON)</Action>
+            </Step>
+        </Procedure>
+    </AircraftPresetProcedures>"#;
+
+    fn run(p: &mut AircraftPresets, vars: &mut TestVars, xp: &mut FakeXplane, seconds: f64) {
+        let dt = 1. / 30.;
+        for _ in 0..(seconds / dt) as usize {
+            p.update(vars, xp, dt);
+        }
+    }
+
+    #[test]
+    fn powered_preset_runs_its_steps_with_their_delays_and_waits_on_conditions() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        // This is the *paced* path, which is no longer the default: presets
+        // now expedite unless asked not to (`AircraftPresets::new`). Said
+        // explicitly here because pacing is the whole subject of this test.
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 0.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        run(&mut p, &mut vars, &mut xp, 0.5);
+        // Step 1 ran on the second frame; its 1 s delay holds step 2.
+        assert_eq!(vars.value("A32NX_OVHD_ELEC_BAT_1_PB_IS_AUTO"), 1.);
+        assert_eq!(p.current_step, 1);
+        // The condition step waits for the bus.
+        run(&mut p, &mut vars, &mut xp, 5.);
+        assert_eq!(p.current_step, 1);
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_LOAD"), 2.);
+        assert!(p.progress_text.ends_with("Await AC BUS ON"));
+        vars.set("A32NX_ELEC_AC_1_BUS_IS_POWERED", 1.);
+        run(&mut p, &mut vars, &mut xp, 5.);
+        // The EXON step is skipped in normal mode; the beacon comes on; done.
+        assert_eq!(vars.value("A32NX_EXPEDITED_ONLY"), 0.);
+        assert_eq!(xp.values["sim/cockpit2/switches/beacon_on"], 1.);
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_LOAD"), 0.);
+        assert!(!p.loading_is_active);
+    }
+
+    #[test]
+    fn expedited_load_runs_every_step_back_to_back_within_one_call() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        // One call only starts the load (initialize_new_loading_process
+        // still returns immediately); the next call is what should run
+        // every ready step back to back, not the one-per-frame pacing
+        // normal mode uses.
+        p.update(&mut vars, &mut xp, 1. / 30.);
+        p.update(&mut vars, &mut xp, 1. / 30.);
+        assert_eq!(vars.value("A32NX_OVHD_ELEC_BAT_1_PB_IS_AUTO"), 1., "the first step's action already ran, no 1 s delay");
+        assert_eq!(p.current_step, 1, "stopped at the COND step, whose condition genuinely is not yet true");
+        assert!(p.loading_is_active);
+
+        // Satisfying the condition lets the rest complete within one more
+        // call too, not several more seconds of per-step pacing.
+        vars.set("A32NX_ELEC_AC_1_BUS_IS_POWERED", 1.);
+        p.update(&mut vars, &mut xp, 1. / 30.);
+        assert_eq!(vars.value("A32NX_EXPEDITED_ONLY"), 1., "EXON runs (not skipped) when expedited");
+        assert_eq!(xp.values["sim/cockpit2/switches/beacon_on"], 1.);
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_LOAD"), 0.);
+        assert!(!p.loading_is_active);
+    }
+
+    #[test]
+    fn expedited_load_fills_feed_tanks_from_flybywires_default_when_too_low_to_start() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 1.);
+        // A near-empty feed tank, as the live report's ini/X-Plane tanks
+        // found (FEED ONE/TWO/THREE at ~0.39 gal).
+        vars.set("A32NX_FUEL_TANK_QUANTITY_2", 0.39);
+        vars.set("A32NX_FUEL_TANK_QUANTITY_5", 0.38);
+        vars.set("A32NX_FUEL_TANK_QUANTITY_6", 0.39);
+        vars.set("A32NX_FUEL_TANK_QUANTITY_9", 829.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        p.update(&mut vars, &mut xp, 1. / 30.); // starts the load
+        p.update(&mut vars, &mut xp, 1. / 30.); // first real tick: tops up fuel once
+
+        for i in [2, 5, 6, 9] {
+            assert_eq!(
+                vars.value(&format!("A32NX_FUEL_TANK_QUANTITY_{i}")),
+                1233.9,
+                "tank {i} should hold FlyByWire's own FADEC default, not an invented number"
+            );
+        }
+        assert_eq!(
+            vars.value("A32NX_REFUEL_STARTED_BY_USR"),
+            1.,
+            "the fill goes through the same REFUEL_STARTED_BY_USR path a real EFB refuel uses"
+        );
+        p.update(&mut vars, &mut xp, 1. / 30.); // next tick clears the one-tick pulse
+        assert_eq!(vars.value("A32NX_REFUEL_STARTED_BY_USR"), 0.);
+    }
+
+    #[test]
+    fn expedited_load_leaves_already_adequate_feed_tanks_alone() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 1.);
+        for i in [2, 5, 6, 9] {
+            vars.set(&format!("A32NX_FUEL_TANK_QUANTITY_{i}"), 1233.9);
+        }
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        p.update(&mut vars, &mut xp, 1. / 30.);
+        p.update(&mut vars, &mut xp, 1. / 30.);
+        assert_eq!(vars.value("A32NX_REFUEL_STARTED_BY_USR"), 0., "already enough fuel to start: no refuel pulse needed");
+    }
+
+    #[test]
+    fn presets_do_not_load_in_the_air_and_zero_cancels() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        run(&mut p, &mut vars, &mut xp, 0.2);
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_LOAD"), 0.);
+        assert_eq!(vars.value("A32NX_OVHD_ELEC_BAT_1_PB_IS_AUTO"), 0.);
+
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        run(&mut p, &mut vars, &mut xp, 0.2);
+        assert!(p.loading_is_active);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 0.);
+        run(&mut p, &mut vars, &mut xp, 0.1);
+        assert!(!p.loading_is_active);
+    }
+
+    #[test]
+    fn flybywire_ready_for_takeoff_preset_steps_all_parse_and_evaluate() {
+        // Every condition and action in FlyByWire's file runs through the
+        // calculator without leaving anything unknown behind.
+        let steps = procedures::preset(procedures::PROCEDURES_XML, 5).unwrap();
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut host = PresetHost { vars: &mut vars, xplane: &mut xp };
+        for s in &steps {
+            rpn::execute(&s.expected_state_check_code, &mut host);
+            rpn::execute(&s.action_code, &mut host);
+        }
+        assert!(steps.len() > 50);
+        assert_eq!(host.vars.value("GENERAL ENG STARTER:4"), 1.);
+    }
+
+    #[test]
+    fn expedited_load_holds_quick_mode_after_finishing_then_clears_it() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        p.update(&mut vars, &mut xp, 1. / 30.); // starts the load
+        p.update(&mut vars, &mut xp, 1. / 30.); // runs to the COND step
+        assert_eq!(
+            vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"),
+            1.,
+            "set for the duration of the expedited load, same as before this fix"
+        );
+
+        vars.set("A32NX_ELEC_AC_1_BUS_IS_POWERED", 1.);
+        p.update(&mut vars, &mut xp, 1. / 30.); // finishes the procedure
+        assert!(!p.loading_is_active);
+        assert_eq!(
+            vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"),
+            1.,
+            "held at 1 once the load finishes, not zeroed within the same frame it completed in (W100)"
+        );
+
+        // Still held just under the hold window.
+        run(&mut p, &mut vars, &mut xp, QUICK_MODE_HOLD_SECONDS - 0.1);
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"), 1.);
+
+        // Cleared once the hold window has fully elapsed, by the
+        // unconditional check at the top of `update()` -- no further load
+        // activity needed to trigger it.
+        run(&mut p, &mut vars, &mut xp, 0.2);
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"), 0.);
+    }
+
+    #[test]
+    fn paced_load_never_sets_quick_mode() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 0.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        vars.set("A32NX_ELEC_AC_1_BUS_IS_POWERED", 1.);
+        // The self-test skip is an expedited-only convention (see the doc
+        // comment on `AircraftPresets::new`): a paced load must never set
+        // quick_mode, at any point in the run, including after it finishes.
+        for _ in 0..300 {
+            p.update(&mut vars, &mut xp, 1. / 30.);
+            assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"), 0.);
+        }
+    }
+
+    #[test]
+    fn a_condition_that_never_comes_true_is_given_up_after_a_minute() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD_EXPEDITE", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        run(&mut p, &mut vars, &mut xp, 30.);
+        assert_eq!(p.current_step, 1, "still waiting for the bus after 30 s");
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_LOAD"), 2.);
+        run(&mut p, &mut vars, &mut xp, 35.);
+        assert_eq!(xp.values["sim/cockpit2/switches/beacon_on"], 1., "the steps after the stuck condition ran");
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_LOAD"), 0.);
+        assert!(!p.loading_is_active);
+    }
+
+    #[test]
+    fn choosing_another_preset_replaces_the_one_that_is_running() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 2.);
+        run(&mut p, &mut vars, &mut xp, 1.);
+        assert!(p.loading_is_active);
+        vars.set("A32NX_AIRCRAFT_PRESET_LOAD", 1.);
+        run(&mut p, &mut vars, &mut xp, 1.);
+        assert_eq!(p.current_procedure_id, 1);
+        assert!(!p.loading_is_active, "preset 1 has no steps in this XML, so it finishes at once");
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_LOAD"), 0.);
+    }
+
+    #[test]
+    fn no_preset_load_leaves_quick_mode_at_zero() {
+        let mut vars = TestVars::default();
+        let mut xp = FakeXplane::default();
+        let mut p = AircraftPresets::new(&mut vars).with_xml(XML.to_string());
+        vars.set("A32NX_IS_READY", 1.);
+        vars.set("SIM ON GROUND", 1.);
+        // No AIRCRAFT_PRESET_LOAD ever set: quick_mode must never move.
+        run(&mut p, &mut vars, &mut xp, 3.);
+        assert_eq!(vars.value("A32NX_AIRCRAFT_PRESET_QUICK_MODE"), 0.);
+    }
+}

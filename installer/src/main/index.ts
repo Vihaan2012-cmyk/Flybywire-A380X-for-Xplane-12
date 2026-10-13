@@ -1,0 +1,268 @@
+import { app, BrowserWindow, Menu, shell, ipcMain } from 'electron';
+import installExtension, { REDUX_DEVTOOLS, REACT_DEVELOPER_TOOLS } from 'electron-devtools-installer';
+import * as packageInfo from '../../package.json';
+import settings, { persistWindowSettings } from './mainSettings';
+import channels from 'common/channels';
+import * as remote from '@electron/remote/main';
+import { InstallManager } from 'main/InstallManager';
+import { XPlaneEngine } from 'main/XPlaneEngine';
+import { SentryClient } from 'main/SentryClient';
+import Store from 'electron-store';
+import path from 'path';
+
+function initializeApp() {
+  Store.initRenderer();
+
+  function createWindow() {
+    // Create the browser window.
+    mainWindow = new BrowserWindow({
+      width: 1280,
+      height: 800,
+      minWidth: 1280,
+      minHeight: 800,
+      frame: false,
+      icon: 'src/main/icons/icon.ico',
+      backgroundColor: '#1b2434',
+      show: false,
+      webPreferences: {
+        nodeIntegration: true,
+        contextIsolation: false,
+      },
+    });
+
+    remote.enable(mainWindow.webContents);
+
+    const UpsertKeyValue = (
+      header: Record<string, string> | Record<string, string[]>,
+      keyToChange: string,
+      value: string | string[],
+    ) => {
+      for (const key of Object.keys(header)) {
+        if (key.toLowerCase() === keyToChange.toLowerCase()) {
+          header[key] = value;
+          return;
+        }
+      }
+      header[keyToChange] = value;
+    };
+
+    // Prevent <a> tags from opening in Electron
+    mainWindow.webContents.setWindowOpenHandler(() => {
+      return { action: 'deny' };
+    });
+
+    mainWindow.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
+      const { requestHeaders } = details;
+      UpsertKeyValue(requestHeaders, 'Access-Control-Allow-Origin', '*');
+      callback({ requestHeaders });
+    });
+
+    mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+      const { responseHeaders } = details;
+      UpsertKeyValue(responseHeaders, 'Access-Control-Allow-Origin', ['*']);
+      UpsertKeyValue(responseHeaders, 'Access-Control-Allow-Headers', ['*']);
+      callback({
+        responseHeaders,
+      });
+    });
+
+    mainWindow.once('ready-to-show', () => {
+      mainWindow.show();
+    });
+
+    mainWindow.on('closed', () => {
+      mainWindow.removeAllListeners();
+      app.quit();
+    });
+
+    ipcMain.on(channels.window.minimize, () => {
+      mainWindow.minimize();
+    });
+
+    ipcMain.on(channels.window.maximize, () => {
+      mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
+    });
+
+    ipcMain.on(channels.window.close, () => {
+      persistWindowSettings(mainWindow);
+      mainWindow.destroy();
+    });
+
+    ipcMain.on(channels.window.reload, () => {
+      mainWindow.reload();
+    });
+
+    ipcMain.on(channels.window.isMaximized, (event) => {
+      event.sender.send(channels.window.isMaximized, mainWindow.isMaximized());
+    });
+
+    ipcMain.on(channels.openPath, (_, value: string) => {
+      void shell.openPath(value);
+    });
+
+    ipcMain.on('request-startup-at-login-changed', (_, value: boolean) => {
+      app.setLoginItemSettings({
+        openAtLogin: value,
+      });
+    });
+
+    /*
+     * Setting the value of the program's taskbar progress bar.
+     * value: The value to set the progress bar to. ( [0 - 1.0], -1 to hide the progress bar )
+     */
+    ipcMain.on('set-window-progress-bar', (_, value: number) => {
+      mainWindow.setProgressBar(value);
+    });
+
+    const lastX = settings.get<string, number>('cache.main.lastWindowX');
+    const lastY = settings.get<string, number>('cache.main.lastWindowY');
+    const shouldMaximize = settings.get<string, boolean>('cache.main.maximized');
+
+    if (shouldMaximize) {
+      mainWindow.maximize();
+    } else if (lastX && lastY) {
+      // 0 width and height should be reset to defaults
+      mainWindow.setBounds({
+        width: lastX,
+        height: lastY,
+      });
+    }
+
+    mainWindow.center();
+
+    if (
+      (settings.get('mainSettings.configDownloadUrl') as string) ===
+      'https://cdn.flybywiresim.com/installer/config/production.json'
+    ) {
+      settings.set('mainSettings.configDownloadUrl', packageInfo.configUrls.production);
+    }
+
+    if (import.meta.env.DEV) {
+      mainWindow.webContents.openDevTools();
+    }
+
+    if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
+      mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL).then();
+    } else {
+      mainWindow.loadFile(path.join(__dirname, '../renderer/index.html')).then();
+    }
+
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+      shell.openExternal(url).then();
+      return { action: 'deny' };
+    });
+
+    if (import.meta.env.DEV) {
+      // Open the DevTools.
+      mainWindow.webContents.once('dom-ready', () => {
+        mainWindow.webContents.openDevTools();
+      });
+    }
+  }
+
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+  }
+
+  remote.initialize();
+
+  app.setAppUserModelId('A380X X-Plane Installer');
+
+  let mainWindow: BrowserWindow;
+
+  Menu.setApplicationMenu(null);
+
+  const disableGpu = process.argv.slice(1).some((arg) => arg === '--disable-gpu');
+
+  if (disableGpu) {
+    settings.set('advanced.disableHardwareAcceleration', true);
+  }
+  if (settings.get('advanced.disableHardwareAcceleration')) {
+    app.disableHardwareAcceleration();
+  }
+
+  const disableGpuSandbox = process.argv.slice(1).some((arg) => arg === '--disable-gpu-sandbox');
+  if (disableGpuSandbox) {
+    settings.set('advanced.disableGpuSandbox', true);
+  }
+  if (settings.get('advanced.disableGpuSandbox')) {
+    app.commandLine.appendSwitch('disable-gpu-sandbox');
+  }
+
+  const noSandbox = process.argv.slice(1).some((arg) => arg === '--no-sandbox');
+  if (noSandbox) {
+    settings.set('advanced.noSandbox', true);
+  }
+  if (settings.get('advanced.noSandbox')) {
+    app.commandLine.appendSwitch('no-sandbox');
+  }
+
+  // This method will be called when Electron has finished
+  // initialization and is ready to create browser windows.
+  // Some APIs can only be used after this event occurs.
+  app.on('ready', () => {
+    createWindow();
+
+    if (import.meta.env.DEV) {
+      installExtension(REACT_DEVELOPER_TOOLS)
+        .then((name) => console.log(`Added Extension:  ${name}`))
+        .catch((err) => console.log('An error occurred: ', err));
+
+      installExtension(REDUX_DEVTOOLS)
+        .then((name) => console.log(`Added Extension:  ${name}`))
+        .catch((err) => console.log('An error occurred: ', err));
+    }
+
+    //Register keybinds
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      // Check if the input event is for window reloading
+      if (
+        input.type === 'keyUp' &&
+        (input.key.toLowerCase() === 'r' || input.key === 'F5') &&
+        (input.control || input.meta)
+      ) {
+        mainWindow.isFocused() && mainWindow.reload();
+      }
+
+      // Check if the input even is for dev tools
+      if (input.type === 'keyUp' && input.key === 'F12' && (input.control || input.meta)) {
+        mainWindow.isFocused() && mainWindow.webContents.toggleDevTools();
+      }
+    });
+  });
+
+  // Quit when all windows are closed, except on macOS. There, it's common
+  // for applications and their menu bar to stay active until the user quits
+  // explicitly with Cmd + Q.
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit();
+    }
+  });
+
+  app.on('activate', () => {
+    // On OS X it's common to re-create a window in the app when the
+    // dock icon is clicked and there are no other windows open.
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
+  });
+
+  // Someone tried to run a second instance, we should focus our window.
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+      }
+      mainWindow.focus();
+    }
+  });
+}
+
+SentryClient.initialize();
+
+InstallManager.setupIpcListeners();
+
+XPlaneEngine.setupIpcListeners();
+
+initializeApp();

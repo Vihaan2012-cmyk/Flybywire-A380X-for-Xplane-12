@@ -1,0 +1,19 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/air_conditioning/cabin_air.rs b/fbw-common/src/wasm/systems/systems/src/air_conditioning/cabin_air.rs
+index 89fbf21..ed87d4f 100644
+--- a/fbw-common/src/wasm/systems/systems/src/air_conditioning/cabin_air.rs
++++ b/fbw-common/src/wasm/systems/systems/src/air_conditioning/cabin_air.rs
+@@ -85,6 +85,14 @@ impl<C: PressurizationConstants, const ZONES: usize> CabinAirSimulation<C, ZONES
+         number_of_open_doors: u8,
+     ) {
+         if !self.is_initialised {
++            // The cabin's air mass comes from this first pressure: until the simulator reports
++            // real ambient air (a host's weather can read zero before its first frame), there is
++            // nothing to fill the cabin from, and a zero-mass cabin has no temperature.
++            if context.ambient_pressure().get::<pascal>() <= 0.
++                || context.ambient_temperature().get::<kelvin>() <= 0.
++            {
++                return;
++            }
+             let initial_cabin_pressure =
+                 self.initialize_cabin_pressure(context, lgciu_gear_compressed);
+             self.internal_air.set_pressure(initial_cabin_pressure);

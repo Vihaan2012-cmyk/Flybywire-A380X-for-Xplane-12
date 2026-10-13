@@ -1,0 +1,122 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs b/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs
+index 0000000..0000000 100644
+--- a/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs
++++ b/fbw-common/src/wasm/systems/systems/src/electrical/transformer_rectifier.rs
+@@ -11,7 +11,8 @@
+     failures::{Failure, FailureType},
+     shared::{ConsumePower, PowerConsumptionReport},
+     simulation::{
+-        InitContext, SimulationElement, SimulationElementVisitor, SimulatorWriter, UpdateContext,
++        InitContext, Read, SimulationElement, SimulationElementVisitor, SimulatorReader,
++        SimulatorWriter, UpdateContext, VariableIdentifier,
+     },
+ };
+ 
+@@ -23,6 +24,18 @@
+     failure: Failure,
+     output_potential: ElectricPotential,
+     output_current: ElectricCurrent,
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md,
++    // "a real power path, not a FailureType" revision): the X-Plane
++    // plugin's breaker catalogue registers this variable, default closed.
++    // Unlike an earlier `failures`-bridged breaker, an open one here really
++    // removes this TR's *output* from the Kirchhoff-solved DC bus (see
++    // `transform` below), not a synthetic failure flag -- so ARINC/display/
++    // FWS consumers downstream see a real loss of DC power, the same as
++    // every other real cause of `transform` returning `Potential::none()`.
++    // The plugin never running (tests in this file, the MSFS build) leaves
++    // it unread, so behaviour is unchanged -- purely additive.
++    breaker_id: VariableIdentifier,
++    breaker_closed: bool,
+ }
+ impl TransformerRectifier {
+     // Value determined by output voltage at specific loads
+@@ -39,6 +52,8 @@
+             failure: Failure::new(FailureType::TransformerRectifier(number)),
+             output_potential: ElectricPotential::new::<volt>(0.),
+             output_current: ElectricCurrent::new::<ampere>(0.),
++            breaker_id: context.get_identifier(format!("ELEC_TR{}_BREAKER_CLOSED", number)),
++            breaker_closed: true,
+         }
+     }
+ 
+@@ -79,7 +94,7 @@
+ }
+ impl ElectricityTransformer for TransformerRectifier {
+     fn transform(&self, input: Ref<Potential>) -> Potential {
+-        if !self.failure.is_active() && input.is_powered() {
++        if !self.failure.is_active() && input.is_powered() && self.breaker_closed {
+             Potential::new(
+                 PotentialOrigin::TransformerRectifier(self.number),
+                 ElectricPotential::new::<volt>(28.),
+@@ -96,6 +111,10 @@
+         visitor.visit(self);
+     }
+ 
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.breaker_closed = reader.read(&self.breaker_id);
++    }
++
+     fn write(&self, writer: &mut SimulatorWriter) {
+         self.writer.write_direct(self, writer);
+     }
+diff --git a/fbw-common/src/wasm/systems/systems/src/electrical/engine_generator.rs b/fbw-common/src/wasm/systems/systems/src/electrical/engine_generator.rs
+index 0000000..0000000 100644
+--- a/fbw-common/src/wasm/systems/systems/src/electrical/engine_generator.rs
++++ b/fbw-common/src/wasm/systems/systems/src/electrical/engine_generator.rs
+@@ -8,8 +8,8 @@
+     failures::{Failure, FailureType},
+     shared::{calculate_towards_target_temperature, EngineFirePushButtons, PowerConsumptionReport},
+     simulation::{
+-        InitContext, SimulationElement, SimulationElementVisitor, SimulatorWriter, UpdateContext,
+-        VariableIdentifier, Write,
++        InitContext, Read, SimulationElement, SimulationElementVisitor, SimulatorReader,
++        SimulatorWriter, UpdateContext, VariableIdentifier, Write,
+     },
+ };
+ use std::{ops::RangeInclusive, time::Duration};
+@@ -63,6 +63,16 @@
+     load: Ratio,
+     time_above_threshold: Duration,
+     failure: Failure,
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md,
++    // "a real power path, not a FailureType" revision): the X-Plane
++    // plugin's breaker catalogue registers this variable, default closed.
++    // ANDed into `should_provide_output` below, so an open one really
++    // drops this generator's contribution to the Kirchhoff solve (its own
++    // AC bus loses potential for real), not a synthetic failure flag.
++    // Unread outside the plugin (tests in this file, the MSFS build), so
++    // purely additive.
++    breaker_id: VariableIdentifier,
++    breaker_closed: bool,
+ }
+ impl<Drive: EngineGeneratorDrive> EngineGenerator<Drive> {
+     /// Nominal (no-load) regulated line-neutral voltage FBW's own code
+@@ -110,6 +120,8 @@
+             load: Ratio::new::<percent>(0.),
+             time_above_threshold: INTEGRATED_DRIVE_GENERATOR_STABILIZATION_TIME,
+             failure: Failure::new(FailureType::Generator(number)),
++            breaker_id: context.get_identifier(format!("ELEC_GEN{}_BREAKER_CLOSED", number)),
++            breaker_closed: true,
+         }
+     }
+ 
+@@ -201,6 +213,7 @@
+             && self.activated
+             && self.frequency_normal()
+             && !self.failure.is_active()
++            && self.breaker_closed
+     }
+ 
+     pub fn is_drive_connected(&self) -> bool {
+@@ -283,6 +296,10 @@
+         visitor.visit(self);
+     }
+ 
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.breaker_closed = reader.read(&self.breaker_id);
++    }
++
+     fn process_power_consumption_report<T: PowerConsumptionReport>(
+         &mut self,
+         _: &UpdateContext,

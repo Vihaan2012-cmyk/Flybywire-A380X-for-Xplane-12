@@ -1,0 +1,136 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/navigation/ala52b.rs b/fbw-common/src/wasm/systems/systems/src/navigation/ala52b.rs
+index 3f95e40..cf5db17 100644
+--- a/fbw-common/src/wasm/systems/systems/src/navigation/ala52b.rs
++++ b/fbw-common/src/wasm/systems/systems/src/navigation/ala52b.rs
+@@ -30,11 +30,26 @@ pub struct Ala52BTransceiverPair {
+     alt_above_ground_id: VariableIdentifier,
+     pitch_id: VariableIdentifier,
+     bank_id: VariableIdentifier,
++    // The X-Plane plugin's radio-altimeter physics
++    // (fbw-xp-systems/src/physics/adirs.rs, docs/physics/adirs.md) probes
++    // the terrain along the antenna boresight itself (sampled sparingly)
++    // rather than relying on X-Plane's/MSFS's single, generally
++    // straight-down AGL value, and writes the result plus a validity flag
++    // here. This struct's own reflection geometry below (transmitter/
++    // receiver height over ground, obliquity from pitch/bank) is unchanged
++    // either way. Neither variable is ever written on a plain MSFS build or
++    // by any test in this file, so `terrain_probe_valid` stays false and
++    // `alt_above_ground` (from "PLANE ALT ABOVE GROUND") is used exactly as
++    // before -- this is purely additive.
++    terrain_probe_alt_above_ground_id: VariableIdentifier,
++    terrain_probe_valid_id: VariableIdentifier,
+ 
+     transmitter: AntennaInstallation,
+     receiver: AntennaInstallation,
+ 
+     alt_above_ground: Length,
++    terrain_probe_alt_above_ground: Length,
++    terrain_probe_valid: bool,
+     pitch: Angle,
+     bank: Angle,
+ }
+@@ -43,6 +58,8 @@ impl Ala52BTransceiverPair {
+     const ALT_ABOVE_GROUND: &'static str = "PLANE ALT ABOVE GROUND";
+     const PITCH: &'static str = "PLANE PITCH DEGREES";
+     const BANK: &'static str = "PLANE BANK DEGREES";
++    const TERRAIN_PROBE_ALT_ABOVE_GROUND: &'static str = "RA_TERRAIN_PROBE_ALT_ABOVE_GROUND";
++    const TERRAIN_PROBE_VALID: &'static str = "RA_TERRAIN_PROBE_VALID";
+ 
+     pub fn new(
+         context: &mut InitContext,
+@@ -56,25 +73,42 @@ impl Ala52BTransceiverPair {
+             alt_above_ground_id: context.get_identifier(Self::ALT_ABOVE_GROUND.to_owned()),
+             pitch_id: context.get_identifier(Self::PITCH.to_owned()),
+             bank_id: context.get_identifier(Self::BANK.to_owned()),
++            terrain_probe_alt_above_ground_id: context
++                .get_identifier(Self::TERRAIN_PROBE_ALT_ABOVE_GROUND.to_owned()),
++            terrain_probe_valid_id: context.get_identifier(Self::TERRAIN_PROBE_VALID.to_owned()),
+             transmitter,
+             receiver,
+             alt_above_ground: Length::new::<foot>(0.),
++            terrain_probe_alt_above_ground: Length::new::<foot>(0.),
++            terrain_probe_valid: false,
+             pitch: Angle::new::<degree>(0.),
+             bank: Angle::new::<degree>(0.),
+         }
+     }
+ 
++    /// The vertical clearance to use for the reflection geometry below: the
++    /// plugin's own boresight terrain probe when it has supplied one this
++    /// tick, otherwise X-Plane's/MSFS's single AGL value as before.
++    fn ground_clearance(&self) -> Length {
++        if self.terrain_probe_valid {
++            self.terrain_probe_alt_above_ground
++        } else {
++            self.alt_above_ground
++        }
++    }
++
+     /// Returns the height over ground of the physical transmitter antenna.
+     fn transmitter_height_over_ground(&self) -> Length {
+         let vertical_offset = self.pitch.sin() * self.transmitter.z();
+-        (self.alt_above_ground + vertical_offset - self.transmitter.y())
++        (self.ground_clearance() + vertical_offset - self.transmitter.y())
+             .max(Length::new::<foot>(0.))
+     }
+ 
+     /// Returns the height over ground of the physical receiver antenna.
+     fn receiver_height_over_ground(&self) -> Length {
+         let vertical_offset = self.pitch.sin() * self.receiver.z();
+-        (self.alt_above_ground + vertical_offset - self.receiver.y()).max(Length::new::<foot>(0.))
++        (self.ground_clearance() + vertical_offset - self.receiver.y())
++            .max(Length::new::<foot>(0.))
+     }
+ 
+     /// Returns the direct distance between the antennas (usually along the aircraft's fuselage)
+@@ -183,6 +217,9 @@ impl SimulationElement for Ala52BTransceiverPair {
+         self.alt_above_ground = reader.read(&self.alt_above_ground_id);
+         self.pitch = reader.read(&self.pitch_id);
+         self.bank = reader.read(&self.bank_id);
++        self.terrain_probe_alt_above_ground =
++            reader.read(&self.terrain_probe_alt_above_ground_id);
++        self.terrain_probe_valid = reader.read(&self.terrain_probe_valid_id);
+     }
+ }
+ 
+@@ -326,6 +363,17 @@ pub struct Ala52BRadioAltimeter {
+     powered_by: ElectricalBusType,
+     is_powered: bool,
+ 
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md,
++    // "RA SYS A/B/C" ATA34): the X-Plane plugin's breaker catalogue
++    // registers one `ELEC_RA_<n>_BREAKER_CLOSED` variable per radio
++    // altimeter, default closed. ANDed into `receive_power` below, so an
++    // open one really drops this transceiver's own power (its runtime is
++    // lost and `radio_altitude()` fails warning, same as a real power
++    // loss), not a synthetic failure flag. Unread outside the plugin, so
++    // purely additive.
++    breaker_id: VariableIdentifier,
++    breaker_closed: bool,
++
+     /// How long the Radio Altimeter can tolerate a power loss and continue functioning.
+     power_holdover: Duration,
+ 
+@@ -359,6 +407,9 @@ impl Ala52BRadioAltimeter {
+             aircraft_installation_delay,
+             powered_by,
+             is_powered: false,
++
++            breaker_id: context.get_identifier(format!("ELEC_RA_{}_BREAKER_CLOSED", number)),
++            breaker_closed: true,
+             power_holdover: Duration::from_secs_f64(random_from_range(
+                 Self::MINIMUM_POWER_HOLDOVER as f64 / 1000.,
+                 Self::MAXIMUM_POWER_HOLDOVER as f64 / 1000.,
+@@ -460,7 +511,11 @@ impl SimulationElement for Ala52BRadioAltimeter {
+     }
+ 
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+-        self.is_powered = buses.is_powered(self.powered_by);
++        self.is_powered = self.breaker_closed && buses.is_powered(self.powered_by);
++    }
++
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.breaker_closed = reader.read(&self.breaker_id);
+     }
+ 
+     fn consume_power<T: ConsumePower>(&mut self, _: &UpdateContext, consumption: &mut T) {

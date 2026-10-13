@@ -1,0 +1,52 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/landing_gear/mod.rs b/fbw-common/src/wasm/systems/systems/src/landing_gear/mod.rs
+index a12074d..d78b10f 100644
+--- a/fbw-common/src/wasm/systems/systems/src/landing_gear/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/landing_gear/mod.rs
+@@ -889,6 +889,18 @@ pub struct LandingGearControlInterfaceUnit {
+     powered_by: ElectricalBusType,
+     external_power_available: bool,
+ 
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md,
++    // "LGCIU 1"/"LGCIU 2" ATA32): the X-Plane plugin's breaker catalogue
++    // registers one `ELEC_LGCIU_<n>_BREAKER_CLOSED` variable per LGCIU,
++    // default closed. ANDed into `receive_power` below alongside the
++    // existing power_supply_failure bridge, so an open one really drops
++    // this LGCIU's own power (every downstream gear/door sensor/state read
++    // through `LgciuInterface` degrades exactly as it would if the real
++    // bus lost power), not just a synthetic failure flag. Unread outside
++    // the plugin, so purely additive.
++    breaker_id: VariableIdentifier,
++    breaker_closed: bool,
++
+     sensor_inputs: LgciuSensorInputs,
+     gear_system_control: GearSystemStateMachine,
+     is_gear_lever_down: bool,
+@@ -954,6 +966,12 @@ impl LandingGearControlInterfaceUnit {
+             powered_by,
+             external_power_available: false,
+ 
++            breaker_id: context.get_identifier(format!(
++                "ELEC_LGCIU_{}_BREAKER_CLOSED",
++                lgciu_number(lgciu_id)
++            )),
++            breaker_closed: true,
++
+             sensor_inputs: LgciuSensorInputs::new(context, lgciu_id),
+             gear_system_control: GearSystemStateMachine::default(),
+             is_gear_lever_down: true,
+@@ -1266,8 +1284,13 @@ impl SimulationElement for LandingGearControlInterfaceUnit {
+     }
+ 
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+-        self.is_powered =
+-            !self.power_supply_failure.is_active() && buses.is_powered(self.powered_by);
++        self.is_powered = self.breaker_closed
++            && !self.power_supply_failure.is_active()
++            && buses.is_powered(self.powered_by);
++    }
++
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.breaker_closed = reader.read(&self.breaker_id);
+     }
+ 
+     fn write(&self, writer: &mut SimulatorWriter) {

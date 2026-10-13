@@ -1,0 +1,60 @@
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/mod.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/mod.rs
+@@ -4283,6 +4283,14 @@
+     tiller_pedal_disconnect_id: VariableIdentifier,
+     autopilot_nosewheel_demand_id: VariableIdentifier,
+ 
++    // fbw-xp-systems landing gear/brakes workstream: this computer (the
++    // BSCU) had no electrical dependency at all, so losing its supply never
++    // affected antiskid, autobrake arming or nosewheel steering, all of
++    // which it alone commands below (`update_brake_pressure_limitation`,
++    // `allow_autobrake_arming`, `update_steering_demands`).
++    powered_by: ElectricalBusType,
++    is_powered: bool,
++
+     autobrake_controller: A380AutobrakeController,
+     parking_brake_demand: bool,
+ 
+@@ -4340,6 +4348,10 @@
+     const AUTOBRAKE_GEAR_RETRACTION_DURATION_S: f64 = 3.;
+ 
+     const PILOT_INPUT_DETECTION_TRESHOLD: f64 = 0.2;
++
++    // Same bus as the hydraulic control electronics it shares a rack with
++    // (A380Hydraulic::EDP_CONTROL_POWER_BUS1).
++    const POWERED_BY: ElectricalBusType = ElectricalBusType::DirectCurrentEssential;
+ 
+     fn new(context: &mut InitContext) -> Self {
+         Self {
+@@ -4357,6 +4369,9 @@
+                 .get_identifier("AUTOPILOT_NOSEWHEEL_DEMAND".to_owned()),
+ 
+             autobrake_controller: A380AutobrakeController::new(context),
++
++            powered_by: Self::POWERED_BY,
++            is_powered: false,
+ 
+             parking_brake_demand: true,
+             left_brake_pilot_input: Ratio::new::<ratio>(0.0),
+@@ -4649,10 +4664,20 @@
+         visitor.visit(self);
+     }
+ 
++    fn receive_power(&mut self, buses: &impl ElectricalBuses) {
++        self.is_powered = buses.is_powered(self.powered_by);
++    }
++
+     fn read(&mut self, reader: &mut SimulatorReader) {
+         self.parking_brake_demand = reader.read(&self.park_brake_lever_pos_id);
+ 
+-        self.anti_skid_activated = reader.read(&self.antiskid_brakes_active_id);
++        // An unpowered BSCU cannot compute antiskid, so it cannot be active
++        // even with the cockpit switch on; this cascades through the
++        // existing logic to the same reduced-pressure alternate braking as
++        // antiskid-off, and disables nosewheel steering, exactly as losing
++        // this computer should.
++        self.anti_skid_activated =
++            self.is_powered && reader.read(&self.antiskid_brakes_active_id);
+         self.left_brake_pilot_input =
+             Ratio::new::<percent>(reader.read(&self.left_brake_pedal_input_id));
+         self.right_brake_pilot_input =

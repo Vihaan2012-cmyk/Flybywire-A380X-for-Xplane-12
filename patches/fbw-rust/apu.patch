@@ -1,0 +1,92 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/apu/mod.rs b/fbw-common/src/wasm/systems/systems/src/apu/mod.rs
+index 0000000..0000000 100644
+--- a/fbw-common/src/wasm/systems/systems/src/apu/mod.rs
++++ b/fbw-common/src/wasm/systems/systems/src/apu/mod.rs
+@@ -85,16 +85,22 @@
+ /// And there is a small hysteresis, means it switches back to 0 when <=16 PSI
+ /// This type exists because we don't have a full fuel implementation yet. Once we do, we will
+ /// probably move this type and the logic to there.
++/// xp plugin: it now does (fuel.rs's `apu_feed_pressure_psi`, the real
++/// line-141 pressure fuel_network.rs already solves from tank/pump/valve
++/// state), fed in as this same tick's `pressure_psi`; the hysteresis below
++/// is the real >=17/<=16 psi switch this type's own doc always specified.
+ pub struct FuelPressureSwitch {
+-    has_fuel_remaining: bool,
++    has_pressure: bool,
+ }
+ impl FuelPressureSwitch {
+     fn new() -> Self {
+         FuelPressureSwitch {
+-            has_fuel_remaining: false,
++            has_pressure: false,
+         }
+     }
+
+-    fn update(&mut self, has_fuel_remaining: bool) {
+-        self.has_fuel_remaining = has_fuel_remaining;
++    fn update(&mut self, pressure_psi: f64) {
++        if pressure_psi >= 17.0 {
++            self.has_pressure = true;
++        } else if pressure_psi <= 16.0 {
++            self.has_pressure = false;
++        }
++        // 16..17 psi: hysteresis band, keep the switch's prior state.
+     }
+
+     fn has_pressure(&self) -> bool {
+-        self.has_fuel_remaining
++        self.has_pressure
+     }
+ }
+@@ -119,6 +125,8 @@
+     apu_oil_pressure_id: VariableIdentifier,
+     apu_oil_temperature_id: VariableIdentifier,
+     last_elec_shaft_power: Power,
++    /// Shared contract (xp plugin docs/physics/fire.md "APU fuel feed
++    /// pressure"): 0 until the fuel workstream writes it.
++    apu_fuel_feed_pressure_psi_id: VariableIdentifier,
++    apu_fuel_feed_pressure_psi: f64,
+
+     turbine: Option<Box<dyn Turbine>>,
+     generators: [T; N],
+@@ -156,6 +164,9 @@
+             apu_oil_pressure_id: context.get_identifier("APU_OIL_PRESSURE_PSI".to_owned()),
+             apu_oil_temperature_id: context.get_identifier("APU_OIL_TEMPERATURE_C".to_owned()),
+             last_elec_shaft_power: Power::default(),
++            apu_fuel_feed_pressure_psi_id: context
++                .get_identifier("APU_FUEL_FEED_PRESSURE_PSI".to_owned()),
++            apu_fuel_feed_pressure_psi: 0.0,
+
+             turbine: Some(turbine),
+             generators,
+@@ -176,11 +187,10 @@
+         apu_bleed_is_on: bool,
+         apu_gen_is_used: bool,
+         bleed_air_valve: &mut impl ControllablePneumaticValve,
+-        has_fuel_remaining: bool,
+     ) {
+         self.ecb
+             .update_overhead_panel_state(overhead, fire_overhead, apu_bleed_is_on);
+         self.ecb.update_apu_fire(fire_on_ground);
+-        self.fuel_pressure_switch.update(has_fuel_remaining);
++        self.fuel_pressure_switch.update(self.apu_fuel_feed_pressure_psi);
+         self.ecb
+             .update_fuel_pressure_switch_state(&self.fuel_pressure_switch);
+         bleed_air_valve.update_open_amount::<ApuBleedAirValveSignal, Self>(self);
+@@ -324,6 +334,7 @@
+     fn read(&mut self, reader: &mut SimulatorReader) {
+         // 0 until the air workstream writes it (docs/briefs/hyperrealism.md
+         // "Until another workstream writes a variable, read it as 0").
+         self.apu_bleed_extraction = reader.read(&self.apu_bleed_extraction_id);
++        self.apu_fuel_feed_pressure_psi = reader.read(&self.apu_fuel_feed_pressure_psi_id);
+     }
+
+     fn write(&self, writer: &mut SimulatorWriter) {
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/lib.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/lib.rs
+index 0000000..0000000 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/lib.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/lib.rs
+@@ -195,7 +195,6 @@
+             self.pneumatic.apu_bleed_air_valve(),
+-            self.fuel.feed_four_tank_has_fuel(),
+         );

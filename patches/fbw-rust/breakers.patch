@@ -1,0 +1,110 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/hydraulic/electrical_pump_physics.rs b/fbw-common/src/wasm/systems/systems/src/hydraulic/electrical_pump_physics.rs
+index 784b248..c09880d 100644
+--- a/fbw-common/src/wasm/systems/systems/src/hydraulic/electrical_pump_physics.rs
++++ b/fbw-common/src/wasm/systems/systems/src/hydraulic/electrical_pump_physics.rs
+@@ -17,8 +17,8 @@
+     ConsumePower, ElectricalBusType, ElectricalBuses,
+ };
+ use crate::simulation::{
+-    InitContext, SimulationElement, SimulationElementVisitor, SimulatorWriter, UpdateContext,
+-    VariableIdentifier, Write,
++    InitContext, Read, SimulationElement, SimulationElementVisitor, SimulatorReader,
++    SimulatorWriter, UpdateContext, VariableIdentifier, Write,
+ };
+ use crate::{
+     failures::{Failure, FailureType},
+@@ -39,6 +39,19 @@
+     // FBW shortcut here to fix, only a missing publish.
+     current_id: VariableIdentifier,
+     power_id: VariableIdentifier,
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md):
++    // the X-Plane plugin's own breaker catalogue registers one
++    // `ELEC_PUMP_<id>_BREAKER_CLOSED` simulation variable per electric
++    // pump (rated at this pump's own `max_current`, `ELECTRIC_PUMP_MAX_
++    // CURRENT_AMPERE` in a380_systems' hydraulic/mod.rs) and pulls it to
++    // simulate an open breaker. Defaults closed (`true`) so a build that
++    // never runs under the plugin (e.g. the MSFS build, or any test in
++    // this file, none of which write this variable) behaves exactly as
++    // before -- purely additive, the same pattern
++    // `navigation/adirs.rs`'s `AdirsSensedData` uses for its own `valid`
++    // flag.
++    breaker_id: VariableIdentifier,
++    breaker_closed: bool,
+     powered_by: ElectricalBusType,
+     is_powered: bool,
+     available_potential: ElectricPotential,
+@@ -98,6 +111,8 @@
+             rpm_id: context.get_identifier(format!("HYD_{}_EPUMP_RPM", id)),
+             current_id: context.get_identifier(format!("HYD_{}_EPUMP_CURRENT", id)),
+             power_id: context.get_identifier(format!("HYD_{}_EPUMP_POWER_W", id)),
++            breaker_id: context.get_identifier(format!("ELEC_PUMP_{}_BREAKER_CLOSED", id)),
++            breaker_closed: true,
+             powered_by: bus_type,
+             is_powered: false,
+             available_potential: ElectricPotential::new::<volt>(0.),
+@@ -288,9 +303,21 @@
+         writer.write(&self.power_id, self.consumed_power.get::<watt>());
+     }
+ 
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.breaker_closed = reader.read(&self.breaker_id);
++    }
++
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+-        self.is_powered = buses.is_powered(self.powered_by);
+-        self.available_potential = buses.potential_of(self.powered_by).raw();
++        // fbw-xp-systems circuit-breaker workstream: an open breaker cuts
++        // this pump's own power the same as losing its bus, independent of
++        // whether the rest of the bus is still alive -- the same real
++        // effect a pulled `HYD ELEC PUMP` breaker has on the real aircraft.
++        self.is_powered = self.breaker_closed && buses.is_powered(self.powered_by);
++        self.available_potential = if self.breaker_closed {
++            buses.potential_of(self.powered_by).raw()
++        } else {
++            ElectricPotential::new::<volt>(0.)
++        };
+     }
+ 
+     fn consume_power<T: ConsumePower>(&mut self, _: &UpdateContext, consumption: &mut T) {
+diff --git a/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/autobrakes.rs b/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/autobrakes.rs
+index 4972955..ced18e8 100644
+--- a/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/autobrakes.rs
++++ b/fbw-a380x/src/wasm/systems/a380_systems/src/hydraulic/autobrakes.rs
+@@ -129,6 +129,13 @@
+ struct A380AutobrakeKnobSelectorSolenoid {
+     disarm_knob_id: VariableIdentifier,
+ 
++    // fbw-xp-systems circuit-breaker workstream (docs/physics/breakers.md,
++    // "AUTOBRAKE DISARM SOLENOID" ATA32): the X-Plane plugin's breaker
++    // catalogue registers this variable, default closed; the plugin never
++    // running (tests in this file, the MSFS build) leaves it unread, so
++    // `is_powered` defaults `true` exactly as before -- purely additive.
++    breaker_id: VariableIdentifier,
++    breaker_closed: bool,
+     powered_by: ElectricalBusType,
+     is_powered: bool,
+ 
+@@ -139,6 +146,9 @@
+         Self {
+             disarm_knob_id: context.get_identifier("AUTOBRAKES_DISARM_KNOB_REQ".to_owned()),
+ 
++            breaker_id: context
++                .get_identifier("ELEC_AUTOBRAKE_DISARM_SOLENOID_BREAKER_CLOSED".to_owned()),
++            breaker_closed: true,
+             powered_by,
+             is_powered: true,
+ 
+@@ -155,8 +165,12 @@
+         writer.write(&self.disarm_knob_id, self.disarm_request);
+     }
+ 
++    fn read(&mut self, reader: &mut SimulatorReader) {
++        self.breaker_closed = reader.read(&self.breaker_id);
++    }
++
+     fn receive_power(&mut self, buses: &impl ElectricalBuses) {
+-        self.is_powered = buses.is_powered(self.powered_by)
++        self.is_powered = self.breaker_closed && buses.is_powered(self.powered_by)
+     }
+ }
+ 

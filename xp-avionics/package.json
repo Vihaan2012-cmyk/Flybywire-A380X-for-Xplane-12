@@ -1,0 +1,11 @@
+{
+  "name": "xp-avionics",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An independent implementation of the avionics framework API that FlyByWire's A380X instruments are written against.",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "build": "sh tools/build.sh"
+  }
+}

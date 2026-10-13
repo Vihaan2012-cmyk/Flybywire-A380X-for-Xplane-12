@@ -1,0 +1,1456 @@
+{
+ "airports": {
+  "OMDB": {
+   "caterer": [
+    "Emirates Flight Catering",
+    "dnata"
+   ],
+   "handler": [
+    "dnata"
+   ],
+   "fueller": [
+    "ENOC",
+    "Emarat"
+   ],
+   "confidence": "high"
+  },
+  "OMDW": {
+   "caterer": [
+    "Emirates Flight Catering",
+    "dnata"
+   ],
+   "handler": [
+    "dnata"
+   ],
+   "fueller": [
+    "ENOC"
+   ],
+   "confidence": "low"
+  },
+  "OMAA": {
+   "caterer": [
+    "Etihad Airways Catering"
+   ],
+   "handler": [
+    "Etihad Airport Services"
+   ],
+   "fueller": [
+    "ADNOC Distribution",
+    "Air BP"
+   ],
+   "confidence": "medium"
+  },
+  "OTHH": {
+   "caterer": [
+    "Qatar Aircraft Catering Company"
+   ],
+   "handler": [
+    "Qatar Aviation Services",
+    "Mathar"
+   ],
+   "fueller": [
+    "Woqod"
+   ],
+   "confidence": "high"
+  },
+  "OERK": {
+   "caterer": [
+    "Saudi Airlines Catering"
+   ],
+   "handler": [
+    "Saudi Ground Services"
+   ],
+   "fueller": [
+    "Saudi Aramco"
+   ],
+   "confidence": "medium"
+  },
+  "OEJN": {
+   "caterer": [
+    "Saudi Airlines Catering"
+   ],
+   "handler": [
+    "Saudi Ground Services"
+   ],
+   "fueller": [
+    "Saudi Aramco"
+   ],
+   "confidence": "medium"
+  },
+  "OKBK": {
+   "caterer": [
+    "Kuwait Catering"
+   ],
+   "handler": [
+    "KGAC"
+   ],
+   "fueller": [
+    "KAFCO"
+   ],
+   "confidence": "low"
+  },
+  "OBBI": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Bahrain Airport Services"
+   ],
+   "fueller": [
+    "Bahrain Airport Company fuelling"
+   ],
+   "confidence": "low"
+  },
+  "OOMS": {
+   "caterer": [
+    "Oman Air Catering"
+   ],
+   "handler": [
+    "Oman Aviation Services"
+   ],
+   "fueller": [
+    "Oman Aviation Fuelling Services"
+   ],
+   "confidence": "low"
+  },
+  "OJAI": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Jordan Aircraft Handling"
+   ],
+   "fueller": [
+    "Shell Aviation"
+   ],
+   "confidence": "low"
+  },
+  "HECA": {
+   "caterer": [
+    "Egypt Air Catering"
+   ],
+   "handler": [
+    "EgyptAir Ground Services"
+   ],
+   "fueller": [
+    "Misr Petroleum"
+   ],
+   "confidence": "low"
+  },
+  "HAAB": {
+   "caterer": [
+    "Ethiopian Catering"
+   ],
+   "handler": [
+    "Ethiopian Ground Services"
+   ],
+   "fueller": [
+    "Total Ethiopia"
+   ],
+   "confidence": "low"
+  },
+  "FAOR": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Menzies Aviation",
+    "Swissport"
+   ],
+   "fueller": [
+    "Shell Aviation",
+    "Engen"
+   ],
+   "confidence": "medium"
+  },
+  "FACT": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Menzies Aviation",
+    "Swissport"
+   ],
+   "fueller": [
+    "Shell Aviation"
+   ],
+   "confidence": "low"
+  },
+  "HKJK": {
+   "caterer": [
+    "Kenya Airways Catering"
+   ],
+   "handler": [
+    "Kenya Airways Ground",
+    "Swissport"
+   ],
+   "fueller": [
+    "Vivo Energy",
+    "Total Kenya"
+   ],
+   "confidence": "low"
+  },
+  "GMMN": {
+   "caterer": [
+    "Casa Catering"
+   ],
+   "handler": [
+    "Royal Air Maroc Handling"
+   ],
+   "fueller": [
+    "Shell Aviation"
+   ],
+   "confidence": "low"
+  },
+  "EGLL": {
+   "caterer": [
+    "Gate Gourmet",
+    "Do & Co"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "dnata",
+    "Aviator"
+   ],
+   "fueller": [
+    "Shell Aviation",
+    "Air BP",
+    "ExxonMobil Aviation"
+   ],
+   "confidence": "high"
+  },
+  "EGCC": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "dnata"
+   ],
+   "fueller": [
+    "Shell Aviation",
+    "Air BP"
+   ],
+   "confidence": "medium"
+  },
+  "EGKK": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Menzies Aviation",
+    "Swissport"
+   ],
+   "fueller": [
+    "Shell Aviation",
+    "Air BP"
+   ],
+   "confidence": "low"
+  },
+  "EDDF": {
+   "caterer": [
+    "LSG Sky Chefs",
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Fraport Ground Handling"
+   ],
+   "fueller": [
+    "Skytanking"
+   ],
+   "confidence": "high"
+  },
+  "EDDM": {
+   "caterer": [
+    "LSG Sky Chefs",
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Aerogate Munich"
+   ],
+   "fueller": [
+    "Skytanking"
+   ],
+   "confidence": "high"
+  },
+  "EDDB": {
+   "caterer": [
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Aeroground"
+   ],
+   "fueller": [
+    "Skytanking"
+   ],
+   "confidence": "low"
+  },
+  "EDDH": {
+   "caterer": [
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Hamburg Airport Ground Handling"
+   ],
+   "fueller": [
+    "Skytanking"
+   ],
+   "confidence": "low"
+  },
+  "EDDK": {
+   "caterer": [
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport"
+   ],
+   "fueller": [
+    "Skytanking"
+   ],
+   "confidence": "low"
+  },
+  "LFPG": {
+   "caterer": [
+    "Servair",
+    "Alpha Flight Services"
+   ],
+   "handler": [
+    "Aeroports de Paris handling",
+    "Groupe 3S",
+    "Swissport"
+   ],
+   "fueller": [
+    "TotalEnergies Aviation",
+    "ExxonMobil Aviation",
+    "Air BP"
+   ],
+   "confidence": "medium"
+  },
+  "LFPO": {
+   "caterer": [
+    "Servair"
+   ],
+   "handler": [
+    "Aeroports de Paris handling"
+   ],
+   "fueller": [
+    "TotalEnergies Aviation"
+   ],
+   "confidence": "low"
+  },
+  "EHAM": {
+   "caterer": [
+    "Aviapartner",
+    "Gate Gourmet",
+    "KLM Catering Services"
+   ],
+   "handler": [
+    "KLM Ground Services",
+    "Menzies Aviation"
+   ],
+   "fueller": [
+    "Skytanking",
+    "Shell Aviation"
+   ],
+   "confidence": "medium"
+  },
+  "LSZH": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Swissport"
+   ],
+   "fueller": [
+    "Skytanking"
+   ],
+   "confidence": "high"
+  },
+  "LSGG": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Geneva Airport Ground Handling",
+    "Swissport"
+   ],
+   "fueller": [
+    "Skytanking"
+   ],
+   "confidence": "low"
+  },
+  "LEMD": {
+   "caterer": [
+    "Servair",
+    "Iberia Airport Services"
+   ],
+   "handler": [
+    "Iberia Airport Services",
+    "Groundforce",
+    "Aviapartner"
+   ],
+   "fueller": [
+    "CLH Aviacion"
+   ],
+   "confidence": "medium"
+  },
+  "LEBL": {
+   "caterer": [
+    "Gate Gourmet",
+    "Servair"
+   ],
+   "handler": [
+    "Iberia Airport Services",
+    "Groundforce",
+    "Aviapartner"
+   ],
+   "fueller": [
+    "CLH Aviacion"
+   ],
+   "confidence": "low"
+  },
+  "LIRF": {
+   "caterer": [
+    "Gate Gourmet",
+    "Alha Airport Services"
+   ],
+   "handler": [
+    "Aviation Services",
+    "Aeroporti di Roma handling"
+   ],
+   "fueller": [
+    "Eni Air",
+    "Skytanking"
+   ],
+   "confidence": "low"
+  },
+  "LIMC": {
+   "caterer": [
+    "Gate Gourmet",
+    "Alpha Flight Services"
+   ],
+   "handler": [
+    "Aviation Services",
+    "SEA Handling"
+   ],
+   "fueller": [
+    "Eni Air",
+    "Skytanking"
+   ],
+   "confidence": "low"
+  },
+  "LOWW": {
+   "caterer": [
+    "Do & Co",
+    "Vienna Airport Catering"
+   ],
+   "handler": [
+    "Vienna Airport Ground Handling"
+   ],
+   "fueller": [
+    "Skytanking"
+   ],
+   "confidence": "low"
+  },
+  "LTFM": {
+   "caterer": [
+    "Do & Co"
+   ],
+   "handler": [
+    "Havaist",
+    "TGS Ground Services",
+    "Celebi"
+   ],
+   "fueller": [
+    "Petrol Ofisi",
+    "Shell & Turcas",
+    "Opet"
+   ],
+   "confidence": "medium"
+  },
+  "UUEE": {
+   "caterer": [
+    "Aeromar",
+    "Aeroflot Catering"
+   ],
+   "handler": [
+    "Sheremetyevo Ground Handling"
+   ],
+   "fueller": [
+    "TZK Sheremetyevo"
+   ],
+   "confidence": "low"
+  },
+  "EKCH": {
+   "caterer": [
+    "Gate Gourmet",
+    "Sky Cafe"
+   ],
+   "handler": [
+    "Swissport"
+   ],
+   "fueller": [
+    "Skytanking",
+    "Air BP"
+   ],
+   "confidence": "low"
+  },
+  "ESSA": {
+   "caterer": [
+    "Gate Gourmet",
+    "Sky Cafe"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation"
+   ],
+   "fueller": [
+    "Air BP",
+    "Skytanking"
+   ],
+   "confidence": "low"
+  },
+  "EIDW": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Swissport",
+    "Aer Lingus Ground Handling"
+   ],
+   "fueller": [
+    "Shell Aviation",
+    "Air BP"
+   ],
+   "confidence": "low"
+  },
+  "WSSS": {
+   "caterer": [
+    "SATS",
+    "Singapore Airlines Catering"
+   ],
+   "handler": [
+    "SATS",
+    "dnata"
+   ],
+   "fueller": [
+    "SATS Aviation Fuel Services",
+    "Mobil"
+   ],
+   "confidence": "high"
+  },
+  "VHHH": {
+   "caterer": [
+    "Cathay Pacific Catering Services",
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "HAS (Hong Kong Airport Services)",
+    "Jardine Aviation Services",
+    "Swissport"
+   ],
+   "fueller": [
+    "HAFCO (Hong Kong Aircraft Fueling Company)",
+    "Shell Aviation"
+   ],
+   "confidence": "high"
+  },
+  "VTBS": {
+   "caterer": [
+    "Thai Airways Catering",
+    "Thai Flight Kitchen"
+   ],
+   "handler": [
+    "Thai Airways Ground",
+    "Bangkok Flight Services",
+    "AOT Ground Aviation Services"
+   ],
+   "fueller": [
+    "BAFS (Bangchak Aviation Fuel Services)"
+   ],
+   "confidence": "medium"
+  },
+  "WMKK": {
+   "caterer": [
+    "Brahims Airline Catering",
+    "Malaysia Airlines Catering"
+   ],
+   "handler": [
+    "Malaysia Airports Handling Services",
+    "Malaysia Airlines Ground",
+    "Swissport"
+   ],
+   "fueller": [
+    "Petronas",
+    "Shell Aviation"
+   ],
+   "confidence": "medium"
+  },
+  "WIII": {
+   "caterer": [
+    "Aerofood ACS"
+   ],
+   "handler": [
+    "Gapura Angkasa",
+    "Garuda Ground"
+   ],
+   "fueller": [
+    "Pertamina Aviation"
+   ],
+   "confidence": "low"
+  },
+  "RPLL": {
+   "caterer": [
+    "Philippine Airlines Catering",
+    "MacroAsia Catering"
+   ],
+   "handler": [
+    "PAL Ground Handling"
+   ],
+   "fueller": [
+    "Petron",
+    "Shell Aviation",
+    "Chevron"
+   ],
+   "confidence": "low"
+  },
+  "VVTS": {
+   "caterer": [
+    "Vietnam Airlines Catering"
+   ],
+   "handler": [
+    "Saigon Ground Services"
+   ],
+   "fueller": [
+    "Skypec"
+   ],
+   "confidence": "low"
+  },
+  "RKSI": {
+   "caterer": [
+    "LSG Sky Chefs",
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Korean Air Ground",
+    "Asiana Airport Services",
+    "Swissport"
+   ],
+   "fueller": [
+    "Hyundai Oilbank",
+    "SK Energy"
+   ],
+   "confidence": "medium"
+  },
+  "RJAA": {
+   "caterer": [
+    "TFK (Tokyo Flight Kitchen)",
+    "JAL Catering",
+    "Narita Catering",
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "JAL Ground Service",
+    "ANA Narita Ground",
+    "Narita Airport Services"
+   ],
+   "fueller": [
+    "Showa Shell",
+    "Eneos",
+    "Idemitsu"
+   ],
+   "confidence": "medium"
+  },
+  "RJTT": {
+   "caterer": [
+    "Japan Flight Catering",
+    "ANA Catering"
+   ],
+   "handler": [
+    "JAL Sky",
+    "ANA Airport Services"
+   ],
+   "fueller": [
+    "Showa Shell",
+    "Eneos"
+   ],
+   "confidence": "medium"
+  },
+  "RJBB": {
+   "caterer": [
+    "Kansai Flight Catering",
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "JAL Sky Kansai",
+    "ANA Kansai"
+   ],
+   "fueller": [
+    "Eneos",
+    "Idemitsu"
+   ],
+   "confidence": "low"
+  },
+  "ZBAA": {
+   "caterer": [
+    "Air China Inflight Services",
+    "Beijing Aviation Food"
+   ],
+   "handler": [
+    "Beijing Capital Airport Ground Services",
+    "Air China Ground"
+   ],
+   "fueller": [
+    "CNAF"
+   ],
+   "confidence": "medium"
+  },
+  "ZSPD": {
+   "caterer": [
+    "Shanghai Eastern Air Catering"
+   ],
+   "handler": [
+    "Shanghai Airport Ground Services",
+    "Eastern Air Ground Services"
+   ],
+   "fueller": [
+    "CNAF"
+   ],
+   "confidence": "medium"
+  },
+  "ZGGG": {
+   "caterer": [
+    "Southern Airlines Catering"
+   ],
+   "handler": [
+    "China Southern Ground Services"
+   ],
+   "fueller": [
+    "CNAF"
+   ],
+   "confidence": "medium"
+  },
+  "ZUUU": {
+   "caterer": [
+    "Sichuan Airlines Catering"
+   ],
+   "handler": [
+    "Chengdu Shuangliu Ground Handling"
+   ],
+   "fueller": [
+    "CNAF"
+   ],
+   "confidence": "low"
+  },
+  "RCTP": {
+   "caterer": [
+    "Taiwan Air Cargo Catering",
+    "EGS Evergreen Sky Catering"
+   ],
+   "handler": [
+    "Evergreen Airline Services",
+    "TAISCO"
+   ],
+   "fueller": [
+    "CPC Corporation Aviation"
+   ],
+   "confidence": "medium"
+  },
+  "VIDP": {
+   "caterer": [
+    "Taj SATS",
+    "Oberoi Flight Services"
+   ],
+   "handler": [
+    "Air India SATS",
+    "Celebi Delhi Cargo"
+   ],
+   "fueller": [
+    "Indian Oil",
+    "Bharat Petroleum"
+   ],
+   "confidence": "low"
+  },
+  "VABB": {
+   "caterer": [
+    "Taj SATS",
+    "Oberoi Flight Services"
+   ],
+   "handler": [
+    "Air India SATS",
+    "Celebi",
+    "Bird Group"
+   ],
+   "fueller": [
+    "Indian Oil",
+    "HPCL"
+   ],
+   "confidence": "low"
+  },
+  "VCBI": {
+   "caterer": [
+    "SriLankan Catering"
+   ],
+   "handler": [
+    "SriLankan Airport Services"
+   ],
+   "fueller": [
+    "Ceylon Petroleum"
+   ],
+   "confidence": "low"
+  },
+  "OPKC": {
+   "caterer": [
+    "Pakistan International Catering"
+   ],
+   "handler": [
+    "PIA Ground Services"
+   ],
+   "fueller": [
+    "Pakistan State Oil"
+   ],
+   "confidence": "low"
+  },
+  "YSSY": {
+   "caterer": [
+    "Qantas Catering",
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Swissport",
+    "Qantas Ground Services",
+    "Menzies Aviation",
+    "dnata"
+   ],
+   "fueller": [
+    "Viva Energy",
+    "Air BP"
+   ],
+   "confidence": "high"
+  },
+  "YMML": {
+   "caterer": [
+    "Qantas Catering",
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Swissport",
+    "Qantas Ground Services",
+    "Menzies Aviation"
+   ],
+   "fueller": [
+    "Viva Energy",
+    "Air BP"
+   ],
+   "confidence": "medium"
+  },
+  "YPPH": {
+   "caterer": [
+    "Qantas Catering",
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Swissport",
+    "Qantas Ground Services"
+   ],
+   "fueller": [
+    "Viva Energy",
+    "Air BP"
+   ],
+   "confidence": "low"
+  },
+  "YBBN": {
+   "caterer": [
+    "Qantas Catering",
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Swissport",
+    "Qantas Ground Services"
+   ],
+   "fueller": [
+    "Viva Energy",
+    "Air BP"
+   ],
+   "confidence": "low"
+  },
+  "NZAA": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Air New Zealand Ground Handling",
+    "Swissport",
+    "Menzies Aviation"
+   ],
+   "fueller": [
+    "Air BP",
+    "Z Energy"
+   ],
+   "confidence": "low"
+  },
+  "KLAX": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs",
+    "Flying Food Group"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Worldwide Flight Services"
+   ],
+   "fueller": [
+    "Allied Aviation Services",
+    "World Fuel Services",
+    "Air BP"
+   ],
+   "confidence": "medium"
+  },
+  "KJFK": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs",
+    "Flying Food Group"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Worldwide Flight Services"
+   ],
+   "fueller": [
+    "Allied Aviation Services",
+    "World Fuel Services",
+    "Aircraft Service International"
+   ],
+   "confidence": "medium"
+  },
+  "KSFO": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Worldwide Flight Services"
+   ],
+   "fueller": [
+    "Mercury Air",
+    "Aircraft Service International"
+   ],
+   "confidence": "medium"
+  },
+  "KORD": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Worldwide Flight Services"
+   ],
+   "fueller": [
+    "Aircraft Service International",
+    "Allied Aviation Services"
+   ],
+   "confidence": "medium"
+  },
+  "KIAD": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Worldwide Flight Services"
+   ],
+   "fueller": [
+    "Aircraft Service International",
+    "World Fuel Services"
+   ],
+   "confidence": "medium"
+  },
+  "KIAH": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Worldwide Flight Services"
+   ],
+   "fueller": [
+    "Aircraft Service International",
+    "World Fuel Services"
+   ],
+   "confidence": "medium"
+  },
+  "KDFW": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Worldwide Flight Services"
+   ],
+   "fueller": [
+    "Aircraft Service International",
+    "World Fuel Services"
+   ],
+   "confidence": "medium"
+  },
+  "KMIA": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Worldwide Flight Services"
+   ],
+   "fueller": [
+    "Aircraft Service International",
+    "World Fuel Services"
+   ],
+   "confidence": "medium"
+  },
+  "KSEA": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation"
+   ],
+   "fueller": [
+    "Aircraft Service International",
+    "Air BP"
+   ],
+   "confidence": "low"
+  },
+  "KBOS": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Worldwide Flight Services"
+   ],
+   "fueller": [
+    "Aircraft Service International",
+    "World Fuel Services"
+   ],
+   "confidence": "low"
+  },
+  "KATL": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Worldwide Flight Services"
+   ],
+   "fueller": [
+    "Aircraft Service International",
+    "World Fuel Services"
+   ],
+   "confidence": "low"
+  },
+  "KLAS": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation"
+   ],
+   "fueller": [
+    "Aircraft Service International"
+   ],
+   "confidence": "low"
+  },
+  "CYYZ": {
+   "caterer": [
+    "Gate Gourmet"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "Air Canada Ground"
+   ],
+   "fueller": [
+    "Aircraft Service International",
+    "Shell Aviation",
+    "Mercury Air"
+   ],
+   "confidence": "low"
+  },
+  "CYVR": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation"
+   ],
+   "fueller": [
+    "Shell Aviation",
+    "Aircraft Service International"
+   ],
+   "confidence": "low"
+  },
+  "MMMX": {
+   "caterer": [
+    "Gate Gourmet Mexico",
+    "Alpha Flight Services"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation"
+   ],
+   "fueller": [
+    "ASA fuelling"
+   ],
+   "confidence": "low"
+  },
+  "SBGR": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "Menzies Aviation",
+    "dnata"
+   ],
+   "fueller": [
+    "Raizen",
+    "BR Distribuidora",
+    "Air BP"
+   ],
+   "confidence": "low"
+  },
+  "SCEL": {
+   "caterer": [
+    "Gate Gourmet",
+    "LSG Sky Chefs"
+   ],
+   "handler": [
+    "Swissport",
+    "SCL Ground Handling"
+   ],
+   "fueller": [
+    "Copec",
+    "Shell Aviation"
+   ],
+   "confidence": "low"
+  }
+ },
+ "operators": {
+  "dnata": {
+   "kind": [
+    "handler",
+    "caterer"
+   ],
+   "colors": [
+    "#D2232A",
+    "#00205B"
+   ]
+  },
+  "Emirates Flight Catering": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#D71921",
+    "#C8A24A"
+   ]
+  },
+  "Gate Gourmet": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#003A70",
+    "#78BE20"
+   ]
+  },
+  "LSG Sky Chefs": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#00539F",
+    "#F58220"
+   ]
+  },
+  "Servair": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#005AA7",
+    "#E2001A"
+   ]
+  },
+  "Newrest": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#D9272E",
+    "#1E2A5A"
+   ]
+  },
+  "Do & Co": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#1A1A1A",
+    "#C8102E"
+   ]
+  },
+  "SATS": {
+   "kind": [
+    "caterer",
+    "handler",
+    "fueller"
+   ],
+   "colors": [
+    "#E31837",
+    "#00205B"
+   ]
+  },
+  "Swissport": {
+   "kind": [
+    "handler"
+   ],
+   "colors": [
+    "#E2231A",
+    "#1B1B1B"
+   ]
+  },
+  "Menzies Aviation": {
+   "kind": [
+    "handler"
+   ],
+   "colors": [
+    "#D81E05",
+    "#1D3F7A"
+   ]
+  },
+  "Worldwide Flight Services": {
+   "kind": [
+    "handler"
+   ],
+   "colors": [
+    "#003B73",
+    "#E2001A"
+   ]
+  },
+  "Aviapartner": {
+   "kind": [
+    "handler",
+    "caterer"
+   ],
+   "colors": [
+    "#0067B1",
+    "#8DC63F"
+   ]
+  },
+  "Aircraft Service International": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#005DAA",
+    "#F58220"
+   ]
+  },
+  "Allied Aviation Services": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#1C3F94",
+    "#E31837"
+   ]
+  },
+  "World Fuel Services": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#003E7E",
+    "#E2231A"
+   ]
+  },
+  "Shell Aviation": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#FBCE07",
+    "#DD1D21"
+   ]
+  },
+  "Air BP": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#009B3A",
+    "#FFE600"
+   ]
+  },
+  "TotalEnergies Aviation": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#ED0000",
+    "#0055A4"
+   ]
+  },
+  "ExxonMobil Aviation": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#E31837",
+    "#0054A6"
+   ]
+  },
+  "Skytanking": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#00508C",
+    "#FFFFFF"
+   ]
+  },
+  "ENOC": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#00A94F",
+    "#E31837"
+   ]
+  },
+  "Emarat": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#00A651",
+    "#FFFFFF"
+   ]
+  },
+  "Qantas Catering": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#E0001B",
+    "#FFFFFF"
+   ]
+  },
+  "Flying Food Group": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#E31837",
+    "#1C1C1C"
+   ]
+  },
+  "Mercury Air": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#004B87",
+    "#E31837"
+   ]
+  },
+  "Cathay Pacific Catering Services": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#006564",
+    "#FFFFFF"
+   ]
+  },
+  "Singapore Airlines Catering": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#F99F1C",
+    "#00266B"
+   ]
+  },
+  "Alpha Flight Services": {
+   "kind": [
+    "caterer"
+   ],
+   "colors": [
+    "#00205B",
+    "#E31837"
+   ]
+  },
+  "CNAF": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#C8102E",
+    "#1D3F7A"
+   ]
+  },
+  "Raizen": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#E31837",
+    "#00A94F"
+   ]
+  },
+  "CLH Aviacion": {
+   "kind": [
+    "fueller"
+   ],
+   "colors": [
+    "#00539F",
+    "#E31837"
+   ]
+  }
+ },
+ "default": {
+  "caterer": "generic",
+  "handler": "generic",
+  "fueller": "generic"
+ }
+}

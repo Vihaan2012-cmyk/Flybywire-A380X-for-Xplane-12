@@ -1,0 +1,32 @@
+[package]
+name = "msfs2xp-aircraft"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+description = "Turn an MSFS aircraft package (FlyByWire A380X) into an X-Plane 12 aircraft: models, animations, cockpit clicks, textures, .acf"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+# The converter's library, for its texture code. Nothing here changes it.
+msfs2xp = { path = "../Converter" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Mesh simplification for the exterior LODs (`model::obj8::simplify_mesh`):
+# Rust bindings over Arseny Kapoulkine's meshoptimizer, built from vendored
+# C++ sources by its own build.rs (no bindgen/libclang needed -- pregenerated
+# bindings ship in the crate).
+meshopt = "0.6.2"
+rayon = "1"
+roxmltree = "0.21"
+serde_json = "1"
+texpresso = "2"
+thiserror = "2"
+walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

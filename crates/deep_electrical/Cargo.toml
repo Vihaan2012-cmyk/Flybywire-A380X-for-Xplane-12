@@ -1,0 +1,15 @@
+[package]
+name = "deep_electrical"
+version = "0.1.0"
+edition = "2021"
+description = "The A380's circuit protection (417 ELMS units), electrical network and wiring, shared by the X-Plane plugin and the MSFS systems module"
+publish = false
+
+# No dependencies beyond std, so FlyByWire's workspace can vendor it as is.
+
+[lib]
+# The area files' own unit tests belong to the X-Plane plugin, which
+# compiles the same files against its full `Truth` and runs them there.
+# This crate's tests are the integration tests in `tests/`.
+test = false
+doctest = false

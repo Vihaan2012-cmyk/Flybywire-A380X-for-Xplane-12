@@ -1,0 +1,350 @@
+diff --git a/fbw-common/src/wasm/systems/systems/src/hydraulic/linear_actuator.rs b/fbw-common/src/wasm/systems/systems/src/hydraulic/linear_actuator.rs
+index 9f2519f..eec6435 100644
+--- a/fbw-common/src/wasm/systems/systems/src/hydraulic/linear_actuator.rs
++++ b/fbw-common/src/wasm/systems/systems/src/hydraulic/linear_actuator.rs
+@@ -418,6 +418,36 @@ struct CoreHydraulicForce {
+     locks_position_in_closed_mode: bool,
+     is_soft_locked: bool,
+     soft_lock_velocity: (AngularVelocity, AngularVelocity),
++
++    // Flight control actuator workstream (fbw-xp-systems, plugin src/flight_controls.rs):
++    // continuous degradation parameters, set once per tick from
++    // `failures::magnitude(id)` (0..=1) times this actuator's own physical
++    // constants -- not scripted outcomes. All default to zero/no-effect so
++    // existing FBW behaviour and tests are unchanged unless a caller wires
++    // them.
++    //
++    // Servo valve internal leakage: fluid crossing the spool from supply to
++    // return without moving the piston. Modelled as an extra flow drawn
++    // from (and returned to) the hydraulic circuit, on top of the flow the
++    // commanded motion needs -- see `servo_leakage_flow` getter and its use
++    // in `LinearActuator::update_fluid_displacements`, which is what
++    // actually couples it to the hydraulic circuit's pressure.
++    servo_leakage_flow: VolumeRate,
++
++    // Piston seal wear: a worn seal no longer holds full pressure across
++    // the piston, so the force the actuator can develop for a given
++    // pressure and area is reduced. Applied as a fractional loss on the
++    // force bounds computed in `update_force_min_max` (which are otherwise
++    // exactly `pressure * area`, i.e. the actuator's own force = pressure
++    // x area model), not on the commanded/PID force directly, so a worn
++    // actuator still commands normally but saturates earlier.
++    seal_wear_force_loss_ratio: Ratio,
++
++    // Partial mechanical jam / friction: an opposing force independent of
++    // pressure, applied in `apply_mechanical_degradation` as Coulomb
++    // friction (opposing current motion, or opposing the commanded force
++    // when stalled).
++    mechanical_friction_force: Force,
+ }
+ impl CoreHydraulicForce {
+     const MIN_MAX_FORCE_CONTROLLER_FILTER_TIME_CONSTANT: Duration = Duration::from_millis(1);
+@@ -518,9 +548,110 @@ impl CoreHydraulicForce {
+             locks_position_in_closed_mode,
+             is_soft_locked: locks_position_in_closed_mode,
+             soft_lock_velocity: soft_lock_velocity.unwrap_or_default(),
++
++            servo_leakage_flow: VolumeRate::new::<gallon_per_second>(0.),
++            seal_wear_force_loss_ratio: Ratio::new::<ratio>(0.),
++            mechanical_friction_force: Force::new::<newton>(0.),
+         }
+     }
+ 
++    /// Sets this tick's servo valve internal leakage flow (see the
++    /// `servo_leakage_flow` field doc). `flow` is a physical volume rate --
++    /// the caller (plugin glue) derives it from
++    /// `failures::magnitude(id) * <this actuator's fully-failed leak rate,
++    /// e.g. a fraction of max_flow>`, matching the physical quantity a
++    /// worn servo valve would actually pass across its spool.
++    pub fn set_servo_leakage_flow(&mut self, flow: VolumeRate) {
++        self.servo_leakage_flow = flow;
++    }
++
++    /// Accessor, not the setter, is where the physical invariant (leakage
++    /// is a magnitude, never negative) is enforced -- a stopgap loud-log
++    /// clamp until the substrate agent's shared logged-clamp helper lands;
++    /// see the module-level note on `failures::magnitude` above for the
++    /// same interim-fallback pattern. Never clamp silently: a negative
++    /// value here means the caller's `failures::magnitude(id) * <rate>`
++    /// derivation is wrong and should be visible, not swallowed.
++    fn servo_leakage_flow(&self) -> VolumeRate {
++        if self.servo_leakage_flow.get::<gallon_per_second>() < 0. {
++            eprintln!(
++                "[actuator] servo_leakage_flow invariant violated: {:.6} gal/s < 0, clamped to 0",
++                self.servo_leakage_flow.get::<gallon_per_second>()
++            );
++            return VolumeRate::new::<gallon_per_second>(0.);
++        }
++        self.servo_leakage_flow
++    }
++
++    /// Sets this tick's piston seal wear, as a fraction (0..=1) of this
++    /// actuator's pressure*area force capability lost to a worn seal no
++    /// longer holding full pressure across the piston. Caller derives it
++    /// from `failures::magnitude(id)` directly (it is already a 0..=1
++    /// physical fraction of the actuator's own rated force).
++    pub fn set_seal_wear_force_loss_ratio(&mut self, loss_ratio: Ratio) {
++        self.seal_wear_force_loss_ratio = loss_ratio;
++    }
++
++    /// See `servo_leakage_flow`'s doc: interim loud-log clamp at the
++    /// accessor. Physically this is a fraction of pressure*area force lost,
++    /// so it must stay within 0..=1 -- below 0 would boost force above the
++    /// hydraulic supply's own pressure*area limit, above 1 would invert it.
++    fn seal_wear_force_loss_ratio(&self) -> Ratio {
++        let value = self.seal_wear_force_loss_ratio.get::<ratio>();
++        if !(0. ..=1.).contains(&value) {
++            eprintln!(
++                "[actuator] seal_wear_force_loss_ratio invariant violated: {:.3} outside 0..=1, clamped",
++                value
++            );
++            return Ratio::new::<ratio>(value.clamp(0., 1.));
++        }
++        self.seal_wear_force_loss_ratio
++    }
++
++    /// Sets this tick's mechanical friction / partial jam force, opposing
++    /// actuator motion (or, when stalled, opposing the commanded force).
++    /// Caller derives it from `failures::magnitude(id) *
++    /// <this actuator's fully-jammed friction force>`.
++    pub fn set_mechanical_friction_force(&mut self, force: Force) {
++        self.mechanical_friction_force = force;
++    }
++
++    /// See `servo_leakage_flow`'s doc: same interim loud-log clamp at the
++    /// accessor rather than a silent clamp in the setter.
++    fn mechanical_friction_force(&self) -> Force {
++        if self.mechanical_friction_force.get::<newton>() < 0. {
++            eprintln!(
++                "[actuator] mechanical_friction_force invariant violated: {:.1} N < 0, clamped to 0",
++                self.mechanical_friction_force.get::<newton>()
++            );
++            return Force::new::<newton>(0.);
++        }
++        self.mechanical_friction_force
++    }
++
++    /// Coulomb friction / partial jam: opposes current motion, or -- when
++    /// the actuator is stalled (near-zero speed) -- opposes whatever force
++    /// is currently being commanded, directly reducing the net force
++    /// available to overcome an external (e.g. aerodynamic hinge moment)
++    /// load. This is what turns "some friction" into "can't reach the
++    /// commanded position under load" rather than a cosmetic force wobble.
++    fn apply_mechanical_degradation(&mut self, speed: Velocity) {
++        let friction = self.mechanical_friction_force();
++        if friction <= Force::new::<newton>(0.) {
++            return;
++        }
++
++        let opposing_sign = if speed.get::<meter_per_second>().abs() > 1e-6 {
++            speed.get::<meter_per_second>().signum()
++        } else if self.force_raw.get::<newton>().abs() > 1e-6 {
++            self.force_raw.get::<newton>().signum()
++        } else {
++            0.
++        };
++
++        self.force_raw -= friction * opposing_sign;
++    }
++
+     fn update_force(
+         &mut self,
+         context: &UpdateContext,
+@@ -698,6 +829,8 @@ impl CoreHydraulicForce {
+             }
+         }
+ 
++        self.apply_mechanical_degradation(speed);
++
+         self.force_raw = self
+             .force_raw
+             .min(Force::new::<newton>(Self::MAX_ABSOLUTE_FORCE_NEWTON))
+@@ -796,6 +929,14 @@ impl CoreHydraulicForce {
+             raw_min_force = max_force;
+         }
+ 
++        // Piston seal wear: worn seal no longer holds full pressure across
++        // the piston, so both the extend and retract force bounds -- which
++        // above are exactly pressure * area -- lose the same fraction of
++        // their capability.
++        let seal_capable_ratio = 1. - self.seal_wear_force_loss_ratio().get::<ratio>();
++        raw_max_force = raw_max_force * seal_capable_ratio;
++        raw_min_force = raw_min_force * seal_capable_ratio;
++
+         self.min_control_force
+             .update(context.delta(), raw_min_force);
+         self.max_control_force
+@@ -1189,9 +1330,22 @@ impl LinearActuator {
+             // Note on assymetric actuators, in extension direction, return to reservoir can be negative,
+             //   meaning actuator takes fluid in the return circuit to be able to move.
+             // This is a shortcut as it shouldn't directly take from reservoir but from return circuit
++            //
++            // Servo valve internal leakage (`servo_leakage_flow`, flight
++            // control actuator workstream): fluid crossing the spool from
++            // supply straight to return without moving the piston. This is
++            // the coupling point to the hydraulic circuit -- a leaking
++            // servo draws this extra volume from supply on top of whatever
++            // the commanded motion needs, so the circuit sees reduced
++            // pressure/flow margin exactly like any other extra consumer,
++            // and the same volume reappears at the reservoir since it never
++            // did any work on the piston.
++            let leakage_volume =
++                self.core_hydraulics.servo_leakage_flow() * context.delta_as_time();
++
+             if self.core_hydraulics.mode() == LinearActuatorMode::PositionControl {
+-                self.total_volume_to_actuator += volume_to_actuator;
+-                self.total_volume_to_reservoir += volume_to_reservoir;
++                self.total_volume_to_actuator += volume_to_actuator + leakage_volume;
++                self.total_volume_to_reservoir += volume_to_reservoir + leakage_volume;
+             } else {
+                 self.total_volume_to_reservoir += volume_to_reservoir - volume_to_actuator;
+             }
+@@ -1229,6 +1383,23 @@ impl LinearActuator {
+         self.force() / area
+     }
+ }
++impl LinearActuator {
++    /// Continuous flight control actuator degradation (fbw-xp-systems
++    /// `failures::magnitude(id)`, plugin `src/flight_controls.rs`): see the
++    /// field docs on `CoreHydraulicForce` for what each parameter
++    /// physically represents and how it couples to hydraulics/force.
++    pub fn set_servo_leakage_flow(&mut self, flow: VolumeRate) {
++        self.core_hydraulics.set_servo_leakage_flow(flow);
++    }
++
++    pub fn set_seal_wear_force_loss_ratio(&mut self, loss_ratio: Ratio) {
++        self.core_hydraulics.set_seal_wear_force_loss_ratio(loss_ratio);
++    }
++
++    pub fn set_mechanical_friction_force(&mut self, force: Force) {
++        self.core_hydraulics.set_mechanical_friction_force(force);
++    }
++}
+ impl Actuator for LinearActuator {
+     fn used_volume(&self) -> Volume {
+         let mut eha_volume_used = Volume::default();
+@@ -2944,6 +3115,124 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn aileron_actuator_force_ceiling_collapses_only_when_leakage_pressure_drop_and_seal_wear_combine(
++    ) {
++        // Hand derivation, using this file's own `aileron_actuator()` rig
++        // constants (bore_side_diameter 0.0537878 m, max_working_pressure
++        // 3000 psi -- FBW's real A320/A380-family aileron servo-control
++        // constants, cited unmodified from `aileron_actuator()` a few
++        // hundred lines below):
++        //
++        //   bore_side_area = pi * (0.0537878 / 2)^2 = 2.272257e-3 m^2
++        //   1 psi = 6894.757293168 Pa
++        //
++        // `CoreHydraulicForce::update_force_min_max` computes this
++        // actuator's force ceiling as exactly current_pressure * area
++        // (see the fn: `let max_force = current_pressure * self.bore_side_area`),
++        // then (this patch) scales it by (1 - seal_wear_force_loss_ratio).
++        // Three ceilings, all by hand from those two facts alone:
++        //
++        //   F_nominal      = 3000 psi * area                     = 20,684,272 Pa * 2.272257e-3 = 46,999.98 N
++        //   F_pressure_only= 1500 psi * area  (wear = 0)          = 10,342,136 Pa * 2.272257e-3 = 23,499.99 N
++        //   F_wear_only    = 3000 psi * area * (1 - 0.4) (3000psi)= 46,999.98 N * 0.6            = 28,199.99 N
++        //   F_combined     = 1500 psi * area * (1 - 0.4)          = 23,499.99 N * 0.6            = 14,099.99 N
++        //
++        // i.e. a servo leak that (via the hydraulics agent's circuit model,
++        // not reproduced here) drops this actuator's supply from 3000 to
++        // 1500 psi loses only ~50% of authority on its own (still ~23.5 kN);
++        // 40% piston seal wear at full pressure loses only ~40% on its own
++        // (still ~28.2 kN); only the *combination* pushes the ceiling to
++        // ~14.1 kN -- below either single-factor result. This is the
++        // "actuator force = pressure x area, degraded" side of the
++        // blowdown/rate-limit mechanism; matching it against a real
++        // high-speed aerodynamic hinge moment is the aero/rigid-body
++        // coupling's job (`LinearActuatedRigidBodyOnHingeAxis` /
++        // `aerodynamic_model.rs`), out of scope for this actuator-only
++        // patch -- see the report for what's left.
++        let mut test_bed = SimulationTestBed::new(|context| {
++            let tested_object = aileron_assembly(context, false);
++            TestAircraft::new(context, tested_object)
++        });
++
++        test_bed.command(|a| a.command_unlock());
++        test_bed.command(|a| {
++            a.set_pressures([Pressure::new::<psi>(3000.), Pressure::new::<psi>(3000.)])
++        });
++        test_bed.command(|a| a.command_position_control(Ratio::new::<ratio>(0.5), 0));
++        test_bed.command(|a| a.command_active_damping_mode(1));
++
++        // Drive actuator 0 to actually push (speed > 0, force > 0) so
++        // `update_force_min_max`'s dynamic (pressure-based) branch latches
++        // in, matching how a real commanded surface movement would.
++        test_bed.command(|a| a.command_position_control(Ratio::new::<ratio>(0.9), 0));
++        test_bed.run_with_delta(Duration::from_secs_f64(0.3));
++
++        let ceiling_nominal = test_bed.query(|a| {
++            a.hydraulic_assembly.linear_actuators[0]
++                .core_hydraulics
++                .max_control_force
++                .output()
++        });
++        assert_gt!(ceiling_nominal, Force::new::<newton>(46999.98 - 200.));
++        assert_lt!(ceiling_nominal, Force::new::<newton>(46999.98 + 200.));
++
++        // -- Decoupling proof: pressure drop alone --------------------------------
++        // Cut the seal-wear link (leave it at its default zero) and only
++        // reduce pressure. The ceiling should land at F_pressure_only, not
++        // collapse to F_combined -- proving wear's contribution is real,
++        // not an artifact of the pressure change alone.
++        test_bed.command(|a| {
++            a.set_pressures([Pressure::new::<psi>(1500.), Pressure::new::<psi>(1500.)])
++        });
++        test_bed.run_with_delta(Duration::from_secs_f64(0.3));
++        let ceiling_pressure_only = test_bed.query(|a| {
++            a.hydraulic_assembly.linear_actuators[0]
++                .core_hydraulics
++                .max_control_force
++                .output()
++        });
++        assert_gt!(ceiling_pressure_only, Force::new::<newton>(23499.99 - 300.));
++        assert_lt!(ceiling_pressure_only, Force::new::<newton>(23499.99 + 300.));
++
++        // -- Decoupling proof: seal wear alone -------------------------------------
++        // Restore full pressure (cut the pressure-drop link) and only apply
++        // seal wear. The ceiling should land at F_wear_only, not F_combined.
++        test_bed.command(|a| {
++            a.set_pressures([Pressure::new::<psi>(3000.), Pressure::new::<psi>(3000.)])
++        });
++        test_bed.command(|a| {
++            a.hydraulic_assembly.linear_actuators[0]
++                .set_seal_wear_force_loss_ratio(Ratio::new::<ratio>(0.4))
++        });
++        test_bed.run_with_delta(Duration::from_secs_f64(0.3));
++        let ceiling_wear_only = test_bed.query(|a| {
++            a.hydraulic_assembly.linear_actuators[0]
++                .core_hydraulics
++                .max_control_force
++                .output()
++        });
++        assert_gt!(ceiling_wear_only, Force::new::<newton>(28199.99 - 300.));
++        assert_lt!(ceiling_wear_only, Force::new::<newton>(28199.99 + 300.));
++
++        // -- Combined: both links live at once -------------------------------------
++        test_bed.command(|a| {
++            a.set_pressures([Pressure::new::<psi>(1500.), Pressure::new::<psi>(1500.)])
++        });
++        test_bed.run_with_delta(Duration::from_secs_f64(0.3));
++        let ceiling_combined = test_bed.query(|a| {
++            a.hydraulic_assembly.linear_actuators[0]
++                .core_hydraulics
++                .max_control_force
++                .output()
++        });
++        assert_gt!(ceiling_combined, Force::new::<newton>(14099.99 - 300.));
++        assert_lt!(ceiling_combined, Force::new::<newton>(14099.99 + 300.));
++
++        assert_lt!(ceiling_combined, ceiling_pressure_only);
++        assert_lt!(ceiling_combined, ceiling_wear_only);
++    }
++
+     #[test]
+     fn linear_actuator_can_control_position() {
+         let mut test_bed = SimulationTestBed::new(|context| {
