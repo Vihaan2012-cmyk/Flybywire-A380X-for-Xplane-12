@@ -77,6 +77,9 @@ pub struct AppSettings {
     /// The EFB's "Passenger cabin" switch (Settings > Aircraft).
     pub cabin_visible: bool,
     pub walkaround: bool,
+    /// How hard the screens are sharpened as they are copied into X-Plane's
+    /// devices, 0 (off) to 1 (display/gl.rs's `draw_bridge`).
+    pub display_sharpen: f64,
 }
 
 impl Default for AppSettings {
@@ -92,6 +95,7 @@ impl Default for AppSettings {
             state_dump_keep: crate::state_dump::DEFAULT_KEEP_PER_SESSION,
             cabin_visible: true,
             walkaround: false,
+            display_sharpen: 0.6,
         }
     }
 }
@@ -130,6 +134,7 @@ fn parse(map: &Map<String, Value>) -> AppSettings {
         state_dump_keep: (as_f64(map, "stateDumpKeep", defaults.state_dump_keep as f64) as u64).clamp(1, 1_000_000) as usize,
         cabin_visible: as_bool(map, "cabinVisible", defaults.cabin_visible),
         walkaround: as_bool(map, "walkaround", defaults.walkaround),
+        display_sharpen: as_f64(map, "displaySharpen", defaults.display_sharpen).clamp(0.0, 1.0),
     }
 }
 

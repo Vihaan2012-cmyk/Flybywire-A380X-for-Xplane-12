@@ -244,6 +244,62 @@ gl_functions! {
     // multisampled framebuffer) has this too.
     generate_mipmap: "glGenerateMipmap" => fn(c_uint);
     read_pixels: "glReadPixels" => fn(c_int, c_int, c_int, c_int, c_uint, c_uint, *mut c_void);
+    create_shader: "glCreateShader" => fn(c_uint) -> c_uint;
+    shader_source: "glShaderSource" => fn(c_uint, c_int, *const *const c_char, *const c_int);
+    compile_shader: "glCompileShader" => fn(c_uint);
+    get_shader_iv: "glGetShaderiv" => fn(c_uint, c_uint, *mut c_int);
+    create_program: "glCreateProgram" => fn() -> c_uint;
+    attach_shader: "glAttachShader" => fn(c_uint, c_uint);
+    link_program: "glLinkProgram" => fn(c_uint);
+    get_program_iv: "glGetProgramiv" => fn(c_uint, c_uint, *mut c_int);
+    get_uniform_location: "glGetUniformLocation" => fn(c_uint, *const c_char) -> c_int;
+    uniform1i: "glUniform1i" => fn(c_int, c_int);
+    uniform1f: "glUniform1f" => fn(c_int, f32);
+    uniform2f: "glUniform2f" => fn(c_int, f32, f32);
+}
+
+const GL_VERTEX_SHADER: c_uint = 0x8B31;
+const GL_FRAGMENT_SHADER: c_uint = 0x8B30;
+const GL_COMPILE_STATUS: c_uint = 0x8B81;
+const GL_LINK_STATUS: c_uint = 0x8B82;
+
+const SHARPEN_VERTEX: &str = "#version 120
+void main() {
+    gl_TexCoord[0] = gl_MultiTexCoord0;
+    gl_FrontColor = gl_Color;
+    gl_Position = ftransform();
+}
+";
+
+const SHARPEN_FRAGMENT: &str = "#version 120
+uniform sampler2D tex;
+uniform vec2 texel;
+uniform float amount;
+void main() {
+    vec2 uv = gl_TexCoord[0].xy;
+    vec4 c = texture2D(tex, uv);
+    vec4 n = texture2D(tex, uv - vec2(0.0, texel.y));
+    vec4 s = texture2D(tex, uv + vec2(0.0, texel.y));
+    vec4 e = texture2D(tex, uv + vec2(texel.x, 0.0));
+    vec4 w = texture2D(tex, uv - vec2(texel.x, 0.0));
+    vec4 lo = min(c, min(min(n, s), min(e, w)));
+    vec4 hi = max(c, max(max(n, s), max(e, w)));
+    vec4 blur = (n + s + e + w) * 0.25;
+    vec4 sharp = clamp(c + (c - blur) * (amount * 1.5), lo, hi);
+    sharp.rgb = min(sharp.rgb, vec3(sharp.a));
+    gl_FragColor = sharp * gl_Color;
+}
+";
+
+/// The sharpening pass [`Renderer::draw_bridge`] draws XPHFBW's pixels with:
+/// a clamped unsharp mask, so text edges steepen without ringing past their
+/// neighbours' range, on CEF's premultiplied pixels.
+#[derive(Clone, Copy)]
+struct Sharpen {
+    program: c_uint,
+    tex: c_int,
+    texel: c_int,
+    amount: c_int,
 }
 
 /// The multisampled framebuffer every screen draws through.
@@ -314,6 +370,8 @@ pub struct Renderer {
     /// yet" warning for, so a screen stuck that way is reported once, not
     /// every frame.
     bridge_no_texture_warned: std::collections::HashSet<&'static str>,
+    /// Built on first use; `Some(None)` once building it failed.
+    sharpen: Option<Option<Sharpen>>,
 }
 
 /// Where in the target a region of the screen lands.
@@ -379,6 +437,7 @@ impl Renderer {
             gl_error_warned: std::collections::HashSet::new(),
             target_multisampled: None,
             bridge_no_texture_warned: std::collections::HashSet::new(),
+            sharpen: None,
         };
         if safe_mode {
             crate::log("display: xphfbw.displaySafeMode is on; skipping the multisampled framebuffer (no anti-aliasing, no clip paths)");
@@ -866,7 +925,48 @@ impl Renderer {
     /// `underlay` (straight alpha) when given, then Chromium's pixels, which
     /// CEF paints with premultiplied alpha.
     #[allow(clippy::too_many_arguments)]
+    fn sharpen_program(&mut self) -> Option<Sharpen> {
+        if let Some(built) = self.sharpen {
+            return built;
+        }
+        let built = unsafe { self.build_sharpen() };
+        if built.is_none() {
+            crate::log("display: the sharpening shader did not build; screens are drawn unsharpened");
+        }
+        self.sharpen = Some(built);
+        built
+    }
+
+    unsafe fn build_sharpen(&self) -> Option<Sharpen> {
+        let gl = &self.gl;
+        let shader = |kind: c_uint, text: &str| -> Option<c_uint> {
+            let id = (gl.create_shader)(kind);
+            let src = CString::new(text).ok()?;
+            let ptr = src.as_ptr();
+            (gl.shader_source)(id, 1, &ptr, std::ptr::null());
+            (gl.compile_shader)(id);
+            let mut ok = 0;
+            (gl.get_shader_iv)(id, GL_COMPILE_STATUS, &mut ok);
+            (ok != 0).then_some(id)
+        };
+        let vertex = shader(GL_VERTEX_SHADER, SHARPEN_VERTEX)?;
+        let fragment = shader(GL_FRAGMENT_SHADER, SHARPEN_FRAGMENT)?;
+        let program = (gl.create_program)();
+        (gl.attach_shader)(program, vertex);
+        (gl.attach_shader)(program, fragment);
+        (gl.link_program)(program);
+        let mut ok = 0;
+        (gl.get_program_iv)(program, GL_LINK_STATUS, &mut ok);
+        if ok == 0 {
+            return None;
+        }
+        let uniform = |name: &std::ffi::CStr| (gl.get_uniform_location)(program, name.as_ptr());
+        Some(Sharpen { program, tex: uniform(c"tex"), texel: uniform(c"texel"), amount: uniform(c"amount") })
+    }
+
     pub fn draw_bridge(&mut self, screen_id: &'static str, gpu: &mut BridgeGpu, underlay: Option<&BridgeGpu>, width: u32, height: u32, crop: Option<[f32; 4]>, target: Target, brightness: &[f32], dimming: &[[f32; 4]]) {
+        let amount = crate::app_settings::current().display_sharpen as f32;
+        let sharpen = if amount > 0. && gpu.size.0 > 0 && gpu.size.1 > 0 { self.sharpen_program() } else { None };
         if gpu.texture == 0 {
             // Distinct from the width/height == 0 case below (a ScreenBlock
             // that simply has not published a size yet, normal for a
@@ -941,7 +1041,16 @@ impl Renderer {
             (self.xp.set_graphics_state)(0, 1, 0, 0, 1, 0, 0);
             (gl.blend_func)(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
             (self.xp.bind_texture)(gpu.texture, 0);
+            if let Some(s) = sharpen {
+                (gl.use_program)(s.program);
+                (gl.uniform1i)(s.tex, 0);
+                (gl.uniform2f)(s.texel, 1. / gpu.size.0 as f32, 1. / gpu.size.1 as f32);
+                (gl.uniform1f)(s.amount, amount);
+            }
             (gl.draw_arrays)(GL_TRIANGLES, 0, 6);
+            if sharpen.is_some() {
+                (gl.use_program)(0);
+            }
             (gl.blend_func)(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             self.draw_calls += 1;
 
