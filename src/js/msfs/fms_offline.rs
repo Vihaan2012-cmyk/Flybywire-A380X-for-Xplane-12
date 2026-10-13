@@ -396,7 +396,7 @@ pub fn power_up_on_ground<H: Host>(host: &mut H, lat: f64, lon: f64) {
         host.set_var(&format!("{pre}_TRACK"), "number", arinc_word(270., 3));
         host.set_var(&format!("{pre}_GROUND_SPEED"), "number", arinc_word(0., 3));
         host.set_var(&format!("{pre}_ALIGNED"), "bool", 1.);
-        host.set_var(&format!("{pre}_MAINT_WORD"), "number", arinc_word(0., 3));
+        host.set_var(&format!("{pre}_MAINT_WORD"), "number", arinc_word(4., 3));
         host.set_var(&format!("L:A32NX_OVHD_ADIRS_IR_{ir}_MODE_SELECTOR_KNOB"), "number", 1.);
         host.set_var(&format!("L:A32NX_ADIRS_ADR_{ir}_ALTITUDE"), "number", arinc_word(83., 3));
         host.set_var(&format!("L:A32NX_ADIRS_ADR_{ir}_BAROMETRIC_CORRECTION_1"), "number", arinc_word(1013.25, 3));
@@ -404,6 +404,10 @@ pub fn power_up_on_ground<H: Host>(host: &mut H, lat: f64, lon: f64) {
     host.set_var("L:A32NX_ADIRS_USES_GPS_AS_PRIMARY", "bool", 1.);
     host.set_var("L:A32NX_ADIRS_PFD_ALIGNED_FIRST", "bool", 1.);
     host.set_var("L:A32NX_ADIRS_PFD_ALIGNED_ATT", "bool", 1.);
+    for side in ["L", "R"] {
+        host.set_var(&format!("L:A32NX_EFIS_{side}_ND_MODE"), "number", 3.);
+        host.set_var(&format!("L:A32NX_EFIS_{side}_ND_RANGE"), "number", 2.);
+    }
 }
 
 struct Fix {
