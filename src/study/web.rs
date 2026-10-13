@@ -568,6 +568,70 @@ pub(crate) fn maintenance_json() -> String {
     .to_string()
 }
 
+const WEAR_WORDS: [&str; 9] = ["WEAR", "CREEP", "LIFE_FRACTION", "DEGRAD", "FATIGUE", "EROSION", "CLOG", "SCORING", "CRACK"];
+
+/// `GET /study/wear`: every wear and tear value in one place.
+pub(crate) fn wear_json() -> String {
+    let (_, hours, _) = crate::mel::latest();
+    let engines: Vec<Value> = crate::physics::damage::snapshot()
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            json!({
+                "engine": i + 1,
+                "hours": e.hours,
+                "cycles": e.cycles,
+                "creepLife": e.creep_life_fraction,
+                "creepFromOvertemp": e.creep_from_overtemp,
+                "creepFromMct": e.creep_from_mct,
+                "creepFromToga": e.creep_from_toga,
+                "compressorEfficiencyLoss": e.compressor_efficiency_loss,
+                "oilQuantityPct": e.oil_quantity_pct,
+                "fodIngested": e.fod_ingested,
+                "exceedances": serde_json::to_value(e.exceedances).unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    let store = crate::wear::snapshot();
+    let components: Vec<Value> = store
+        .ids()
+        .map(|c| {
+            let w = store.get(c);
+            json!({ "id": c, "hotHours": w.hot_hours, "cycles": w.cycles, "thermalStress": w.thermal_stress_integral, "degradation": w.degradation_fraction })
+        })
+        .collect();
+    let parameters: Vec<Value> = crate::components::list()
+        .into_iter()
+        .filter(|c| (c.value - c.spec.healthy).abs() > 1e-9 || c.rate_per_hour != 0.)
+        .map(|c| {
+            json!({
+                "component": c.component,
+                "chapter": component_chapter(&c.component),
+                "param": c.spec.name,
+                "unit": c.spec.unit,
+                "healthy": c.spec.healthy,
+                "min": c.spec.min,
+                "max": c.spec.max,
+                "description": c.spec.description,
+                "value": c.value,
+                "ratePerHour": c.rate_per_hour,
+            })
+        })
+        .collect();
+    let live: Vec<Value> = crate::snapshot()
+        .lock()
+        .map(|s| {
+            s.names
+                .iter()
+                .zip(s.values.iter())
+                .filter(|(n, _)| WEAR_WORDS.iter().any(|w| n.to_ascii_uppercase().contains(w)))
+                .map(|(n, v)| json!({ "name": n, "value": v }))
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({ "airframeHours": hours, "engines": engines, "components": components, "parameters": parameters, "live": live }).to_string()
+}
+
 /// `GET /study/components`: every damageable component's physical
 /// parameters, their current (combined) values and any direct setting.
 pub(crate) fn components_json() -> String {
@@ -1020,6 +1084,16 @@ pub(crate) fn apply_action(body: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wear_page_lists_every_engine_and_section() {
+        let v: Value = serde_json::from_str(&wear_json()).unwrap();
+        assert_eq!(v["engines"].as_array().map(Vec::len), Some(4));
+        assert!(v["engines"][0]["creepLife"].is_number() && v["engines"][0]["exceedances"].is_object());
+        for key in ["components", "parameters", "live"] {
+            assert!(v[key].is_array(), "{key}");
+        }
+    }
 
     /// Writes `/study/pages` to `STUDY_PAGES_OUT`, for previewing the web
     /// pages without X-Plane or the app.

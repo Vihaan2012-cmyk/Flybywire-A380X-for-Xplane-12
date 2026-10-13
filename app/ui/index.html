@@ -217,6 +217,11 @@
   .cb-info { cursor: pointer; }
   .comp-row { display: grid; grid-template-columns: 40px 1fr 60px 140px auto 26px; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line-dim); }
   .comp-row .bus, .mel-row .bus { font-size: 11px; text-transform: none; }
+  .wear-engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+  .wear-card { display: flex; flex-direction: column; gap: 6px; }
+  .wear-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: center; }
+  .wear-row .comp-bar { grid-column: 1 / -1; }
+  .comp-row.wear-comp { grid-template-columns: 1fr 70px 160px; }
   .comp-bar { height: 6px; background: var(--line-dim); }
   .comp-bar > div { height: 6px; }
   .comp-quick { display: flex; gap: 6px; }
@@ -304,6 +309,7 @@
   <button type="button" class="tab-btn" data-tab="breakers">Circuit Breakers</button>
   <button type="button" class="tab-btn" data-tab="maintenance">MEL &amp; Maintenance</button>
   <button type="button" class="tab-btn" data-tab="components">Components</button>
+  <button type="button" class="tab-btn" data-tab="wear">Wear &amp; Tear</button>
   <button type="button" class="tab-btn" data-tab="flightplan">Flight Plan</button>
   <button type="button" class="tab-btn" data-tab="ground">Ground Services</button>
   <button type="button" class="tab-btn" data-tab="charts">Charts</button>
@@ -369,6 +375,11 @@
       <div id="comp-content"></div>
     </div>
   </div>
+</div>
+
+<div class="tab-panel" id="tab-wear">
+  <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
+  <div class="study-main" id="wear-content"></div>
 </div>
 
 <div class="tab-panel" id="tab-breakers">
@@ -960,6 +971,7 @@ for (const btn of $all('.tab-btn')) {
     if (btn.dataset.tab === 'breakers') breakersOnShow();
     if (btn.dataset.tab === 'maintenance') maintenanceOnShow();
     if (btn.dataset.tab === 'components') componentsOnShow();
+    if (btn.dataset.tab === 'wear') wearOnShow();
     if (btn.dataset.tab === 'flightplan') flightPlanOnShow();
     if (btn.dataset.tab === 'ground') groundOnShow();
     if (btn.dataset.tab === 'charts') chartsOnShow();
@@ -1092,6 +1104,7 @@ async function studyGet(path) {
     if (path === '/study/breakers') return fixtureData.breakers;
     if (path === '/study/components') return fixtureData.components || {};
     if (path === '/study/maintenance') return fixtureData.maintenance || {};
+    if (path === '/study/wear') return fixtureData.wear || {};
     if (path.startsWith('/vars')) return fixtureData.vars;
     return {};
   }
@@ -2194,6 +2207,102 @@ function fmtNum(v) {
   if (v == null || !isFinite(v)) return '–';
   const a = Math.abs(v);
   return a !== 0 && (a < 0.01 || a >= 1e5) ? v.toExponential(2) : (+v.toFixed(3)).toString();
+}
+
+let wearTimer = null;
+
+async function wearOnShow() {
+  await wearDraw();
+  clearInterval(wearTimer);
+  wearTimer = setInterval(() => {
+    if (document.getElementById('tab-wear').classList.contains('active')) wearDraw();
+    else {
+      clearInterval(wearTimer);
+      wearTimer = null;
+    }
+  }, 5000);
+}
+
+function wearBar(f) {
+  const v = Math.max(0, Math.min(1, f || 0));
+  const bar = el('div', { class: 'comp-bar' });
+  bar.append(el('div', { style: `width:${(v * 100).toFixed(1)}%;background:${v > 0.5 ? 'var(--bad)' : v > 0.1 ? 'var(--warn)' : 'var(--ok)'}` }));
+  return bar;
+}
+
+function wearPct(f) {
+  const v = f || 0;
+  return `${(v * 100).toFixed(v > 0 && v < 0.1 ? 2 : 1)}%`;
+}
+
+function wearName(name) {
+  const s = name.replace(/^(L:)?(A32NX_|A380X_|DEEP_)/, '').replace(/:(\d+)$/, ' $1').replace(/_/g, ' ').toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function wearRow(label, value, frac) {
+  const r = el('div', { class: 'wear-row' }, el('span', { class: 'label dim', text: label }), el('span', { class: 'fval', text: value }));
+  if (frac != null) r.append(wearBar(frac));
+  return r;
+}
+
+async function wearDraw() {
+  const box = document.getElementById('wear-content');
+  let d = null;
+  try {
+    d = await studyGet('/study/wear');
+  } catch {}
+  if (!d || !d.engines) {
+    box.replaceChildren(el('div', { class: 'box', text: 'Could not load the wear values.' }));
+    return;
+  }
+  const out = [];
+  out.push(el('div', { class: 'section-title', text: 'Airframe' }), el('div', { class: 'box' }, wearRow('Flight hours', `${fmtNum(d.airframeHours)} h`)));
+
+  out.push(el('div', { class: 'section-title', text: 'Engines' }));
+  const engines = el('div', { class: 'wear-engines' });
+  for (const e of d.engines) {
+    const card = el('div', { class: 'box wear-card' }, el('div', { class: 'label', text: `Engine ${e.engine}` }));
+    card.append(wearRow('Hours', fmtNum(e.hours)), wearRow('Start cycles', String(e.cycles)), wearRow('Creep life used', wearPct(e.creepLife), e.creepLife));
+    if (e.creepLife > 0) card.append(el('div', { class: 'label dim bus', text: `over-temperature ${wearPct(e.creepFromOvertemp)} · above MCT ${wearPct(e.creepFromMct)} · TOGA ${wearPct(e.creepFromToga)}` }));
+    card.append(wearRow('Compressor efficiency loss', wearPct(e.compressorEfficiencyLoss), e.compressorEfficiencyLoss));
+    card.append(wearRow('Oil quantity', `${fmtNum(e.oilQuantityPct)}%`, 1 - (e.oilQuantityPct ?? 100) / 100));
+    if (e.fodIngested) card.append(el('div', { class: 'label', style: 'color:var(--bad)', text: 'Foreign object ingested' }));
+    const ex = Object.entries(e.exceedances || {}).filter(([, n]) => n > 0);
+    card.append(el('div', { class: 'label dim bus', text: ex.length ? 'Exceedances: ' + ex.map(([k, n]) => `${k.replace(/_/g, ' ')} ×${n}`).join(', ') : 'No exceedances' }));
+    engines.append(card);
+  }
+  out.push(engines);
+
+  out.push(el('div', { class: 'section-title', text: 'Component wear' }));
+  if (!d.components.length) out.push(el('div', { class: 'box label dim', text: 'No component wear recorded yet.' }));
+  for (const c of [...d.components].sort((a, b) => b.degradation - a.degradation)) {
+    out.push(el('div', { class: 'comp-row wear-comp' },
+      el('div', {}, el('div', { class: 'label', text: c.id }), el('div', { class: 'label dim bus', text: `${fmtNum(c.hotHours)} hot hours · ${c.cycles} cycles · thermal stress ${fmtNum(c.thermalStress)}` })),
+      el('span', { class: 'fval', text: wearPct(c.degradation) }),
+      wearBar(c.degradation)));
+  }
+
+  out.push(el('div', { class: 'section-title', text: 'Components away from healthy' }));
+  if (!d.parameters.length) out.push(el('div', { class: 'box label dim', text: 'Every component is at its healthy value.' }));
+  for (const c of [...d.parameters].sort((a, b) => compDegradation(b) - compDegradation(a))) {
+    const deg = compDegradation(c);
+    out.push(el('div', { class: 'comp-row wear-comp' },
+      el('div', {}, el('div', { class: 'label', text: compLabel(c) || c.component }), el('div', { class: 'label dim bus', text: compInstance(c) + ` · ${fmtNum(c.value)} ${c.unit} (healthy ${fmtNum(c.healthy)})` + (c.ratePerHour ? ` · worsening ${fmtNum(c.ratePerHour)} ${c.unit}/h` : '') })),
+      el('span', { class: 'fval', text: wearPct(deg) }),
+      wearBar(deg)));
+  }
+
+  out.push(el('div', { class: 'section-title', text: 'Live wear indicators' }));
+  if (!d.live.length) out.push(el('div', { class: 'box label dim', text: 'No live wear values yet: load the aircraft.' }));
+  for (const v of [...d.live].sort((a, b) => a.name.localeCompare(b.name))) {
+    const frac = /FRACTION|WEAR|LIFE|DEGRADATION/i.test(v.name) && v.value >= 0 && v.value <= 1 ? v.value : null;
+    out.push(el('div', { class: 'comp-row wear-comp' },
+      el('div', {}, el('div', { class: 'label', text: wearName(v.name) }), el('div', { class: 'label dim bus', text: v.name })),
+      el('span', { class: 'fval', text: frac != null ? wearPct(frac) : fmtNum(v.value) }),
+      frac != null ? wearBar(frac) : el('span', {})));
+  }
+  box.replaceChildren(...out);
 }
 
 async function componentsOnShow() {

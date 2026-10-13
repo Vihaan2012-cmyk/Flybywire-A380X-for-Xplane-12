@@ -140,6 +140,7 @@ fn serve(mut stream: TcpStream) -> std::io::Result<()> {
         "/study/breakers" => reply(&mut stream, 200, "application/json", crate::study::web::breakers_json().as_bytes()),
         "/study/components" => reply(&mut stream, 200, "application/json", crate::study::web::components_json().as_bytes()),
         "/study/maintenance" => reply(&mut stream, 200, "application/json", crate::study::web::maintenance_json().as_bytes()),
+        "/study/wear" => reply(&mut stream, 200, "application/json", crate::study::web::wear_json().as_bytes()),
         "/study/mel" => reply(&mut stream, 200, "application/json", crate::study::web::mel_search_json(query).as_bytes()),
         #[cfg(feature = "js")]
         "/study/charts" => {

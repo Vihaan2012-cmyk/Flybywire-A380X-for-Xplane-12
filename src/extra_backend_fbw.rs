@@ -97,8 +97,8 @@ pub fn source_patches() -> Vec<crate::source_patch::SourcePatch> {
     vec![crate::source_patch::SourcePatch {
         path: "/Pages/VCockpit/Instruments/A380X/ExtrasHost/index.js".to_string(),
         find: LIGHT_SYNC_INIT.to_string(),
-        replace: "{ const lightSyncStart = Date.now(); const lightSyncInit = () => SimVar.GetSimVarValue(\"GLASSCOCKPIT AUTOMATIC BRIGHTNESS\", \"percent\") > 0 ? this.initLighting() : Date.now() - lightSyncStart < 120000 && setTimeout(lightSyncInit, 250); lightSyncInit(); }".to_string(),
-        reason: "LightSync sets the display knobs only from a real automatic brightness; without one the displays keep the full brightness the plugin starts them at, never FlyByWire's 15 % floor".to_string(),
+        replace: "{ const lightSyncStart = Date.now(); let lightSyncLast = -1; let lightSyncSteady = Date.now(); const lightSyncInit = () => { const v = SimVar.GetSimVarValue(\"GLASSCOCKPIT AUTOMATIC BRIGHTNESS\", \"percent\"); if (Math.abs(v - lightSyncLast) > 1) { lightSyncLast = v; lightSyncSteady = Date.now(); } if (v > 0 && Date.now() - lightSyncSteady > 5000) this.initLighting(); else if (Date.now() - lightSyncStart < 180000) setTimeout(lightSyncInit, 250); }; lightSyncInit(); }".to_string(),
+        reason: "LightSync sets the display knobs only from an automatic brightness that has held for 5 s: while X-Plane is still setting the time of day the sun reads low and FlyByWire clamped that to its 15 % floor for the whole flight; without a value the displays keep the plugin's full brightness".to_string(),
     }]
 }
 
@@ -419,6 +419,7 @@ mod tests {
         let out = crate::source_patch::apply(&source_patches(), "/Pages/VCockpit/Instruments/A380X/ExtrasHost/index.js", text, |ok, _| assert!(ok));
         assert!(out.contains("GLASSCOCKPIT AUTOMATIC BRIGHTNESS") && out.contains("lightSyncInit();") && out.contains("this.initLighting()"));
         assert!(!out.contains("> 10000) ? this.initLighting()"), "a missing brightness must not initialise the knobs");
+        assert!(out.contains("lightSyncSteady > 5000"), "the brightness must hold before the knobs are set");
         assert!(!sun_known(0., 0.));
         assert!(sun_known(-3., 0.) && sun_known(0., 120.));
     }

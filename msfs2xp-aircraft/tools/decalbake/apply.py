@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 import ddsmips
 from bake import TEXPIPE, decode_installed, light_canon, obj_path
@@ -114,6 +114,9 @@ def main(objdir, acf_path, work, stage, main_lua):
                 g = np.asarray(Image.open(glow_png).convert('RGB')).astype(np.float32)
                 e = decode_installed(obj_path(objdir, old_lit))[..., :3]
                 e = np.asarray(Image.fromarray(e).resize((g.shape[1], g.shape[0]), Image.BICUBIC)).astype(np.float32)
+                lamps = ((e.max(axis=2) - e.min(axis=2)) > 40) & (e.max(axis=2) > 60)
+                lamps = np.asarray(Image.fromarray((lamps * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(5))) > 0
+                e[lamps] = 0
                 merged = np.clip(np.maximum(e, g), 0, 255).astype(np.uint8)
                 mp = os.path.join(work, os.path.splitext(lit)[0] + '.png')
                 Image.fromarray(merged, 'RGB').save(mp)
