@@ -17,8 +17,8 @@ Never in it: SASL's own files (proprietary; the installer downloads SASL
 from 1-sim, and only our generated module goes in the release), Laminar's
 .acf and airfoils (the installer builds the .acf from the user's own A330 and
 the release carries only *.acfpatch), the FCU font (downloaded from
-FlyByWire's repository), and the A380 Sound Pack's banks and .snd (installed
-from X-Plane Sounds' own download; the release carries our .sndpatch).
+FlyByWire's repository), and FTSiM+'s A380RR_Sp sound pack's banks and .snd
+(installed from FTSiM+'s own demo download; the release carries our .sndpatch).
 
 Output: dist/<version>/ with the archive parts, converter.zip and
 manifest.json, published to GitHub Releases by distribution/publish.sh.
@@ -249,8 +249,8 @@ def main() -> None:
         "Built on FlyByWire Simulations' A380X (GPL-3.0 code; original 3D assets CC BY-NC 4.0).\n"
         "Not affiliated with or endorsed by Microsoft, Laminar Research or FlyByWire Simulations.\n"
         "Contains no Microsoft Flight Simulator content. Liveries remain their authors'.\n"
-        "Not included, downloaded during installation from their own sites: SASL (1-sim), X-Plane Sounds'\n"
-        "A380 Sound Pack (RR) and FlyByWire's FCU font. The .acf and wing airfoils are built from your own\n"
+        "Not included, downloaded during installation from their own sites: SASL (1-sim), FTSiM+'s\n"
+        "A380RR_Sp sound pack (Peter Hager demo) and FlyByWire's FCU font. The .acf and wing airfoils are built from your own\n"
         "X-Plane 12's Airbus A330-300.\n"
         "Every component's license and notice: THIRD_PARTY_NOTICES.txt in the aircraft folder.\n"
     ))

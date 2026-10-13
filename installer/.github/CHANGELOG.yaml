@@ -13,25 +13,25 @@ releases:
     changes:
       - title: First release, a fork of the FlyByWire Installer made for X-Plane 12
         categories: [Core]
-        authors: [A380X X-Plane port]
+        authors: [A380 for X-Plane 12]
       - title: Installs and updates the A380X from its GitHub releases, downloading only the updates since your version
         categories: [Install]
-        authors: [A380X X-Plane port]
-      - title: Downloads SASL from 1-sim and X-Plane Sounds' A380 Sound Pack (RR) from its own link during installation
+        authors: [A380 for X-Plane 12]
+      - title: Downloads SASL from 1-sim and FTSiM+'s A380RR_Sp sound pack (Peter Hager demo) from its own link during installation
         categories: [Install]
-        authors: [A380X X-Plane port]
+        authors: [A380 for X-Plane 12]
       - title: Builds the aircraft's .acf and wing airfoils from your own X-Plane 12's Airbus A330-300
         categories: [Install]
-        authors: [A380X X-Plane port]
+        authors: [A380 for X-Plane 12]
       - title: Downloads the FCU display font from FlyByWire's repository
         categories: [Install]
-        authors: [A380X X-Plane port]
+        authors: [A380 for X-Plane 12]
       - title: Stable (4K), Stable (8K) and Stable (2K) versions; 2K downscales every texture after the download
         categories: [Textures]
-        authors: [A380X X-Plane port]
+        authors: [A380 for X-Plane 12]
       - title: AMDB Bridge for the airport map and charts, with its release notes from GitHub
         categories: [AMDB Bridge]
-        authors: [A380X X-Plane port]
+        authors: [A380 for X-Plane 12]
       - title: Release notes read straight from GitHub
         categories: [UI]
-        authors: [A380X X-Plane port]
+        authors: [A380 for X-Plane 12]

@@ -33,7 +33,7 @@ const xplaneOnly =
 
 const updates =
   'Updates come from GitHub: once installed, only what changed since your version is downloaded. ' +
-  "SASL is downloaded from 1-sim and X-Plane Sounds' A380 Sound Pack (RR) from its own link; the .acf and " +
+  "SASL is downloaded from 1-sim and FTSiM+'s A380RR_Sp sound pack (Peter Hager demo) from its own link; the .acf and " +
   "wing airfoils are built from your own X-Plane 12's Airbus A330-300.\n\n";
 
 export const defaultConfiguration: Configuration = {

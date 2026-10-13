@@ -48,12 +48,14 @@ supported by FlyByWire Simulations, Microsoft, Laminar Research or Airbus.
 
 7. Sounds
    Engine, ground, weather, warning, callout and switch sounds (fmod/):
-   x_A380 Sound Pack (RR) by X-Plane Sounds. The pack is not in the
-   release: during installation the installer downloads the free
-   A380_Sp(RR)(P)(C).zip (or uses your own copy) and adapts it to this
-   aircraft on your computer (its sound parameters renamed to this
-   aircraft's, and this aircraft's own sound positions applied to its
-   A388.snd).
+   A380RR_Sp v1.2, demo "P-HAGER" edition (for Peter Hager's A380), by
+   FTSiM+Sounds, https://www.ftsimplus.net/a380rr.html. The pack is not in
+   the release: during installation the installer downloads the demo from
+   FTSiM+'s own link (or uses your own copy of A380_Sp(RR)(P)(C).zip) and
+   adapts it to this aircraft on your computer (its sound parameters
+   renamed to this aircraft's, and this aircraft's own sound positions
+   applied to its A388.snd). FTSiM+'s full version is on their Patreon,
+   https://www.patreon.com/FTSIM.
 
 8. Laminar Research
    The aircraft's .acf is built on Laminar Research's Airbus A330-300, and

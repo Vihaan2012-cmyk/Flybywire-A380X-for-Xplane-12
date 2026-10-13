@@ -288,7 +288,7 @@ enum Step {
     BuildAcf { template: String, patch: String, to: String },
     /// Download a file the release does not carry, checked against its SHA-256.
     Download { url: String, sha256: String, to: String },
-    /// Install X-Plane Sounds' A380 pack, from the user's Downloads or its own download link: its banks with our dataref names, its GUIDs, and our .snd built on its own.
+    /// Install FTSiM+'s A380RR_Sp sound pack (demo, Peter Hager edition), from the user's Downloads or FTSiM+'s own download link: its banks with our dataref names, its GUIDs, and our .snd built on its own.
     SoundPack {
         #[serde(default)]
         url: Option<String>,
@@ -664,15 +664,15 @@ fn run_steps(a: &Answers, ctx: &Ctx, steps: &Steps, release: &Path, aircraft: &P
                 let local = a.sound_pack.clone().filter(|p| sha256_file(p).is_ok_and(|h| h.eq_ignore_ascii_case(zip_sha256)));
                 let zip = match local {
                     Some(p) => {
-                        ctx.log(format!("A380 Sound Pack: using {}", p.display()));
+                        ctx.log(format!("A380RR_Sp: using {}", p.display()));
                         p
                     }
                     None => {
-                        ctx.status("Downloading X-Plane Sounds' A380 Sound Pack...");
+                        ctx.status("Downloading FTSiM+'s A380RR_Sp sound pack...");
                         fetch_cached(url.as_deref().unwrap_or(SOUND_PACK_URL), zip_sha256, work_dir, ctx)?
                     }
                 };
-                ctx.status("Installing the A380 Sound Pack...");
+                ctx.status("Installing FTSiM+'s A380RR_Sp sound pack...");
                 let files = read_sound_pack(&zip, sha256)?;
                 let dst = aircraft.join(to);
                 std::fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
@@ -819,7 +819,7 @@ fn read_sound_pack(zip_path: &Path, expected: &std::collections::BTreeMap<String
         out.insert(wanted.clone(), data);
     }
     for (name, hash) in expected {
-        let data = out.get(name).ok_or_else(|| format!("{} has no fmod/{name}; is it X-Plane Sounds' A380_Sp(RR)(P)(C).zip?", zip_path.display()))?;
+        let data = out.get(name).ok_or_else(|| format!("{} has no fmod/{name}; is it FTSiM+'s A380_Sp(RR)(P)(C).zip (A380RR_Sp demo, P-HAGER)?", zip_path.display()))?;
         if !hex(&Sha256::digest(data)).eq_ignore_ascii_case(hash) {
             return Err(format!("fmod/{name} in {} is not the version this release was made for", zip_path.display()));
         }
