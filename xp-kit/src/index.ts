@@ -1,0 +1,11 @@
+export * from './sub';
+export * from './components';
+export * from './bus';
+export * from './math';
+export * from './navdata';
+export * from './extra';
+import { Cell, DerivedCell, FeedCell, ListCell } from './sub';
+export const cell: typeof Cell.create = ((...a: any[]) => (Cell.create as any)(...a)) as any;
+export const derive: typeof DerivedCell.create = ((...a: any[]) => (DerivedCell.create as any)(...a)) as any;
+export const feed: typeof FeedCell.create = ((...a: any[]) => (FeedCell.create as any)(...a)) as any;
+export const list: typeof ListCell.create = ((...a: any[]) => (ListCell.create as any)(...a)) as any;

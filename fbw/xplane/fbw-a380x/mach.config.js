@@ -3,13 +3,14 @@ const postCssPlugin = require('esbuild-style-plugin-v2');
 const tailwind = require('tailwindcss');
 const postCssColorFunctionalNotation = require('postcss-color-functional-notation');
 const postCssInset = require('postcss-inset');
-const { typecheckingPlugin, xpAvionicsPlugin } = require('#build-utils');
+const { typecheckingPlugin, xpAvionicsPlugin, xpKitPlugin } = require('#build-utils');
 
 /** @type { import('@synaptic-simulations/mach').MachConfig } */
 module.exports = {
   packageName: 'A380X',
   packageDir: 'out/flybywire-aircraft-a380-842',
   plugins: [
+    xpKitPlugin(),
     xpAvionicsPlugin(),
     imagePlugin({ limit: -1 }),
     postCssPlugin({

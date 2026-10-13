@@ -1,0 +1,16 @@
+{
+  "name": "xp-kit",
+  "version": "0.1.0",
+  "description": "Avionics UI library and build transform for FlyByWire instruments on X-Plane",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --target=es2020 --outfile=dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "0.19.9",
+    "typescript": "6.0.3"
+  }
+}

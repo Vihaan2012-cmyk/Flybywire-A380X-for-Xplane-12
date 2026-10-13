@@ -103,8 +103,15 @@ if [ ! -f "$PFD_HTML" ]; then
 fi
 MSFS_SDK_FILES=$(grep -rlE 'node_modules/@microsoft/msfs-sdk|msfssdk' "$AIRCRAFT/html_ui" --include='*.js' --include='*.map' 2>/dev/null || true)
 if [ -n "$MSFS_SDK_FILES" ]; then
-  echo "install.sh: FAIL: Microsoft's avionics library (MSFS-only license) is in these installed files; rebuild FlyByWire's instruments with XP_AVIONICS set to the xp-avionics build:" >&2
+  echo "install.sh: FAIL: Microsoft's avionics library (MSFS-only license) is in these installed files; rebuild FlyByWire's instruments with XP_KIT set to the xp-kit build (docs/sdk-free.md):" >&2
   echo "$MSFS_SDK_FILES" >&2
+  exit 1
+fi
+find "$AIRCRAFT/html_ui" -name '*.map' -delete
+SDK_SHAPED=$(grep -rlE '\b(FSComponent|DisplayComponent|MappedSubject|ConsumerSubject|getSubscriber|whenChanged|onAfterRender|buildComponent)\b' "$AIRCRAFT/html_ui" --include='*.js' 2>/dev/null || true)
+if [ -n "$SDK_SHAPED" ]; then
+  echo "install.sh: FAIL: these installed bundles still use the avionics framework's names; build FlyByWire's instruments with XP_KIT set (docs/sdk-free.md):" >&2
+  echo "$SDK_SHAPED" >&2
   exit 1
 fi
 python -I tools/third_party_licenses.py "$AIRCRAFT" || { echo "install.sh: FAIL: could not write THIRD_PARTY_LICENSES.txt" >&2; exit 1; }

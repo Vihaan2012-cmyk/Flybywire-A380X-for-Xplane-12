@@ -18,13 +18,13 @@ supported by FlyByWire Simulations, Microsoft, Laminar Research or Airbus.
 2. Microsoft Flight Simulator
    FlyByWire's A380X is an add-on for Microsoft Flight Simulator. This port
    contains no Microsoft Flight Simulator content: its models and textures
-   are FlyByWire's own, and its instruments run on xp-avionics, this port's
-   own implementation of the avionics framework they are written for, not on
-   Microsoft's MSFS avionics library.
+   are FlyByWire's own, and its instruments are built onto xp-kit, this
+   port's own avionics UI library, by a build-time transform. They contain
+   no part of Microsoft's MSFS avionics library.
    Microsoft Flight Simulator (c) Microsoft Corporation.
 
 3. The port's own software
-   The systems plugin, the display host (XPHFBW), xp-avionics, the aircraft
+   The systems plugin, the display host (XPHFBW), xp-kit, the aircraft
    converter and the installer: GNU General Public License v3.
    Source: https://github.com/Vihaan2012-cmyk/Flybywire-A380X-for-Xplane-12
 

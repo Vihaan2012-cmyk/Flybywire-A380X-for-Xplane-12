@@ -49,6 +49,7 @@ function esbuildModuleBuild(projectRoot, globalName, entryPoint, outFile, tsConf
         define: { DEBUG: 'false', ...defineEnvVars() },
 
         plugins: [
+            xpKitPlugin(),
             xpAvionicsPlugin(),
             typecheckingPlugin(),
         ],
@@ -88,6 +89,16 @@ function xpAvionicsPlugin() {
 }
 
 module.exports.xpAvionicsPlugin = xpAvionicsPlugin;
+
+function xpKitPlugin() {
+    const root = process.env.XP_KIT;
+    if (!root) {
+        return { name: 'xp-kit-off', setup() {} };
+    }
+    return require(path.resolve(root, '..', 'tools', 'transform.cjs')).plugin();
+}
+
+module.exports.xpKitPlugin = xpKitPlugin;
 
 /**
  * Returns an esbuild plugin which runs `tsc` typechecking
