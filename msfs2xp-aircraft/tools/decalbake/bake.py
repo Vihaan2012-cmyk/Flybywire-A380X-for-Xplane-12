@@ -30,6 +30,7 @@ MIN_DOT = 0.4
 MAX_GAP = 0.006
 RES = 4096
 OVERLAP_RES = 2048
+UPSCALE_4K = {'MIP_KNOBS_02_4K_ALBEDO'}
 
 
 def light_canon(main_lua):
@@ -499,7 +500,18 @@ def rebuild_base(objdir, work, tex):
     if os.environ.get('BAKE_CLEAN'):
         from clean import clean_rgb
         base[..., :3] = clean_rgb(base[..., :3], base.shape[1] / 4096)[0]
-    return apply_copies(base, tex, (0.0, 0.0, 0.0, 1.0)), best
+    base = apply_copies(base, tex, (0.0, 0.0, 0.0, 1.0))
+    if stem.replace('A380_COCKPIT_', '') in UPSCALE_4K and base.shape[1] < RES:
+        base = upscale(base, RES)
+    return base, best
+
+
+def upscale(base, res):
+    h = base.shape[0] * res // base.shape[1]
+    rgb = lin(np.clip(base[..., :3], 0, 1))
+    chans = [np.asarray(Image.fromarray(rgb[..., c].astype(np.float32), 'F').resize((res, h), Image.BICUBIC)) for c in range(3)]
+    alpha = np.asarray(Image.fromarray(base[..., 3].astype(np.float32), 'F').resize((res, h), Image.BICUBIC))
+    return np.dstack([srgb(np.clip(np.dstack(chans), 0, 1)), np.clip(alpha, 0, 1)]).astype(np.float32)
 
 
 def composite(base, items, P_uv, atlases, emis):
