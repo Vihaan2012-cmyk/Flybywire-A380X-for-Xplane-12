@@ -279,21 +279,11 @@
         sc = [c[0], c[1], c[2], c[3] * parseFloat(cs.strokeOpacity) * alpha];
       }
     }
-    return { fill: [fc[0], fc[1], fc[2], fa], sw, sc, under: cs.paintOrder.startsWith('stroke') };
+    return { fill: [fc[0], fc[1], fc[2], fa], sw, sc };
   }
 
   function emitText(w, cs, text, x, y, baseline, col) {
-    const t = w.str(text);
-    const f = w.str(fontFamily(cs));
-    const size = parseFloat(cs.fontSize);
-    const weight = weightOf(cs);
-    const italic = italicOf(cs);
-    if (col.under && col.sw > 0 && col.sc[3] > 0 && col.fill[3] > 0) {
-      w.nums(OP.TEXT, [t, f, size, weight, italic, x, y, 0, baseline, 0, 0, 0, 0, col.sw, col.sc[0], col.sc[1], col.sc[2], col.sc[3]]);
-      w.nums(OP.TEXT, [t, f, size, weight, italic, x, y, 0, baseline, col.fill[0], col.fill[1], col.fill[2], col.fill[3], 0, 0, 0, 0, 0]);
-      return;
-    }
-    w.nums(OP.TEXT, [t, f, size, weight, italic, x, y, 0, baseline, col.fill[0], col.fill[1], col.fill[2], col.fill[3], col.sw, col.sc[0], col.sc[1], col.sc[2], col.sc[3]]);
+    w.nums(OP.TEXT, [w.str(text), w.str(fontFamily(cs)), parseFloat(cs.fontSize), weightOf(cs), italicOf(cs), x, y, 0, baseline, col.fill[0], col.fill[1], col.fill[2], col.fill[3], col.sw, col.sc[0], col.sc[1], col.sc[2], col.sc[3]]);
   }
 
   function textRun(w, el, cs, alpha) {
@@ -572,7 +562,7 @@
     if (HTML_SKIP.has(el.tagName)) return;
     const cs = getComputedStyle(el);
     if (cs.display === 'none') return;
-    const a = alpha * (el === document.documentElement && globalThis.__xphfbwVectorHidden ? 1 : parseFloat(cs.opacity));
+    const a = alpha * (parseFloat(cs.opacity) ?? 1);
     if (!(a > 0)) return;
     let saved = false;
     if (cs.overflowX !== 'visible' || cs.overflowY !== 'visible') {

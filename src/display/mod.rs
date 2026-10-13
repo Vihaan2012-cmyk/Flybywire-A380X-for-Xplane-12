@@ -728,8 +728,7 @@ impl Displays {
                 let Some((src, crop)) = Self::picture(shown) else { continue };
                 let sub = gl::Target { framebuffer: target.framebuffer, viewport: [vx + (x0 * scale).round() as c_int, vy, (MFD_HALF_WIDTH * scale).round() as c_int, vh] };
                 let region = crop.unwrap_or([0., 0., SCREENS[src].width as f32, SCREENS[src].height as f32]);
-                let b = brightness.get(half).copied().unwrap_or(0.);
-                let _ = self.draw_vector_source(src, crop, sub, b) || self.draw_bridge_source(src, crop, sub, vec![b], vec![region]);
+                self.draw_bridge_source(src, crop, sub, vec![brightness.get(half).copied().unwrap_or(0.)], vec![region]);
             }
             return true;
         }
@@ -737,31 +736,11 @@ impl Displays {
         match route[du.id()].filter(|f| *f != du).and_then(Self::picture) {
             Some((src, crop)) => {
                 let region = crop.unwrap_or([0., 0., SCREENS[src].width as f32, SCREENS[src].height as f32]);
-                let b = self.unit_brightness(index).first().copied().unwrap_or(0.);
-                self.draw_vector_source(src, crop, target, b) || self.draw_bridge_source(src, crop, target, vec![b], vec![region]) || self.draw_bridge_screen(index, target)
+                let brightness = vec![self.unit_brightness(index).first().copied().unwrap_or(0.)];
+                self.draw_bridge_source(src, crop, target, brightness, vec![region]) || self.draw_bridge_screen(index, target)
             }
             None => self.draw_bridge_screen(index, target),
         }
-    }
-
-    fn draw_vector_source(&mut self, src: usize, crop: Option<[f32; 4]>, target: gl::Target, brightness: f32) -> bool {
-        if !vector_live(src) {
-            return false;
-        }
-        let Some(Ok(renderer)) = self.renderer.as_mut() else { return false };
-        let s = &mut self.screens[src];
-        if s.mesh.width == 0 || s.mesh.height == 0 {
-            return false;
-        }
-        let (kx, ky) = (s.mesh.width as f32 / s.def.width as f32, s.mesh.height as f32 / s.def.height as f32);
-        let region = match crop {
-            Some([x0, y0, x1, y1]) => [(x0 * kx).round() as i32, (y0 * ky).round() as i32, (x1 * kx).round() as i32, (y1 * ky).round() as i32],
-            None => [0, 0, s.mesh.width as i32, s.mesh.height as i32],
-        };
-        let natives: Vec<_> = s.mesh.natives.iter().map(|id| crate::mapdata::plugin::native_image(id)).collect();
-        let levels = vec![brightness; s.def.dimming.len().max(1)];
-        renderer.draw(&mut s.gpu, s.stream, &s.mesh, &s.steps, region, target, &levels, &natives, &mut self.res);
-        true
     }
 
     fn draw_bridge_source(&mut self, index: usize, crop: Option<[f32; 4]>, target: gl::Target, brightness: Vec<f32>, dimming: Vec<[f32; 4]>) -> bool {

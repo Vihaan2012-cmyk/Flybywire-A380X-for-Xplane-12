@@ -571,7 +571,6 @@ impl Tessellator {
         // vertically and quarter pixels horizontally, which keeps it crisp.
         let upright = m.b.abs() < 1e-9 && m.c.abs() < 1e-9 && m.a > 0. && (m.a - m.d).abs() < 1e-9;
         let px = size * m.mean_scale();
-        let boost = super::text::boost_for(colour);
         let generation = res.atlas.generation;
         for &(glyph, gx) in &run.glyphs {
             let (entry, quad) = if upright {
@@ -579,12 +578,12 @@ impl Tessellator {
                 let quarters = (dx * SUBPIXEL as f64).round();
                 let whole = (quarters / SUBPIXEL as f64).floor();
                 let subpixel = (quarters - whole * SUBPIXEL as f64) as u32;
-                let Some(e) = res.atlas.glyph(&res.fonts, run.face, glyph, px, subpixel, boost).map_err(|_| Stale)? else { continue };
+                let Some(e) = res.atlas.glyph(&res.fonts, run.face, glyph, px, subpixel).map_err(|_| Stale)? else { continue };
                 let (left, top) = (whole as f32 + e.left, dy.round() as f32 + e.top);
                 let (w, h) = (e.w as f32, e.h as f32);
                 (e, [[left, top], [left + w, top], [left + w, top + h], [left, top + h]])
             } else {
-                let Some(e) = res.atlas.glyph(&res.fonts, run.face, glyph, px, 0, boost).map_err(|_| Stale)? else { continue };
+                let Some(e) = res.atlas.glyph(&res.fonts, run.face, glyph, px, 0).map_err(|_| Stale)? else { continue };
                 let s = m.mean_scale();
                 let corner = |fx: f32, fy: f32| {
                     let [dx, dy] = m.apply(x0 + gx + fx as f64 / s, y0 + fy as f64 / s);
