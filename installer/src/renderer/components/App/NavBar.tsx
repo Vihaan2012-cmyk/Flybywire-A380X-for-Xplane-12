@@ -4,8 +4,6 @@ import store, { useIsDarkTheme, useSetting } from 'renderer/rendererSettings';
 import { Publisher } from 'renderer/utils/InstallerConfiguration';
 import { useAppSelector } from 'renderer/redux/store';
 import { Gear, Wrench, ArrowRepeat } from 'react-bootstrap-icons';
-import Msfs2020logo from '../../assets/msfs2020.png';
-import Msfs2024logo from '../../assets/msfs2024.png';
 import { InstallStatus } from 'renderer/components/AddonSection/Enums';
 import { enabledSimulators, nextSim, Simulators } from 'renderer/utils/SimManager';
 import cn from 'renderer/utils/cn';
@@ -33,8 +31,6 @@ export const NavBar: FC = ({ children }) => {
     <div className={`${bg} flex h-full flex-col justify-between border-r border-navy-light px-6 py-7`}>
       <div className="mb-5 border-b-2 border-navy-light pb-5">
         <ManagedSimSelector to="/" className="border-none" handleClick={() => setManagedSim(nextSim(managedSim))}>
-          {managedSim === Simulators.Msfs2020 && <img width={36} src={Msfs2020logo} alt={`MSFS 2020 Logo`} />}
-          {managedSim === Simulators.Msfs2024 && <img width={36} src={Msfs2024logo} alt={`MSFS 2024 Logo`} />}
           {managedSim === Simulators.XPlane12 &&
             (xplaneLogo ? (
               <img width={36} src={xplaneLogo} alt="X-Plane 12" />

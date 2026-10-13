@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use systems::simulation::{SimulatorReaderWriter, VariableIdentifier, VariableRegistry};
 
@@ -51,7 +51,108 @@ const REPLACED: &[&str] = &[
     "detent",
     "IdleDetent",
     "parkbrk",
+    "CRC_380",
+    "mastercaution",
+    "cavcharge",
+    "cchordloop",
+    "cchordshort",
+    "aural_stall_new",
+    "aural_pullup_new",
+    "aural_sink_rate_new",
+    "aural_dontsink_new",
+    "aural_too_low_gear",
+    "aural_too_low_flaps",
+    "aural_too_low_terrain",
+    "new_2500",
+    "new_2_500",
+    "new_1000",
+    "new_500",
+    "new_400",
+    "new_300",
+    "new_200",
+    "new_100",
+    "50_380",
+    "40_380",
+    "30_380",
+    "20_380",
+    "10_380",
+    "new_retard",
+    "aural_minimumnew",
+    "light_switch_seatbelt",
+    "flaps380",
+    "flaps380stop",
+    "slats380stop",
 ];
+
+const CALLOUTS: &[(&str, u32)] = &[
+    ("new_2500", 2500),
+    ("new_2_500", 2500),
+    ("new_1000", 1000),
+    ("new_500", 500),
+    ("new_400", 400),
+    ("new_300", 300),
+    ("new_200", 200),
+    ("new_100", 100),
+    ("50_380", 50),
+    ("40_380", 40),
+    ("30_380", 30),
+    ("20_380", 20),
+    ("10_380", 10),
+];
+
+const CALLOUT_HEIGHTS: [u32; 12] = [2500, 1000, 500, 400, 300, 200, 100, 50, 40, 30, 20, 10];
+
+const CLICKS: &[(&str, &str)] = &[
+    ("pb1on", "p1"),
+    ("mpb1on", "p1"),
+    ("fcubutton", "p1"),
+    ("roundbutton", "p1"),
+    ("CHRon", "p1"),
+    ("SETon", "p1"),
+    ("RSTon", "p1"),
+    ("firetestbutton", "p1"),
+    ("pb1off", "p2"),
+    ("mpb1off", "p2"),
+    ("CHRoff", "p2"),
+    ("SEToff", "p2"),
+    ("RSToff", "p2"),
+    ("mcdubuttons", "p3"),
+    ("firepb", "p4"),
+    ("engmaster", "s1"),
+    ("lswitch", "s2"),
+    ("flapcover", "s4"),
+    ("firepbguard", "s4"),
+    ("revlever", "sel0"),
+    ("turnknob", "sel1"),
+    ("smallknob", "sel1"),
+    ("SETknob", "sel1"),
+    ("RMPknob", "sel1"),
+    ("QNHknob", "sel1"),
+    ("pulloutknob", "sel2"),
+    ("clds", "sel2"),
+    ("rudtrim", "sel3"),
+];
+
+const CLICK_SOUNDS: [&str; 12] = ["p1", "p2", "p3", "p4", "p5", "s1", "s2", "s3", "s4", "sel0", "sel1", "sel2"];
+
+const REPEATED_AURAL_HOLD_S: f64 = 1.5;
+const CAVALRY_MIN_S: f64 = 1.1;
+const CCHORD_REPEAT_S: f64 = 1.7;
+const STALL_REPEAT_S: f64 = 2.6;
+const CALLOUT_HOLD_S: f64 = 0.5;
+const FLAPS_STILL_S: f64 = 0.3;
+
+static REQUESTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn request(name: &str) {
+    if let Ok(mut queue) = REQUESTS.lock() {
+        queue.push(name.to_owned());
+    }
+}
+
+pub fn click_sound(event: &str) -> Option<&'static str> {
+    CLICKS.iter().find(|(e, _)| e.eq_ignore_ascii_case(event)).map(|(_, c)| *c)
+}
 
 #[cfg(feature = "js")]
 pub fn plugin_dir() -> Option<std::path::PathBuf> {
@@ -126,6 +227,18 @@ pub const BANK_PARAMETERS: &[(&str, &str)] = &[
     ("sim/sounds/PA/Approach", "fbw/snd/pa_approach"),
     ("sim/sounds/PA/After_Landing", "fbw/snd/pa_after_landing"),
     ("sim/sounds/PA/Gate_Arv", "fbw/snd/pa_gate_arv"),
+    ("1-sim/lamp/223", "fbw/snd/crc_lt"),
+    ("1-sim/lamp/224", "fbw/snd/sc_lmp"),
+    ("AirbusFBW/RetardWarning", "fbw/snd/retard_on"),
+    ("1-sim/L/throttle", "fbw/snd/retd_thr"),
+    ("sim/cockpit2/annunciators/stall_warning", "fbw/snd/stall_on"),
+    ("sim/cockpit2/gauges/indicators/radio_altimeter_dh_lit_pilot", "fbw/snd/minimum_lit"),
+    ("sim/cockpit/warnings/annunciators/GPWS", "fbw/snd/gpws_on"),
+    ("sim/flightmodel/engine/ENGN_thro_use[0]", "fbw/snd/dsink_thr"),
+    ("sim/cockpit/Warning/Low_Gear", "fbw/snd/low_gear"),
+    ("sim/cockpit/Warning/Low_Flaps", "fbw/snd/low_flaps"),
+    ("sim/cockpit/Warning/Low_Terrain", "fbw/snd/low_terrain"),
+    ("sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot", "fbw/snd/radio_alt_callout"),
 ];
 
 const PA_FLAGS: &[&str] = &[
@@ -278,6 +391,131 @@ struct Flight {
 }
 
 #[derive(Default)]
+struct Aurals {
+    retard_s: f64,
+    pull_s: f64,
+    sink_s: f64,
+    dont_sink_s: f64,
+    low_gear_s: f64,
+    low_flaps_s: f64,
+    low_terrain_s: f64,
+    cavalry_s: f64,
+    cchord_s: f64,
+    stall_s: f64,
+    callout_s: f64,
+    callout_ra: f64,
+    flaps_still_s: f64,
+    flaps_moving: bool,
+    last_flaps: Option<(f64, f64)>,
+    last_sc: bool,
+    last_cchord: bool,
+    last_cchord_short: bool,
+    last_stall: bool,
+    last_cabin: Option<(f64, f64)>,
+    single_chime: f64,
+    cchord: f64,
+    stall: f64,
+    minimum: f64,
+    seatbelt: f64,
+    flaps_stop: f64,
+    callouts: [f64; 12],
+    clicks: [f64; 12],
+}
+
+struct AuralInputs {
+    crc: bool,
+    single_chime: bool,
+    cavalry: bool,
+    cchord: bool,
+    cchord_short: bool,
+    stall: bool,
+    on_ground: bool,
+    cabin: (f64, f64),
+    flaps: (f64, f64),
+}
+
+impl Aurals {
+    fn request(&mut self, name: &str) {
+        if let Some((_, height)) = CALLOUTS.iter().find(|(n, _)| *n == name) {
+            if let Some(i) = CALLOUT_HEIGHTS.iter().position(|h| h == height) {
+                self.callouts[i] += 1.;
+                self.callout_ra = *height as f64;
+                self.callout_s = CALLOUT_HOLD_S;
+            }
+            return;
+        }
+        if let Some(i) = click_sound(name).and_then(|c| CLICK_SOUNDS.iter().position(|k| *k == c)) {
+            self.clicks[i] += 1.;
+            return;
+        }
+        match name {
+            "new_retard" => self.retard_s = REPEATED_AURAL_HOLD_S,
+            "aural_pullup_new" => self.pull_s = REPEATED_AURAL_HOLD_S,
+            "aural_sink_rate_new" => self.sink_s = REPEATED_AURAL_HOLD_S,
+            "aural_dontsink_new" => self.dont_sink_s = REPEATED_AURAL_HOLD_S,
+            "aural_too_low_gear" => self.low_gear_s = REPEATED_AURAL_HOLD_S,
+            "aural_too_low_flaps" => self.low_flaps_s = REPEATED_AURAL_HOLD_S,
+            "aural_too_low_terrain" => self.low_terrain_s = REPEATED_AURAL_HOLD_S,
+            "aural_minimumnew" => self.minimum += 1.,
+            _ => {}
+        }
+    }
+
+    fn step(&mut self, i: &AuralInputs, dt: f64) {
+        for t in [&mut self.retard_s, &mut self.pull_s, &mut self.sink_s, &mut self.dont_sink_s, &mut self.low_gear_s, &mut self.low_flaps_s, &mut self.low_terrain_s, &mut self.callout_s] {
+            *t = (*t - dt).max(0.);
+        }
+        if i.single_chime && !self.last_sc {
+            self.single_chime += 1.;
+        }
+        self.last_sc = i.single_chime;
+        self.cavalry_s = if i.cavalry { CAVALRY_MIN_S } else { (self.cavalry_s - dt).max(0.) };
+        if i.cchord && (!self.last_cchord || self.cchord_s <= 0.) {
+            self.cchord += 1.;
+            self.cchord_s = CCHORD_REPEAT_S;
+        }
+        if i.cchord_short && !self.last_cchord_short {
+            self.cchord += 1.;
+        }
+        self.cchord_s = (self.cchord_s - dt).max(0.);
+        self.last_cchord = i.cchord;
+        self.last_cchord_short = i.cchord_short;
+        let stall = i.stall && !i.on_ground;
+        if stall && (!self.last_stall || self.stall_s <= 0.) {
+            self.stall += 1.;
+            self.stall_s = STALL_REPEAT_S;
+        }
+        self.stall_s = (self.stall_s - dt).max(0.);
+        self.last_stall = stall;
+        if self.last_cabin.is_some_and(|c| c != i.cabin) {
+            self.seatbelt += 1.;
+        }
+        self.last_cabin = Some(i.cabin);
+        let moved = self.last_flaps.is_some_and(|(f, s)| (f - i.flaps.0).abs() > 1e-3 || (s - i.flaps.1).abs() > 1e-3);
+        self.last_flaps = Some(i.flaps);
+        if moved {
+            self.flaps_moving = true;
+            self.flaps_still_s = 0.;
+        } else if self.flaps_moving {
+            self.flaps_still_s += dt;
+            if self.flaps_still_s >= FLAPS_STILL_S {
+                self.flaps_moving = false;
+                self.flaps_stop += 1.;
+            }
+        }
+        let _ = i.crc;
+    }
+
+    fn callout_ra(&self, radio_alt: f64) -> f64 {
+        if self.callout_s > 0. {
+            self.callout_ra
+        } else {
+            radio_alt
+        }
+    }
+}
+
+#[derive(Default)]
 struct Announcements {
     done: u8,
     heard: bool,
@@ -375,6 +613,46 @@ struct Inputs {
     burning: Option<DataRef>,
     landing_lights: Option<DataRef>,
     flight_time: Option<DataRef>,
+    slats_percent: VariableIdentifier,
+    fwc_crc: VariableIdentifier,
+    fwc_sc: VariableIdentifier,
+    fwc_cavalry: VariableIdentifier,
+    alt_deviation: VariableIdentifier,
+    alt_deviation_short: VariableIdentifier,
+    stall_aural: VariableIdentifier,
+    seatbelt_switch: VariableIdentifier,
+    no_smoking_memo: VariableIdentifier,
+}
+
+struct AuralOutputs {
+    crc: Value,
+    single_chime: Value,
+    cavalry: Value,
+    cchord: Value,
+    stall: Value,
+    retard: Value,
+    minimum: Value,
+    gpws_pull: Value,
+    gpws_sink: Value,
+    gpws_dont_sink: Value,
+    gpws_low: Value,
+    seatbelt: Value,
+    flaps_moving: Value,
+    flaps_stop: Value,
+    callouts: Vec<Value>,
+    clicks: Vec<Value>,
+    crc_lamp: Value,
+    sc_lamp: Value,
+    retard_on: Value,
+    retard_thr: Value,
+    stall_on: Value,
+    minimum_lit: Value,
+    gpws_on: Value,
+    dsink_thr: Value,
+    low_gear: Value,
+    low_flaps: Value,
+    low_terrain: Value,
+    radio_alt_callout: Value,
 }
 
 struct Outputs {
@@ -423,6 +701,8 @@ struct Outputs {
 pub struct SoundPack {
     inputs: Inputs,
     outputs: Outputs,
+    aural_outputs: AuralOutputs,
+    aurals: Aurals,
     _published: Published,
     apu_on: bool,
     apu_n: f64,
@@ -473,6 +753,15 @@ impl SoundPack {
             burning: xplm.find("sim/flightmodel2/engines/engine_is_burning_fuel"),
             landing_lights: xplm.find("sim/cockpit2/switches/landing_lights_on"),
             flight_time: xplm.find("sim/time/total_flight_time_sec"),
+            slats_percent: get("LEFT_SLATS_POSITION_PERCENT".into()),
+            fwc_crc: get("FWC_CRC".into()),
+            fwc_sc: get("FWC_SC".into()),
+            fwc_cavalry: get("FWC_CAVALRY_CHARGE".into()),
+            alt_deviation: get("ALT_DEVIATION".into()),
+            alt_deviation_short: get("ALT_DEVIATION_SHORT".into()),
+            stall_aural: get("AUDIO_ROP_MAX_BRAKING".into()),
+            seatbelt_switch: get("CABIN SEATBELTS ALERT SWITCH".into()),
+            no_smoking_memo: get("NO_SMOKING_MEMO".into()),
         };
         let mut p = Published::default();
         let mut n = |name: &str| p.number(&format!("fbw/snd/{name}"), 0., false);
@@ -518,7 +807,45 @@ impl SoundPack {
             throttle_input: p.numbers(&dataref_of("AirbusFBW/throttle_input["), 4),
             _pa_flags: PA_FLAGS.iter().map(|f| p.number(&dataref_of(f), 0., false)).collect(),
         };
-        crate::log("sound pack: fmod/ found; FlyByWire's engine, APU, gear, wind and lever sounds give way to it, fbw/snd/* published");
+        let mut n = |name: &str| p.number(&format!("fbw/snd/{name}"), 0., false);
+        let (crc, single_chime, cavalry, cchord, stall, retard, minimum) =
+            (n("aural_crc"), n("aural_single_chime"), n("aural_cavalry"), n("aural_cchord"), n("aural_stall"), n("aural_retard"), n("aural_minimum"));
+        let (gpws_pull, gpws_sink, gpws_dont_sink, gpws_low) = (n("gpws_pull"), n("gpws_sink"), n("gpws_dont_sink"), n("gpws_low"));
+        let (seatbelt, flaps_moving, flaps_stop) = (n("seatbelt_chime"), n("flaps_moving"), n("flaps_stop"));
+        let callouts: Vec<Value> = CALLOUT_HEIGHTS.iter().map(|h| n(&format!("callout_{h}"))).collect();
+        let clicks: Vec<Value> = CLICK_SOUNDS.iter().map(|c| n(&format!("click_{c}"))).collect();
+        let mut bank = |original: &str, value: f64| p.number(&dataref_of(original), value, false);
+        let aural_outputs = AuralOutputs {
+            crc,
+            single_chime,
+            cavalry,
+            cchord,
+            stall,
+            retard,
+            minimum,
+            gpws_pull,
+            gpws_sink,
+            gpws_dont_sink,
+            gpws_low,
+            seatbelt,
+            flaps_moving,
+            flaps_stop,
+            callouts,
+            clicks,
+            crc_lamp: bank("1-sim/lamp/223", 1.),
+            sc_lamp: bank("1-sim/lamp/224", 1.),
+            retard_on: bank("AirbusFBW/RetardWarning", 1.),
+            retard_thr: bank("1-sim/L/throttle", 0.5),
+            stall_on: bank("sim/cockpit2/annunciators/stall_warning", 1.),
+            minimum_lit: bank("sim/cockpit2/gauges/indicators/radio_altimeter_dh_lit_pilot", 1.),
+            gpws_on: bank("sim/cockpit/warnings/annunciators/GPWS", 1.),
+            dsink_thr: bank("sim/flightmodel/engine/ENGN_thro_use[0]", 1.),
+            low_gear: bank("sim/cockpit/Warning/Low_Gear", 0.),
+            low_flaps: bank("sim/cockpit/Warning/Low_Flaps", 0.),
+            low_terrain: bank("sim/cockpit/Warning/Low_Terrain", 0.),
+            radio_alt_callout: bank("sim/cockpit2/gauges/indicators/radio_altimeter_height_ft_pilot", 0.),
+        };
+        crate::log("sound pack: fmod/ found; FlyByWire's engine, APU, gear, wind, lever, warning and callout sounds give way to it, fbw/snd/* published");
         for path in ["sim/operation/sound/engine_volume_ratio", "sim/operation/sound/fan_volume_ratio"] {
             if let Some(d) = xplm.find(path).filter(|&d| xplm.get_f(d) <= 0.) {
                 xplm.set_f(d, 1.);
@@ -527,7 +854,7 @@ impl SoundPack {
         }
         let mut announcements = Announcements::default();
         announcements.reset();
-        Some(Self { inputs, outputs, _published: p, apu_on: false, apu_n: 0., speedbrake: 0., announcements, flight_time_s: 0., since_touchdown_s: TOUCHDOWN_HOLD_S })
+        Some(Self { inputs, outputs, aural_outputs, aurals: Aurals::default(), _published: p, apu_on: false, apu_n: 0., speedbrake: 0., announcements, flight_time_s: 0., since_touchdown_s: TOUCHDOWN_HOLD_S })
     }
 
     pub fn update(&mut self, vars: &mut Vars, xplm: &Xplm, dt: f64) {
@@ -623,6 +950,49 @@ impl SoundPack {
         }
         self.flight_time_s = flight_time_s;
         published::set(o.pa, self.announcements.step(&flight, enabled, dt) as f64);
+
+        let requests = REQUESTS.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+        for name in &requests {
+            self.aurals.request(name);
+        }
+        let aural_inputs = AuralInputs {
+            crc: read(&i.fwc_crc) > 0.5,
+            single_chime: read(&i.fwc_sc) > 0.5,
+            cavalry: read(&i.fwc_cavalry) > 0.5,
+            cchord: read(&i.alt_deviation) > 0.5,
+            cchord_short: read(&i.alt_deviation_short) > 0.5,
+            stall: read(&i.stall_aural) > 0.5,
+            on_ground: flight.on_ground,
+            cabin: (read(&i.seatbelt_switch).round(), read(&i.no_smoking_memo).round()),
+            flaps: (read(&i.flaps_percent), read(&i.slats_percent)),
+        };
+        self.aurals.step(&aural_inputs, dt);
+        let au = &self.aurals;
+        let ao = &self.aural_outputs;
+        published::set(ao.crc, aural_inputs.crc as u8 as f64);
+        published::set(ao.single_chime, au.single_chime);
+        published::set(ao.cavalry, (au.cavalry_s > 0.) as u8 as f64);
+        published::set(ao.cchord, au.cchord);
+        published::set(ao.stall, au.stall);
+        published::set(ao.retard, (au.retard_s > 0.) as u8 as f64);
+        published::set(ao.minimum, au.minimum);
+        published::set(ao.gpws_pull, (au.pull_s > 0.) as u8 as f64);
+        published::set(ao.gpws_sink, (au.sink_s > 0.) as u8 as f64);
+        published::set(ao.gpws_dont_sink, (au.dont_sink_s > 0.) as u8 as f64);
+        published::set(ao.low_gear, (au.low_gear_s > 0.) as u8 as f64);
+        published::set(ao.low_flaps, (au.low_flaps_s > 0.) as u8 as f64);
+        published::set(ao.low_terrain, (au.low_terrain_s > 0.) as u8 as f64);
+        published::set(ao.gpws_low, (au.low_gear_s > 0. || au.low_flaps_s > 0. || au.low_terrain_s > 0.) as u8 as f64);
+        published::set(ao.seatbelt, au.seatbelt);
+        published::set(ao.flaps_moving, au.flaps_moving as u8 as f64);
+        published::set(ao.flaps_stop, au.flaps_stop);
+        for (v, c) in ao.callouts.iter().zip(au.callouts) {
+            published::set(*v, c);
+        }
+        for (v, c) in ao.clicks.iter().zip(au.clicks) {
+            published::set(*v, c);
+        }
+        published::set(ao.radio_alt_callout, au.callout_ra(i.radio_alt.map_or(0., |d| xplm.get_f(d) as f64)));
 
         let agl_ft = i.agl.map_or(0., |d| xplm.get_f(d) as f64 * FT_PER_M);
         let chatter = read(&i.atc_level) > 0.;
@@ -794,12 +1164,86 @@ mod tests {
     }
 
     #[test]
-    fn the_pack_replaces_engine_apu_gear_wind_and_lever_sounds_but_not_warnings() {
-        for e in ["Engine_1_Front", "Engine_4_Rear", "apurun", "380gmain", "cockpitwind380", "detent", "parkbrk"] {
+    fn the_pack_replaces_what_it_has_a_recording_for_and_nothing_else() {
+        for e in ["Engine_1_Front", "Engine_4_Rear", "apurun", "380gmain", "cockpitwind380", "detent", "parkbrk", "CRC_380", "mastercaution", "cavcharge", "new_retard", "50_380", "flaps380"] {
             assert!(replaces(e), "{e}");
         }
-        for e in ["CRC_380", "mastercaution", "cavcharge", "aural_retard", "pb1on", "flaps380", "apuflapopen", "TR380"] {
+        for e in ["V1", "3click", "aural_100above", "new_2000", "5_380", "pb1on", "apuflapopen", "TR380"] {
             assert!(!replaces(e), "{e}");
         }
+    }
+
+    fn quiet() -> AuralInputs {
+        AuralInputs { crc: false, single_chime: false, cavalry: false, cchord: false, cchord_short: false, stall: false, on_ground: false, cabin: (0., 0.), flaps: (0., 0.) }
+    }
+
+    #[test]
+    fn a_callout_plays_its_own_recording_with_the_radio_altitude_inside_its_band() {
+        let mut a = Aurals::default();
+        a.request("50_380");
+        assert_eq!(a.callouts[CALLOUT_HEIGHTS.iter().position(|h| *h == 50).unwrap()], 1.);
+        assert_eq!(a.callout_ra(48.7), 50.);
+        a.step(&quiet(), 0.6);
+        assert_eq!(a.callout_ra(41.2), 41.2, "back to the real height after the callout");
+        a.request("new_2_500");
+        a.request("new_2000");
+        assert_eq!(a.callouts[0], 1., "2500 twice-named, 2000 has no recording");
+    }
+
+    #[test]
+    fn repeated_aurals_hold_between_flybywires_requests_and_stop_after_the_last() {
+        let mut a = Aurals::default();
+        a.request("new_retard");
+        for _ in 0..10 {
+            a.step(&quiet(), 0.1);
+        }
+        assert!(a.retard_s > 0.);
+        a.request("new_retard");
+        for _ in 0..16 {
+            a.step(&quiet(), 0.1);
+        }
+        assert_eq!(a.retard_s, 0.);
+    }
+
+    #[test]
+    fn stall_repeats_in_flight_only_and_the_c_chord_repeats_while_it_lasts() {
+        let mut a = Aurals::default();
+        let stall = AuralInputs { stall: true, ..quiet() };
+        for _ in 0..30 {
+            a.step(&stall, 0.1);
+        }
+        assert_eq!(a.stall, 2., "at once and again after 2.6 s");
+        let mut ground = Aurals::default();
+        ground.step(&AuralInputs { stall: true, on_ground: true, ..quiet() }, 0.1);
+        assert_eq!(ground.stall, 0., "the same variable is max braking on the ground");
+        let mut c = Aurals::default();
+        for _ in 0..20 {
+            c.step(&AuralInputs { cchord: true, ..quiet() }, 0.1);
+        }
+        assert_eq!(c.cchord, 2.);
+    }
+
+    #[test]
+    fn flaps_play_while_moving_and_a_stop_after() {
+        let mut a = Aurals::default();
+        for k in 0..5 {
+            a.step(&AuralInputs { flaps: (k as f64, 0.), ..quiet() }, 0.1);
+        }
+        assert!(a.flaps_moving);
+        for _ in 0..5 {
+            a.step(&AuralInputs { flaps: (4., 0.), ..quiet() }, 0.1);
+        }
+        assert!(!a.flaps_moving);
+        assert_eq!(a.flaps_stop, 1.);
+    }
+
+    #[test]
+    fn cockpit_clicks_map_onto_the_packs_switch_sounds() {
+        assert_eq!(click_sound("pb1on"), Some("p1"));
+        assert_eq!(click_sound("lswitch"), Some("s2"));
+        assert_eq!(click_sound("papertear"), None);
+        let mut a = Aurals::default();
+        a.request("turnknob");
+        assert_eq!(a.clicks[CLICK_SOUNDS.iter().position(|c| *c == "sel1").unwrap()], 1.);
     }
 }

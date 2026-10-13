@@ -47,12 +47,13 @@ supported by FlyByWire Simulations, Microsoft, Laminar Research or Airbus.
    FlyByWire's repository.
 
 7. Sounds
-   Engine, ground and weather sounds (fmod/): x_A380 Sound Pack (RR) by
-   X-Plane Sounds, https://x-plane-sounds.blogspot.com/. The pack is not in
-   the release: the installer takes it from your own download of
-   A380_Sp(RR)(P)(C).zip and adapts it to this aircraft (its sound
-   parameters renamed to this aircraft's, and this aircraft's own sound
-   positions applied to its A388.snd).
+   Engine, ground, weather, warning, callout and switch sounds (fmod/):
+   x_A380 Sound Pack (RR) by X-Plane Sounds. The pack is not in the
+   release: during installation the installer downloads the free
+   A380_Sp(RR)(P)(C).zip (or uses your own copy) and adapts it to this
+   aircraft on your computer (its sound parameters renamed to this
+   aircraft's, and this aircraft's own sound positions applied to its
+   A388.snd).
 
 8. Laminar Research
    The aircraft's .acf is built on Laminar Research's Airbus A330-300, and
@@ -62,7 +63,16 @@ supported by FlyByWire Simulations, Microsoft, Laminar Research or Airbus.
 
 9. SASL
    SASL is 1-sim's (https://1-sim.com) and is not included: the installer
-   copies it from your own download.
+   downloads it from 1-sim during installation. SASL's notice:
+
+   The current software uses the SASL library. Redistribution in source and
+   binary forms, with or without modification, are not permitted.
+   Copyright (c) 2025, 1-sim.aero. All rights reserved.
+   SASL copyright holders are not responsible in any event for malfunction,
+   unavailability, incompatibility or other problems that might occur while
+   using the end product which uses SASL in conjunction with any other
+   software. SASL copyright holders are not liable for any properties for
+   any end product which uses SASL.
 
 10. Trademarks
    Airbus and A380 are Airbus trademarks, used only to identify the aircraft.

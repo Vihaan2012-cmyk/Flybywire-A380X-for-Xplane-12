@@ -1,5 +1,5 @@
 import React, { FC, useEffect, useState } from 'react';
-import FbwTail from 'renderer/assets/FBW-Tail.svg';
+import AppLogo from 'renderer/assets/a380x-xp/publisher.svg';
 import * as packageInfo from '../../../../package.json';
 import { shell } from 'electron';
 import { ChangelogModal, useModals } from '../Modal';
@@ -31,7 +31,7 @@ export const AboutSettings: FC = () => {
       <div className="flex flex-row items-center gap-x-10">
         <img
           className="cursor-pointer"
-          src={FbwTail}
+          src={AppLogo}
           width={60}
           onClick={handleLogoClick}
           style={{ transform: `rotate(${logoRotation}deg)`, transition: 'transform 200ms linear' }}

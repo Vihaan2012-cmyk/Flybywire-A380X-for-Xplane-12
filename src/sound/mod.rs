@@ -105,6 +105,9 @@ static INSTRUMENT_QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// the main thread. Safe to call from the instruments' worker thread once the
 /// lead moves them off the main one.
 pub fn play_instrument_sound(name: &str) {
+    if crate::sound_pack::installed() {
+        crate::sound_pack::request(name);
+    }
     if let Ok(mut queue) = INSTRUMENT_QUEUE.lock() {
         queue.push(name.to_owned());
     }
@@ -969,7 +972,8 @@ impl Sound {
     /// the same "must not fire on the first reading" rule `step` already
     /// documents for cold spawn — instead of a falsely-consumed crossing.
     fn evaluate_animation_triggers(&mut self, vars: &mut Vars) {
-        if self.state.is_none() {
+        let pack = crate::sound_pack::installed();
+        if self.state.is_none() && !pack {
             return;
         }
         let mut fired = Vec::new();
@@ -981,6 +985,10 @@ impl Sound {
         }
         for (event, dataref) in fired {
             *self.fired.entry(format!("{event} <- {dataref}")).or_insert(0) += 1;
+            if pack && crate::sound_pack::click_sound(click_fallback(&event).unwrap_or(&event)).is_some() {
+                crate::sound_pack::request(click_fallback(&event).unwrap_or(&event));
+                continue;
+            }
             self.fire_event(&event, Some(false), None, false);
         }
         self.log_fired();
