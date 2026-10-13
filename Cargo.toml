@@ -11,8 +11,8 @@ crate-type = ["cdylib", "rlib"]
 name = "fbw_a380_systems"
 
 [dependencies]
-a380_systems = { path = "../fbw-aircraft/fbw-a380x/src/wasm/systems/a380_systems" }
-systems = { path = "../fbw-aircraft/fbw-common/src/wasm/systems/systems" }
+a380_systems = { path = "fbw/xplane/fbw-a380x/src/wasm/systems/a380_systems" }
+systems = { path = "fbw/xplane/fbw-common/src/wasm/systems/systems" }
 uom = "0.37.0"
 # The failure sets FlyByWire's systems take (src/remote).
 rustc-hash = "2.1.1"
