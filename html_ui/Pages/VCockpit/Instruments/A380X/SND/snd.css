@@ -1,0 +1,35 @@
+@font-face {
+  font-family: "SndFont";
+  src: url(/Fonts/fbw-a380x/ISISFontTemporary.ttf) format("truetype");
+}
+
+#SND_ROOT,
+#SND_ROOT svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 512px;
+  height: 512px;
+  background: #000000;
+}
+
+#SND_ROOT text {
+  font-family: "SndFont", monospace;
+  fill: #ffffff;
+}
+
+#SND_ROOT .w { fill: #ffffff; }
+#SND_ROOT .g { fill: #00ff00; }
+#SND_ROOT .c { fill: #00ffff; }
+#SND_ROOT .m { fill: #ff94ff; }
+#SND_ROOT .y { fill: #ffff00; }
+#SND_ROOT .r { fill: #ff0000; }
+#SND_ROOT .k { fill: #000000; }
+#SND_ROOT .sw { stroke: #ffffff; fill: none; }
+#SND_ROOT .sg { stroke: #00ff00; fill: none; }
+#SND_ROOT .sc { stroke: #00ffff; fill: none; }
+#SND_ROOT .sm { stroke: #ff94ff; fill: none; }
+#SND_ROOT .sy { stroke: #ffff00; fill: none; }
+#SND_ROOT .sr { stroke: #ff0000; fill: none; }
+#SND_ROOT .mid { text-anchor: middle; }
+#SND_ROOT .end { text-anchor: end; }

@@ -10,7 +10,8 @@
 //! `htmlgauge00=A380X/MFD/mfd.html`), and each side dims with its own knob,
 //! so a screen has one dimming region per mesh.
 //!
-//! SCREEN_ISIS_2 runs the same ISIS gauge as SCREEN_ISIS_1. The two
+//! SCREEN_ISIS_2 is the Standby Navigation Display, our own
+//! `A380X/SND/snd.html` (html_ui/, FlyByWire has none). The two
 //! OITs (`SCREEN_OIT_LEFT`/`SCREEN_OIT_RIGHT`, the Onboard Information
 //! Terminals on the lateral consoles) are drawn, from FlyByWire's
 //! `A380X/OIT/oit.html` (docs/oit.md). The EFB (`SCREEN_EFB`) is included, but XPHFBW does not

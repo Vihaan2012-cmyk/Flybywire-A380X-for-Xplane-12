@@ -62,6 +62,9 @@ cp -r app/ui/* "$XPHFBW/ui/"
   cp "app/js/$f" "$XPHFBW/js/$f"
 done
 cp "$PANEL/panel.cfg" "$PANEL/panel.xml" "$AIRCRAFT/panel/"
+# ISIS 2 is our Standby Navigation Display (html_ui/, copied after FlyByWire's).
+sed -i 's|^;htmlgauge00=A380X/ISISlegacy/isislegacy.html, 0,0,512,512|htmlgauge00=A380X/SND/snd.html, 0,0,512,512|' "$AIRCRAFT/panel/panel.cfg"
+grep -q '^htmlgauge00=A380X/SND/snd.html' "$AIRCRAFT/panel/panel.cfg" || { echo "install.sh: FAIL: panel.cfg has no ISIS 2 line to point at the SND" >&2; exit 1; }
 if [ ! -d "$BASE_BUILD" ]; then
   echo "install.sh: FAIL: FlyByWire's built instruments not found at $BASE_BUILD -- build them first (docs/js-build.md: npm run build-a380x:instruments) before installing." >&2
   exit 1
@@ -84,6 +87,7 @@ for SRC in "$BASE_BUILD" "$BUILD"; do
   done
   echo "install.sh: FlyByWire instruments from $SRC"
 done
+cp -r html_ui/. "$AIRCRAFT/html_ui/"
 # FBW reads its build info from the package root (/VFS/a380x_build_info.json).
 for j in "$BASE_BUILD"/../*.json "$BUILD"/../*.json; do
   [ -f "$j" ] && cp "$j" "$AIRCRAFT/"
