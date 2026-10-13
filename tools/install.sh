@@ -61,7 +61,6 @@ cp -r app/ui/* "$XPHFBW/ui/"
   mkdir -p "$XPHFBW/js/$(dirname "$f")"
   cp "app/js/$f" "$XPHFBW/js/$f"
 done
-cp src/js/dom/geometry.js "$XPHFBW/js/geometry.js"
 cp "$PANEL/panel.cfg" "$PANEL/panel.xml" "$AIRCRAFT/panel/"
 if [ ! -d "$BASE_BUILD" ]; then
   echo "install.sh: FAIL: FlyByWire's built instruments not found at $BASE_BUILD -- build them first (docs/js-build.md: npm run build-a380x:instruments) before installing." >&2

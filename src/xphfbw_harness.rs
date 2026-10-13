@@ -21,7 +21,7 @@ use systems::simulation::StartState;
 use crate::display::screens::SCREENS;
 use crate::remote::client::RemoteSystems;
 use crate::xp::Xplm;
-use crate::xphfbw_bridge::{ScreenBlock, StreamBlock};
+use crate::xphfbw_bridge::ScreenBlock;
 use crate::xphfbw_host::XphfbwHost;
 
 fn env_path(name: &str) -> PathBuf {
@@ -67,8 +67,6 @@ fn xphfbw_harness() {
 
     let host: RefCell<Option<XphfbwHost>> = RefCell::new(None);
     let screens: RefCell<Vec<(&'static str, ScreenBlock)>> = RefCell::new(Vec::new());
-    let vector_ids: Vec<String> = std::env::var("XPHFBW_VECTOR").unwrap_or_else(|_| "SCREEN_DU_PFDL,SCREEN_DU_PFDR".into()).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-    let streams: RefCell<Vec<(&'static str, u32, u32, StreamBlock)>> = RefCell::new(Vec::new());
     let mut remote = RemoteSystems::connect(StartState::Taxi, &mut vars, |tag| {
         eprintln!("harness: session {tag}");
         *host.borrow_mut() = Some(XphfbwHost::start(tag, xplm, &panel_cfg, None).ok_or("the bridge host did not start")?);
@@ -77,11 +75,6 @@ fn xphfbw_harness() {
             match ScreenBlock::create(tag, def.id, dw, dh) {
                 Some(b) => screens.borrow_mut().push((def.id, b)),
                 None => eprintln!("harness: could not create screen {}", def.id),
-            }
-            if vector_ids.iter().any(|v| v == def.id) {
-                if let Some(b) = StreamBlock::create(tag, def.id) {
-                    streams.borrow_mut().push((def.id, dw, dh, b));
-                }
             }
         }
         std::process::Command::new(&exe)
@@ -96,8 +89,6 @@ fn xphfbw_harness() {
     .expect("XPHFBW's systems did not come up");
     let mut host = host.into_inner().unwrap();
     let screens = screens.into_inner();
-    let streams = streams.into_inner();
-    let mut stream_counts = vec![0u64; streams.len()];
     eprintln!("harness: systems up, {} views, {} screens", host.view_count(), screens.len());
 
     // Nothing X-Plane would feed is here, so power the aircraft the way a
@@ -144,20 +135,16 @@ fn xphfbw_harness() {
             eprintln!("harness: systems: {message}");
         }
         host.post_tick(&mut vars, time, &[], &[]);
-        for (k, (_, _, _, b)) in streams.iter().enumerate() {
-            stream_counts[k] = b.header().seq.load(Ordering::Relaxed);
-        }
         if time >= report_at {
             report_at = time + 5.;
             let frames: Vec<String> = screens.iter().map(|(id, b)| format!("{}={}", id.trim_start_matches("SCREEN_"), b.header().frame.load(Ordering::Relaxed))).collect();
             eprintln!(
-                "harness: t={time:.0}s loaded {}/{} displays_active={} gone={} frames {} vector {:?}",
+                "harness: t={time:.0}s loaded {}/{} displays_active={} gone={} frames {}",
                 host.views_loaded(),
                 host.view_count(),
                 host.displays_active(),
                 host.gone(),
-                frames.join(" "),
-                stream_counts
+                frames.join(" ")
             );
         }
         std::thread::sleep(Duration::from_millis(16));
@@ -165,17 +152,6 @@ fn xphfbw_harness() {
     for (id, block) in &screens {
         if block.header().frame.load(Ordering::Relaxed) > 0 {
             write_png(&out.join(format!("{id}.png")), block);
-        }
-    }
-    for (id, w, h, b) in &streams {
-        match b.read(0) {
-            Some((seq, Some((ops, strings)))) => {
-                let body = serde_json::json!({ "screen": id, "width": w, "height": h, "ms": 0, "warmMs": 0, "seq": seq, "ops": ops, "strings": strings });
-                std::fs::write(out.join(format!("{id}.vector.json")), body.to_string()).unwrap();
-                eprintln!("harness: {id} vector stream #{seq}: {} ops, {} strings", ops.len(), strings.len());
-            }
-            Some((seq, None)) => eprintln!("harness: {id} vector switched off at #{seq}"),
-            None => eprintln!("harness: {id} sent no vector stream"),
         }
     }
     eprintln!("harness: pictures in {}", out.display());
