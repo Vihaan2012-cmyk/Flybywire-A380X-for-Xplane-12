@@ -933,3 +933,6 @@ impl Drop for Cockpit {
 pub(crate) mod fms_offline;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod fuzz;
