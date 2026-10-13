@@ -1575,9 +1575,10 @@ impl ElectricalLive {
         let rat_live = self.rat_deployed && producing(&self.net, self.src_rat);
         self.net.contactors[self.contactor.rat_line].commanded_closed = rat_live;
 
-        // The emergency AC bus backs the *essential* AC bus up only from
-        // the RAT's own emergency generator -- never from the static
-        // inverter alone.
+        // Outside emergency configuration AC ESS feeds the emergency AC bus
+        // (FlyByWire's contactor 3XB.1). In emergency the emergency AC bus
+        // backs the *essential* AC bus up only from the RAT's own emergency
+        // generator -- never from the static inverter alone.
         //
         // `sources::StaticInverter::RATED_W` is 135 W (real, FBW-sourced:
         // FlyByWire's own `power_consumption.rs` AC_STAT_INV bus demand,
@@ -1602,7 +1603,7 @@ impl ElectricalLive {
         // a bus it cannot hold up. The RAT (`sources::Rat::MAX_POWER_W`,
         // 70 kW) can, and it is the real A380 emergency-configuration
         // source for AC ESS.
-        self.net.contactors[self.contactor.ac_emer_to_ess].commanded_closed = emergency && rat_live;
+        self.net.contactors[self.contactor.ac_emer_to_ess].commanded_closed = !emergency || rat_live;
 
         // The shed buses drop in emergency configuration; that is what makes
         // them shed buses.

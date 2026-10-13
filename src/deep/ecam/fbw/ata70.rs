@@ -909,8 +909,9 @@ pub fn wire(v: &mut Vec<FbwProc>) {
             .inhibit(&[phase::SECOND_ENG_TO_POWER, phase::AT_OR_ABOVE_80_KT, phase::AT_OR_ABOVE_V1, phase::LIFT_OFF, phase::AT_OR_ABOVE_400_FT, phase::AT_OR_ABOVE_1500_FT, phase::AT_OR_BELOW_800_FT, phase::TOUCH_DOWN]),
         );
 
-        // ---- REV LOCKED (Pattern 27). Normal, healthy stowed+locked memo:
-        // not commanded, sleeve within the same disagree tolerance
+        // ---- REV LOCKED (Pattern 27). The reverser deactivated for
+        // dispatch (MEL) and found stowed and locked: not commanded, sleeve
+        // within the same disagree tolerance
         // `REV_POSITION_DISAGREE` itself uses (`live.rs`'s own
         // `REVERSER_DISAGREE_TOLERANCE`, 0.05), and no lock degraded.
         v.push(
@@ -920,12 +921,13 @@ pub fn wire(v: &mut Vec<FbwProc>) {
                 Level::Advisory,
                 sd_page::ENG,
                 all(vec![
+                    var(&format!("A32NX_ENG_{eng}_REV_MEL_INOP")).on(),
                     var(&format!("A32NX_ENG_{eng}_REV_ENERGIZED")).off(),
                     var(&format!("A32NX_ENG_{eng}_REV_POSITION")).le(0.05),
                     var(&format!("A32NX_ENG_{eng}_REV_LOCK_DEGRADED_COUNT")).eq(0.0),
                     var(&format!("A32NX_ENG_{eng}_REV_CTL_FAULT")).off(),
                 ]),
-                "the reverser is not commanded, its sleeve reads stowed within tolerance and none of its three locks are degraded",
+                "the reverser is deactivated under the MEL, not commanded, its sleeve reads stowed within tolerance and none of its three locks are degraded",
             )
             .confirm(1.0)
             .inhibit(&[phase::SECOND_ENG_TO_POWER, phase::AT_OR_ABOVE_80_KT, phase::AT_OR_ABOVE_V1, phase::LIFT_OFF, phase::AT_OR_ABOVE_400_FT, phase::AT_OR_ABOVE_1500_FT, phase::AT_OR_BELOW_800_FT]),

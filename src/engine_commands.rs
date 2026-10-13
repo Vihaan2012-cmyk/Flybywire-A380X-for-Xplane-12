@@ -181,6 +181,9 @@ struct EngineIds {
     // and `master` each tick (W131): see `eng_failed`/`eng_combustion`.
     eng_failed: VariableIdentifier,
     eng_combustion: VariableIdentifier,
+    /// The same, under MSFS's other name for it, which FlyByWire's PFD reads
+    /// (`GENERAL ENG COMBUSTION:n`, the sidestick position cross).
+    general_eng_combustion: VariableIdentifier,
     // The simulator-facing engine Vars `fadec.rs` also writes (this
     // module's writes happen later in the tick and take precedence, see
     // module docs) plus, for N2 (the IP spool), a real value where
@@ -414,6 +417,7 @@ impl EngineCommands {
             timer: vars.get(format!("ENGINE_TIMER:{n}")),
             eng_failed: vars.get(format!("ENG FAILED:{n}")),
             eng_combustion: vars.get(format!("ENG COMBUSTION:{n}")),
+            general_eng_combustion: vars.get(format!("GENERAL ENG COMBUSTION:{n}")),
             n1: vars.get(format!("ENGINE_N1:{n}")),
             n2: vars.get(format!("ENGINE_N2:{n}")),
             n3: vars.get(format!("ENGINE_N3:{n}")),
@@ -690,6 +694,7 @@ impl EngineCommands {
             let starter_engaged = starter_valve(starter_commanded, crate::failures::magnitude(80_000 + i as u64), &mut self.starter_valve_held[i]);
             vars.write(&e.eng_failed, eng_failed(master, state) as i32 as f64);
             vars.write(&e.eng_combustion, eng_combustion(state) as i32 as f64);
+            vars.write(&e.general_eng_combustion, eng_combustion(state) as i32 as f64);
 
             let phys_inputs = EngineInputs {
                 ambient_pressure_pa,

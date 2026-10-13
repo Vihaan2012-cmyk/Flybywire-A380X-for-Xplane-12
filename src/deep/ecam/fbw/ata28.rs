@@ -351,18 +351,6 @@ pub fn wire(v: &mut Vec<FbwProc>) {
     // when an imbalance is detected and when it is corrected).
     v.push(
         proc(
-            281_800_098,
-            "FUEL WINGS BALANCED",
-            Level::Caution,
-            sd_page::FUEL,
-            gated(all(vec![on("FUEL_WING_IMBALANCE_KNOWN"), var("FUEL_WING_IMBALANCE_KG").lt(3000.0)])),
-            "FCOM PRO-ABN-ECAM p.5289: following a WINGS NOT BALANCED alert, the corrective actions are successful. Threshold: deep::fuel's own WING_IMBALANCE_LIMIT_KG (live.rs), which the FCOM's own 6600 lb symmetric-feed-tank-pair figure (p.5294) corroborates (6600 lb = 2993.7 kg, within 0.2% of 3000.0); kept at the crossfeed-physics constant rather than the FCOM's own slightly different number so the alert and the automatic crossfeed correction agree on the same threshold. Silent, not falsely 'balanced', while the real bridge has not published a reading yet.",
-        )
-        .confirm(5.0)
-        .inhibit(&[3, 4, 5, 6, 7, 9, 10]),
-    );
-    v.push(
-        proc(
             281_800_100,
             "FUEL WINGS NOT BALANCED",
             Level::Caution,
@@ -678,17 +666,18 @@ mod tests {
     }
 
     #[test]
-    fn wings_balanced_and_not_balanced_are_mutually_exclusive_and_silent_when_unknown() {
-        let balanced = wiring(281_800_098);
+    fn wings_not_balanced_is_silent_when_unknown_or_level_and_wings_balanced_is_unwired() {
         let not_balanced = wiring(281_800_100);
         let unknown = with(powered(), "FUEL_WING_IMBALANCE_KNOWN", 0.0);
-        assert!(!holds(&balanced.trigger, &unknown) && !holds(&not_balanced.trigger, &unknown), "the real bridge has not published a reading yet: both must stay silent");
+        assert!(!holds(&not_balanced.trigger, &unknown), "the real bridge has not published a reading yet");
 
         let level = with(with(powered(), "FUEL_WING_IMBALANCE_KNOWN", 1.0), "FUEL_WING_IMBALANCE_KG", 100.0);
-        assert!(holds(&balanced.trigger, &level) && !holds(&not_balanced.trigger, &level));
+        assert!(!holds(&not_balanced.trigger, &level));
 
         let imbalanced = with(with(powered(), "FUEL_WING_IMBALANCE_KNOWN", 1.0), "FUEL_WING_IMBALANCE_KG", 4000.0);
-        assert!(!holds(&balanced.trigger, &imbalanced) && holds(&not_balanced.trigger, &imbalanced));
+        assert!(holds(&not_balanced.trigger, &imbalanced));
+
+        assert!(wire_all().iter().all(|p| p.id != 281_800_098), "WINGS BALANCED follows a NOT BALANCED alert; level wings alone must not raise it");
     }
 
     #[test]

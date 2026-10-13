@@ -403,7 +403,7 @@ pub fn register(r: &mut Registry) {
     r.alert(
         // W162: `DEEP_APU_OIL_PRESSURE_PSI`, not FlyByWire's own
         // `APU_OIL_PRESSURE_PSI` -- same reason.
-        EcamAlert::new("APU_OIL_LO_PR", ATA, "APU OIL LO PR", Level::Caution, var("DEEP_APU_OIL_PRESSURE_PSI").lt(15.0))
+        EcamAlert::new("APU_OIL_LO_PR", ATA, "APU OIL LO PR", Level::Caution, all(vec![var("DEEP_APU_OIL_PRESSURE_PSI").lt(15.0), var("APU_N").ge(95.0)]))
             .confirm(5.0)
             .step(line("APU MASTER SW", "OFF").done(var("OVHD_APU_MASTER_SW_PB_IS_ON").off()))
             .status_line("APU INOP")
