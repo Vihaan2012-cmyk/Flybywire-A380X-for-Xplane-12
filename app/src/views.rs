@@ -152,29 +152,14 @@ fn screens_ready(tag: &str, aircraft_root: &Path) -> bool {
     view_list(&panel_cfg).iter().filter(|d| !d.screen.is_empty()).all(|d| ScreenBlock::open(tag, &d.screen, d.width, d.height).is_some())
 }
 
-fn create_views(tag: &str, session: Session, aircraft_root: PathBuf) {
-    let panel_cfg = match std::fs::read_to_string(aircraft_root.join("panel").join("panel.cfg")) {
-        Ok(text) => text,
-        Err(e) => {
-            crate::logging::log(&format!("views: could not read {}: {e}", aircraft_root.join("panel").join("panel.cfg").display()));
-            return;
-        }
-    };
-    let fps = display_fps(&aircraft_root);
-    let defs = view_list(&panel_cfg);
-    crate::logging::log(&format!("views: {} views from panel.cfg, {fps} fps", defs.len()));
-    LAYERS.with(|l| {
-        let mut l = l.borrow_mut();
-        l.clear();
-        for d in defs.iter().filter(|d| d.layer > 0) {
-            l.entry(d.screen.to_ascii_uppercase()).or_default();
-        }
-    });
+type Browsers = (Vec<Browser>, Vec<Option<Browser>>, Vec<Vec<(usize, Browser)>>);
 
+/// One browser per view, plus the EFB's, each routed to its screen or layer.
+fn make_browsers(tag: &str, defs: &[ViewDef], fps: i32) -> Browsers {
     let mut browsers = Vec::with_capacity(defs.len());
     let mut screen_browsers: Vec<Option<Browser>> = SCREEN_ORDER.iter().map(|_| None).collect();
     let mut layer_browsers: Vec<Vec<(usize, Browser)>> = SCREEN_ORDER.iter().map(|_| Vec::new()).collect();
-    for def in &defs {
+    for def in defs {
         let Some(browser) = spawn_view(tag, def, fps) else {
             crate::logging::log(&format!("views: could not create the browser for {} ({})", def.section, def.gauge_url));
             continue;
@@ -196,7 +181,29 @@ fn create_views(tag: &str, session: Session, aircraft_root: PathBuf) {
     } else {
         crate::logging::log("views: could not create the EFB browser (the app's own web server has no port yet?)");
     }
+    (browsers, screen_browsers, layer_browsers)
+}
 
+fn create_views(tag: &str, session: Session, aircraft_root: PathBuf) {
+    let panel_cfg = match std::fs::read_to_string(aircraft_root.join("panel").join("panel.cfg")) {
+        Ok(text) => text,
+        Err(e) => {
+            crate::logging::log(&format!("views: could not read {}: {e}", aircraft_root.join("panel").join("panel.cfg").display()));
+            return;
+        }
+    };
+    let fps = display_fps(&aircraft_root);
+    let defs = view_list(&panel_cfg);
+    crate::logging::log(&format!("views: {} views from panel.cfg, {fps} fps", defs.len()));
+    LAYERS.with(|l| {
+        let mut l = l.borrow_mut();
+        l.clear();
+        for d in defs.iter().filter(|d| d.layer > 0) {
+            l.entry(d.screen.to_ascii_uppercase()).or_default();
+        }
+    });
+
+    let (browsers, screen_browsers, layer_browsers) = make_browsers(tag, &defs, fps);
     let count = browsers.len();
     publish_status(screen_browsers.iter().flatten().count(), fps);
     let spawns_seen = session.slots.header().ready.load(Ordering::Acquire);
@@ -980,7 +987,7 @@ wrap_task! {
     }
 }
 
-/// Every view again, from scratch, once the plugin has confirmed a spawn's
+/// Every view made again, from scratch, once the plugin has confirmed a spawn's
 /// start state: the instruments then start on the aircraft as it really is.
 fn reload_on_new_spawn() {
     STATE.with(|s| {
@@ -991,11 +998,18 @@ fn reload_on_new_spawn() {
             return;
         }
         state.spawns_seen = spawns;
-        for browser in &state.browsers {
-            browser.reload();
+        for browser in state.browsers.drain(..) {
+            if let Some(host) = browser.host() {
+                host.close_browser(1);
+            }
         }
+        let (browsers, screen_browsers, layer_browsers) = make_browsers(&state.tag, &state.defs, state.fps);
+        state.browsers = browsers;
+        state.screen_browsers = screen_browsers;
+        state.layer_browsers = layer_browsers;
         state.governed = (0, 0);
-        crate::logging::log(&format!("views: spawn {spawns} confirmed, reloaded all {} views", state.browsers.len()));
+        publish_status(state.screen_browsers.iter().flatten().count(), state.fps);
+        crate::logging::log(&format!("views: spawn {spawns} confirmed, remade all {} views", state.browsers.len()));
     });
 }
 
