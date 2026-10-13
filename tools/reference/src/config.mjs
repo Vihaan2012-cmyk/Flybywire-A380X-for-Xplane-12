@@ -12,12 +12,9 @@ export const TOOL_ROOT = path.resolve(here, '..');
 // FlyByWire checkout. Its own build (`fbw-a380x/out/...`) is served as-is.
 export const FBW_ROOT = env('FBW_ROOT', 'D:/fbw-aircraft');
 
-// Built instrument bundles: html_ui of FBW's mach build output. Falls back to
-// D:/A380/fbw-build/reference-bundles when the runtime engineer's build is absent.
 export const BUNDLE_HTML_UI_CANDIDATES = [
   process.env.FBW_BUNDLE_HTML_UI,
-  path.join(FBW_ROOT, 'fbw-a380x/out/flybywire-aircraft-a380-842/html_ui'),
-  'D:/A380/fbw-build/reference-bundles/flybywire-aircraft-a380-842/html_ui',
+  'D:/Steam Games/steamapps/common/X-Plane 12/Aircraft/A380 for X-Plane 12/html_ui',
 ].filter(Boolean);
 
 // Fonts, images and FBW's small plain-JS helpers (A380X_Simvars.js) live in

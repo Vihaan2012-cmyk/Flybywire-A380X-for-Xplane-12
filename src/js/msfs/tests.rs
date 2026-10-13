@@ -1,4 +1,10 @@
 use super::*;
+
+fn instruments_html_ui() -> PathBuf {
+    std::env::var("BOOT_HTML_UI")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(r"D:\Steam Games\steamapps\common\X-Plane 12\Aircraft\A380 for X-Plane 12\html_ui"))
+}
 use std::time::Instant;
 
 #[test]
@@ -66,7 +72,7 @@ fn boots_fbw_cockpit_views() {
             }
         }
     }
-    let html_ui = std::env::var("BOOT_HTML_UI").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(r"D:\fbw-aircraft\fbw-a380x\out\flybywire-aircraft-a380-842\html_ui"));
+    let html_ui = instruments_html_ui();
     let panel = PathBuf::from(r"D:\Microsoft Flight Simulator 2020\Microsoft Flight Simulator 2020 Packages\Community\flybywire-aircraft-a380-842\SimObjects\AirPlanes\FlyByWire_A380_842\panel");
     let mut options = CockpitOptions::new(html_ui, std::fs::read_to_string(panel.join("panel.cfg")).unwrap());
     options.panel_xml = std::fs::read_to_string(panel.join("panel.xml")).unwrap_or_default();
@@ -215,7 +221,7 @@ fn mfd_dropdown_click_and_overlap() {
             }
         }
     }
-    let html_ui = PathBuf::from(r"D:\fbw-aircraft\fbw-a380x\out\flybywire-aircraft-a380-842\html_ui");
+    let html_ui = instruments_html_ui();
     let panel = PathBuf::from(r"D:\Microsoft Flight Simulator 2020\Microsoft Flight Simulator 2020 Packages\Community\flybywire-aircraft-a380-842\SimObjects\AirPlanes\FlyByWire_A380_842\panel");
     let mut options = CockpitOptions::new(html_ui, std::fs::read_to_string(panel.join("panel.cfg")).unwrap());
     options.panel_xml = std::fs::read_to_string(panel.join("panel.xml")).unwrap_or_default();
@@ -384,7 +390,7 @@ fn sd_legacy_react_pages_render_through_the_dom() {
             }
         }
     }
-    let html_ui = PathBuf::from(r"D:\fbw-aircraft\fbw-a380x\out\flybywire-aircraft-a380-842\html_ui");
+    let html_ui = instruments_html_ui();
     let panel = PathBuf::from(r"D:\Microsoft Flight Simulator 2020\Microsoft Flight Simulator 2020 Packages\Community\flybywire-aircraft-a380-842\SimObjects\AirPlanes\FlyByWire_A380_842\panel");
     let mut options = CockpitOptions::new(html_ui, std::fs::read_to_string(panel.join("panel.cfg")).unwrap());
     options.panel_xml = std::fs::read_to_string(panel.join("panel.xml")).unwrap_or_default();
@@ -491,7 +497,7 @@ fn fws_recovers_after_a_cold_and_dark_power_up() {
             }
         }
     }
-    let html_ui = PathBuf::from(r"D:\fbw-aircraft\fbw-a380x\out\flybywire-aircraft-a380-842\html_ui");
+    let html_ui = instruments_html_ui();
     let panel = PathBuf::from(r"D:\Microsoft Flight Simulator 2020\Microsoft Flight Simulator 2020 Packages\Community\flybywire-aircraft-a380-842\SimObjects\AirPlanes\FlyByWire_A380_842\panel");
     let mut options = CockpitOptions::new(html_ui, std::fs::read_to_string(panel.join("panel.cfg")).unwrap());
     options.panel_xml = std::fs::read_to_string(panel.join("panel.xml")).unwrap_or_default();
