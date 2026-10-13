@@ -859,4 +859,64 @@ pub(crate) mod tests {
         }
         assert_eq!(vars.value("A32NX_GEAR_LEVER_POSITION_REQUEST"), 1.);
     }
+
+    #[test]
+    fn full_rudder_pedal_steers_the_nose_wheel_on_the_ground() {
+        use crate::aspects::test_vars::TestVars;
+        use a380_systems::A380;
+        use systems::simulation::{Simulation, StartState};
+
+        let mut vars = TestVars::default();
+        vars.set("TOTAL WEIGHT", 600_000.0);
+        vars.set("AMBIENT PRESSURE", 29.92);
+        vars.set("AMBIENT TEMPERATURE", 15.0);
+        vars.set("SIM ON GROUND", 1.0);
+        for n in ["", ":1", ":2", ":3", ":4"] {
+            vars.set(&format!("CONTACT POINT COMPRESSION{n}"), 60.);
+        }
+        for name in crate::OVERHEAD_DEFAULTS_ON {
+            vars.set(&format!("A32NX_{name}"), 1.);
+        }
+        vars.set("A32NX_GEAR_LEVER_POSITION_REQUEST", 1.);
+        let mut sim = Simulation::new(StartState::Apron, A380::new, &mut vars);
+        let mut fbw = crate::aspects::a380(&mut vars);
+        let mut handling = Aspects::new(&mut vars);
+        let mut t = 0.0;
+        let mut run = |vars: &mut TestVars, handling: &mut Aspects, t: &mut f64, seconds: f64| {
+            for _ in 0..(seconds / 0.05) as u32 {
+                handling.pre_tick(vars, 0.05);
+                fbw.pre_tick(vars, 0.05);
+                sim.tick(std::time::Duration::from_millis(50), *t, vars);
+                fbw.post_tick(vars);
+                handling.post_tick(vars, *t);
+                *t += 0.05;
+            }
+        };
+        run(&mut vars, &mut handling, &mut t, 5.0);
+        for bat in ["BAT_1", "BAT_2", "BAT_ESS", "BAT_APU"] {
+            vars.set(&format!("A32NX_OVHD_ELEC_{bat}_PB_IS_AUTO"), 1.);
+        }
+        for i in 1..=4 {
+            vars.set(&format!("A32NX_EXT_PWR_AVAIL:{i}"), 1.);
+            vars.set(&format!("A32NX_OVHD_ELEC_EXT_PWR_{i}_PB_IS_ON"), 1.);
+        }
+        for pump in ["EPUMPGA", "EPUMPGB", "EPUMPYA", "EPUMPYB"] {
+            vars.set(&format!("A32NX_OVHD_HYD_{pump}_ON_PB_IS_AUTO"), 0.);
+        }
+        vars.set("A32NX_PARK_BRAKE_LEVER_POS", 0.);
+        vars.set("ANTISKID BRAKES ACTIVE", 1.);
+        vars.set("PUSHBACK STATE", 3.);
+        for n in 1..=4 {
+            vars.set(&format!("A32NX_ENGINE_N2:{n}"), 60.);
+            vars.set(&format!("A32NX_ENGINE_N3:{n}"), 60.);
+        }
+        run(&mut vars, &mut handling, &mut t, 30.0);
+        let green = vars.value("A32NX_HYD_GREEN_SYSTEM_1_SECTION_PRESSURE");
+        let yellow = vars.value("A32NX_HYD_YELLOW_SYSTEM_1_SECTION_PRESSURE");
+        vars.set("A32NX_RUDDER_PEDAL_POSITION", -100.);
+        run(&mut vars, &mut handling, &mut t, 5.0);
+        let nose = vars.value("A32NX_NOSE_WHEEL_POSITION_RATIO");
+        let tiller = vars.value("A32NX_TILLER_HANDLE_POSITION");
+        assert!(nose < -0.5, "full left pedal: tiller {tiller:.3}, nose wheel ratio {nose:.3} (green {green:.0}, yellow {yellow:.0} psi)");
+    }
 }

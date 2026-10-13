@@ -2007,7 +2007,8 @@ impl Plugin {
         // (cpp:121-149): FCUs, PRIMs, SECs, then the FADECs with the PRIM
         // buses, then the surface commands. The FADECs come after the engine
         // control, which writes the thrust limits they read.
-        let readings = self.prim_refs.read(xplm);
+        let mut readings = self.prim_refs.read(xplm);
+        readings.inputs[2] = prim::SimReadings::from_xplane_axes(0., 0., self.handling.rudder_axis())[2];
         crate::perf::lap("tick: extra_backend_fbw");
         // [slot tick: extra_backend_fbw] Before the PRIMs: updateFlyByWire's
         // outputs (sidestick, pedals, tracking mode), the reverser force onto

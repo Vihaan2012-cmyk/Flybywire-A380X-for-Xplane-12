@@ -80,6 +80,7 @@ pub struct AppSettings {
     /// How hard the screens are sharpened as they are copied into X-Plane's
     /// devices, 0 (off) to 1 (display/gl.rs's `draw_bridge`).
     pub display_sharpen: f64,
+    pub roll_steering: bool,
 }
 
 impl Default for AppSettings {
@@ -96,6 +97,7 @@ impl Default for AppSettings {
             cabin_visible: true,
             walkaround: false,
             display_sharpen: 0.6,
+            roll_steering: false,
         }
     }
 }
@@ -135,6 +137,7 @@ fn parse(map: &Map<String, Value>) -> AppSettings {
         cabin_visible: as_bool(map, "cabinVisible", defaults.cabin_visible),
         walkaround: as_bool(map, "walkaround", defaults.walkaround),
         display_sharpen: as_f64(map, "displaySharpen", defaults.display_sharpen).clamp(0.0, 1.0),
+        roll_steering: as_bool(map, "rollSteering", defaults.roll_steering),
     }
 }
 

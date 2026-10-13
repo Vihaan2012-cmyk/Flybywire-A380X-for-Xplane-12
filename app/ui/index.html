@@ -524,6 +524,7 @@
       <label class="row"><input type="checkbox" data-key="MODEL_SATCOM_ENABLED" data-bool="1,0"><span class="label">Satcom antenna</span></label>
       <label class="row"><input type="checkbox" data-key="xphfbw.cabinVisible" id="cabin-visible"><span class="label" id="cabin-label">Passenger cabin</span><span class="help" title="Show the passenger cabin, from inside and through open doors. Off hides it to save frame rate; its textures stay loaded.">?</span></label>
       <label class="row"><input type="checkbox" data-key="REALISTIC_TILLER_ENABLED" data-bool="1,0"><span class="label">Realistic tiller</span></label>
+      <label class="row"><input type="checkbox" data-key="xphfbw.rollSteering"><span class="label">Roll steers on the ground</span><span class="help" title="For sticks without a twist grip or rudder pedals: on the ground, moving the stick left or right also moves the rudder and the nosewheel, as the pedals would. It fades out over two seconds after lift-off and back in after touchdown. A twist grip or pedals still work alongside it.">?</span></label>
       <label class="row"><input type="checkbox" data-key="PUSHBACK_USE_CONTROLLER_INPUT" data-bool="1,0"><span class="label">Pushback with controller input</span></label>
       <label class="row"><input type="checkbox" data-key="RMP_VHF_SPACING_25KHZ" data-bool="1,0"><span class="label">RMP 25 kHz spacing</span></label>
       <label class="row"><input type="checkbox" data-key="RADIO_RECEIVER_USAGE_ENABLED" data-bool="1,0"><span class="label">Radio receiver usage</span></label>
@@ -824,7 +825,7 @@ const DEFAULTS = {
   SOUND_ANNOUNCEMENTS_ENABLED: '1', SOUND_PTU_AUDIBLE_COCKPIT: '0', SOUND_INTERIOR_ENGINE: '0', SOUND_INTERIOR_WIND: '0', SOUND_EXTERIOR_MASTER: '0', SOUND_LEVEL_MASTER: '100', SOUND_LEVEL_ENGINES: '100', SOUND_LEVEL_AIRFRAME: '100', SOUND_LEVEL_WEATHER: '100', SOUND_LEVEL_COCKPIT: '100', SOUND_LEVEL_ATC: '0', SOUND_LEVEL_CABIN: '100', SOUND_LEVEL_FBW: '100',
   'xphfbw.systemsOutOfProcess': true, 'xphfbw.coldStartGroundPower': true, 'xphfbw.randomFailures': false, 'xphfbw.failureRate': '1',
   'xphfbw.persistence': true, 'xphfbw.stateDumps': true, 'xphfbw.stateDumpFrames': '200', 'xphfbw.stateDumpKeep': '60',
-  'xphfbw.cabinVisible': true, 'xphfbw.walkaround': false,
+  'xphfbw.cabinVisible': true, 'xphfbw.walkaround': false, 'xphfbw.rollSteering': false,
 };
 
 let settings = {};

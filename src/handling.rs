@@ -237,6 +237,8 @@ struct Refs {
     steer_actual: Option<DataRef>,
     flap_detents: Option<DataRef>,
     tug_connected: Option<DataRef>,
+    yoke_roll: Option<DataRef>,
+    on_ground: Option<DataRef>,
 }
 
 impl Refs {
@@ -270,6 +272,8 @@ impl Refs {
             steer_actual: f("sim/flightmodel2/gear/tire_steer_actual_deg"),
             flap_detents: f("sim/aircraft/controls/acf_flap_detents"),
             tug_connected: f("bp/connected"),
+            yoke_roll: f("sim/joystick/yoke_roll_ratio"),
+            on_ground: f("sim/flightmodel/failures/onground_any"),
         }
     }
 
@@ -361,6 +365,23 @@ pub struct Handling {
     /// Whether FlyByWire's landing gear has ever published a position, so
     /// its silent initial zero is never mistaken for "gear up".
     gear_reported: bool,
+    roll_share: f64,
+    rudder_axis: f64,
+    last_inputs_at: Option<f64>,
+}
+
+const ROLL_STEERING_FADE_S: f64 = 2.;
+
+fn rudder_axis(yaw: Option<f64>, roll: f64, roll_share: f64) -> f64 {
+    (yaw.unwrap_or(0.) + roll * roll_share).clamp(-1., 1.)
+}
+
+fn step_toward(from: f64, to: f64, step: f64) -> f64 {
+    if from < to {
+        (from + step).min(to)
+    } else {
+        (from - step).max(to)
+    }
 }
 
 unsafe impl Send for Handling {}
@@ -420,6 +441,9 @@ impl Handling {
             ticks: 0,
             gear_deploy_floor: f64::INFINITY,
             gear_reported: false,
+            roll_share: 0.,
+            rudder_axis: 0.,
+            last_inputs_at: None,
         };
         handling.register(xplm);
         handling
@@ -484,16 +508,15 @@ impl Handling {
 
         self.read_axes(vars, xplm);
 
-        // FlyByWireInterface.cpp:2896: the rudder pedals in percent, from the
-        // sim's rudder input (inputs[2], which prim.rs takes as the negated
-        // yoke heading ratio) -- here, `self.axes[4]` (AXIS_YAW), the raw
-        // pedal axis `read_axes()` just refreshed above, NOT
-        // `sim/joystick/yoke_heading_ratio` (see AXIS_YAW's doc comment for
-        // why). With no rudder-pedal hardware `self.axes[4]` is `None`, read
-        // as centred, matching MSFS never sending an AXIS_RUDDER_SET without
-        // a real rudder-pedal peripheral.
-        let input_2 = -self.axes[4].unwrap_or(0.);
-        vars.write(&self.ids.rudder_pedal_position, (-100. * input_2).clamp(-100., 100.));
+        let t = now();
+        let dt = self.last_inputs_at.map_or(0., |last| (t - last).clamp(0., 0.5));
+        self.last_inputs_at = Some(t);
+        let on_ground = self.refs.on_ground.is_some_and(|d| xplm.get_i(d) != 0);
+        let target = if crate::app_settings::current().roll_steering && on_ground { 1. } else { 0. };
+        self.roll_share = step_toward(self.roll_share, target, dt / ROLL_STEERING_FADE_S);
+        let roll = self.refs.yoke_roll.map_or(0., |d| xplm.get_f(d) as f64);
+        self.rudder_axis = rudder_axis(self.axes[4], roll, self.roll_share);
+        vars.write(&self.ids.rudder_pedal_position, 100. * self.rudder_axis);
 
         self.cockpit_levers(vars, xplm);
     }
@@ -598,6 +621,10 @@ impl Handling {
             self.ids.brake_pedal_input.map(|id| vars.read(&id)),
         );
         self.pedal_animations.show(xplm, ratios);
+    }
+
+    pub fn rudder_axis(&self) -> f64 {
+        self.rudder_axis
     }
 
     /// The aspects' pre-tick work, just before the systems run.
@@ -751,6 +778,30 @@ mod tests {
         assert_eq!(pedal_animation_ratios(0., [0., 0.]), [0.5, 0., 0.]);
         assert_eq!(pedal_animation_ratios(-100., [100., 0.]), [0., 1., 0.]);
         assert_eq!(pedal_animation_ratios(100., [0., 50.]), [1., 0., 0.5]);
+    }
+
+    #[test]
+    fn roll_adds_to_the_pedals_by_its_share_and_never_past_full_travel() {
+        assert_eq!(rudder_axis(None, 0.8, 0.), 0.);
+        assert_eq!(rudder_axis(None, 0.8, 1.), 0.8);
+        assert_eq!(rudder_axis(Some(-0.25), 0.5, 0.5), 0.);
+        assert_eq!(rudder_axis(Some(0.7), 0.9, 1.), 1.);
+        assert_eq!(rudder_axis(Some(-0.4), 0., 1.), -0.4);
+    }
+
+    #[test]
+    fn the_roll_share_fades_in_and_out_without_overshooting() {
+        let mut share = 0.;
+        for _ in 0..3 {
+            share = step_toward(share, 1., 0.4);
+        }
+        assert_eq!(share, 1.);
+        share = step_toward(share, 0., 0.25);
+        assert_eq!(share, 0.75);
+        for _ in 0..10 {
+            share = step_toward(share, 0., 0.25);
+        }
+        assert_eq!(share, 0.);
     }
 
     #[test]
