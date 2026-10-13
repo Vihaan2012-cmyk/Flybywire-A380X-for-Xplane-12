@@ -97,8 +97,8 @@ pub fn source_patches() -> Vec<crate::source_patch::SourcePatch> {
     vec![crate::source_patch::SourcePatch {
         path: "/Pages/VCockpit/Instruments/A380X/ExtrasHost/index.js".to_string(),
         find: LIGHT_SYNC_INIT.to_string(),
-        replace: "{ const lightSyncStart = Date.now(); const lightSyncInit = () => (SimVar.GetSimVarValue(\"GLASSCOCKPIT AUTOMATIC BRIGHTNESS\", \"percent\") > 0 || Date.now() - lightSyncStart > 10000) ? this.initLighting() : setTimeout(lightSyncInit, 250); lightSyncInit(); }".to_string(),
-        reason: "LightSync sets the display knobs once the automatic brightness has a value, not from the 0 a first read returns".to_string(),
+        replace: "{ const lightSyncStart = Date.now(); const lightSyncInit = () => SimVar.GetSimVarValue(\"GLASSCOCKPIT AUTOMATIC BRIGHTNESS\", \"percent\") > 0 ? this.initLighting() : Date.now() - lightSyncStart < 120000 && setTimeout(lightSyncInit, 250); lightSyncInit(); }".to_string(),
+        reason: "LightSync sets the display knobs only from a real automatic brightness; without one the displays keep the full brightness the plugin starts them at, never FlyByWire's 15 % floor".to_string(),
     }]
 }
 
@@ -418,6 +418,7 @@ mod tests {
         let text = "x.then(([keyEventManager]) => {\n        this.keyInterceptManager = keyEventManager;\n        this.initLighting();\n".to_string();
         let out = crate::source_patch::apply(&source_patches(), "/Pages/VCockpit/Instruments/A380X/ExtrasHost/index.js", text, |ok, _| assert!(ok));
         assert!(out.contains("GLASSCOCKPIT AUTOMATIC BRIGHTNESS") && out.contains("lightSyncInit();") && out.contains("this.initLighting()"));
+        assert!(!out.contains("> 10000) ? this.initLighting()"), "a missing brightness must not initialise the knobs");
         assert!(!sun_known(0., 0.));
         assert!(sun_known(-3., 0.) && sun_known(0., 120.));
     }
