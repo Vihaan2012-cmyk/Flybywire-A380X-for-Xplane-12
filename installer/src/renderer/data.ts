@@ -115,6 +115,25 @@ export const defaultConfiguration: Configuration = {
           targetDirectory: 'A380 for X-Plane 12',
           tracks: [
             {
+              name: 'Stable (2K)',
+              key: 'a380x-xp-stable-2k',
+              url: REPO_URL,
+              description:
+                xplaneOnly +
+                'Every cabin, cockpit and exterior texture downscaled to 2K after the download. Choose this option for ' +
+                'reduced stutters and better performance. Especially, if you intend to use the following:\n\n' +
+                '* Frame generation \n\n' +
+                '* Virtual Reality (VR) \n\n' +
+                '* or are otherwise limited by your graphics card VRAM amount (8 GB or less). \n\n' +
+                'Small panel lettering gets a little softer. Going back to 4K or 8K downloads the aircraft again.\n\n' +
+                updates,
+              isExperimental: false,
+              releaseModel: {
+                type: 'xplaneEngine',
+                textures: 2048,
+              },
+            },
+            {
               name: 'Stable (4K)',
               key: 'a380x-xp-stable-4k',
               url: REPO_URL,
@@ -144,25 +163,6 @@ export const defaultConfiguration: Configuration = {
               releaseModel: {
                 type: 'xplaneEngine',
                 textures: 8192,
-              },
-            },
-            {
-              name: 'Stable (2K)',
-              key: 'a380x-xp-stable-2k',
-              url: REPO_URL,
-              description:
-                xplaneOnly +
-                'Every cabin, cockpit and exterior texture downscaled to 2K after the download. Choose this option for ' +
-                'reduced stutters and better performance. Especially, if you intend to use the following:\n\n' +
-                '* Frame generation \n\n' +
-                '* Virtual Reality (VR) \n\n' +
-                '* or are otherwise limited by your graphics card VRAM amount (8 GB or less). \n\n' +
-                'Small panel lettering gets a little softer. Going back to 4K or 8K downloads the aircraft again.\n\n' +
-                updates,
-              isExperimental: false,
-              releaseModel: {
-                type: 'xplaneEngine',
-                textures: 2048,
               },
             },
           ],

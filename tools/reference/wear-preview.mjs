@@ -21,6 +21,13 @@ page.on('pageerror', (e) => console.log('pageerror', e.message));
 await page.goto(`http://127.0.0.1:${server.address().port}/index.html?fixture=1`);
 await page.click('.tab-btn[data-tab="wear"]');
 await page.waitForTimeout(1500);
+const scroll = Number(process.argv[3] || 0);
+if (scroll) {
+  await page.evaluate((y) => {
+    for (const e of document.querySelectorAll('*')) if (e.scrollHeight > e.clientHeight + 10 && getComputedStyle(e).overflowY !== 'visible') e.scrollTop = y;
+  }, scroll);
+  await page.waitForTimeout(300);
+}
 await page.screenshot({ path: out, fullPage: true });
 await browser.close();
 server.close();

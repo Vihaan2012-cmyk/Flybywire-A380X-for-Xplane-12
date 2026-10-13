@@ -386,6 +386,22 @@ const GAME_STRING_WAIT_MS: u64 = 5_000;
 // readFile — html_ui-relative or /VFS/ paths, from the aircraft dir.
 // ---------------------------------------------------------------------------
 
+/// The plugin's source patches, applied to the scripts `import-script` and
+/// `Include.addScript` read through `readFile` (scheme.rs patches only what
+/// arrives over `coui://`, which FlyByWire's bundles never do).
+fn patched(view: &ViewState, requested: &str, text: String) -> String {
+    thread_local! {
+        static PATCHES: Vec<fbw_a380_systems::source_patch::SourcePatch> = fbw_a380_systems::static_source_patches();
+    }
+    let clean = format!("/{}", requested.trim_start_matches(['/', '\\']).replace('\\', "/"));
+    PATCHES.with(|patches| {
+        fbw_a380_systems::source_patch::apply(patches, &clean, text, |ok, msg| {
+            let text = format!("patch {}{msg}", if ok { "" } else { "ERROR: " });
+            view.session.uplink.push(&Uplink::Log { view: view.view, level: if ok { 0 } else { 2 }, text }.encode());
+        })
+    })
+}
+
 fn read_file(aircraft_dir: &Path, requested: &str) -> Option<String> {
     // The same mapping as scheme.rs's coui://: `/VFS/...` is the aircraft
     // package root, anything else is under its `html_ui` folder.
@@ -525,10 +541,13 @@ fn dispatch_inner(name: &str, args: &[Option<V8Value>]) -> Result<Option<V8Value
             let result = stored_data::run(&view.xp_root, &op, &key, &value);
             Ok(v8_value_create_string(Some(&cs(&result))))
         }
-        "readFile" => match read_file(&view.aircraft_dir, &arg_str(args, 0)) {
-            Some(text) => Ok(v8_value_create_string(Some(&cs(&text)))),
-            None => Ok(v8_value_create_null()),
-        },
+        "readFile" => {
+            let requested = arg_str(args, 0);
+            match read_file(&view.aircraft_dir, &requested) {
+                Some(text) => Ok(v8_value_create_string(Some(&cs(&patched(&view, &requested, text))))),
+                None => Ok(v8_value_create_null()),
+            }
+        }
         "log" => {
             let level = arg(args, 0).map(|v| v.int_value()).unwrap_or(0).clamp(0, 2) as u8;
             let text = arg_str(args, 1);

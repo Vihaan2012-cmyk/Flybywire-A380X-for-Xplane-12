@@ -2246,6 +2246,36 @@ function wearRow(label, value, frac) {
   return r;
 }
 
+const WEAR_SYSTEMS = [
+  ['Fuel', /FUEL/],
+  ['Electrical', /ELEC|_GEN|BAT|SSC|TRU/],
+  ['Hydraulics', /HYD/],
+  ['Pneumatics and air', /PNEU|BLEED|PACK|DUCT|ENV_|OUTFLOW/],
+  ['Flight controls', /FCTL|ACTUATOR|SERVO|AILERON|ELEVATOR|RUDDER|SPOILER|FLAP|SLAT|THS/],
+  ['Landing gear', /GEAR|BRAKE|TYRE|WHEEL|STEER/],
+  ['Engines', /ENG|CREEP|NACELLE|THRUST|REVERSER/],
+  ['APU', /APU/],
+  ['Sensors and avionics', /ADIRS|ADR|STATIC|PITOT|AOA|GPS|RADIO|SENSOR|PROBE|ANTENNA/],
+];
+
+function wearCard(title, rows) {
+  const card = el('div', { class: 'box wear-card' }, el('div', { class: 'label', text: title }));
+  for (const r of rows) if (r) card.append(r);
+  return card;
+}
+
+function wearGrid(cards) {
+  const g = el('div', { class: 'wear-engines' });
+  g.append(...cards);
+  return g;
+}
+
+function wearNote(text, bad) {
+  return el('div', { class: 'label dim bus', style: bad ? 'color:var(--bad)' : '', text });
+}
+
+const wearKnown = (v) => v != null && isFinite(v);
+
 async function wearDraw() {
   const box = document.getElementById('wear-content');
   let d = null;
@@ -2257,51 +2287,90 @@ async function wearDraw() {
     return;
   }
   const out = [];
-  out.push(el('div', { class: 'section-title', text: 'Airframe' }), el('div', { class: 'box' }, wearRow('Flight hours', `${fmtNum(d.airframeHours)} h`)));
+  out.push(el('div', { class: 'section-title', text: 'Airframe' }), wearGrid([wearCard('Airframe', [wearRow('Flight hours', `${fmtNum(d.airframeHours)} h`)])]));
 
   out.push(el('div', { class: 'section-title', text: 'Engines' }));
-  const engines = el('div', { class: 'wear-engines' });
-  for (const e of d.engines) {
-    const card = el('div', { class: 'box wear-card' }, el('div', { class: 'label', text: `Engine ${e.engine}` }));
-    card.append(wearRow('Hours', fmtNum(e.hours)), wearRow('Start cycles', String(e.cycles)), wearRow('Creep life used', wearPct(e.creepLife), e.creepLife));
-    if (e.creepLife > 0) card.append(el('div', { class: 'label dim bus', text: `over-temperature ${wearPct(e.creepFromOvertemp)} · above MCT ${wearPct(e.creepFromMct)} · TOGA ${wearPct(e.creepFromToga)}` }));
-    card.append(wearRow('Compressor efficiency loss', wearPct(e.compressorEfficiencyLoss), e.compressorEfficiencyLoss));
-    card.append(wearRow('Oil quantity', `${fmtNum(e.oilQuantityPct)}%`, 1 - (e.oilQuantityPct ?? 100) / 100));
-    if (e.fodIngested) card.append(el('div', { class: 'label', style: 'color:var(--bad)', text: 'Foreign object ingested' }));
+  out.push(wearGrid(d.engines.map((e) => {
     const ex = Object.entries(e.exceedances || {}).filter(([, n]) => n > 0);
-    card.append(el('div', { class: 'label dim bus', text: ex.length ? 'Exceedances: ' + ex.map(([k, n]) => `${k.replace(/_/g, ' ')} ×${n}`).join(', ') : 'No exceedances' }));
-    engines.append(card);
-  }
-  out.push(engines);
+    return wearCard(`Engine ${e.engine}`, [
+      wearRow('Hours', fmtNum(e.hours)),
+      wearRow('Start cycles', String(e.cycles)),
+      wearRow('Creep life used', wearPct(e.creepLife), e.creepLife),
+      e.creepLife > 0 ? wearNote(`over-temperature ${wearPct(e.creepFromOvertemp)} · above MCT ${wearPct(e.creepFromMct)} · TOGA ${wearPct(e.creepFromToga)}`) : null,
+      wearRow('Compressor efficiency loss', wearPct(e.compressorEfficiencyLoss), e.compressorEfficiencyLoss),
+      wearRow('Oil quantity', `${fmtNum(e.oilQuantityPct)}%`, 1 - (e.oilQuantityPct ?? 100) / 100),
+      e.fodIngested ? wearNote('Foreign object ingested', true) : null,
+      wearNote(ex.length ? 'Exceedances: ' + ex.map(([k, n]) => `${k.replace(/_/g, ' ')} ×${n}`).join(', ') : 'No exceedances'),
+    ]);
+  })));
 
+  const a = d.apu || {};
+  const apuStore = (d.components || []).find((c) => c.id === 'apu');
+  out.push(el('div', { class: 'section-title', text: 'APU' }));
+  out.push(wearGrid([wearCard('APU', [
+    wearRow('Operating hours', wearKnown(a.hours) ? fmtNum(a.hours) : '–'),
+    wearRow('Compressor wear', wearPct(a.compressorWear), a.compressorWear),
+    wearRow('Turbine wear', wearPct(a.turbineWear), a.turbineWear),
+    wearRow('Starter duty heat', wearPct(a.starterHeat), a.starterHeat),
+    apuStore ? wearRow('Hot-section degradation', wearPct(apuStore.degradation), apuStore.degradation) : null,
+    apuStore ? wearNote(`${fmtNum(apuStore.hotHours)} hot hours · ${apuStore.cycles} cycles`) : null,
+  ])]));
+
+  const newTread = d.newTreadMm || 6;
+  const gear = d.gear || [];
+  out.push(el('div', { class: 'section-title', text: 'Landing gear' }));
+  out.push(wearGrid(gear.map((g) => wearCard(g.name, [
+    wearRow('Strut life used', wearPct(g.strutLife), g.strutLife),
+    wearRow('Strut gas charge', wearKnown(g.strutGas) ? wearPct(g.strutGas) : '–', wearKnown(g.strutGas) ? 1 - g.strutGas : null),
+    wearRow('Strut oil level', wearKnown(g.strutOil) ? wearPct(g.strutOil) : '–', wearKnown(g.strutOil) ? 1 - g.strutOil : null),
+    g.collapsed ? wearNote('Strut collapsed', true) : null,
+    ...g.wheels.map((w) => {
+      const wear = wearKnown(w.treadMm) ? 1 - w.treadMm / newTread : null;
+      return wearRow(`Tyre ${w.name}`, wearKnown(w.treadMm) ? `${fmtNum(w.treadMm)} mm` + (w.leaked > 0.001 ? ` · ${wearPct(w.leaked)} leaked` : '') : '–', wear);
+    }),
+  ]))));
+
+  const braked = gear.filter((g) => g.wheels.some((w) => wearKnown(w.brakeWear)));
+  out.push(el('div', { class: 'section-title', text: 'Brakes' }));
+  out.push(braked.length
+    ? wearGrid(braked.map((g) => wearCard(g.name.replace(' gear', ' brakes'), g.wheels.filter((w) => wearKnown(w.brakeWear)).map((w) =>
+      wearRow(`Brake ${w.name}`, `${wearPct(w.brakeWear)}` + (wearKnown(w.brakeTempC) ? ` · ${Math.round(w.brakeTempC)} °C` : ''), w.brakeWear)))))
+    : el('div', { class: 'box label dim', text: 'No brake values yet: load the aircraft.' }));
+
+  const groups = new Map();
+  for (const v of d.live || []) {
+    const sys = (WEAR_SYSTEMS.find(([, re]) => re.test(v.name)) || ['Other'])[0];
+    if (!groups.has(sys)) groups.set(sys, []);
+    groups.get(sys).push(v);
+  }
+  if (groups.size) {
+    out.push(el('div', { class: 'section-title', text: 'Systems' }));
+    out.push(wearGrid([...groups].map(([sys, list]) => wearCard(sys, list.map((v) => {
+      const frac = /FRACTION|WEAR|LIFE|DEGRADATION/i.test(v.name) && v.value >= 0 && v.value <= 1 ? v.value : null;
+      return wearRow(wearName(v.name), frac != null ? wearPct(frac) : fmtNum(v.value), frac);
+    })))));
+  }
+
+  const store = (d.components || []).filter((c) => c.id !== 'apu').sort((x, y) => y.degradation - x.degradation);
   out.push(el('div', { class: 'section-title', text: 'Component wear' }));
-  if (!d.components.length) out.push(el('div', { class: 'box label dim', text: 'No component wear recorded yet.' }));
-  for (const c of [...d.components].sort((a, b) => b.degradation - a.degradation)) {
-    out.push(el('div', { class: 'comp-row wear-comp' },
-      el('div', {}, el('div', { class: 'label', text: c.id }), el('div', { class: 'label dim bus', text: `${fmtNum(c.hotHours)} hot hours · ${c.cycles} cycles · thermal stress ${fmtNum(c.thermalStress)}` })),
-      el('span', { class: 'fval', text: wearPct(c.degradation) }),
-      wearBar(c.degradation)));
-  }
+  out.push(store.length
+    ? wearGrid(store.map((c) => wearCard(c.id, [
+      wearRow('Degradation', wearPct(c.degradation), c.degradation),
+      wearNote(`${fmtNum(c.hotHours)} hot hours · ${c.cycles} cycles · thermal stress ${fmtNum(c.thermalStress)}`),
+    ])))
+    : el('div', { class: 'box label dim', text: 'No component wear recorded yet.' }));
 
+  const params = [...(d.parameters || [])].sort((x, y) => compDegradation(y) - compDegradation(x));
   out.push(el('div', { class: 'section-title', text: 'Components away from healthy' }));
-  if (!d.parameters.length) out.push(el('div', { class: 'box label dim', text: 'Every component is at its healthy value.' }));
-  for (const c of [...d.parameters].sort((a, b) => compDegradation(b) - compDegradation(a))) {
-    const deg = compDegradation(c);
-    out.push(el('div', { class: 'comp-row wear-comp' },
-      el('div', {}, el('div', { class: 'label', text: compLabel(c) || c.component }), el('div', { class: 'label dim bus', text: compInstance(c) + ` · ${fmtNum(c.value)} ${c.unit} (healthy ${fmtNum(c.healthy)})` + (c.ratePerHour ? ` · worsening ${fmtNum(c.ratePerHour)} ${c.unit}/h` : '') })),
-      el('span', { class: 'fval', text: wearPct(deg) }),
-      wearBar(deg)));
-  }
-
-  out.push(el('div', { class: 'section-title', text: 'Live wear indicators' }));
-  if (!d.live.length) out.push(el('div', { class: 'box label dim', text: 'No live wear values yet: load the aircraft.' }));
-  for (const v of [...d.live].sort((a, b) => a.name.localeCompare(b.name))) {
-    const frac = /FRACTION|WEAR|LIFE|DEGRADATION/i.test(v.name) && v.value >= 0 && v.value <= 1 ? v.value : null;
-    out.push(el('div', { class: 'comp-row wear-comp' },
-      el('div', {}, el('div', { class: 'label', text: wearName(v.name) }), el('div', { class: 'label dim bus', text: v.name })),
-      el('span', { class: 'fval', text: frac != null ? wearPct(frac) : fmtNum(v.value) }),
-      frac != null ? wearBar(frac) : el('span', {})));
-  }
+  out.push(params.length
+    ? wearGrid(params.map((c) => {
+      const deg = compDegradation(c);
+      return wearCard(compLabel(c) || c.component, [
+        wearRow(compInstance(c) || c.param, wearPct(deg), deg),
+        wearNote(`${fmtNum(c.value)} ${c.unit} (healthy ${fmtNum(c.healthy)})` + (c.ratePerHour ? ` · worsening ${fmtNum(c.ratePerHour)} ${c.unit}/h` : '')),
+      ]);
+    }))
+    : el('div', { class: 'box label dim', text: 'Every component is at its healthy value.' }));
   box.replaceChildren(...out);
 }
 

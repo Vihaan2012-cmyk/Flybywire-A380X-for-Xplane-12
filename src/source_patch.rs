@@ -91,6 +91,20 @@ mod tests {
     }
 
     #[test]
+    fn every_static_patch_matches_the_installed_pages_once() {
+        let Some(root) = std::env::var_os("FBW_HTML_UI") else { return };
+        let bad: Vec<String> = crate::static_source_patches()
+            .into_iter()
+            .filter_map(|p| {
+                let text = std::fs::read_to_string(std::path::Path::new(&root).join(p.path.trim_start_matches('/'))).unwrap_or_default();
+                let n = text.matches(p.find.as_str()).count();
+                (n != 1).then(|| format!("{} x{n}: {}", p.path, p.reason))
+            })
+            .collect();
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    #[test]
     fn a_patch_matching_once_is_applied_and_reported_true() {
         let mut ok = None;
         let out = apply(&[patch("x", "y")], "/a.js", "ax".to_string(), |o, _| ok = Some(o));

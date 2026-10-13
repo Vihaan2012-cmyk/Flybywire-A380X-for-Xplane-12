@@ -725,7 +725,7 @@ export class InstallManager {
         (track) =>
           track.releaseModel.type === 'xplaneEngine' &&
           (track.releaseModel.textures ?? null) === (addon.engine === 'amdb-bridge' ? null : (status.textures ?? 4096)),
-      ) ?? addon.tracks[0];
+      ) ?? this.defaultTrack(addon);
 
     if (!store.getState().selectedTracks[addon.key]) {
       this.setCurrentSelectedTrack(addon, installedTrack);
@@ -880,9 +880,17 @@ export class InstallManager {
       return selectedTrack;
     }
 
-    this.setCurrentSelectedTrack(addon, addon.tracks[0]);
+    const track = this.defaultTrack(addon);
+    this.setCurrentSelectedTrack(addon, track);
 
-    return addon.tracks[0];
+    return track;
+  }
+
+  private static defaultTrack(addon: Addon): AddonTrack {
+    return (
+      addon.tracks.find((track) => track.releaseModel.type === 'xplaneEngine' && track.releaseModel.textures === 4096) ??
+      addon.tracks[0]
+    );
   }
 
   public static determineAddonInstalledTrack(addon: Addon): AddonTrack | null {

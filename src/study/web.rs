@@ -618,19 +618,76 @@ pub(crate) fn wear_json() -> String {
             })
         })
         .collect();
-    let live: Vec<Value> = crate::snapshot()
-        .lock()
-        .map(|s| {
-            s.names
+    let vars: std::collections::HashMap<String, f64> =
+        crate::snapshot().lock().map(|s| s.names.iter().cloned().zip(s.values.iter().copied()).collect()).unwrap_or_default();
+    let var = |name: &str| vars.get(name).or_else(|| vars.get(&format!("A32NX_{name}"))).copied();
+    let names = &crate::physics::tyre_model::WHEEL_NAMES;
+    let gear: Vec<Value> = WEAR_LEGS
+        .iter()
+        .enumerate()
+        .map(|(leg, (name, wheels))| {
+            let n = leg + 1;
+            let wheels: Vec<Value> = wheels
                 .iter()
-                .zip(s.values.iter())
-                .filter(|(n, _)| WEAR_WORDS.iter().any(|w| n.to_ascii_uppercase().contains(w)))
-                .map(|(n, v)| json!({ "name": n, "value": v }))
-                .collect()
+                .map(|&w| {
+                    let i = w + 1;
+                    let braked = w < crate::physics::tyre_model::BRAKED_WHEELS;
+                    json!({
+                        "name": names[w],
+                        "treadMm": var(&format!("TYRE_TREAD_MM:{i}")),
+                        "pressurePa": var(&format!("TYRE_PRESSURE_PA:{i}")),
+                        "leaked": var(&format!("TYRE_LEAKED_FRACTION:{i}")),
+                        "tempC": var(&format!("TYRE_TEMPERATURE_C:{i}")),
+                        "brakeWear": if braked { var(&format!("BRAKE_WEAR_FRACTION:{i}")) } else { None },
+                        "brakeTempC": if braked { var(&format!("BRAKE_STACK_TEMP_C:{i}")) } else { None },
+                    })
+                })
+                .collect();
+            json!({
+                "name": name,
+                "strutLife": var(&format!("GEAR_STRUT_LIFE_FRACTION:{n}")),
+                "strutGas": var(&format!("GEAR_STRUT_GAS_CHARGE_FRACTION:{n}")),
+                "strutOil": var(&format!("GEAR_STRUT_OIL_LEVEL_FRACTION:{n}")),
+                "collapsed": var(&format!("GEAR_STRUT_COLLAPSED:{n}")).is_some_and(|v| v > 0.5),
+                "wheels": wheels,
+            })
         })
-        .unwrap_or_default();
-    json!({ "airframeHours": hours, "engines": engines, "components": components, "parameters": parameters, "live": live }).to_string()
+        .collect();
+    let apu = json!({
+        "hours": var("APU_OPERATING_HOURS"),
+        "compressorWear": var("APU_COMPRESSOR_WEAR"),
+        "turbineWear": var("APU_TURBINE_WEAR"),
+        "starterHeat": var("APU_STARTER_DUTY_HEAT"),
+    });
+    let shown = ["GEAR_STRUT_LIFE_FRACTION", "BRAKE_WEAR_FRACTION", "APU_COMPRESSOR_WEAR", "APU_TURBINE_WEAR"];
+    let mut live: Vec<Value> = vars
+        .iter()
+        .filter(|(n, _)| WEAR_WORDS.iter().any(|w| n.to_ascii_uppercase().contains(w)) && !shown.iter().any(|s| n.contains(s)))
+        .map(|(n, v)| json!({ "name": n, "value": v }))
+        .collect();
+    live.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    json!({
+        "airframeHours": hours,
+        "engines": engines,
+        "apu": apu,
+        "gear": gear,
+        "newTreadMm": crate::physics::tyre_model::NEW_TREAD_DEPTH_MM,
+        "components": components,
+        "parameters": parameters,
+        "live": live,
+    })
+    .to_string()
 }
+
+/// Each leg's tyres, in `physics::tyre_model::WHEEL_NAMES` order (leg `n`
+/// is `GEAR_*:n`: nose, left wing, right wing, left body, right body).
+const WEAR_LEGS: [(&str, &[usize]); 5] = [
+    ("Nose gear", &[16, 17]),
+    ("Left wing gear", &[0, 1, 4, 5]),
+    ("Right wing gear", &[2, 3, 6, 7]),
+    ("Left body gear", &[8, 9, 12, 13, 18, 19]),
+    ("Right body gear", &[10, 11, 14, 15, 20, 21]),
+];
 
 /// `GET /study/components`: every damageable component's physical
 /// parameters, their current (combined) values and any direct setting.
@@ -1093,6 +1150,10 @@ mod tests {
         for key in ["components", "parameters", "live"] {
             assert!(v[key].is_array(), "{key}");
         }
+        assert_eq!(v["gear"].as_array().map(Vec::len), Some(5));
+        let wheels: usize = v["gear"].as_array().unwrap().iter().map(|g| g["wheels"].as_array().unwrap().len()).sum();
+        assert_eq!(wheels, crate::physics::tyre_model::WHEELS);
+        assert!(v["apu"].is_object());
     }
 
     /// Writes `/study/pages` to `STUDY_PAGES_OUT`, for previewing the web
