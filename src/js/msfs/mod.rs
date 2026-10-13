@@ -930,4 +930,6 @@ impl Drop for Cockpit {
 }
 
 #[cfg(test)]
+pub(crate) mod fms_offline;
+#[cfg(test)]
 mod tests;
