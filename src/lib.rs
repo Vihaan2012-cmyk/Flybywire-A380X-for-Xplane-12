@@ -869,6 +869,8 @@ fn mapping(name: &str) -> Option<(&'static str, Kind, fn(f64) -> f64)> {
         ),
         "AMBIENT DENSITY" => ("sim/weather/rho", Float, |v| v * KGM3_TO_SLUGFT3),
         "SIM ON GROUND" => ("sim/flightmodel/failures/onground_any", Int, identity),
+        "GEAR IS ON GROUND" => ("sim/flightmodel/failures/onground_any", Int, identity),
+        "PLANE ALTITUDE" => ("sim/flightmodel/position/elevation", Double, |v| v * M_TO_FT),
         // MSFS's camera enum: 2 cockpit, 3 external (PilotSeat.ts reads it
         // to tell whether the viewer sits in the flight deck).
         "CAMERA STATE" => ("sim/graphics/view/view_is_external", Int, |v| if v != 0. { 3. } else { 2. }),

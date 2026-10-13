@@ -15,8 +15,8 @@
 //!   simvar.js:9-12`).
 //! - Any other bare name (`"A32NX_ENG_2_HP_PUMP_LOW_FLOW"`,
 //!   `"FIRE_BUTTON_ENG2"`) is this plugin's own published local variable,
-//!   which FlyByWire's own JS always reaches as an `L:` var; `"L:"` is
-//!   prepended.
+//!   which `Vars::get` (lib.rs) stores as `A32NX_<name>`; it is read as
+//!   `L:A32NX_<name>`, the prefix never doubled.
 //!
 //! Unit: a `Cond` carries no unit of its own (`api.rs`'s `VarRef` only ever
 //! compares to a plain `f64`), so one is inferred from how the value is
@@ -50,7 +50,7 @@ pub fn js_var_name(name: &str) -> String {
     if NAMESPACES.iter().any(|p| lower.starts_with(p)) || name.contains(' ') {
         name.to_string()
     } else {
-        format!("L:{name}")
+        format!("L:A32NX_{}", name.strip_prefix("A32NX_").unwrap_or(name))
     }
 }
 
@@ -125,6 +125,8 @@ mod tests {
     #[test]
     fn a_bare_custom_name_gets_the_l_prefix_a_spaced_default_simvar_does_not() {
         assert_eq!(js_var_name("A32NX_ENG_2_FMU_FAULT"), "L:A32NX_ENG_2_FMU_FAULT");
+        assert_eq!(js_var_name("GEAR_DOWNLOCKED:1"), "L:A32NX_GEAR_DOWNLOCKED:1");
+        assert_eq!(js_var_name("ELEC_AC_1_BUS_IS_POWERED"), "L:A32NX_ELEC_AC_1_BUS_IS_POWERED");
         assert_eq!(js_var_name("GENERAL ENG STARTER:2"), "GENERAL ENG STARTER:2");
         assert_eq!(js_var_name("L:A32NX_ALREADY_PREFIXED"), "L:A32NX_ALREADY_PREFIXED");
         assert_eq!(js_var_name("A:PLANE ALTITUDE"), "A:PLANE ALTITUDE");

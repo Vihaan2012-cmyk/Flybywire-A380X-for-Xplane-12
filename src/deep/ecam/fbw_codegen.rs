@@ -93,7 +93,7 @@ mod tests {
             }
         }
         assert_eq!(open, close, "unbalanced JS literal");
-        assert!(js.contains("'L:ELEC_AC_2_BUS_IS_POWERED'"));
+        assert!(js.contains("'L:A32NX_ELEC_AC_2_BUS_IS_POWERED'"));
         assert!(!js.contains("'ELEC_AC_2_BUS_IS_POWERED'"), "a bare plugin variable must reach SimVar as an L: var");
     }
 
@@ -105,7 +105,7 @@ mod tests {
         let one = vec![fbw::item(3)];
         assert_eq!(item_js(&one[0]), "{index:3,show:null,checked:null}");
         let sensed = fbw::item(0).checked(var("X").on());
-        assert!(item_js(&sensed).contains("checked:['var','L:X','bool','ne',0]"));
+        assert!(item_js(&sensed).contains("checked:['var','L:A32NX_X','bool','ne',0]"));
     }
 
     #[test]

@@ -99,6 +99,12 @@ pub fn source_patches() -> Vec<crate::source_patch::SourcePatch> {
         find: LIGHT_SYNC_INIT.to_string(),
         replace: "{ const lightSyncStart = Date.now(); let lightSyncLast = -1; let lightSyncSteady = Date.now(); const lightSyncInit = () => { const v = SimVar.GetSimVarValue(\"GLASSCOCKPIT AUTOMATIC BRIGHTNESS\", \"percent\"); if (Math.abs(v - lightSyncLast) > 1) { lightSyncLast = v; lightSyncSteady = Date.now(); } if (v > 0 && Date.now() - lightSyncSteady > 5000) this.initLighting(); else if (Date.now() - lightSyncStart < 180000) setTimeout(lightSyncInit, 250); }; lightSyncInit(); }".to_string(),
         reason: "LightSync sets the display knobs only from an automatic brightness that has held for 5 s: while X-Plane is still setting the time of day the sun reads low and FlyByWire clamped that to its 15 % floor for the whole flight; without a value the displays keep the plugin's full brightness".to_string(),
+    },
+    crate::source_patch::SourcePatch {
+        path: "/Pages/VCockpit/Instruments/A380X/ExtrasHost/index.js".to_string(),
+        find: "this.setPotentiometer(85, autoBrightness)".to_string(),
+        replace: "this.setPotentiometer(85, autoBrightness < 50 ? 1.5 * autoBrightness : 0)".to_string(),
+        reason: "the main panel's integral lighting (85) follows the glareshield's (84): LightSync turned 84 off in daylight and 85 to full, so half the panel lettering glowed white beside the other half".to_string(),
     }]
 }
 
@@ -416,10 +422,13 @@ mod tests {
     #[test]
     fn light_sync_waits_for_the_automatic_brightness_and_the_sun_must_be_known_first() {
         let text = "x.then(([keyEventManager]) => {\n        this.keyInterceptManager = keyEventManager;\n        this.initLighting();\n".to_string();
-        let out = crate::source_patch::apply(&source_patches(), "/Pages/VCockpit/Instruments/A380X/ExtrasHost/index.js", text, |ok, _| assert!(ok));
+        let out = crate::source_patch::apply(&source_patches(), "/Pages/VCockpit/Instruments/A380X/ExtrasHost/index.js", text, |_, _| {});
         assert!(out.contains("GLASSCOCKPIT AUTOMATIC BRIGHTNESS") && out.contains("lightSyncInit();") && out.contains("this.initLighting()"));
         assert!(!out.contains("> 10000) ? this.initLighting()"), "a missing brightness must not initialise the knobs");
         assert!(out.contains("lightSyncSteady > 5000"), "the brightness must hold before the knobs are set");
+        let text = "this.setPotentiometer(84, autoBrightness < 50 ? 1.5 * autoBrightness : 0);\n    this.setPotentiometer(85, autoBrightness);".to_string();
+        let out = crate::source_patch::apply(&source_patches(), "/Pages/VCockpit/Instruments/A380X/ExtrasHost/index.js", text, |_, _| {});
+        assert_eq!(out.matches("autoBrightness < 50 ? 1.5 * autoBrightness : 0").count(), 2, "the main-panel legends follow the glareshield's: {out}");
         assert!(!sun_known(0., 0.));
         assert!(sun_known(-3., 0.) && sun_known(0., 120.));
     }

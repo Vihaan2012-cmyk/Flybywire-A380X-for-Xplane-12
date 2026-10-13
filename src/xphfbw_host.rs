@@ -109,6 +109,40 @@ pub struct XphfbwHost {
 
 const BACKLOG_BYTES: usize = 4 * DOWNLINK_BYTES;
 
+/// Variables FlyByWire reads once while its instruments start, which a
+/// fresh slot would answer with 0 (rule 2): the FMS then takes the
+/// aircraft for airborne and drops to DONE, which flags a cold and dark
+/// start for every system. Registered and resolved before any view runs.
+const SEED_SLOTS: &[(&str, &str)] = &[
+    ("GEAR IS ON GROUND", "bool"),
+    ("PLANE ALTITUDE", "feet"),
+    ("FLAPS HANDLE INDEX", "enum"),
+    ("IS SLEW ACTIVE", "bool"),
+    ("L:A32NX_IS_READY", "number"),
+    ("L:A32NX_COLD_AND_DARK_SPAWN", "bool"),
+    ("L:A32NX_COLD_AND_DARK_SPAWN", "Bool"),
+    ("L:A32NX_AIRCRAFT_PRESET_QUICK_MODE", "bool"),
+    ("L:A32NX_LGCIU_1_NOSE_GEAR_COMPRESSED", "bool"),
+    ("L:A32NX_LGCIU_2_NOSE_GEAR_COMPRESSED", "bool"),
+    ("L:A32NX_ENGINE_N2:2", "percent"),
+    ("L:A32NX_ENGINE_N2:3", "percent"),
+];
+
+const SAVED_SLOTS_MAX: usize = crate::xphfbw_bridge::SLOT_CAPACITY / 2;
+
+fn saved_slots_path() -> Option<std::path::PathBuf> {
+    Some(crate::xp::system_path()?.join("Output").join("fbw-a380x").join("xphfbw_slots.txt"))
+}
+
+/// [`SEED_SLOTS`] and every slot the last session's views used.
+fn seed_slots(session: &Session) {
+    let saved = saved_slots_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    let saved = saved.lines().filter_map(|l| l.split_once('\t')).take(SAVED_SLOTS_MAX);
+    for (name, unit) in SEED_SLOTS.iter().copied().chain(saved) {
+        session.slots.register(name, unit);
+    }
+}
+
 impl XphfbwHost {
     /// Creates the session's shared objects for `tag` (the same tag XPHFBW's
     /// own process was started with) and works out the view numbering from
@@ -123,6 +157,7 @@ impl XphfbwHost {
         // processes), so a leaked, genuinely `'static` reference is sound
         // and needs no unsafe lifetime extension from a `static mut`.
         let session: &'static Session = Box::leak(Box::new(Session::create(tag)?));
+        seed_slots(session);
         let tag: &'static str = Box::leak(tag.to_string().into_boxed_str());
         let views = view_list(panel_cfg);
         let loaded = vec![None; views.len()];
@@ -531,7 +566,24 @@ impl XphfbwHost {
         if all_ok != self.displays_active {
             self.displays_active = all_ok;
             self.session.slots.header().displays_active.store(all_ok as u32, Ordering::Relaxed);
+            if all_ok {
+                self.save_slots();
+            }
         }
+    }
+
+    fn save_slots(&self) {
+        let Some(path) = saved_slots_path() else { return };
+        let count = self.session.slots.header().count.load(Ordering::Relaxed) as usize;
+        let text: String = (0..count)
+            .map(|i| self.session.slots.entry(i))
+            .filter(|(n, u)| !n.contains(['\t', '\n']) && !u.contains(['\t', '\n']))
+            .map(|(n, u)| format!("{n}\t{u}\n"))
+            .collect();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, text);
     }
 
     /// Whether XPHFBW's process (if its pid was known) has exited since the
@@ -614,6 +666,7 @@ impl Drop for XphfbwHost {
     /// drives (the leaked `Session`/tag memory itself outlives this, which
     /// is fine: it is a fixed, small, one-time-per-session leak).
     fn drop(&mut self) {
+        self.save_slots();
         crate::display::set_bridge(None, None, &[]);
     }
 }
@@ -740,6 +793,27 @@ htmlgauge00=A380X/SystemsHost/index.html, 0,0,1,1
         // Published under the lock: the header's frame is even (published),
         // never left odd (mid-write) after post_tick returns.
         assert_eq!(host.session.slots.header().frame.load(Ordering::Relaxed) % 2, 0);
+    }
+
+    #[test]
+    fn the_fms_start_reads_ground_and_altitude_from_x_plane() {
+        assert_eq!(crate::source_dataref("GEAR IS ON GROUND"), Some("sim/flightmodel/failures/onground_any"));
+        assert_eq!(crate::source_dataref("PLANE ALTITUDE"), Some("sim/flightmodel/position/elevation"));
+    }
+
+    #[test]
+    fn a_seeded_start_variable_reads_its_value_on_a_view_s_first_read() {
+        let t = tag();
+        let mut host = XphfbwHost::start(&t, xplm(), PANEL_CFG, None).unwrap();
+        let mut vars = vars();
+        let id = vars_id(&mut vars, "A32NX_LGCIU_1_NOSE_GEAR_COMPRESSED");
+        vars.write(&id, 1.);
+        host.pre_tick(&mut vars);
+        host.post_tick(&mut vars, 0.1, &[], &[]);
+        let view = FakeView::open(&t, 0);
+        let slot = view.register("L:A32NX_LGCIU_1_NOSE_GEAR_COMPRESSED", "bool");
+        assert!(slot < view.session.slots.header().resolved.load(Ordering::Relaxed));
+        assert_eq!(view.read(slot), 1.);
     }
 
     #[test]

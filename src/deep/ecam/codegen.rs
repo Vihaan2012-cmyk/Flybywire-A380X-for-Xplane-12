@@ -307,7 +307,7 @@ mod tests {
         assert!(js.contains("confirmS:2"));
         assert!(js.contains("flightPhaseInhib:[6,8]"), "LiftOff=6, Above1500Ft=8, sorted");
         assert!(js.contains("afterS:30"));
-        assert!(js.contains("'ENGINE_OIL_PRESSURE_PSI:2'") || js.contains("L:ENGINE_OIL_PRESSURE_PSI:2"));
+        assert!(js.contains("'L:A32NX_ENGINE_OIL_PRESSURE_PSI:2'"));
         // Title/item display text does not belong here.
         assert!(!js.contains("ENG 2 OIL LO PR"));
         assert!(!js.contains("THR LEVER"));
