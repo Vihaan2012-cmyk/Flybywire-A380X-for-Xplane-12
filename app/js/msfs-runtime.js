@@ -294,6 +294,12 @@
 
   let vectorOn = true;
   let vectorRetryAt = 0;
+  let vectorSince = 0;
+  const hidePixels = (hide) => {
+    if (!!globalThis.__xphfbwVectorHidden === hide) return;
+    globalThis.__xphfbwVectorHidden = hide;
+    document.documentElement.style.opacity = hide ? '0' : '';
+  };
   let lastOps = null;
   let lastStrings = '';
   const sendVector = () => {
@@ -307,6 +313,8 @@
       c = v.capture(document.documentElement);
     } catch (e) {
       native.log(2, `vector: ${e && e.stack ? e.stack : e}`);
+      hidePixels(false);
+      vectorSince = 0;
       native.submitDisplay(null);
       vectorOn = false;
       vectorRetryAt = performance.now() + 5000;
@@ -325,6 +333,8 @@
       if (same) return;
     }
     if (!native.submitDisplay(c.ops.buffer, c.ops.length, strings, c.strings.length)) {
+      hidePixels(false);
+      vectorSince = 0;
       vectorOn = false;
       vectorRetryAt = performance.now() + 2000;
       lastOps = null;
@@ -332,6 +342,8 @@
     }
     lastOps = c.ops.slice();
     lastStrings = strings;
+    if (!vectorSince) vectorSince = performance.now();
+    else if (performance.now() - vectorSince > 3000) hidePixels(true);
   };
 
   // ------------------------------------------------------------------

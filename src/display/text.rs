@@ -308,6 +308,37 @@ struct GlyphKey {
     /// Pixel size in eighths of a pixel.
     size: u32,
     subpixel: u32,
+    boost: u8,
+}
+
+/// Coverage exponents by [`boost_for`] level: light text on the dark screens
+/// is drawn heavier, as Chromium's text renderer draws it.
+fn coverage_gamma() -> [f32; BOOST_LEVELS] {
+    static G: std::sync::OnceLock<[f32; BOOST_LEVELS]> = std::sync::OnceLock::new();
+    *G.get_or_init(|| {
+        let mut g = DEFAULT_COVERAGE_GAMMA;
+        if let Ok(v) = std::env::var("FBW_TEXT_GAMMA") {
+            for (i, x) in v.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).take(BOOST_LEVELS).enumerate() {
+                g[i] = x;
+            }
+        }
+        g
+    })
+}
+
+pub const BOOST_LEVELS: usize = 3;
+const DEFAULT_COVERAGE_GAMMA: [f32; BOOST_LEVELS] = [1.0, 0.75, 0.55];
+
+/// The coverage boost a fill colour gets, by its luminance.
+pub fn boost_for(rgba: [u8; 4]) -> u8 {
+    let l = (0.2126 * rgba[0] as f32 + 0.7152 * rgba[1] as f32 + 0.0722 * rgba[2] as f32) / 255.;
+    if l > 0.6 {
+        2
+    } else if l > 0.3 {
+        1
+    } else {
+        0
+    }
 }
 
 /// One coverage texture holding every glyph every screen draws. When it
@@ -367,8 +398,9 @@ impl Atlas {
     /// the fraction `subpixel / SUBPIXEL`. `None` for a glyph with no ink,
     /// or `Err` when the atlas is full and has been started again, which
     /// means everything tessellated against it is stale.
-    pub fn glyph(&mut self, fonts: &Fonts, face: usize, glyph: GlyphId, px: f64, subpixel: u32) -> Result<Option<AtlasGlyph>, ()> {
-        let key = GlyphKey { face, glyph: glyph.0, size: (px * 8.).round().max(1.) as u32, subpixel };
+    pub fn glyph(&mut self, fonts: &Fonts, face: usize, glyph: GlyphId, px: f64, subpixel: u32, boost: u8) -> Result<Option<AtlasGlyph>, ()> {
+        let key = GlyphKey { face, glyph: glyph.0, size: (px * 8.).round().max(1.) as u32, subpixel, boost };
+        let gamma = coverage_gamma()[(boost as usize).min(BOOST_LEVELS - 1)];
         if let Some(g) = self.glyphs.get(&key) {
             return Ok(*g);
         }
@@ -396,7 +428,7 @@ impl Atlas {
         let stride = self.size as usize;
         outlined.draw(|gx, gy, c| {
             let i = (y + gy) as usize * stride + (x + gx) as usize;
-            self.pixels[i] = (c.clamp(0., 1.) * 255. + 0.5) as u8;
+            self.pixels[i] = (c.clamp(0., 1.).powf(gamma) * 255. + 0.5) as u8;
         });
         let entry = AtlasGlyph { x, y, w, h, left: bounds.min.x, top: bounds.min.y };
         self.dirty = Some(match self.dirty {
@@ -472,10 +504,10 @@ pub mod tests {
         fonts.add("Ecam", Vec::new(), 400, false, data).unwrap();
         let mut atlas = Atlas::with_size(64);
         let a = fonts.face(0).font.glyph_id('A');
-        assert!(atlas.glyph(&fonts, 0, a, 20., 0).unwrap().is_some());
+        assert!(atlas.glyph(&fonts, 0, a, 20., 0, 0).unwrap().is_some());
         let mut grew = false;
         for size in 21..200 {
-            if atlas.glyph(&fonts, 0, a, size as f64, 0).is_err() {
+            if atlas.glyph(&fonts, 0, a, size as f64, 0, 0).is_err() {
                 grew = true;
                 break;
             }
