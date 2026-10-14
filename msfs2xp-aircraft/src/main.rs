@@ -4162,9 +4162,12 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(root.join("README.txt"), readme)?;
     if !args.no_optimize {
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools").join("optimize").join("optimize.py");
-        let status = std::process::Command::new("python").arg("-I").arg(&script).arg(&root).status()?;
-        if !status.success() {
-            anyhow::bail!("tools/optimize failed on {}", root.display());
+        if script.is_file() {
+            match std::process::Command::new("python").arg("-I").arg(&script).arg(&root).status() {
+                Ok(status) if status.success() => {}
+                Ok(status) => println!("  tools/optimize did not finish ({status}); the aircraft is converted without it"),
+                Err(e) => println!("  tools/optimize skipped: python not available ({e})"),
+            }
         }
     }
     println!("wrote {}", root.display());
