@@ -12,7 +12,7 @@ type AutoBrightnessProps = {
 export const AutoBrightness: React.FC<AutoBrightnessProps> = ({ bugsActive, children }) => {
   const minBrightness = 0.03;
   const maxBrightness = 0.99;
-  const dayBrightness = 0.85;
+  const dayBrightness = 0.99;
   const nightBrightness = 0.2;
   const brightnessGranularity = 0.025;
 
@@ -57,10 +57,10 @@ export const AutoBrightness: React.FC<AutoBrightnessProps> = ({ bugsActive, chil
   );
 
   useEffect(() => {
-    setAutoBrightness(
-      Avionics.Utils.lerpAngle(nightBrightness, dayBrightness, Math.max(0, autoBrightness - 0.3 / 0.85)),
-    );
-    setManualOffset(MathUtils.clamp(manualOffset, minBrightness - autoBrightness, maxBrightness - autoBrightness));
+    const raw = rawAutoBrightness > 1 ? rawAutoBrightness / 100 : rawAutoBrightness;
+    const auto = nightBrightness + (dayBrightness - nightBrightness) * MathUtils.clamp(raw, 0, 1);
+    setAutoBrightness(auto);
+    setManualOffset(MathUtils.clamp(manualOffset, minBrightness - auto, maxBrightness - auto));
   }, [rawAutoBrightness]);
 
   useEffect(() => {

@@ -42,10 +42,6 @@ export class MouseCursor extends DisplayComponent<MouseCursorProps> {
   private hideTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 
   updatePosition(x: number, y: number) {
-    if (this.divRef.instance.style.display !== 'block') {
-      this.divRef.instance.style.display = 'block';
-    }
-
     const xOffset = this.props.side.get() === 'FO' && this.props.isDoubleScreenMfd ? x - 40 - 878 : x - 40;
     this.divRef.instance.style.left = `${xOffset}px`;
     this.divRef.instance.style.top = `${y - 40}px`;
@@ -57,8 +53,7 @@ export class MouseCursor extends DisplayComponent<MouseCursorProps> {
   }
 
   show() {
-    this.divRef.instance.style.display = 'block';
-    this.hideTimer = setTimeout(() => this.hide(), 5000);
+    this.hide();
   }
 
   hide() {
@@ -81,7 +76,7 @@ export class MouseCursor extends DisplayComponent<MouseCursorProps> {
 
   render(): VNode {
     return (
-      <div ref={this.divRef} class="mfd-mouse-cursor">
+      <div ref={this.divRef} class="mfd-mouse-cursor" style="display: none">
         <svg width="80" height="80" xmlns="http://www.w3.org/2000/svg">
           <g transform={this.rotation}>
             <polyline points="0,0 40,35 80,0" style={{ fill: 'none', stroke: this.fillColor, 'stroke-width': '3' }} />
