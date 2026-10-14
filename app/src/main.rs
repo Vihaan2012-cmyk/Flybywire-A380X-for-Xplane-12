@@ -16,6 +16,7 @@
 
 mod crash;
 mod font_metrics;
+mod gpu_share;
 mod logging;
 mod plugin_route;
 mod renderer;

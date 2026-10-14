@@ -147,6 +147,61 @@ extern "system" {
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
 }
 
+const GL_HANDLE_TYPE_D3D11_IMAGE_EXT: c_uint = 0x958B;
+const GL_DEDICATED_MEMORY_OBJECT_EXT: c_uint = 0x9581;
+const GL_TEXTURE_SWIZZLE_R: c_uint = 0x8E42;
+const GL_TEXTURE_SWIZZLE_B: c_uint = 0x8E44;
+const GL_RED: c_int = 0x1903;
+const GL_BLUE: c_int = 0x1905;
+
+#[derive(Clone, Copy)]
+struct Interop {
+    create_memory_objects: unsafe extern "system" fn(c_int, *mut c_uint),
+    delete_memory_objects: unsafe extern "system" fn(c_int, *const c_uint),
+    memory_object_parameteriv: unsafe extern "system" fn(c_uint, c_uint, *const c_int),
+    import_memory_win32_name: unsafe extern "system" fn(c_uint, u64, c_uint, *const c_void),
+    tex_storage_mem_2d: unsafe extern "system" fn(c_uint, c_int, c_uint, c_int, c_int, c_uint, u64),
+    acquire_keyed_mutex: unsafe extern "system" fn(c_uint, u64, c_uint) -> u8,
+    release_keyed_mutex: unsafe extern "system" fn(c_uint, u64) -> u8,
+    copy_image_sub_data: unsafe extern "system" fn(c_uint, c_uint, c_int, c_int, c_int, c_int, c_uint, c_uint, c_int, c_int, c_int, c_int, c_int, c_int, c_int),
+}
+
+impl Interop {
+    unsafe fn load() -> Option<Self> {
+        let dll = CString::new("opengl32.dll").ok()?;
+        let module = LoadLibraryA(dll.as_ptr());
+        if module.is_null() {
+            return None;
+        }
+        let wgl = GetProcAddress(module, c"wglGetProcAddress".as_ptr());
+        if wgl.is_null() {
+            return None;
+        }
+        let wgl: unsafe extern "system" fn(*const c_char) -> *mut c_void = std::mem::transmute(wgl);
+        let find = |name: &std::ffi::CStr| -> Option<*mut c_void> {
+            let p = wgl(name.as_ptr());
+            ((p as isize) < -1 || (p as isize) > 3).then_some(p)
+        };
+        Some(Self {
+            create_memory_objects: std::mem::transmute(find(c"glCreateMemoryObjectsEXT")?),
+            delete_memory_objects: std::mem::transmute(find(c"glDeleteMemoryObjectsEXT")?),
+            memory_object_parameteriv: std::mem::transmute(find(c"glMemoryObjectParameterivEXT")?),
+            import_memory_win32_name: std::mem::transmute(find(c"glImportMemoryWin32NameEXT")?),
+            tex_storage_mem_2d: std::mem::transmute(find(c"glTexStorageMem2DEXT")?),
+            acquire_keyed_mutex: std::mem::transmute(find(c"glAcquireKeyedMutexWin32EXT")?),
+            release_keyed_mutex: std::mem::transmute(find(c"glReleaseKeyedMutexWin32EXT")?),
+            copy_image_sub_data: std::mem::transmute(find(c"glCopyImageSubData")?),
+        })
+    }
+}
+
+struct SharedImport {
+    generation: u64,
+    memory: c_uint,
+    texture: c_int,
+    size: (u32, u32),
+}
+
 macro_rules! gl_functions {
     ($($field:ident: $name:literal => fn($($arg:ty),*) $(-> $ret:ty)?;)*) => {
         #[allow(non_snake_case)]
@@ -346,6 +401,8 @@ pub struct ScreenGpu {
 #[derive(Default)]
 pub struct BridgeGpu {
     texture: c_int,
+    shared: Option<SharedImport>,
+    swizzled: bool,
     /// The quad's vertex buffer (rebuilt each draw: the full screen, then
     /// one quad per dimmed region).
     buffer: c_uint,
@@ -392,6 +449,7 @@ pub struct Renderer {
     bridge_no_texture_warned: std::collections::HashSet<&'static str>,
     /// Built on first use; `Some(None)` once building it failed.
     sharpen: Option<Option<Sharpen>>,
+    interop: Option<Option<Interop>>,
 }
 
 /// Where in the target a region of the screen lands.
@@ -458,6 +516,7 @@ impl Renderer {
             target_multisampled: None,
             bridge_no_texture_warned: std::collections::HashSet::new(),
             sharpen: None,
+            interop: None,
         };
         if safe_mode {
             crate::log("display: xphfbw.displaySafeMode is on; skipping the multisampled framebuffer (no anti-aliasing, no clip paths)");
@@ -851,9 +910,101 @@ impl Renderer {
     /// function when there is something to upload, rate-limited by the same
     /// 24 MB/frame `upload_budget` `UPLOADED_BYTES` below counts against, so
     /// gating the mipmap rebuild on that call is free.
+    unsafe fn release_shared(&self, gpu: &mut BridgeGpu) {
+        let (Some(shared), Some(Some(interop))) = (gpu.shared.take(), self.interop) else { return };
+        let texture = shared.texture as c_uint;
+        (self.gl.delete_textures)(1, &texture);
+        (interop.delete_memory_objects)(1, &shared.memory);
+    }
+
+    unsafe fn import_shared(&mut self, gpu: &mut BridgeGpu, name: &str, generation: u64, width: u32, height: u32) -> Result<(), String> {
+        let interop = (*self.interop.get_or_insert_with(|| Interop::load())).ok_or("this OpenGL has no GL_EXT_memory_object_win32 / GL_EXT_win32_keyed_mutex")?;
+        self.release_shared(gpu);
+        for _ in 0..8 {
+            if (self.gl.get_error)() == 0 {
+                break;
+            }
+        }
+        let mut memory = 0;
+        (interop.create_memory_objects)(1, &mut memory);
+        let dedicated: c_int = 1;
+        (interop.memory_object_parameteriv)(memory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated);
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        (interop.import_memory_win32_name)(memory, width as u64 * height as u64 * 4, GL_HANDLE_TYPE_D3D11_IMAGE_EXT, wide.as_ptr().cast());
+        let texture = self.new_texture();
+        (self.xp.bind_texture)(texture, 0);
+        (interop.tex_storage_mem_2d)(GL_TEXTURE_2D, 1, GL_RGBA8 as c_uint, width as c_int, height as c_int, memory, 0);
+        let error = (self.gl.get_error)();
+        if error != 0 {
+            let t = texture as c_uint;
+            (self.gl.delete_textures)(1, &t);
+            (interop.delete_memory_objects)(1, &memory);
+            return Err(format!("importing {name} failed with GL error 0x{error:x}"));
+        }
+        gpu.shared = Some(SharedImport { generation, memory, texture, size: (width, height) });
+        Ok(())
+    }
+
+    pub fn bridge_gpu_copy(&mut self, gpu: &mut BridgeGpu, name: &str, generation: u64, width: u32, height: u32) -> Result<bool, String> {
+        if width == 0 || height == 0 {
+            return Ok(false);
+        }
+        unsafe {
+            if gpu.shared.as_ref().is_none_or(|s| s.generation != generation || s.size != (width, height)) {
+                self.import_shared(gpu, name, generation, width, height)?;
+            }
+            let Some(Some(interop)) = self.interop else { return Err("no interop".into()) };
+            let gl = &self.gl;
+            if gpu.texture == 0 || gpu.size != (width, height) {
+                if gpu.texture == 0 {
+                    gpu.texture = self.new_texture();
+                }
+                (self.xp.bind_texture)(gpu.texture, 0);
+                (gl.tex_image)(GL_TEXTURE_2D, 0, GL_RGBA8, width as c_int, height as c_int, 0, GL_BGRA, GL_UNSIGNED_BYTE, std::ptr::null());
+                self.texture_parameters(GL_LINEAR_MIPMAP_LINEAR, bridge_mip_levels(width, height));
+                gpu.size = (width, height);
+                gpu.swizzled = false;
+            }
+            if !gpu.swizzled {
+                (self.xp.bind_texture)(gpu.texture, 0);
+                (gl.tex_parameter)(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+                (gl.tex_parameter)(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+                gpu.swizzled = true;
+            }
+            let shared = gpu.shared.as_ref().expect("imported above");
+            if (interop.acquire_keyed_mutex)(shared.memory, 0, 0) == 0 {
+                return Ok(false);
+            }
+            (interop.copy_image_sub_data)(
+                shared.texture as c_uint,
+                GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                0,
+                gpu.texture as c_uint,
+                GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                0,
+                width as c_int,
+                height as c_int,
+                1,
+            );
+            (interop.release_keyed_mutex)(shared.memory, 0);
+            (self.xp.bind_texture)(gpu.texture, 0);
+            (gl.generate_mipmap)(GL_TEXTURE_2D);
+        }
+        Ok(true)
+    }
+
     pub fn bridge_upload(&mut self, gpu: &mut BridgeGpu, width: u32, height: u32, pixels: &[u8], rects: &[[u32; 4]]) {
         if width == 0 || height == 0 || pixels.len() < (width as usize * height as usize * 4) {
             return;
+        }
+        unsafe {
+            self.release_shared(gpu);
         }
         let gl = &self.gl;
         unsafe {
@@ -861,6 +1012,11 @@ impl Renderer {
                 gpu.texture = self.new_texture();
             }
             (self.xp.bind_texture)(gpu.texture, 0);
+            if gpu.swizzled {
+                (gl.tex_parameter)(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_RED);
+                (gl.tex_parameter)(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
+                gpu.swizzled = false;
+            }
             (gl.pixel_store)(GL_UNPACK_ALIGNMENT, 4);
             if gpu.size != (width, height) {
                 crate::perf::UPLOADED_BYTES.fetch_add(width as u64 * height as u64 * 4, std::sync::atomic::Ordering::Relaxed);

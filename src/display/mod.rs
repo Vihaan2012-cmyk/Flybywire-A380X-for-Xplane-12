@@ -750,7 +750,26 @@ impl Displays {
         let due = header.frame.load(Ordering::Relaxed) != bs.last_uploaded
             && waited >= UPLOAD_MIN_INTERVAL
             && !(dark && bs.last_upload_at.is_some());
-        if due && header.writing.load(Ordering::Relaxed) == 0 {
+        let gpu_generation = header.gpu_generation.load(Ordering::Acquire);
+        if gpu_generation != 0 && header.gpu_refused.load(Ordering::Relaxed) == 0 {
+            let frame = header.frame.load(Ordering::Acquire);
+            if frame != bs.last_uploaded {
+                if let Some(Ok(renderer)) = self.renderer.as_mut() {
+                    match renderer.bridge_gpu_copy(&mut bs.gpu, &bs.block.gpu_texture_name(gpu_generation), gpu_generation, width, height) {
+                        Ok(true) => {
+                            bs.last_uploaded = frame;
+                            bs.last_upload_at = Some(now);
+                            bs.uploads += 1;
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            log(&format!("{}: GPU sharing off, back to copied pixels: {e}", def.id));
+                            header.gpu_refused.store(1, Ordering::Release);
+                        }
+                    }
+                }
+            }
+        } else if due && header.writing.load(Ordering::Relaxed) == 0 {
             let frame = header.frame.load(Ordering::Acquire);
             let rects = xphfbw::plan_upload(header.changed_since(bs.last_uploaded, frame), width, height);
             // What this upload actually costs, which is what the frame's

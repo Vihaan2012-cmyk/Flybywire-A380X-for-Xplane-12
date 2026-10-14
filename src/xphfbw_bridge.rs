@@ -592,6 +592,8 @@ pub struct ScreenHeader {
     pub history: [DirtyFrame; DIRTY_HISTORY],
     /// 1 while the app is writing pixels (the plugin skips that frame).
     pub writing: AtomicU32,
+    pub gpu_refused: AtomicU32,
+    pub gpu_generation: AtomicU64,
 }
 
 /// One paint's changed rectangles: x, y, w, h each.
@@ -646,6 +648,7 @@ const SCREEN_HEADER: usize = std::mem::size_of::<ScreenHeader>();
 
 pub struct ScreenBlock {
     shared: Shared,
+    name: String,
 }
 
 impl ScreenBlock {
@@ -656,8 +659,9 @@ impl ScreenBlock {
     /// Created by the plugin for each screen id (display::screens), sized
     /// from panel.cfg.
     pub fn create(tag: &str, screen_id: &str, width: u32, height: u32) -> Option<Self> {
-        let shared = Shared::create(&object_name(tag, &format!("screen_{screen_id}")), Self::bytes(width, height))?;
-        let b = Self { shared };
+        let name = object_name(tag, &format!("screen_{screen_id}"));
+        let shared = Shared::create(&name, Self::bytes(width, height))?;
+        let b = Self { shared, name };
         let h = b.header();
         h.magic.store(SCREEN_MAGIC, Ordering::Relaxed);
         h.width.store(width, Ordering::Relaxed);
@@ -666,13 +670,18 @@ impl ScreenBlock {
     }
 
     pub fn open(tag: &str, screen_id: &str, width: u32, height: u32) -> Option<Self> {
-        let shared = Shared::open(&object_name(tag, &format!("screen_{screen_id}")), Self::bytes(width, height))?;
-        let b = Self { shared };
+        let name = object_name(tag, &format!("screen_{screen_id}"));
+        let shared = Shared::open(&name, Self::bytes(width, height))?;
+        let b = Self { shared, name };
         (b.header().magic.load(Ordering::Relaxed) == SCREEN_MAGIC).then_some(b)
     }
 
     pub fn header(&self) -> &ScreenHeader {
         unsafe { &*(self.shared.ptr() as *const ScreenHeader) }
+    }
+
+    pub fn gpu_texture_name(&self, generation: u64) -> String {
+        format!("{}_gpu{generation}", self.name)
     }
 
     /// BGRA, top row first, `width * height * 4` bytes.

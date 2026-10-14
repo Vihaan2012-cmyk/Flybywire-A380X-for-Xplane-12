@@ -488,11 +488,12 @@ fn spawn_efb_view(tag: &str, fps: i32) -> Option<Browser> {
     let (dw, dh) = device_size(EFB_SCREEN, EFB_WIDTH, EFB_HEIGHT);
     let block = ScreenBlock::open(tag, EFB_SCREEN, dw, dh)?;
     let screen = Some(Rc::new(block));
-    let render_handler = ViewPaint::new(EFB_WIDTH as i32, EFB_HEIGHT as i32, EFB_SUPERSAMPLE as f32, screen, Rc::default(), None);
+    let render_handler = ViewPaint::new(EFB_WIDTH as i32, EFB_HEIGHT as i32, EFB_SUPERSAMPLE as f32, screen, Rc::default(), None, Some(Rc::default()));
     let url = format!("http://127.0.0.1:{port}/");
     let load_handler = ViewLoad::new(EFB_SCREEN.to_string(), "EFB".to_string(), url.clone());
     let mut client = ViewClient::new(render_handler, load_handler);
-    let window_info = WindowInfo::default().set_as_windowless(unsafe { std::mem::zeroed() });
+    let mut window_info = WindowInfo::default().set_as_windowless(unsafe { std::mem::zeroed() });
+    window_info.shared_texture_enabled = 1;
     let browser_settings = BrowserSettings { windowless_frame_rate: fps.max(1), background_color: 0, ..Default::default() };
     let browser = browser_host_create_browser_sync(Some(&window_info), Some(&mut client), Some(&CefString::from(url.as_str())), Some(&browser_settings), None, None)?;
     focus(&browser);
@@ -515,12 +516,15 @@ fn spawn_view(tag: &str, def: &ViewDef, fps: i32) -> Option<Browser> {
     };
     let layered = LAYERS.with(|l| l.borrow().get(&def.screen.to_ascii_uppercase()).cloned()).map(|stack| (stack, def.layer as usize));
     let scale = if def.screen.is_empty() { 1.0 } else { supersample(&def.screen) as f32 };
-    let render_handler = ViewPaint::new(width, height, scale, screen, Rc::default(), layered);
+    let gpu = (screen.is_some() && layered.is_none()).then(Rc::default);
+    let shared = gpu.is_some();
+    let render_handler = ViewPaint::new(width, height, scale, screen, Rc::default(), layered, gpu);
     let url = gauge_url(def);
     let load_screen = if def.screen.is_empty() { "headless".to_string() } else { def.screen.clone() };
     let load_handler = ViewLoad::new(load_screen, def.section.clone(), url.clone());
     let mut client = ViewClient::new(render_handler, load_handler);
-    let window_info = WindowInfo::default().set_as_windowless(unsafe { std::mem::zeroed() });
+    let mut window_info = WindowInfo::default().set_as_windowless(unsafe { std::mem::zeroed() });
+    window_info.shared_texture_enabled = shared as i32;
     // Transparent: an ND page's empty areas must show the terrain or weather
     // radar layer the plugin draws under it (MSFS stacks the terrain gauge
     // below nd.html); the plugin draws opaque black under every screen.
@@ -637,6 +641,7 @@ wrap_render_handler! {
         screen: Option<Rc<ScreenBlock>>,
         popup: Rc<RefCell<Popup>>,
         layered: Option<(Rc<RefCell<LayerStack>>, usize)>,
+        gpu: Option<Rc<RefCell<GpuView>>>,
     }
 
     impl RenderHandler {
@@ -660,6 +665,9 @@ wrap_render_handler! {
                 return;
             }
             *self.popup.borrow_mut() = Popup::default();
+            if let Some(gpu) = &self.gpu {
+                gpu.borrow_mut().popup = None;
+            }
             if let Some(host) = browser.and_then(|b| b.host()) {
                 host.invalidate(PaintElementType::VIEW);
             }
@@ -719,7 +727,80 @@ wrap_render_handler! {
                 overlay(block, &rect, &popup);
             }
         }
+
+        fn on_accelerated_paint(
+            &self,
+            _browser: Option<&mut Browser>,
+            type_: PaintElementType,
+            _dirty_rects: Option<&[Rect]>,
+            info: Option<&AcceleratedPaintInfo>,
+        ) {
+            PAINT_STATS.calls.fetch_add(1, Ordering::Relaxed);
+            let (Some(info), Some(block), Some(gpu)) = (info, self.screen.as_deref(), self.gpu.as_ref()) else {
+                PAINT_STATS.no_block.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            let handle = windows::Win32::Foundation::HANDLE(info.shared_texture_handle as *mut std::ffi::c_void);
+            let Some(src) = crate::gpu_share::open(handle) else {
+                PAINT_STATS.empty.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            let mut g = gpu.borrow_mut();
+            let h = block.header();
+            if type_ == PaintElementType::POPUP {
+                PAINT_STATS.not_view.fetch_add(1, Ordering::Relaxed);
+                let Some(rect) = self.popup.borrow().rect.clone() else { return };
+                g.popup = crate::gpu_share::duplicate(&src).map(|t| (t, rect.x, rect.y));
+                let g = &*g;
+                if let (Some(out), Some((p, x, y))) = (g.out.as_ref(), g.popup.as_ref()) {
+                    if out.copy(None, Some((p, *x, *y))) {
+                        h.publish(&[[rect.x.max(0) as u32, rect.y.max(0) as u32, rect.width.max(0) as u32, rect.height.max(0) as u32]]);
+                    }
+                }
+                return;
+            }
+            if type_ != PaintElementType::VIEW {
+                return;
+            }
+            let (w, ht) = crate::gpu_share::size(&src);
+            if h.width.load(Ordering::Relaxed) != w || h.height.load(Ordering::Relaxed) != ht {
+                PAINT_STATS.size_mismatch.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            if h.gpu_refused.load(Ordering::Relaxed) != 0 {
+                h.writing.store(1, Ordering::Relaxed);
+                let g = &mut *g;
+                if crate::gpu_share::readback(&src, &mut g.staging, block.pixels()) {
+                    h.publish(&[[0, 0, w, ht]]);
+                    PAINT_STATS.written.fetch_add(1, Ordering::Relaxed);
+                }
+                h.writing.store(0, Ordering::Relaxed);
+                return;
+            }
+            if g.out.as_ref().is_none_or(|o| (o.width, o.height) != (w, ht)) {
+                g.out = crate::gpu_share::SharedOut::create(|generation| block.gpu_texture_name(generation), w, ht);
+                if g.out.is_none() {
+                    crate::logging::log("views: could not make a shared screen texture; this screen goes back to copied pixels");
+                    h.gpu_refused.store(1, Ordering::Relaxed);
+                    return;
+                }
+            }
+            let g = &*g;
+            let Some(out) = g.out.as_ref() else { return };
+            if out.copy(Some(&src), g.popup.as_ref().map(|(p, x, y)| (p, *x, *y))) {
+                h.gpu_generation.store(out.generation, Ordering::Release);
+                h.publish(&[[0, 0, w, ht]]);
+                PAINT_STATS.written.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
+}
+
+#[derive(Default)]
+struct GpuView {
+    out: Option<crate::gpu_share::SharedOut>,
+    popup: Option<(windows::Win32::Graphics::Direct3D11::ID3D11Texture2D, i32, i32)>,
+    staging: Option<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D>,
 }
 
 fn paint(block: &ScreenBlock, dirty_rects: Option<&[Rect]>, buffer: *const u8, width: i32, height: i32) {
