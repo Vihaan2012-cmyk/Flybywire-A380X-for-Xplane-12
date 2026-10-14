@@ -1620,6 +1620,22 @@ pub fn main_lua(title: &str, rigs: &[&Rig], sim: Option<&SimState>) -> String {
     s.push_str("}\nlocal watch_next = 0\n");
     s.push_str(
         "\n\
+         local SET_LAST = {}\n\
+         local function setc(p, v)\n\
+         \x20 if p == nil then return end\n\
+         \x20 if SET_LAST[p] ~= v then\n\
+         \x20   SET_LAST[p] = v\n\
+         \x20   set(p, v)\n\
+         \x20 end\n\
+         end\n\
+         local SPREAD_I = 0\n\
+         local function write_if_due(l, ps, v, now)\n\
+         \x20 if l.last ~= v or now - (l.at or -1) >= 0.5 then\n\
+         \x20   l.last, l.at = v, now\n\
+         \x20   for _, p in ipairs(ps) do set(p, v) end\n\
+         \x20 end\n\
+         end\n\
+         \n\
          function fbw_update_body()\n\
          \x20 DEP, DEFL, STEER, TIRE = val(x_dep), val(x_defl), val(x_steer), val(x_tire)\n\
          \x20 GND, N1, REV = val(x_gnd), val(x_n1), val(x_rev)\n\
@@ -1631,7 +1647,14 @@ pub fn main_lua(title: &str, rigs: &[&Rig], sim: Option<&SimState>) -> String {
     );
     for rig in rigs {
         for line in &rig.update {
-            let _ = writeln!(s, "  {line}");
+            match line.strip_prefix("set(D[") {
+                Some(rest) => {
+                    let _ = writeln!(s, "  setc(D[{rest}");
+                }
+                None => {
+                    let _ = writeln!(s, "  {line}");
+                }
+            }
         }
     }
     s.push_str(
@@ -1658,21 +1681,22 @@ pub fn main_lua(title: &str, rigs: &[&Rig], sim: Option<&SimState>) -> String {
          \x20 tick_held_controls(now)\n\
          \x20 for _, l in ipairs(LOOKS) do\n\
          \x20   local ok, v = pcall(l.f)\n\
-         \x20   if ok and type(v) == \"number\" then set(l.p, clamp(v, 0, 1)) end\n\
+         \x20   if ok and type(v) == \"number\" then write_if_due(l, {l.p}, clamp(v, 0, 1), now) end\n\
          \x20 end\n\
-         \x20 -- Lights, and the SLOW positions above, at 20 Hz: enough for\n\
-         \x20 -- the XML's 1 Hz blinking legends, and a click already shows\n\
-         \x20 -- through its own command handler, so up to 50 ms for the\n\
-         \x20 -- displayed position to catch up is not felt.\n\
-         \x20 if now >= lights_next then\n\
-         \x20   lights_next = now + 0.05\n\
-         \x20   for _, l in ipairs(LIGHTS) do\n\
-         \x20     local ok, v = pcall(l.f)\n\
-         \x20     if ok and type(v) == \"number\" then for _, p in ipairs(l.ps) do set(p, v) end end\n\
-         \x20   end\n\
-         \x20   for _, l in ipairs(SLOW) do\n\
-         \x20     local ok, v = pcall(l.f)\n\
-         \x20     if ok and type(v) == \"number\" then set(l.p, clamp(v, 0, 1)) end\n\
+         \x20 local total = #LIGHTS + #SLOW\n\
+         \x20 if total > 0 then\n\
+         \x20   local batch = math.max(1, math.ceil(total * math.min(1, 20 * math.max(dt, 1 / 30))))\n\
+         \x20   for _ = 1, batch do\n\
+         \x20     SPREAD_I = SPREAD_I % total + 1\n\
+         \x20     if SPREAD_I <= #LIGHTS then\n\
+         \x20       local l = LIGHTS[SPREAD_I]\n\
+         \x20       local ok, v = pcall(l.f)\n\
+         \x20       if ok and type(v) == \"number\" then write_if_due(l, l.ps, v, now) end\n\
+         \x20     else\n\
+         \x20       local l = SLOW[SPREAD_I - #LIGHTS]\n\
+         \x20       local ok, v = pcall(l.f)\n\
+         \x20       if ok and type(v) == \"number\" then write_if_due(l, {l.p}, clamp(v, 0, 1), now) end\n\
+         \x20     end\n\
          \x20   end\n\
          \x20 end\n\
          \x20 local crashed = val(x_crash)\n\
