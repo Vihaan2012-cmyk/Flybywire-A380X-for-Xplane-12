@@ -72,14 +72,17 @@ def grade(im):
     r = np.sqrt(((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2)
     a = a * (1 - 0.35 * np.clip(r - 0.55, 0, 1) ** 1.5)[..., None]
     out = Image.fromarray((np.clip(a, 0, 1) * 255).astype('uint8'))
-    return Image.blend(out, out.filter(ImageFilter.MedianFilter(3)), 0.5)
+    return out
 
 
 shots = sorted(f for f in os.listdir(shots_dir) if f.lower().endswith(('.webp', '.png', '.jpg', '.jpeg')))
 for i, name in enumerate(shots):
     im = crop_menu_bar(Image.open(os.path.join(shots_dir, name)).convert('RGB'))
-    if im.width > DESIGN_W:
-        im = im.resize((DESIGN_W, round(im.height * DESIGN_W / im.width)), Image.LANCZOS)
+    target = (DESIGN_W, DESIGN_W * 9 // 16)
+    scale = max(target[0] / im.width, target[1] / im.height)
+    cw, ch = round(target[0] / scale), round(target[1] / scale)
+    left, top = (im.width - cw) // 2, (im.height - ch) // 2
+    im = im.crop((left, top, left + cw, top + ch)).resize(target, Image.LANCZOS)
     im = grade(im)
     out = f'bg_{i + 1:02d}.png'
     im.save(os.path.join(out_dir, out), optimize=True)
