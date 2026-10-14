@@ -82,7 +82,18 @@ struct Screen {
     handle: AvionicsId,
     pressed: bool,
     hover: Option<(c_int, c_int)>,
+    pointer: Option<(c_int, c_int)>,
+    hover_moved: Option<std::time::Instant>,
     window: popout::Watch,
+}
+
+impl Screen {
+    fn track_pointer(&mut self, x: c_int, y: c_int) {
+        if self.pointer != Some((x, y)) {
+            self.pointer = Some((x, y));
+            self.hover_moved = Some(std::time::Instant::now());
+        }
+    }
 }
 
 /// One screen's link to XPHFBW: the `ScreenBlock` this module creates for it
@@ -200,6 +211,7 @@ pub struct Displays {
     bridge: Option<Bridge>,
     /// What is left of this X-Plane frame's [`UPLOAD_BUDGET_BYTES`].
     upload_budget: usize,
+    efis_refs: Option<[Option<xp::DataRef>; 4]>,
     /// `log_screen_stats`: when it last printed, and each screen's
     /// (published frame, upload count) at that moment.
     stats_at: Option<std::time::Instant>,
@@ -464,6 +476,8 @@ impl Displays {
                 handle: std::ptr::null_mut(),
                 pressed: false,
                 hover: None,
+                pointer: None,
+                hover_moved: None,
                 window: popout::Watch::default(),
             })
             .collect();
@@ -478,6 +492,7 @@ impl Displays {
             events: VecDeque::new(),
             bridge: None,
             upload_budget: UPLOAD_BUDGET_BYTES,
+            efis_refs: None,
             stats_at: None,
             stats_baseline: [(0, 0); SCREENS.len()],
         }
@@ -694,6 +709,7 @@ impl Displays {
             return false;
         }
         let def = self.screens[index].def;
+        let pointer = self.screen_cursor(index);
 
         let Some(bridge) = self.bridge.as_mut() else { return false };
         let Some(Some(bs)) = bridge.screens.get_mut(index) else { return false };
@@ -701,6 +717,7 @@ impl Displays {
         let width = header.width.load(Ordering::Relaxed);
         let height = header.height.load(Ordering::Relaxed);
         let (fx, fy) = (width as f32 / def.width.max(1) as f32, height as f32 / def.height.max(1) as f32);
+        let cursor = crop.is_none().then_some(()).and(pointer).map(|(x, y, rgba)| gl::Cursor { x: x as f32 + 0.5, y: height as f32 - (y as f32 + 0.5), scale: fx, rgba });
         let crop = crop.map(|[x0, y0, x1, y1]| [x0 * fx, y0 * fy, x1 * fx, y1 * fy]);
         let dimming: Vec<[f32; 4]> = dimming.iter().map(|[x0, y0, x1, y1]| [x0 * fx, y0 * fy, x1 * fx, y1 * fy]).collect();
         let now = std::time::Instant::now();
@@ -773,9 +790,39 @@ impl Displays {
         // upload again next frame, rather than skip the draw outright.
         if let Some(Ok(renderer)) = self.renderer.as_mut() {
             let underlay = has_underlay.then_some(&bs.underlay);
-            renderer.draw_bridge(def.id, &mut bs.gpu, underlay, width, height, crop, target, &brightness, &dimming);
+            renderer.draw_bridge(def.id, &mut bs.gpu, underlay, width, height, crop, target, &brightness, &dimming, cursor);
         }
         true
+    }
+
+    fn screen_cursor(&mut self, index: usize) -> Option<(c_int, c_int, [u8; 4])> {
+        let side = match self.screens[index].def.id {
+            "SCREEN_DU_NDL" => Some(0),
+            "SCREEN_DU_NDR" => Some(1),
+            "SCREEN_DU_MFD" => None,
+            _ => return None,
+        };
+        let s = &self.screens[index];
+        let (x, y) = s.pointer?;
+        if s.hover_moved.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
+            return None;
+        }
+        let pressed = s.pressed;
+        let oans = side.is_some_and(|i| self.oans_shown(i));
+        if oans && pressed {
+            return None;
+        }
+        Some((x, y, if oans { [255, 148, 255, 255] } else { [255, 255, 0, 255] }))
+    }
+
+    fn oans_shown(&mut self, side: usize) -> bool {
+        let Some(xplm) = self.xplm else { return false };
+        let refs = self.efis_refs.get_or_insert_with(|| {
+            ["fbw/A32NX_EFIS_L_ND_RANGE", "fbw/A32NX_EFIS_L_ND_MODE", "fbw/A32NX_EFIS_R_ND_RANGE", "fbw/A32NX_EFIS_R_ND_MODE"].map(|n| xplm.find(n))
+        });
+        let (Some(range), Some(mode)) = (refs[side * 2], refs[side * 2 + 1]) else { return false };
+        let mode = xplm.get_f(mode).round() as i32;
+        xplm.get_f(range).round() as i32 == 0 && (2..=4).contains(&mode)
     }
 
     /// A device's texel (origin bottom-left) as a point on its screen.
@@ -935,6 +982,9 @@ impl Displays {
     }
 
     fn mouse(&mut self, screen: usize, x: c_int, y: c_int, status: c_int, button: i32) {
+        if status != xp::MOUSE_UP {
+            self.screens[screen].track_pointer(x, y);
+        }
         // X-Plane gives no position with a release on an avionics device: the
         // up always arrives at (0,0), whatever the press and drags said.
         // Forwarded as it comes, the page sees the press on a button and the
@@ -964,6 +1014,7 @@ impl Displays {
 
     fn cursor(&mut self, screen: usize, x: c_int, y: c_int) {
         let s = &mut self.screens[screen];
+        s.track_pointer(x, y);
         if !s.pressed && s.hover != Some((x, y)) {
             s.hover = Some((x, y));
             self.dispatch_pointer(screen, "move", InputKind::Move, x, y, 0, 0.);

@@ -964,7 +964,7 @@ impl Renderer {
         Some(Sharpen { program, tex: uniform(c"tex"), texel: uniform(c"texel"), amount: uniform(c"amount") })
     }
 
-    pub fn draw_bridge(&mut self, screen_id: &'static str, gpu: &mut BridgeGpu, underlay: Option<&BridgeGpu>, width: u32, height: u32, crop: Option<[f32; 4]>, target: Target, brightness: &[f32], dimming: &[[f32; 4]]) {
+    pub fn draw_bridge(&mut self, screen_id: &'static str, gpu: &mut BridgeGpu, underlay: Option<&BridgeGpu>, width: u32, height: u32, crop: Option<[f32; 4]>, target: Target, brightness: &[f32], dimming: &[[f32; 4]], cursor: Option<Cursor>) {
         let amount = crate::app_settings::current().display_sharpen as f32;
         let sharpen = if amount > 0. && gpu.size.0 > 0 && gpu.size.1 > 0 { self.sharpen_program() } else { None };
         if gpu.texture == 0 {
@@ -1053,6 +1053,14 @@ impl Renderer {
             }
             (gl.blend_func)(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             self.draw_calls += 1;
+
+            if let Some(c) = cursor {
+                let verts = cursor_vertices(&c);
+                (gl.buffer_data)(GL_ARRAY_BUFFER, std::mem::size_of_val(verts.as_slice()) as isize, verts.as_ptr().cast(), GL_DYNAMIC_DRAW);
+                (self.xp.set_graphics_state)(0, 0, 0, 0, 1, 0, 0);
+                (gl.draw_arrays)(GL_TRIANGLES, 0, verts.len() as c_int);
+                self.draw_calls += 1;
+            }
 
             // The dimming regions on top, same darkening as Step::Dim.
             (gl.disable_client_state)(GL_COLOR_ARRAY);
@@ -1343,6 +1351,37 @@ fn textured_quad(width: f32, height: f32) -> [Vertex; 6] {
     let rgba = [255, 255, 255, 255];
     let v = |x: f32, y: f32, u: f32, v: f32| Vertex { x, y, u, v, rgba };
     [v(0., 0., 0., 0.), v(width, 0., 1., 0.), v(width, height, 1., 1.), v(0., 0., 0., 0.), v(width, height, 1., 1.), v(0., height, 0., 1.)]
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Cursor {
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+    pub rgba: [u8; 4],
+}
+
+fn cursor_vertices(c: &Cursor) -> Vec<Vertex> {
+    let at = |px: f32, py: f32| (c.x + (px - 40.) * c.scale, c.y + (py - 40.) * c.scale);
+    let segments: [((f32, f32), (f32, f32), f32); 6] = [
+        ((0., 0.), (40., 35.), 3.),
+        ((40., 35.), (80., 0.), 3.),
+        ((0., 80.), (40., 45.), 3.),
+        ((40., 45.), (80., 80.), 3.),
+        ((40., 39.), (40., 41.), 2.),
+        ((39., 40.), (41., 40.), 2.),
+    ];
+    let mut out = Vec::with_capacity(segments.len() * 6);
+    for (a, b, w) in segments {
+        let (ax, ay) = at(a.0, a.1);
+        let (bx, by) = at(b.0, b.1);
+        let (dx, dy) = (bx - ax, by - ay);
+        let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+        let (nx, ny) = (-dy / len * w * c.scale / 2., dx / len * w * c.scale / 2.);
+        let v = |x: f32, y: f32| Vertex { x, y, u: 0., v: 0., rgba: c.rgba };
+        out.extend([v(ax + nx, ay + ny), v(bx + nx, by + ny), v(bx - nx, by - ny), v(ax + nx, ay + ny), v(bx - nx, by - ny), v(ax - nx, ay - ny)]);
+    }
+    out
 }
 
 /// An untextured black quad over one region, for the dimming pass
