@@ -1115,7 +1115,7 @@ const GOVERNOR_PERIOD_MS: i64 = 1000;
 /// and altitude tapes, a rotating map). They get the full governed rate;
 /// every other view (engine and system pages, MFD, OIT, EFB, RMPs, clock)
 /// gets half of it.
-const SMOOTH_SCREENS: &[&str] = &["SCREEN_DU_PFDL", "SCREEN_DU_PFDR", "SCREEN_DU_NDL", "SCREEN_DU_NDR", "SCREEN_ISIS_1"];
+const SMOOTH_SCREENS: &[&str] = &["SCREEN_DU_PFDL", "SCREEN_DU_PFDR", "SCREEN_ISIS_1"];
 
 fn governed_rates(_sim_fps: f64, cap: i32) -> (i32, i32) {
     let cap = cap.clamp(1, 60);
