@@ -235,9 +235,18 @@ impl<H: Host> FmsHost<H> {
     }
 }
 
+impl<H: Host> FmsHost<H> {
+    fn clock_offset(&self, name: &str) -> f64 {
+        match name {
+            "E:SIMULATION TIME" | "E:ABSOLUTE TIME" => self.now_ms / 1000.,
+            _ => 0.,
+        }
+    }
+}
+
 impl<H: Host> Host for FmsHost<H> {
     fn get_var(&mut self, name: &str, unit: &str) -> f64 {
-        self.inner.get_var(name, unit)
+        self.inner.get_var(name, unit) + self.clock_offset(name)
     }
 
     fn set_var(&mut self, name: &str, unit: &str, value: f64) {
@@ -249,7 +258,7 @@ impl<H: Host> Host for FmsHost<H> {
     }
 
     fn get_var_reg(&mut self, id: usize, name: &str, unit: &str) -> f64 {
-        self.inner.get_var_reg(id, name, unit)
+        self.inner.get_var_reg(id, name, unit) + self.clock_offset(name)
     }
 
     fn set_var_reg(&mut self, id: usize, name: &str, unit: &str, value: f64) {
@@ -405,8 +414,8 @@ pub fn power_up_on_ground<H: Host>(host: &mut H, lat: f64, lon: f64) {
     host.set_var("L:A32NX_ADIRS_PFD_ALIGNED_FIRST", "bool", 1.);
     host.set_var("L:A32NX_ADIRS_PFD_ALIGNED_ATT", "bool", 1.);
     for side in ["L", "R"] {
-        host.set_var(&format!("L:A32NX_EFIS_{side}_ND_MODE"), "number", 3.);
-        host.set_var(&format!("L:A32NX_EFIS_{side}_ND_RANGE"), "number", 2.);
+        host.set_var(&format!("L:A32NX_EFIS_{side}_ND_MODE"), "number", 2.);
+        host.set_var(&format!("L:A32NX_EFIS_{side}_ND_RANGE"), "number", 5.);
     }
 }
 
@@ -759,7 +768,17 @@ pub fn show_fpln<H: Host>(cockpit: &mut Cockpit, host: &mut FmsHost<H>) -> Resul
 
 pub fn nd_strings(cockpit: &Cockpit, gauge_needle: &str, screen: &str) -> Vec<String> {
     let Some(view) = view_with_gauge(cockpit, gauge_needle) else { return Vec::new() };
-    let js = format!("(() => {{ if (!globalThis.__dom) return '[]'; const d = [...__dom.documents.values()].find((x) => x.__screen === {}); return JSON.stringify(d ? d._strings.slice() : []); }})()", js_str(screen));
+    let js = format!(
+        "(() => {{ if (!globalThis.__dom) return '[]'; const d = [...__dom.documents.values()].find((x) => x.__screen === {}); if (!d) return '[]'; const out = d._strings.slice(); for (const c of d.querySelectorAll('canvas')) {{ const ops = c._context && c._context._ops; if (ops) for (const v of ops) if (typeof v === 'string' && v.length > 1) out.push(v); }} return JSON.stringify(out); }})()",
+        js_str(screen)
+    );
+    if std::env::var("FMS_ND_DEBUG").is_ok() {
+        let probe = format!(
+            "(() => {{ const d = [...__dom.documents.values()].find((x) => x.__screen === {}); if (!d) return 'no doc'; return JSON.stringify([...d.querySelectorAll('canvas')].map((c) => ({{ w: c.width, h: c.height, ctx: !!c._context, ops: c._context ? c._context._ops.length : -1, cls: c.getAttribute('class'), id: c.id, disp: c.style && c.style.display, vis: c.style && c.style.visibility }}))); }})()",
+            js_str(screen)
+        );
+        println!("ND debug {screen}: {:?}", cockpit.eval_in(&view, &probe));
+    }
     let out = cockpit.eval_in(&view, &js).unwrap_or_default();
     serde_json::from_str::<Vec<String>>(&out).unwrap_or_default()
 }
@@ -803,7 +822,7 @@ fn fms_offline_flight_plan() {
         let strings = nd_strings(&cockpit, needle, screen);
         let shown: Vec<&str> = EGLL_KJFK_IDENTS.iter().copied().filter(|id| strings.iter().any(|s| s.contains(id))).collect();
         println!("{screen}: {} strings, route idents drawn: {shown:?}", strings.len());
-        println!("{screen} strings: {strings:?}");
+        assert!(shown.contains(&"EGLL") && shown.contains(&"CPT"), "{screen} draws no route: {shown:?}");
     }
     dump_state(&host);
     for must in ["EGLL", "KJFK", "OLPOP", "PUPPY"] {

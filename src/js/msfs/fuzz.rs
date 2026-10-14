@@ -99,6 +99,7 @@ const BUSES: [&str; 14] = ["AC_1", "AC_2", "AC_3", "AC_4", "AC_ESS", "DC_1", "DC
 
 fn is_pinned(name: &str) -> bool {
     name.starts_with("K:")
+        || name.starts_with("E:")
         || name.starts_with("H:")
         || (name.starts_with("L:A32NX_ELEC_") && name.ends_with("_BUS_IS_POWERED"))
         || name == "L:A32NX_FWC_FLIGHT_PHASE"
@@ -114,6 +115,7 @@ struct Store {
     units: BTreeMap<String, String>,
     writes: Vec<(String, f64)>,
     errors: Vec<String>,
+    now_ms: f64,
 }
 
 impl Host for Store {
@@ -121,7 +123,11 @@ impl Host for Store {
         if !self.units.contains_key(name) {
             self.units.insert(name.to_string(), unit.to_string());
         }
-        *self.vars.get(name).unwrap_or(&0.)
+        match name {
+            "E:ABSOLUTE TIME" => 63_895_000_000. + self.now_ms / 1000.,
+            "E:SIMULATION TIME" => 100. + self.now_ms / 1000.,
+            _ => *self.vars.get(name).unwrap_or(&0.),
+        }
     }
     fn set_var(&mut self, name: &str, _unit: &str, value: f64) {
         self.writes.push((name.to_string(), value));
@@ -296,7 +302,7 @@ fn fuzz_trace() {
         .filter_map(|v| v.texture.as_ref().filter(|t| t.to_ascii_uppercase().contains("MFD")).map(|t| (v.name.clone(), t.clone(), v.display)))
         .collect();
 
-    let mut host = Store { vars: BTreeMap::new(), strings: BTreeMap::new(), units: BTreeMap::new(), writes: Vec::new(), errors: Vec::new() };
+    let mut host = Store { vars: BTreeMap::new(), strings: BTreeMap::new(), units: BTreeMap::new(), writes: Vec::new(), errors: Vec::new(), now_ms: 0. };
     host.vars.insert("L:A32NX_COLD_AND_DARK_SPAWN".into(), 0.);
     for potentiometer in [80, 81, 82, 87, 88, 89, 90, 91, 92, 93, 98, 99] {
         host.vars.insert(format!("LIGHT POTENTIOMETER:{potentiometer}"), 1.);
@@ -318,6 +324,7 @@ fn fuzz_trace() {
     for tick in 0..ticks {
         let t = tick as f64 * TICK_MS;
         sim_ms.store(t.to_bits(), Ordering::Relaxed);
+        host.now_ms = t;
         apply_inputs(&mut host, seed, tick, rate);
 
         let mut clicks: Vec<serde_json::Value> = Vec::new();
