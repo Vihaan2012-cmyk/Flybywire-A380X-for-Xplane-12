@@ -1379,7 +1379,7 @@ fn cursor_vertices(c: &Cursor) -> Vec<Vertex> {
         let len = (dx * dx + dy * dy).sqrt().max(1e-3);
         let (nx, ny) = (-dy / len * w * c.scale / 2., dx / len * w * c.scale / 2.);
         let v = |x: f32, y: f32| Vertex { x, y, u: 0., v: 0., rgba: c.rgba };
-        out.extend([v(ax + nx, ay + ny), v(bx + nx, by + ny), v(bx - nx, by - ny), v(ax + nx, ay + ny), v(bx - nx, by - ny), v(ax - nx, ay - ny)]);
+        out.extend([v(ax + nx, ay + ny), v(bx - nx, by - ny), v(bx + nx, by + ny), v(ax + nx, ay + ny), v(ax - nx, ay - ny), v(bx - nx, by - ny)]);
     }
     out
 }
@@ -1391,4 +1391,21 @@ fn plain_quad(x0: f32, y0: f32, x1: f32, y1: f32) -> [Vertex; 6] {
     let rgba = [0, 0, 0, 255];
     let v = |x: f32, y: f32| Vertex { x, y, u: 0., v: 0., rgba };
     [v(x0, y0), v(x1, y0), v(x1, y1), v(x0, y0), v(x1, y1), v(x0, y1)]
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    fn area(t: &[Vertex]) -> f32 {
+        (t[1].x - t[0].x) * (t[2].y - t[0].y) - (t[2].x - t[0].x) * (t[1].y - t[0].y)
+    }
+
+    #[test]
+    fn the_cursor_winds_like_the_screen_quads() {
+        let quad = plain_quad(0., 0., 10., 10.);
+        let front = area(&quad[..3]).signum();
+        let verts = cursor_vertices(&Cursor { x: 500., y: 500., scale: 1.5, rgba: [255, 255, 0, 255] });
+        assert!(verts.chunks(3).all(|t| area(t).signum() == front));
+    }
 }
