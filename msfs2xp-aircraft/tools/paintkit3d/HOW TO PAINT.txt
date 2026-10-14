@@ -1,0 +1,12 @@
+A380 for X-Plane 12 - 3D paint kit
+
+1. Open "A380 3D Paint Kit.blend" in Blender 4.2 or newer.
+2. Switch to the Texture Paint workspace. Pick an object in the "Paintable"
+   collection (fuselage, fin, belly, engines, wing fences) and paint on it.
+   "Reference" holds the rest of the aircraft for context; it is not exported.
+3. Image > Save All Images now and then. The paintable sheets are the PNGs in
+   textures/paint.
+4. Open the Scripting workspace, open the "export_livery.py" text, set
+   LIVERY_NAME at the top and press Run Script.
+5. Copy the new folder from liveries/ into
+   X-Plane 12/Aircraft/A380 for X-Plane 12/liveries/ and pick it in X-Plane.
