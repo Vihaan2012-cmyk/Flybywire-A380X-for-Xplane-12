@@ -16,11 +16,61 @@ pub fn plan_upload(changed: Option<Vec<[u32; 4]>>, width: u32, height: u32) -> V
     let mut rects: Vec<[u32; 4]> = changed.into_iter().filter_map(|r| clamp_rect(r, width, height)).collect();
     rects.sort_unstable();
     rects.dedup();
+    let overlapping = (0..rects.len()).any(|i| (i + 1..rects.len()).any(|j| overlaps(&rects[i], &rects[j])));
+    if overlapping {
+        rects = tile_union(&rects, width, height);
+    }
     let area: u64 = rects.iter().map(|r| r[2] as u64 * r[3] as u64).sum();
     if area >= width as u64 * height as u64 {
         return whole;
     }
     rects
+}
+
+const UNION_TILE: u32 = 32;
+
+fn overlaps(a: &[u32; 4], b: &[u32; 4]) -> bool {
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+fn tile_union(rects: &[[u32; 4]], width: u32, height: u32) -> Vec<[u32; 4]> {
+    let (cols, rows) = (width.div_ceil(UNION_TILE), height.div_ceil(UNION_TILE));
+    let mut grid = vec![false; (cols * rows) as usize];
+    for r in rects {
+        for ty in r[1] / UNION_TILE..=(r[1] + r[3] - 1) / UNION_TILE {
+            for tx in r[0] / UNION_TILE..=(r[0] + r[2] - 1) / UNION_TILE {
+                grid[(ty * cols + tx) as usize] = true;
+            }
+        }
+    }
+    let mut out: Vec<[u32; 4]> = Vec::new();
+    let mut above: Vec<(u32, u32, usize)> = Vec::new();
+    for ty in 0..rows {
+        let mut here = Vec::new();
+        let mut tx = 0;
+        while tx < cols {
+            if !grid[(ty * cols + tx) as usize] {
+                tx += 1;
+                continue;
+            }
+            let start = tx;
+            while tx < cols && grid[(ty * cols + tx) as usize] {
+                tx += 1;
+            }
+            match above.iter().find(|(s, e, _)| *s == start && *e == tx) {
+                Some(&(_, _, i)) => {
+                    out[i][3] += UNION_TILE;
+                    here.push((start, tx, i));
+                }
+                None => {
+                    out.push([start * UNION_TILE, ty * UNION_TILE, (tx - start) * UNION_TILE, UNION_TILE]);
+                    here.push((start, tx, out.len() - 1));
+                }
+            }
+        }
+        above = here;
+    }
+    out.into_iter().filter_map(|r| clamp_rect(r, width, height)).collect()
 }
 
 /// Clamp a dirty rectangle to the screen's bounds; `None` if it is empty or
@@ -70,6 +120,25 @@ mod tests {
     fn plan_upload_takes_the_whole_screen_without_a_history_or_when_it_is_cheaper() {
         assert_eq!(plan_upload(None, 100, 60), vec![[0, 0, 100, 60]]);
         assert_eq!(plan_upload(Some(vec![[0, 0, 100, 40], [0, 20, 100, 40]]), 100, 60), vec![[0, 0, 100, 60]]);
+    }
+
+    #[test]
+    fn overlapping_paints_upload_their_union_once() {
+        let a = [0, 0, 64, 64];
+        let b = [32, 32, 64, 64];
+        let plan = plan_upload(Some(vec![a, b]), 200, 200);
+        let area: u32 = plan.iter().map(|r| r[2] * r[3]).sum();
+        assert!(area < 64 * 64 * 2, "union {area} is less than the two rects summed");
+        let covered = |x: u32, y: u32| plan.iter().any(|r| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]);
+        for r in [a, b] {
+            for y in r[1]..r[1] + r[3] {
+                for x in r[0]..r[0] + r[2] {
+                    assert!(covered(x, y), "({x},{y}) left out");
+                }
+            }
+        }
+        let rows_overlap = (0..plan.len()).any(|i| (i + 1..plan.len()).any(|j| overlaps(&plan[i], &plan[j])));
+        assert!(!rows_overlap, "no pixel is sent twice");
     }
 
     #[test]
