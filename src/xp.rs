@@ -964,6 +964,7 @@ pub const MOUSE_DRAG: c_int = 2;
 pub const MOUSE_UP: c_int = 3;
 /// Let X-Plane choose the cursor (XPLMDefs.h).
 pub const CURSOR_DEFAULT: c_int = 0;
+pub const CURSOR_HIDDEN: c_int = 1;
 
 /// The cockpit device calls and the texture calls drawing with them needs.
 #[derive(Clone, Copy)]
