@@ -1756,10 +1756,7 @@ unsafe extern "C" fn cursor_callback(x: c_int, y: c_int, refcon: *mut c_void) ->
     if FIRST.fetch_add(1, Ordering::Relaxed) < 5 {
         log_callback("cursor", refcon, x, y, 0, handled);
     }
-    match SCREENS.get(screen_of(refcon)).map(|d| d.id) {
-        Some("SCREEN_DU_NDL" | "SCREEN_DU_NDR") => xp::CURSOR_HIDDEN,
-        _ => xp::CURSOR_DEFAULT,
-    }
+    xp::CURSOR_DEFAULT
 }
 
 /// Full brightness: the dimming FlyByWire's model does (potentiometer and
