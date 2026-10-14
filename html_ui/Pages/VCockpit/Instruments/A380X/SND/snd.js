@@ -312,7 +312,7 @@
 
     updateBrightness(now) {
       const raw = (SimVar.GetSimVarValue('GLASSCOCKPIT AUTOMATIC BRIGHTNESS', 'percent') || 0) / 100;
-      const auto = 0.2 + 0.65 * clamp(raw, 0, 1);
+      const auto = 0.2 + 0.79 * clamp(raw, 0, 1);
       if (this.held && now - this.heldAt >= 150) {
         this.heldAt = now;
         this.offset = clamp(this.offset + 0.025 * this.held, 0.03 - auto, 0.99 - auto);

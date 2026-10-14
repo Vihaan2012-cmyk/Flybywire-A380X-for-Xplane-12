@@ -23,7 +23,7 @@ use fbw_a380_systems::xphfbw_bridge::{Input, InputKind, ScreenBlock, Session, MA
 use fbw_a380_systems::xphfbw_bridge_views::{view_list, ViewDef};
 
 /// Shared with the plugin (xphfbw_bridge_views), so both number screens alike.
-use fbw_a380_systems::xphfbw_bridge_views::{device_size, EFB_HEIGHT, EFB_SCREEN, EFB_SUPERSAMPLE, EFB_WIDTH, SCREEN_ORDER};
+use fbw_a380_systems::xphfbw_bridge_views::{device_size, supersample, EFB_HEIGHT, EFB_SCREEN, EFB_SUPERSAMPLE, EFB_WIDTH, SCREEN_ORDER};
 
 const OPEN_RETRY_MS: i64 = 250;
 /// ~75s of retries: the plugin creates the session only once the systems
@@ -149,7 +149,7 @@ fn screens_ready(tag: &str, aircraft_root: &Path) -> bool {
         // create_views reports the missing panel.cfg itself.
         return true;
     };
-    view_list(&panel_cfg).iter().filter(|d| !d.screen.is_empty()).all(|d| ScreenBlock::open(tag, &d.screen, d.width, d.height).is_some())
+    view_list(&panel_cfg).iter().filter(|d| !d.screen.is_empty()).all(|d| { let (w, h) = device_size(&d.screen, d.width, d.height); ScreenBlock::open(tag, &d.screen, w, h).is_some() })
 }
 
 type Browsers = (Vec<Browser>, Vec<Option<Browser>>, Vec<Vec<(usize, Browser)>>);
@@ -345,7 +345,7 @@ fn screen_size(state: &State, screen: usize) -> Option<(u32, u32)> {
     if id.eq_ignore_ascii_case(EFB_SCREEN) {
         return Some(device_size(EFB_SCREEN, EFB_WIDTH, EFB_HEIGHT));
     }
-    state.defs.iter().find(|d| d.screen.eq_ignore_ascii_case(id)).map(|d| (d.width, d.height))
+    state.defs.iter().find(|d| d.screen.eq_ignore_ascii_case(id)).map(|d| device_size(&d.screen, d.width, d.height))
 }
 
 // ---------------------------------------------------------------------------
@@ -504,7 +504,8 @@ fn spawn_view(tag: &str, def: &ViewDef, fps: i32) -> Option<Browser> {
     let screen = if def.screen.is_empty() {
         None
     } else {
-        match ScreenBlock::open(tag, &def.screen, def.width, def.height) {
+        let (dw, dh) = device_size(&def.screen, def.width, def.height);
+        match ScreenBlock::open(tag, &def.screen, dw, dh) {
             Some(b) => Some(Rc::new(b)),
             None => {
                 crate::logging::log(&format!("views: no ScreenBlock {} for {} (the plugin has not made it yet?)", def.screen, def.section));
@@ -513,7 +514,8 @@ fn spawn_view(tag: &str, def: &ViewDef, fps: i32) -> Option<Browser> {
         }
     };
     let layered = LAYERS.with(|l| l.borrow().get(&def.screen.to_ascii_uppercase()).cloned()).map(|stack| (stack, def.layer as usize));
-    let render_handler = ViewPaint::new(width, height, 1.0, screen, Rc::default(), layered);
+    let scale = if def.screen.is_empty() { 1.0 } else { supersample(&def.screen) as f32 };
+    let render_handler = ViewPaint::new(width, height, scale, screen, Rc::default(), layered);
     let url = gauge_url(def);
     let load_screen = if def.screen.is_empty() { "headless".to_string() } else { def.screen.clone() };
     let load_handler = ViewLoad::new(load_screen, def.section.clone(), url.clone());
@@ -946,22 +948,10 @@ const GOVERNOR_PERIOD_MS: i64 = 1000;
 /// every other view (engine and system pages, MFD, OIT, EFB, RMPs, clock)
 /// gets half of it.
 const SMOOTH_SCREENS: &[&str] = &["SCREEN_DU_PFDL", "SCREEN_DU_PFDR", "SCREEN_DU_NDL", "SCREEN_DU_NDR", "SCREEN_ISIS_1"];
-/// Below this a flight instrument's tapes visibly step, whatever X-Plane's
-/// own frame rate.
-const SMOOTH_FLOOR_FPS: i32 = 15;
-const SLOW_FLOOR_FPS: i32 = 10;
 
-/// The render rates for X-Plane's measured frame rate: `displayFps` (`cap`)
-/// at most, and never more than X-Plane can put on screen (plus a fifth, so
-/// a fresh picture is ready for nearly every X-Plane frame even though the
-/// two clocks drift). CEF at 60 fps under an X-Plane at 17 renders
-/// two-thirds of its frames for nobody, on the same GPU X-Plane needs.
-fn governed_rates(sim_fps: f64, cap: i32) -> (i32, i32) {
-    let cap = cap.max(1);
-    let wanted = if sim_fps.is_finite() && sim_fps > 0. { (sim_fps * 1.2).ceil() as i32 } else { 0 };
-    let smooth = wanted.clamp(SMOOTH_FLOOR_FPS.min(cap), cap);
-    let slow = (smooth / 2).clamp(SLOW_FLOOR_FPS.min(cap), cap);
-    (smooth, slow)
+fn governed_rates(_sim_fps: f64, cap: i32) -> (i32, i32) {
+    let cap = cap.clamp(1, 60);
+    (cap, cap)
 }
 
 /// Whether a new rate is worth setting: a 1-2 fps wobble in X-Plane's frame
@@ -1252,17 +1242,11 @@ mod governor_tests {
     use super::*;
 
     #[test]
-    fn views_render_no_faster_than_x_plane_shows_them() {
-        // X-Plane at 17 fps under a 60 fps cap: about 21, not 60.
-        assert_eq!(governed_rates(17., 60), (21, 10));
-        // A fast X-Plane is held to the cap.
-        assert_eq!(governed_rates(90., 60), (60, 30));
-        // Paused, loading, or not measured yet: the floors.
-        assert_eq!(governed_rates(0., 60), (15, 10));
-        assert_eq!(governed_rates(f64::NAN, 60), (15, 10));
-        // A cap below the floors wins.
-        assert_eq!(governed_rates(40., 12), (12, 10));
-        assert_eq!(governed_rates(40., 8), (8, 8));
+    fn every_view_renders_at_the_cap() {
+        assert_eq!(governed_rates(17., 60), (60, 60));
+        assert_eq!(governed_rates(90., 60), (60, 60));
+        assert_eq!(governed_rates(0., 30), (30, 30));
+        assert_eq!(governed_rates(40., 120), (60, 60));
     }
 
     #[test]

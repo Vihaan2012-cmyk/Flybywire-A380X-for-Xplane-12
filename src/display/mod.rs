@@ -108,7 +108,7 @@ struct BridgeScreen {
 /// Screen pixels copied into X-Plane's textures in one X-Plane frame, at
 /// most: each copy stalls X-Plane's GPU, and 15 screens refreshed in full
 /// every frame (58 MB) took X-Plane down to 2-3 fps. Screens take turns.
-const UPLOAD_BUDGET_BYTES: usize = 24 << 20;
+const UPLOAD_BUDGET_BYTES: usize = 48 << 20;
 
 const UNIT_SCREENS: [(Du, &str); 6] = [
     (Du::CaptPfd, "SCREEN_DU_PFDL"),
@@ -700,6 +700,9 @@ impl Displays {
         let header = bs.block.header();
         let width = header.width.load(Ordering::Relaxed);
         let height = header.height.load(Ordering::Relaxed);
+        let (fx, fy) = (width as f32 / def.width.max(1) as f32, height as f32 / def.height.max(1) as f32);
+        let crop = crop.map(|[x0, y0, x1, y1]| [x0 * fx, y0 * fy, x1 * fx, y1 * fy]);
+        let dimming: Vec<[f32; 4]> = dimming.iter().map(|[x0, y0, x1, y1]| [x0 * fx, y0 * fy, x1 * fx, y1 * fy]).collect();
         let now = std::time::Instant::now();
         let waited = bs.last_upload_at.map_or(UPLOAD_MAX_WAIT, |t| now - t);
         // A screen with no dimming regions (SCREEN_ISIS_1, Clock, RTPI, BAT,

@@ -49,12 +49,22 @@ pub const EFB_HEIGHT: u32 = 1000;
 /// `scale` (device texels over CSS size) maps them back.
 pub const EFB_SUPERSAMPLE: u32 = 2;
 
-/// A screen's device size in texels: its CSS size times its supersampling
-/// (only the EFB supersamples). Used for the X-Plane device, the shared
-/// `ScreenBlock` and the browser's paint buffer alike, so all three agree.
+pub const SCREEN_SUPERSAMPLE: f64 = 1.5;
+
+pub fn supersample(screen_id: &str) -> f64 {
+    if screen_id.eq_ignore_ascii_case(EFB_SCREEN) {
+        EFB_SUPERSAMPLE as f64
+    } else {
+        SCREEN_SUPERSAMPLE
+    }
+}
+
+/// A screen's device size in texels: its CSS size times its supersampling.
+/// Used for the X-Plane device, the shared `ScreenBlock` and the browser's
+/// paint buffer alike, so all three agree.
 pub fn device_size(screen_id: &str, css_width: u32, css_height: u32) -> (u32, u32) {
-    let s = if screen_id == EFB_SCREEN { EFB_SUPERSAMPLE } else { 1 };
-    (css_width * s, css_height * s)
+    let s = supersample(screen_id);
+    ((css_width as f64 * s).round() as u32, (css_height as f64 * s).round() as u32)
 }
 
 const SDV2_STYLESHEET: &str = r#"<link rel="stylesheet" href="/Pages/VCockpit/Instruments/A380X/SDv2/sdv2.css" />"#;
