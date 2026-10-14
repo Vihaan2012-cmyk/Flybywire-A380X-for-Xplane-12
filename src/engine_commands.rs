@@ -1334,7 +1334,7 @@ const HP_COMPRESSOR_DESTROYED: EngineDamage =
 
 /// Each engine failure (by its base id; engine n is base + n - 1) and the
 /// physical quantities it moves at full magnitude.
-const EXOTIC: [(u64, EngineDamage); 7] = [
+const EXOTIC: [(u64, EngineDamage); 8] = [
     // Bearing *wear* (`failures.rs`: "a main shaft bearing wears, raising
     // vibration and running clearances"), not a seizure. This was 1.0 --
     // a parasitic drag equal to the HP turbine's entire design torque,
@@ -1363,6 +1363,10 @@ const EXOTIC: [(u64, EngineDamage); 7] = [
     // down the core. Before this entry the FOD failure moved nothing the
     // engine model reads (only `damage.rs`'s display-only efficiency number).
     (72_024, HP_COMPRESSOR_DESTROYED),
+    (
+        crate::failures::extra::ENGINE_SEPARATION,
+        EngineDamage { compressor_efficiency_loss: 1.0, compressor_flow_capacity_loss: 1.0, turbine_efficiency_loss: 1.0, bearing_friction: 5.0 },
+    ),
 ];
 
 #[cfg(test)]
@@ -1382,6 +1386,27 @@ mod fod_tests {
         assert_eq!(fod.compressor_flow_capacity_loss, destroyed.compressor_flow_capacity_loss);
         assert_eq!(fod.bearing_friction, destroyed.bearing_friction);
         assert_eq!(fod.compressor_efficiency_loss, 1.0);
+    }
+
+    #[test]
+    fn a_separated_engine_loses_its_whole_core() {
+        let base = crate::failures::extra::ENGINE_SEPARATION;
+        for id in base..base + 4 {
+            assert!(is_engine_component_failure(id));
+        }
+        let d = EXOTIC.iter().find(|(b, _)| *b == base).map(|(_, d)| *d).unwrap();
+        assert_eq!(d.compressor_efficiency_loss, 1.0);
+        assert_eq!(d.turbine_efficiency_loss, 1.0);
+        assert!(d.bearing_friction > 1.5);
+        let natives: Vec<_> = crate::failures::extra::extra_failures()
+            .into_iter()
+            .filter(|x| (base..base + 4).contains(&x.id))
+            .filter_map(|x| match x.effect {
+                crate::failures::extra::Effect::NativeXplane { dataref } => Some(dataref),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(natives, ["sim/operation/failures/rel_engsep0", "sim/operation/failures/rel_engsep1", "sim/operation/failures/rel_engsep2", "sim/operation/failures/rel_engsep3"]);
     }
 
     /// End to end through the component registry: arming engine 3's FOD id

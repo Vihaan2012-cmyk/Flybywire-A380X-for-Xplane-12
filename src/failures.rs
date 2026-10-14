@@ -963,6 +963,21 @@ pub mod extra {
         ));
     }
 
+    pub const ENGINE_SEPARATION: u64 = 54_000;
+
+    fn separation(v: &mut Vec<ExtraFailure>) {
+        for n in 1..=4u64 {
+            v.push(f(
+                ENGINE_SEPARATION + (n - 1),
+                54,
+                format!("Engine {n} separation"),
+                format!("Engine {n} and its pylon tear off the wing: its thrust, generators, hydraulic pumps and bleed are gone, and fuel pours from the severed feed line until the engine's LP valve is closed."),
+                Effect::NativeXplane { dataref: ["sim/operation/failures/rel_engsep0", "sim/operation/failures/rel_engsep1", "sim/operation/failures/rel_engsep2", "sim/operation/failures/rel_engsep3"][n as usize - 1] },
+                None,
+            ));
+        }
+    }
+
     pub fn extra_failures() -> Vec<ExtraFailure> {
         let mut v = Vec::new();
         electrical(&mut v);
@@ -974,6 +989,7 @@ pub mod extra {
         pneumatic(&mut v);
         apu(&mut v);
         engines(&mut v);
+        separation(&mut v);
         exceedances(&mut v);
         v
     }

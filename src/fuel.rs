@@ -998,6 +998,11 @@ impl Fuel {
             };
             let line = FEED_LINE[i];
             let have = self.net.tank_gallons(line);
+            if crate::failures::is_active(crate::failures::extra::ENGINE_SEPARATION + i as u64) {
+                self.net.set_tank_gallons(line, 0.);
+                self.starved[i] = true;
+                continue;
+            }
             let burn = want_gal.min(have);
             self.net.set_tank_gallons(line, have - burn);
             self.starved[i] = want_gal > 0. && burn + 1e-9 < want_gal;

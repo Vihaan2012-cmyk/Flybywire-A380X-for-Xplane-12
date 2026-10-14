@@ -38,6 +38,7 @@ pub(super) fn chapter(ata: u64) -> &'static str {
         49 => "49 Airborne Auxiliary Power",
         52 => "52 Doors",
         53 => "53 Fuselage",
+        54 => "54 Nacelles and Pylons",
         56 => "56 Windows",
         57 => "57 Wings",
         71 => "71 Power Plant",
