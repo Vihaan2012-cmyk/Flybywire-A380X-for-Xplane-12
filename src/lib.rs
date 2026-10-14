@@ -2022,6 +2022,11 @@ impl Plugin {
         }
         // Strictly before `take`: a detent turned this tick has to be in the
         // batch this tick's FCU update reads, or the knob lags a frame.
+        let mut backed_up = |name: &str| match self.vars.ids.get(name).copied() {
+            Some(id) => self.vars.read(&id) != 0.,
+            None => false,
+        };
+        afs_events::set_backups(backed_up("A380X_FCU_BKUP_AFS_ACTIVE"), [backed_up("A380X_FCU_BKUP_EFIS_L_ACTIVE"), backed_up("A380X_FCU_BKUP_EFIS_R_ACTIVE")]);
         self.efis_knobs.update(xplm);
         self.efis_buttons.update(xplm);
         let events = afs_events::take();

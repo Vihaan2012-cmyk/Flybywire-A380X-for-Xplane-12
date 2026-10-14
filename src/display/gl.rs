@@ -275,6 +275,9 @@ const SHARPEN_FRAGMENT: &str = "#version 120
 uniform sampler2D tex;
 uniform vec2 texel;
 uniform float amount;
+uniform float glow;
+uniform float weight;
+uniform float sheen;
 void main() {
     vec2 uv = gl_TexCoord[0].xy;
     vec4 c = texture2D(tex, uv);
@@ -286,8 +289,22 @@ void main() {
     vec4 hi = max(c, max(max(n, s), max(e, w)));
     vec4 blur = (n + s + e + w) * 0.25;
     vec4 sharp = clamp(c + (c - blur) * (amount * 1.5), lo, hi);
-    sharp.rgb = min(sharp.rgb, vec3(sharp.a));
-    gl_FragColor = sharp * gl_Color;
+    sharp = max(sharp, hi * weight);
+    vec2 d = texel * 6.0;
+    vec3 lw = vec3(0.299, 0.587, 0.114);
+    vec4 wide = texture2D(tex, uv, 4.0);
+    vec4 halo = (texture2D(tex, uv + vec2(d.x, d.y), 2.5) + texture2D(tex, uv + vec2(-d.x, d.y), 2.5)
+        + texture2D(tex, uv + vec2(d.x, -d.y), 2.5) + texture2D(tex, uv + vec2(-d.x, -d.y), 2.5)) * 0.15
+        + (wide + texture2D(tex, uv + vec2(d.x * 2.0, 0.0), 4.0) + texture2D(tex, uv - vec2(d.x * 2.0, 0.0), 4.0)) * 0.1333;
+    halo *= 1.0 - smoothstep(0.2, 0.5, dot(wide.rgb, lw));
+    vec4 outc = sharp + halo * glow * (1.0 - dot(sharp.rgb, lw));
+    float lum = dot(outc.rgb, lw);
+    float band = smoothstep(0.15, 1.0, uv.x * 0.6 + (1.0 - uv.y) * 0.8) * (1.0 - smoothstep(0.0, 0.35, lum));
+    outc.rgb += vec3(0.55, 0.6, 0.7) * band * sheen * 0.06;
+    outc.a = max(outc.a, max(outc.r, max(outc.g, outc.b)));
+    outc = clamp(outc, 0.0, 1.0);
+    outc.rgb = min(outc.rgb, vec3(outc.a));
+    gl_FragColor = outc * gl_Color;
 }
 ";
 
@@ -300,6 +317,9 @@ struct Sharpen {
     tex: c_int,
     texel: c_int,
     amount: c_int,
+    glow: c_int,
+    weight: c_int,
+    sheen: c_int,
 }
 
 /// The multisampled framebuffer every screen draws through.
@@ -961,12 +981,23 @@ impl Renderer {
             return None;
         }
         let uniform = |name: &std::ffi::CStr| (gl.get_uniform_location)(program, name.as_ptr());
-        Some(Sharpen { program, tex: uniform(c"tex"), texel: uniform(c"texel"), amount: uniform(c"amount") })
+        Some(Sharpen {
+            program,
+            tex: uniform(c"tex"),
+            texel: uniform(c"texel"),
+            amount: uniform(c"amount"),
+            glow: uniform(c"glow"),
+            weight: uniform(c"weight"),
+            sheen: uniform(c"sheen"),
+        })
     }
 
     pub fn draw_bridge(&mut self, screen_id: &'static str, gpu: &mut BridgeGpu, underlay: Option<&BridgeGpu>, width: u32, height: u32, crop: Option<[f32; 4]>, target: Target, brightness: &[f32], dimming: &[[f32; 4]], cursor: Option<Cursor>) {
-        let amount = crate::app_settings::current().display_sharpen as f32;
-        let sharpen = if amount > 0. && gpu.size.0 > 0 && gpu.size.1 > 0 { self.sharpen_program() } else { None };
+        let settings = crate::app_settings::current();
+        let amount = settings.display_sharpen as f32;
+        let finish = [settings.display_glow as f32, settings.display_line_weight as f32, settings.display_sheen as f32];
+        let any = amount > 0. || finish.iter().any(|v| *v > 0.);
+        let sharpen = if any && gpu.size.0 > 0 && gpu.size.1 > 0 { self.sharpen_program() } else { None };
         if gpu.texture == 0 {
             // Distinct from the width/height == 0 case below (a ScreenBlock
             // that simply has not published a size yet, normal for a
@@ -1046,6 +1077,9 @@ impl Renderer {
                 (gl.uniform1i)(s.tex, 0);
                 (gl.uniform2f)(s.texel, 1. / gpu.size.0 as f32, 1. / gpu.size.1 as f32);
                 (gl.uniform1f)(s.amount, amount);
+                (gl.uniform1f)(s.glow, finish[0]);
+                (gl.uniform1f)(s.weight, finish[1]);
+                (gl.uniform1f)(s.sheen, finish[2]);
             }
             (gl.draw_arrays)(GL_TRIANGLES, 0, 6);
             if sharpen.is_some() {

@@ -375,6 +375,34 @@ pub fn send(event: Event) {
     }
 }
 
+static BACKUP: [AtomicBool; 3] = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
+
+pub fn set_backups(afs: bool, efis: [bool; 2]) {
+    BACKUP[0].store(afs, Ordering::Relaxed);
+    BACKUP[1].store(efis[0], Ordering::Relaxed);
+    BACKUP[2].store(efis[1], Ordering::Relaxed);
+}
+
+fn panel_backed_up(event: Event) -> bool {
+    use Event::*;
+    let panel = match event {
+        FcuEfisModeTurn(s, _) | FcuEfisRangeTurn(s, _) | FcuEfisBaroTurn(s, _) | FcuEfisBaroPush(s) | FcuEfisBaroPull(s) | FcuEfisButton(s, _) => 1 + s.min(1),
+        FcuAp1Push | FcuAp2Push | FcuAthrPush | FcuFdPush | FcuSpdInc | FcuSpdDec | FcuSpdPush | FcuSpdPull | FcuSpdMachTogglePush | FcuHdgInc | FcuHdgDec | FcuHdgPush
+        | FcuHdgPull | FcuTrkFpaTogglePush | FcuTrueTogglePush | FcuAltInc | FcuAltDec | FcuAltPush | FcuAltPull | FcuMetricAltTogglePush | FcuVsInc | FcuVsDec
+        | FcuVsPush | FcuVsPull | FcuLocPush | FcuApprPush | FcuAltButtonPush => 0,
+        _ => return false,
+    };
+    BACKUP[panel].load(Ordering::Relaxed)
+}
+
+fn send_from_panel(event: Event) {
+    if panel_backed_up(event) {
+        crate::diag::event("fcu-backup", &format!("{event:?} ignored: its control panel is backed up on the MFD"));
+    } else {
+        send(event);
+    }
+}
+
 /// This tick's inputs: every event since the last call, applied to the
 /// cleared inputs.
 pub fn take() -> EventInputs {
@@ -483,7 +511,7 @@ impl KnobVar {
         };
         let moved = value - baseline;
         if moved != 0.0 && moved.abs() <= MAX_DETENTS_PER_TICK {
-            send((self.event)(self.side, moved as i8));
+            send_from_panel((self.event)(self.side, moved as i8));
         }
         // Either way this read is now the reference, so one turn is not
         // sent twice while the FCU catches up.
@@ -601,7 +629,7 @@ impl ButtonVar {
         let Some(value) = self.read(xplm) else { return };
         if let Some(button) = self.baseline.and_then(|was| self.watch.pushed(was, value)) {
             crate::diag::event("efis", &format!("{} {:?} -> {value}: {button:?} pushed on side {}", self.path, self.baseline, self.side));
-            send(Event::FcuEfisButton(self.side, button));
+            send_from_panel(Event::FcuEfisButton(self.side, button));
         }
         self.baseline = Some(value);
     }
@@ -663,7 +691,7 @@ unsafe extern "C" fn on_command(_command: CommandRef, phase: std::ffi::c_int, re
     if let Some(event) = efis_button_command(refcon as usize) {
         if phase == 0 {
             crate::diag::event("command", &format!("{event:?}"));
-            send(event);
+            send_from_panel(event);
         }
         return 1;
     }
@@ -673,7 +701,7 @@ unsafe extern "C" fn on_command(_command: CommandRef, phase: std::ffi::c_int, re
     }
     // A key event is one press: take the command's begin phase.
     if phase == 0 {
-        send(event);
+        send_from_panel(event);
     }
     if suffix.starts_with("sim/") {
         0
@@ -823,6 +851,18 @@ mod priority_takeover_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backed_up_panel_ignores_only_its_own_controls() {
+        set_backups(true, [false, true]);
+        assert!(panel_backed_up(Event::FcuSpdInc));
+        assert!(panel_backed_up(Event::FcuEfisBaroPush(1)));
+        assert!(!panel_backed_up(Event::FcuEfisBaroPush(0)));
+        assert!(!panel_backed_up(Event::FcuAthrDisconnectPush));
+        assert!(!panel_backed_up(Event::AutopilotOff));
+        set_backups(false, [false, false]);
+        assert!(!panel_backed_up(Event::FcuSpdInc));
+    }
 
     /// The gap that left the ND frozen: every other FCU knob had an event
     /// wired to it, and the two EFIS ones did not, so

@@ -59,18 +59,6 @@ const TOTAL_CELLS: usize = AZIMUTH_BINS * RANGE_BINS;
 /// (`TOTAL_CELLS`) over several seconds instead.
 const SAMPLES_PER_TICK: usize = 6;
 
-/// FlyByWire gives the WXR beam no tilt or gain input of its own to read (no
-/// `A32NX_WXR_*_TILT`/`_GAIN` LVar exists anywhere in fbw-a380x -- checked
-/// by `rg`; the MFD SURV page's `wxrElevnTiltSelectedIndex`/`wxrGainAuto`
-/// are local UI state nothing else reads). The pedestal's real tilt/gain/
-/// multiscan/GCS/mode knobs are converter datarefs instead
-/// (`fbw/cockpit/SWITCH_RADAR_MULTISCAN`/`_GCS` already exist; tilt, gain
-/// and mode are TBD names from a concurrent binding pass -- `read_controls`
-/// below `xplm.find`s each by best-guess name every tick, the same lazy-
-/// lookup pattern `read_aircraft` already uses for X-Plane's own datarefs,
-/// and simply keeps this level-beam/full-gain/no-suppression default for
-/// any input that is not there yet). This constant is that default and the
-/// fallback whenever a knob is absent or MULTISCAN is in AUTO.
 const TILT_DEG: f64 = 0.;
 
 /// Beyond this, a stored return is dropped rather than carried forever
@@ -128,6 +116,7 @@ fn bucket(lat: f64, lon: f64) -> (i32, i32) {
 
 #[derive(Default)]
 struct SideState {
+    points: HashMap<(i32, i32), Point>,
     cursor: usize,
     /// Whether the ND is currently showing this image (the selector
     /// L:vars this tick): `native_image` returns `None` when this is
@@ -143,7 +132,6 @@ struct SideState {
 
 #[derive(Default)]
 struct State {
-    points: HashMap<(i32, i32), Point>,
     sides: [SideState; 2],
 }
 
@@ -177,58 +165,43 @@ fn read_aircraft(xplm: &Xplm) -> Option<Aircraft> {
     })
 }
 
-/// The pedestal's real weather-radar knob cluster (`docs/physics/
-/// surveillance.md`'s "Still needed from the converter" and the module doc
-/// above): `SWITCH_RADAR_MULTISCAN`/`_GCS` are already converter datarefs;
-/// tilt, gain and mode are not yet, so `read_controls` looks each up by a
-/// best-guess `fbw/cockpit/KNOB_RADAR_*` name and simply leaves this tick's
-/// default (level beam, full gain, no clutter suppression, radar on) alone
-/// for any one of them that is not published yet -- never a fabricated
-/// value for a missing input.
-struct Controls {
-    /// `SWITCH_RADAR_MULTISCAN` > 0.5: automatic tilt computed by the
-    /// AESU. Below that, or the dataref not found yet, is manual -- the
-    /// pilot's own tilt knob applies (`knob_tilt_deg`, itself falling back
-    /// to [`TILT_DEG`] if that knob is not there either). Polarity (which
-    /// state is AUTO) is this module's own best guess pending the real
-    /// binding's documented sense -- either way, both branches degrade to
-    /// today's level beam whenever the tilt knob itself is absent, so a
-    /// wrong guess here cannot fabricate a tilt value.
-    multiscan_auto: bool,
-    /// `SWITCH_RADAR_GCS` > 0.5: ground-clutter suppression on.
-    gcs_on: bool,
-    /// The tilt knob's raw reading in degrees, if that dataref exists.
-    knob_tilt_deg: Option<f64>,
-    /// The gain knob's raw reading, clamped to 0..1, if that dataref
-    /// exists; `None` (full gain, [`apply_gain`]'s own default) otherwise.
+struct SideControls {
+    mode: i32,
+    elevn_m: f64,
+    tilt_deg: f64,
     gain: Option<f32>,
-    /// The mode selector's raw reading, if that dataref exists; used only
-    /// by [`mode_is_off`] to detect OFF/STBY (assumed to be the lowest
-    /// value the selector reports).
-    mode_raw: Option<f32>,
+    map: bool,
 }
 
-fn read_controls(xplm: &Xplm) -> Controls {
+struct Controls {
+    off: bool,
+    turb_off: bool,
+    gcs_on: bool,
+    sides: [SideControls; 2],
+}
+
+const FEET_TO_METRES: f64 = 0.3048;
+
+fn read_controls(vars: &Vars, xplm: &Xplm) -> Controls {
     let gcs_on = xplm.find("fbw/cockpit/SWITCH_RADAR_GCS").is_some_and(|d| xplm.get_f(d) > 0.5);
-    let value = |name: &str| xplm.find(name).map(|d| xplm.get_f(d));
-    let manual = |name: &str| value(name).is_some_and(|v| v > 0.5);
-    let knob_tilt_deg = manual("fbw/cockpit/WXR_TILT_MAN").then(|| value("fbw/cockpit/WXR_TILT_DEG").map(f64::from)).flatten();
-    let gain = manual("fbw/cockpit/WXR_GAIN_MAN").then(|| value("fbw/cockpit/WXR_GAIN_PCT").map(manual_gain)).flatten();
-    let multiscan_auto = knob_tilt_deg.is_none();
-    let mode_raw = xplm.find("fbw/cockpit/KNOB_RADAR_MODE").map(|d| xplm.get_f(d));
-    Controls { multiscan_auto, gcs_on, knob_tilt_deg, gain, mode_raw }
+    let flag = |name: &str| read_named(vars, name).is_some_and(|v| v != 0.);
+    let side = |s: char| {
+        let get = |name: &str| read_named(vars, &format!("A380X_WXR_{s}_{name}"));
+        SideControls {
+            mode: get("ELEVN_TILT").map_or(0, |v| v.round() as i32),
+            elevn_m: get("ELEVN_FT").unwrap_or(0.) * FEET_TO_METRES,
+            tilt_deg: get("TILT_DEG").unwrap_or(TILT_DEG).clamp(-15., 15.),
+            gain: get("GAIN_MAN").is_some_and(|v| v != 0.).then(|| manual_gain(get("GAIN_PCT").unwrap_or(50.) as f32)),
+            map: get("MODE_MAP").is_some_and(|v| v != 0.),
+        }
+    };
+    Controls { off: flag("A380X_WXR_OFF"), turb_off: flag("A380X_WXR_TURB_OFF"), gcs_on, sides: [side('L'), side('R')] }
 }
 
-/// The beam's tilt this tick: the manual knob only when MULTISCAN is not
-/// AUTO and the knob is actually there, [`TILT_DEG`]'s level-beam default
-/// otherwise (AUTO with no real auto-tilt model in this module yet, or the
-/// knob simply not bound).
-fn effective_tilt_deg(multiscan_auto: bool, knob_tilt_deg: Option<f64>) -> f64 {
-    if multiscan_auto {
-        TILT_DEG
-    } else {
-        knob_tilt_deg.unwrap_or(TILT_DEG)
-    }
+fn beam_sample_point(aircraft: &Aircraft, c: &SideControls, azimuth: f64, range_nm: f64) -> (f64, f64, f64) {
+    let tilt = if c.mode == 2 { c.tilt_deg } else { TILT_DEG };
+    let (lat, lon, alt_m) = geometry::beam_point(aircraft.lat, aircraft.lon, aircraft.alt_m, aircraft.heading_true_deg, azimuth, range_nm, tilt);
+    (lat, lon, if c.mode == 1 { c.elevn_m } else { alt_m })
 }
 
 /// The gain knob scales the classifier's input ratio directly: a return
@@ -256,13 +229,6 @@ fn gcs_suppress(level: Level, gcs_on: bool) -> Level {
     } else {
         level
     }
-}
-
-/// Whether the mode selector reads as OFF/STBY: this module's best guess is
-/// that state is the selector's lowest value, `<= 0.5`. `None` (dataref not
-/// bound yet) never counts as off -- the radar stays on, today's behaviour.
-fn mode_is_off(mode_raw: Option<f32>) -> bool {
-    mode_raw.is_some_and(|m| m <= 0.5)
 }
 
 /// One of FlyByWire's LVars, read the same way the JS engine's `L:` writes
@@ -342,15 +308,11 @@ fn upsert(points: &mut HashMap<(i32, i32), Point>, lat: f64, lon: f64, level: Le
 /// written by the scripts, are the ones read here.
 pub fn tick(vars: &Vars, xplm: &Xplm, time_s: f64) {
     let Some(aircraft) = read_aircraft(xplm) else { return };
-    let controls = read_controls(xplm);
-    // A mode selector read as OFF/STBY blanks the radar the same way a
-    // failed or unpowered lane does -- one antenna, so this is not
-    // per-side like `wxr_failed`'s own lane split.
-    let failed = wxr_failed(vars) || mode_is_off(controls.mode_raw);
-    let tilt_deg = effective_tilt_deg(controls.multiscan_auto, controls.knob_tilt_deg);
+    let controls = read_controls(vars, xplm);
+    let failed = wxr_failed(vars) || controls.off;
     let mut state = state().lock().unwrap_or_else(|e| e.into_inner());
     let mut sampler = XplmSampler;
-    let configs = [side_config(vars, 'L', failed), side_config(vars, 'R', failed)];
+    let configs = [side_config(vars, 'L', failed || controls.sides[0].map), side_config(vars, 'R', failed || controls.sides[1].map)];
     for (i, config) in configs.iter().enumerate() {
         let now_active = config.is_some();
         if now_active && !state.sides[i].active {
@@ -366,15 +328,19 @@ pub fn tick(vars: &Vars, xplm: &Xplm, time_s: f64) {
             let (az_i, rg_i) = (idx / RANGE_BINS, idx % RANGE_BINS);
             let azimuth = cell_azimuth(az_i);
             let range_nm = cell_range_nm(rg_i, config.range_nm);
-            let (lat, lon, alt_m) = geometry::beam_point(aircraft.lat, aircraft.lon, aircraft.alt_m, aircraft.heading_true_deg, azimuth, range_nm, tilt_deg);
+            let c = &controls.sides[i];
+            let (lat, lon, alt_m) = beam_sample_point(&aircraft, c, azimuth, range_nm);
             if let Some(Sample { precip_rate_alt, turbulence_alt }) = sampler.sample(lat, lon, alt_m) {
-                let level = gcs_suppress(levels::classify(apply_gain(precip_rate_alt, controls.gain), turbulence_alt), controls.gcs_on);
-                upsert(&mut state.points, lat, lon, level);
+                let turbulence = if controls.turb_off { 0. } else { turbulence_alt };
+                let level = gcs_suppress(levels::classify(apply_gain(precip_rate_alt, c.gain), turbulence), controls.gcs_on);
+                upsert(&mut state.sides[i].points, lat, lon, level);
                 state.sides[i].dirty = true;
             }
         }
     }
-    state.points.retain(|_, p| distance_wgs84(aircraft.lat, aircraft.lon, p.lat, p.lon) <= MAX_STORE_RADIUS_NM);
+    for side in state.sides.iter_mut() {
+        side.points.retain(|_, p| distance_wgs84(aircraft.lat, aircraft.lon, p.lat, p.lon) <= MAX_STORE_RADIUS_NM);
+    }
     for (i, config) in configs.into_iter().enumerate() {
         let Some(config) = config else { continue };
         let side = &state.sides[i];
@@ -399,7 +365,7 @@ fn rebuild(state: &mut State, side: usize, aircraft: &Aircraft, config: &SideCon
         max_radius_px,
         cell_half_px: (max_radius_px / RANGE_BINS as f64).max(3.),
     };
-    let returns: Vec<image::Return> = state.points.values().map(|p| image::Return { lat: p.lat, lon: p.lon, level: p.level }).collect();
+    let returns: Vec<image::Return> = state.sides[side].points.values().map(|p| image::Return { lat: p.lat, lon: p.lon, level: p.level }).collect();
     let rgba = image::rasterize(&returns, &view);
     let s = &mut state.sides[side];
     s.generation += 1;
@@ -500,14 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn manual_tilt_uses_the_knob_only_when_not_auto() {
-        assert_eq!(effective_tilt_deg(false, Some(7.5)), 7.5);
-        assert_eq!(effective_tilt_deg(true, Some(7.5)), TILT_DEG);
-        assert_eq!(effective_tilt_deg(false, None), TILT_DEG);
-        assert_eq!(effective_tilt_deg(true, None), TILT_DEG);
-    }
-
-    #[test]
     fn the_wxr_patch_matches_the_installed_systems_host_once() {
         let Some(root) = std::env::var_os("FBW_HTML_UI") else { return };
         for p in source_patches() {
@@ -540,10 +498,13 @@ mod tests {
     }
 
     #[test]
-    fn mode_off_only_when_the_selector_is_bound_and_reads_low() {
-        assert!(!mode_is_off(None), "missing dataref must never fake OFF");
-        assert!(mode_is_off(Some(0.0)));
-        assert!(!mode_is_off(Some(1.0)));
+    fn elevn_samples_at_the_selected_altitude_and_tilt_raises_the_beam() {
+        let aircraft = Aircraft { lat: 47.0, lon: 11.0, alt_m: 3000., heading_true_deg: 90. };
+        let side = |mode, tilt_deg| SideControls { mode, elevn_m: 6000., tilt_deg, gain: None, map: false };
+        assert_eq!(beam_sample_point(&aircraft, &side(1, 0.), 0., 40.).2, 6000.);
+        let level = beam_sample_point(&aircraft, &side(0, 10.), 0., 40.).2;
+        let tilted = beam_sample_point(&aircraft, &side(2, 10.), 0., 40.).2;
+        assert!(tilted > level + 10_000.);
     }
 
     #[test]
@@ -583,7 +544,7 @@ mod tests {
         {
             let mut state = state().lock().unwrap_or_else(|e| e.into_inner());
             state.sides[side].active = true;
-            upsert(&mut state.points, 47.01, 11.01, Level::Red);
+            upsert(&mut state.sides[side].points, 47.01, 11.01, Level::Red);
             rebuild(&mut state, side, &aircraft, &config, 1.0);
         }
         let (w, h, gen1, rgba) = layer(Side::Right).expect("rebuilt while active");
@@ -593,7 +554,7 @@ mod tests {
 
         {
             let mut state = state().lock().unwrap_or_else(|e| e.into_inner());
-            upsert(&mut state.points, 47.02, 11.02, Level::Red);
+            upsert(&mut state.sides[side].points, 47.02, 11.02, Level::Red);
             rebuild(&mut state, side, &aircraft, &config, 2.0);
         }
         let (_, _, gen2, _) = layer(Side::Right).expect("rebuilt again");

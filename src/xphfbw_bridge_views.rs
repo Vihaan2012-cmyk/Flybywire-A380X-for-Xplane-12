@@ -49,7 +49,7 @@ pub const EFB_HEIGHT: u32 = 1000;
 /// `scale` (device texels over CSS size) maps them back.
 pub const EFB_SUPERSAMPLE: u32 = 2;
 
-pub const SCREEN_SUPERSAMPLE: f64 = 1.5;
+pub const SCREEN_SUPERSAMPLE: f64 = 2.0;
 
 pub fn supersample(screen_id: &str) -> f64 {
     if screen_id.eq_ignore_ascii_case(EFB_SCREEN) {

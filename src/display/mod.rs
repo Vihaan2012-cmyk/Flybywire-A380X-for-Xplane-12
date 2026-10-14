@@ -119,7 +119,7 @@ struct BridgeScreen {
 /// Screen pixels copied into X-Plane's textures in one X-Plane frame, at
 /// most: each copy stalls X-Plane's GPU, and 15 screens refreshed in full
 /// every frame (58 MB) took X-Plane down to 2-3 fps. Screens take turns.
-const UPLOAD_BUDGET_BYTES: usize = 48 << 20;
+const UPLOAD_BUDGET_BYTES: usize = 80 << 20;
 
 const UNIT_SCREENS: [(Du, &str); 6] = [
     (Du::CaptPfd, "SCREEN_DU_PFDL"),
