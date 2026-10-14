@@ -87,6 +87,9 @@ struct Args {
     /// embossed in them; smaller, the cockpit shades flat.
     #[arg(long, default_value_t = 4096)]
     normal_max: u32,
+    /// Skip tools/optimize/optimize.py on the converted aircraft.
+    #[arg(long)]
+    no_optimize: bool,
     /// Include the passenger cabin (the LOD01 graft, 180k triangles behind
     /// the cockpit door; on by default). Accepted as a no-op for old command
     /// lines: the cabin was opt-in before it became the default. Never read
@@ -4157,6 +4160,13 @@ fn main() -> anyhow::Result<()> {
         readme.push_str(&format!("  objects/{f}\r\n"));
     }
     std::fs::write(root.join("README.txt"), readme)?;
+    if !args.no_optimize {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools").join("optimize").join("optimize.py");
+        let status = std::process::Command::new("python").arg("-I").arg(&script).arg(&root).status()?;
+        if !status.success() {
+            anyhow::bail!("tools/optimize failed on {}", root.display());
+        }
+    }
     println!("wrote {}", root.display());
     Ok(())
 }

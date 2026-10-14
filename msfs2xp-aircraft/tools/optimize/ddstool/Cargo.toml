@@ -1,0 +1,9 @@
+[package]
+name = "ddstool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+msfs2xp = { path = "../../../../Converter" }
+
+[workspace]
