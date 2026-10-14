@@ -25,6 +25,7 @@ use systems::simulation::{
 };
 
 mod afs_events;
+mod cockpit_tweaks;
 pub mod remote;
 pub mod xphfbw_bridge;
 pub mod xphfbw_bridge_views;
@@ -2450,6 +2451,7 @@ impl Plugin {
         }
         #[cfg(feature = "js")]
         wxr::tick(&self.vars, xplm, self.time);
+        cockpit_tweaks::tick(xplm);
         crate::perf::lap("tick-after-systems: xplane_mirror");
         xplane_mirror::update(&mut self.vars, xplm); // [slot tick-after-systems: xplane_mirror]
         self.vars.publish();
