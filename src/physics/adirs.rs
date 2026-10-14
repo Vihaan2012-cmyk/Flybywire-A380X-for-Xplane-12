@@ -781,6 +781,7 @@ pub struct Adiru {
     // Study/reporting.
     position_error_m: f64,
     drift_rate_smoothed_nm_hr: f64,
+    gps_accel_correction: [f64; 2],
 
     v: AdiruVars,
 }
@@ -890,6 +891,7 @@ impl Adiru {
             adr_probe_heat_w: 0.,
             position_error_m: 0.,
             drift_rate_smoothed_nm_hr: 0.,
+            gps_accel_correction: [0.; 2],
             v,
         }
     }
@@ -1031,6 +1033,7 @@ impl Adiru {
             self.last_r_sensed_xp = 0.;
             self.position_error_m = 0.;
             self.drift_rate_smoothed_nm_hr = 0.;
+            self.gps_accel_correction = [0.; 2];
         } else {
             if !self.running {
                 // Just finished aligning: freeze whatever gyrocompass error
@@ -1489,8 +1492,12 @@ impl Adiru {
         let gps_v_north = t.v_north_ms + self.rng.gaussian() * gps_velocity_noise_ms;
         let gps_v_east = t.v_east_ms + self.rng.gaussian() * gps_velocity_noise_ms;
         let kv = (dt / GPS_VELOCITY_TIME_CONSTANT_S).min(1.0);
-        self.v_north += kv * (gps_v_north - self.v_north);
-        self.v_east += kv * (gps_v_east - self.v_east);
+        let ki = dt / (4.0 * GPS_VELOCITY_TIME_CONSTANT_S * GPS_VELOCITY_TIME_CONSTANT_S);
+        let (error_north, error_east) = (gps_v_north - self.v_north, gps_v_east - self.v_east);
+        self.gps_accel_correction[0] += ki * error_north;
+        self.gps_accel_correction[1] += ki * error_east;
+        self.v_north += kv * error_north + self.gps_accel_correction[0] * dt;
+        self.v_east += kv * error_east + self.gps_accel_correction[1] * dt;
 
         let north_error_m = (t.lat_deg.to_radians() - self.lat_rad) * EARTH_RADIUS_M;
         let east_error_m =
@@ -2232,6 +2239,29 @@ mod tests {
                 eprintln!("{clock:.0}s GS {:.1} kt pitch {:.3} roll {:.3} hdg {:.2} (xp {:.3} {:.3} {:.2}) g {:.4} {:.4} {:.4}", a.v_north.hypot(a.v_east) * MS_TO_KNOT, a.pitch_deg, a.roll_deg, a.heading_deg, t.theta_xp, t.phi_xp, t.psi_xp, t.g_axil, t.g_side, t.g_nrml);
             }
         }
+    }
+
+    #[test]
+    fn gps_aiding_removes_a_steady_acceleration_error_from_parked_ground_speed() {
+        let _g = crate::failures::tests::serial();
+        let mut a = Adiru::new_for_test(1);
+        let mut t = stationary_level_state(25.0);
+        t.theta_xp = 0.419;
+        t.phi_xp = 0.698;
+        t.g_axil = -0.0122;
+        t.g_side = -0.0173;
+        t.g_nrml = 0.9995;
+        t.any_engine_running = true;
+        let dt = 1.0 / 30.0;
+        for _ in 0..(60.0 / dt) as u64 {
+            a.advance(dt, &t, 2.0, true, true, true);
+        }
+        t.g_axil -= 0.002;
+        for _ in 0..(600.0 / dt) as u64 {
+            a.advance(dt, &t, 2.0, true, true, true);
+        }
+        let ground_speed_kt = a.v_north.hypot(a.v_east) * MS_TO_KNOT;
+        assert!(ground_speed_kt < 0.2, "parked with a steady 2 mg force error, got {ground_speed_kt:.2} kt");
     }
 
     #[test]
