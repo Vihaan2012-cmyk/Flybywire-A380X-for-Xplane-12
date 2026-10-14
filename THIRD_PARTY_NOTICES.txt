@@ -76,5 +76,9 @@ supported by FlyByWire Simulations, Microsoft, Laminar Research or Airbus.
    software. SASL copyright holders are not liable for any properties for
    any end product which uses SASL.
 
-10. Trademarks
+10. Loading screen images
+   The loading screen backgrounds (plugins/fbw_a380_systems/loading) are
+   screenshots by a3fatty, used with permission.
+
+11. Trademarks
    Airbus and A380 are Airbus trademarks, used only to identify the aircraft.
