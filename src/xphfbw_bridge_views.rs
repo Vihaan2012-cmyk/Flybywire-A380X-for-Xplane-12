@@ -47,11 +47,11 @@ pub const EFB_HEIGHT: u32 = 1000;
 /// sharp when it fills much of the view (it looked low-res at 1x,
 /// 2026-09-27). Taps still arrive in CSS pixels: the plugin's per-screen
 /// `scale` (device texels over CSS size) maps them back.
-pub const EFB_SUPERSAMPLE: u32 = 2;
+pub const EFB_SUPERSAMPLE: u32 = 1;
 
 pub const SCREEN_SUPERSAMPLE: f64 = 2.0;
 
-const NATIVE_SCREENS: &[&str] = &["FCU", "SCREEN_DU_RMP_1", "SCREEN_DU_RMP_2", "SCREEN_DU_RMP_3", "Clock", "BAT", "RTPI"];
+const NATIVE_SCREENS: &[&str] = &["FCU", "SCREEN_DU_RMP_1", "SCREEN_DU_RMP_2", "SCREEN_DU_RMP_3", "Clock", "BAT", "RTPI", "SCREEN_OIT_LEFT", "SCREEN_OIT_RIGHT"];
 
 const STANDBY_SCREENS: &[&str] = &["SCREEN_ISIS_1", "SCREEN_ISIS_2"];
 
