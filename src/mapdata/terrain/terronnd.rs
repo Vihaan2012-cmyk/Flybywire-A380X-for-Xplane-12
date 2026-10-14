@@ -259,10 +259,12 @@ impl Display {
     /// `DisplayBase::render`: the gauge's picture, redrawn when it would change.
     fn render(&mut self) -> Option<NativeImage> {
         let image_key = self.image.as_ref().map_or(0, |i| Arc::as_ptr(i) as usize);
-        if self.last_drawn == Some((self.configuration, image_key)) {
+        let mut key = self.configuration;
+        key.potentiometer = (key.potentiometer * 255.).round() / 255.;
+        if self.last_drawn == Some((key, image_key)) {
             return None;
         }
-        self.last_drawn = Some((self.configuration, image_key));
+        self.last_drawn = Some((key, image_key));
         let (w, h) = (GAUGE_WIDTH, GAUGE_HEIGHT);
         let mut rgba = if self.configuration.powered { INSTRUMENT_BG_COLOR.repeat(w * h) } else { [0, 0, 0, 255].repeat(w * h) };
         if self.configuration.powered && self.configuration.potentiometer.abs() > 1e-4 {
@@ -495,6 +497,20 @@ mod tests {
         gauge.draw(Instant::now(), &inputs, &mut out);
         let left = out.images.iter().find(|(s, _)| *s == Side::Left).expect("redrawn");
         assert_eq!(&left.1.rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_brightness_wobble_under_one_level_does_not_redraw_the_picture() {
+        let mut out = GaugeOutput::default();
+        let mut gauge = Gauge::new(&mut out);
+        let mut inputs = GaugeInputs { status: [0.; 9], nd: [40., 3., 1., 20., 3., 1., 1., 1.], simulator: [0., 0., 1., 1.] };
+        let mut out = GaugeOutput::default();
+        gauge.draw(Instant::now(), &inputs, &mut out);
+        assert!(out.images.iter().any(|(s, _)| *s == Side::Left));
+        inputs.simulator[2] = 0.999;
+        let mut out = GaugeOutput::default();
+        gauge.draw(Instant::now() + std::time::Duration::from_secs(1), &inputs, &mut out);
+        assert!(out.images.iter().all(|(s, _)| *s != Side::Left), "0.1 % brightness change redrew the terrain");
     }
 
     /// `NativeImage`'s size and `generation` are exactly what
