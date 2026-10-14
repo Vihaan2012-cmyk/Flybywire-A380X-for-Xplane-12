@@ -1,7 +1,7 @@
 {
   "name": "a380x-xp-installer",
   "productName": "A380 for X-Plane 12",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Installs and updates A380 for X-Plane 12 (Ported from FBW A380). A fork of the FlyByWire Installer.",
   "author": {
     "name": "A380 for X-Plane 12 contributors"
