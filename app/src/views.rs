@@ -1170,10 +1170,49 @@ fn reload_on_new_spawn() {
     });
 }
 
+const BOOST_AFTER_INPUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+thread_local! {
+    static BOOSTED: RefCell<std::collections::HashMap<i32, std::time::Instant>> = RefCell::new(std::collections::HashMap::new());
+}
+
+fn is_smooth(state: &State, id: i32) -> bool {
+    state.screen_browsers.iter().enumerate().any(|(i, b)| {
+        b.as_ref().is_some_and(|b| b.identifier() == id) && SMOOTH_SCREENS.iter().any(|s| SCREEN_ORDER.get(i).is_some_and(|o| o.eq_ignore_ascii_case(s)))
+    })
+}
+
+fn boost(host: &BrowserHost, id: i32, state: &State) {
+    let smooth = if state.governed.0 > 0 { state.governed.0 } else { state.fps };
+    let fresh = BOOSTED.with(|b| b.borrow_mut().insert(id, std::time::Instant::now() + BOOST_AFTER_INPUT).is_none());
+    if fresh && !is_smooth(state, id) {
+        host.set_windowless_frame_rate(smooth);
+    }
+}
+
+fn unboost_expired(state: &State) {
+    let now = std::time::Instant::now();
+    let expired: Vec<i32> = BOOSTED.with(|b| {
+        let mut b = b.borrow_mut();
+        let gone: Vec<i32> = b.iter().filter(|(_, until)| **until <= now).map(|(id, _)| *id).collect();
+        for id in &gone {
+            b.remove(id);
+        }
+        gone
+    });
+    let slow = if state.governed.1 > 0 { state.governed.1 } else { (state.fps / 2).max(1) };
+    for browser in state.browsers.iter().filter(|b| expired.contains(&b.identifier()) && !is_smooth(state, b.identifier())) {
+        if let Some(host) = browser.host() {
+            host.set_windowless_frame_rate(slow);
+        }
+    }
+}
+
 fn govern() {
     STATE.with(|s| {
         let mut borrow = s.borrow_mut();
         let Some(state) = borrow.as_mut() else { return };
+        unboost_expired(state);
         // The plugin adds 2 to `frame` per X-Plane frame (odd while it
         // writes, `xphfbw_host.rs`'s `publish`).
         let frame = state.session.slots.header().frame.load(Ordering::Acquire);
@@ -1196,8 +1235,9 @@ fn govern() {
                 smooth_ids.push(browser.identifier());
             }
         }
+        let boosted: Vec<i32> = BOOSTED.with(|b| b.borrow().keys().copied().collect());
         for browser in &state.browsers {
-            let rate = if smooth_ids.contains(&browser.identifier()) { smooth } else { slow };
+            let rate = if smooth_ids.contains(&browser.identifier()) || boosted.contains(&browser.identifier()) { smooth } else { slow };
             if let Some(host) = browser.host() {
                 host.set_windowless_frame_rate(rate);
             }
@@ -1265,6 +1305,7 @@ fn drain_input() {
             }
             let Some(browser) = browser_for(layer).or_else(|| browser_for(0)) else { continue };
             let Some(host) = browser.host() else { continue };
+            boost(&host, browser.identifier(), state);
             send_input_event(&host, input);
         }
     });
