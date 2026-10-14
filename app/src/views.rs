@@ -951,7 +951,7 @@ const SMOOTH_SCREENS: &[&str] = &["SCREEN_DU_PFDL", "SCREEN_DU_PFDR", "SCREEN_DU
 
 fn governed_rates(_sim_fps: f64, cap: i32) -> (i32, i32) {
     let cap = cap.clamp(1, 60);
-    (cap, cap)
+    (cap, (cap / 2).max(1))
 }
 
 /// Whether a new rate is worth setting: a 1-2 fps wobble in X-Plane's frame
@@ -1242,11 +1242,11 @@ mod governor_tests {
     use super::*;
 
     #[test]
-    fn every_view_renders_at_the_cap() {
-        assert_eq!(governed_rates(17., 60), (60, 60));
-        assert_eq!(governed_rates(90., 60), (60, 60));
-        assert_eq!(governed_rates(0., 30), (30, 30));
-        assert_eq!(governed_rates(40., 120), (60, 60));
+    fn flight_instruments_render_at_the_cap_and_the_rest_at_half() {
+        assert_eq!(governed_rates(17., 60), (60, 30));
+        assert_eq!(governed_rates(90., 60), (60, 30));
+        assert_eq!(governed_rates(0., 30), (30, 15));
+        assert_eq!(governed_rates(40., 120), (60, 30));
     }
 
     #[test]

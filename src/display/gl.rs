@@ -392,6 +392,7 @@ pub struct Renderer {
     bridge_no_texture_warned: std::collections::HashSet<&'static str>,
     /// Built on first use; `Some(None)` once building it failed.
     sharpen: Option<Option<Sharpen>>,
+    overlay_buffer: c_uint,
 }
 
 /// Where in the target a region of the screen lands.
@@ -458,6 +459,7 @@ impl Renderer {
             target_multisampled: None,
             bridge_no_texture_warned: std::collections::HashSet::new(),
             sharpen: None,
+            overlay_buffer: 0,
         };
         if safe_mode {
             crate::log("display: xphfbw.displaySafeMode is on; skipping the multisampled framebuffer (no anti-aliasing, no clip paths)");
@@ -602,22 +604,27 @@ impl Renderer {
         unsafe {
             let gl = &self.gl;
             (gl.use_program)(0);
-            (gl.bind_buffer)(GL_ARRAY_BUFFER, 0);
+            (gl.bind_vertex_array)(0);
+            if self.overlay_buffer == 0 {
+                (gl.gen_buffers)(1, &mut self.overlay_buffer);
+            }
+            (gl.bind_buffer)(GL_ARRAY_BUFFER, self.overlay_buffer);
+            (gl.buffer_data)(GL_ARRAY_BUFFER, std::mem::size_of_val(&verts) as isize, verts.as_ptr().cast(), GL_DYNAMIC_DRAW);
             (self.xp.set_graphics_state)(0, 1, 0, 0, 1, 0, 0);
             (gl.blend_func)(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             (gl.tex_env)(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
             (self.xp.bind_texture)(texture, 0);
             let stride = std::mem::size_of::<Vertex>() as c_int;
-            let base = verts.as_ptr() as *const u8;
             (gl.enable_client_state)(GL_VERTEX_ARRAY);
             (gl.enable_client_state)(GL_TEXTURE_COORD_ARRAY);
             (gl.enable_client_state)(GL_COLOR_ARRAY);
-            (gl.vertex_pointer)(2, GL_FLOAT, stride, base.cast());
-            (gl.tex_coord_pointer)(2, GL_FLOAT, stride, base.add(8).cast());
-            (gl.color_pointer)(4, GL_UNSIGNED_BYTE, stride, base.add(16).cast());
+            (gl.vertex_pointer)(2, GL_FLOAT, stride, std::ptr::null());
+            (gl.tex_coord_pointer)(2, GL_FLOAT, stride, 8 as *const c_void);
+            (gl.color_pointer)(4, GL_UNSIGNED_BYTE, stride, 16 as *const c_void);
             (gl.draw_arrays)(GL_TRIANGLES, 0, 6);
             (gl.disable_client_state)(GL_COLOR_ARRAY);
             (gl.disable_client_state)(GL_TEXTURE_COORD_ARRAY);
+            (gl.bind_buffer)(GL_ARRAY_BUFFER, 0);
         }
     }
 

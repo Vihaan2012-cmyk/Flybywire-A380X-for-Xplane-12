@@ -51,9 +51,17 @@ pub const EFB_SUPERSAMPLE: u32 = 2;
 
 pub const SCREEN_SUPERSAMPLE: f64 = 2.0;
 
+const NATIVE_SCREENS: &[&str] = &["FCU", "SCREEN_DU_RMP_1", "SCREEN_DU_RMP_2", "SCREEN_DU_RMP_3", "Clock", "BAT", "RTPI"];
+
+const STANDBY_SCREENS: &[&str] = &["SCREEN_ISIS_1", "SCREEN_ISIS_2"];
+
 pub fn supersample(screen_id: &str) -> f64 {
     if screen_id.eq_ignore_ascii_case(EFB_SCREEN) {
         EFB_SUPERSAMPLE as f64
+    } else if NATIVE_SCREENS.iter().any(|s| s.eq_ignore_ascii_case(screen_id)) {
+        1.
+    } else if STANDBY_SCREENS.iter().any(|s| s.eq_ignore_ascii_case(screen_id)) {
+        1.5
     } else {
         SCREEN_SUPERSAMPLE
     }
