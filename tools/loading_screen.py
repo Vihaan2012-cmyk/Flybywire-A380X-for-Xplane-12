@@ -71,9 +71,8 @@ def grade(im):
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     r = np.sqrt(((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2)
     a = a * (1 - 0.35 * np.clip(r - 0.55, 0, 1) ** 1.5)[..., None]
-    a = a + np.random.default_rng(3).normal(0, 0.012, a.shape[:2])[..., None]
     out = Image.fromarray((np.clip(a, 0, 1) * 255).astype('uint8'))
-    return out.filter(ImageFilter.UnsharpMask(radius=2, percent=60, threshold=2))
+    return Image.blend(out, out.filter(ImageFilter.MedianFilter(3)), 0.5)
 
 
 shots = sorted(f for f in os.listdir(shots_dir) if f.lower().endswith(('.webp', '.png', '.jpg', '.jpeg')))
