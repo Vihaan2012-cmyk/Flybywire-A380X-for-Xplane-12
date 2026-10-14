@@ -69,6 +69,7 @@ mod lights;
 // low-pressure caution and mask deployment.
 mod oxygen;
 mod cabin_option;
+mod flight_deck_view;
 mod panel;
 mod study;
 mod throttle;
@@ -1146,6 +1147,7 @@ struct Plugin {
     oxygen: oxygen::Oxygen,
     // [slot fields: cabin option] The EFB's "Passenger cabin" switch.
     cabin_option: cabin_option::CabinOption,
+    flight_deck_view: flight_deck_view::FlightDeckView,
     // [slot fields: flight_controls] X-Plane's control surfaces, driven by
     // FlyByWire's hydraulic actuators.
     flight_controls: flight_controls::FlightControls,
@@ -1744,6 +1746,7 @@ impl Plugin {
             // [slot init: oxygen]
             oxygen,
             cabin_option: cabin_option::CabinOption::default(),
+            flight_deck_view: flight_deck_view::FlightDeckView::default(),
             // [slot init: flight_controls]
             flight_controls,
             handling,
@@ -2257,6 +2260,7 @@ impl Plugin {
         // [slot tick-after-systems: cabin option] The EFB's "Passenger
         // cabin" switch, into the dataref the cabin objects show by.
         self.cabin_option.update(xplm, delta);
+        self.flight_deck_view.update(xplm);
         crate::perf::lap("tick-after-systems: flight_controls");
         // [slot tick-after-systems: flight_controls] The actuators have moved
         // this tick; X-Plane's surfaces follow.
