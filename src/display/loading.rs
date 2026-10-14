@@ -11,6 +11,7 @@ const SLIDE_S: f32 = 8.;
 const CROSSFADE_S: f32 = 1.2;
 const FADE_IN_S: f32 = 0.6;
 const HOLD_S: f32 = 2.;
+const MIN_VISIBLE_S: f32 = 10.;
 const FADE_OUT_S: f32 = 1.5;
 const TIMEOUT_S: f32 = 240.;
 const CYAN: [f32; 3] = [0., 200. / 255., 1.];
@@ -68,7 +69,7 @@ pub struct Loading {
     manifest: Manifest,
     incoming: Receiver<(String, Picture)>,
     textures: HashMap<String, (c_int, u32, u32)>,
-    started: Instant,
+    started: Option<Instant>,
     complete_at: Option<Instant>,
     closing_at: Option<Instant>,
     first_bg: usize,
@@ -103,7 +104,7 @@ impl Loading {
             manifest,
             incoming,
             textures: HashMap::new(),
-            started: now,
+            started: None,
             complete_at: None,
             closing_at: None,
             first_bg,
@@ -140,12 +141,22 @@ impl Loading {
         }
 
         let now = Instant::now();
+        let started = *self.started.get_or_insert_with(|| {
+            crate::log(&format!(
+                "display: loading screen shown, {}x{}, {} textures ready, {:.0}% loaded",
+                window.2 - window.0,
+                window.1 - window.3,
+                self.textures.len(),
+                progress.percent()
+            ));
+            now
+        });
         let dt = (now - self.last_frame).as_secs_f32().min(0.25);
         self.last_frame = now;
-        let t = (now - self.started).as_secs_f32();
+        let t = (now - started).as_secs_f32();
         if progress.complete() {
             let done = *self.complete_at.get_or_insert(now);
-            if (now - done).as_secs_f32() > HOLD_S {
+            if (now - done).as_secs_f32() > HOLD_S && t > MIN_VISIBLE_S {
                 self.closing_at.get_or_insert(now);
             }
         }
@@ -155,6 +166,7 @@ impl Loading {
         let closing = self.closing_at.map_or(0., |c| (now - c).as_secs_f32() / FADE_OUT_S);
         if closing >= 1. {
             self.finished = true;
+            crate::log(&format!("display: loading screen closed after {t:.1} s, {} textures", self.textures.len()));
             return;
         }
         let alpha = (t / FADE_IN_S).min(1.) * (1. - closing);

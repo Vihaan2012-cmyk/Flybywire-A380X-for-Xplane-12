@@ -85,6 +85,8 @@ struct Screen {
     hover: Option<(c_int, c_int)>,
     pointer: Option<(c_int, c_int)>,
     hover_moved: Option<std::time::Instant>,
+    redraw_key: u64,
+    redrawn_at: Option<std::time::Instant>,
     window: popout::Watch,
 }
 
@@ -481,6 +483,8 @@ impl Displays {
                 hover: None,
                 pointer: None,
                 hover_moved: None,
+                redraw_key: 0,
+                redrawn_at: None,
                 window: popout::Watch::default(),
             })
             .collect();
@@ -583,7 +587,6 @@ impl Displays {
             load.release(renderer);
             self.loading = None;
             xplm.show(window, false);
-            log("loading screen closed");
         }
     }
 
@@ -1128,6 +1131,78 @@ impl Displays {
                 *value = screens::brightness(read(&format!("LIGHT POTENTIOMETER:{}", d.potentiometer)), powered);
             }
         }
+        self.request_redraws();
+    }
+
+    fn sources_of(&self, index: usize, route: &crate::cds_reconf::Route) -> Vec<usize> {
+        let id = self.screens[index].def.id;
+        let mut sources = vec![index];
+        if id == MFD_SCREEN {
+            for (du, _) in MFD_HALVES.iter() {
+                if let Some((src, _)) = route[du.id()].filter(|f| f != du).and_then(Self::picture) {
+                    sources.push(src);
+                }
+            }
+        } else if let Some(&(du, _)) = UNIT_SCREENS.iter().find(|(_, s)| *s == id) {
+            if let Some((src, _)) = route[du.id()].filter(|f| *f != du).and_then(Self::picture) {
+                sources.push(src);
+            }
+        }
+        sources
+    }
+
+    fn redraw_needed(&mut self, index: usize, route: &crate::cds_reconf::Route) -> (bool, u64) {
+        use std::hash::{Hash, Hasher};
+        let mut pending = false;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{route:?}").hash(&mut h);
+        for src in self.sources_of(index, route) {
+            if let Some(Some(bs)) = self.bridge.as_ref().and_then(|b| b.screens.get(src)) {
+                let header = bs.block.header();
+                let frame = header.frame.load(Ordering::Relaxed);
+                pending |= frame != bs.last_uploaded;
+                frame.hash(&mut h);
+                bs.underlay_generation.hash(&mut h);
+            }
+            self.screens[src].stream.hash(&mut h);
+            self.bridge_active(src).hash(&mut h);
+        }
+        let side = match self.screens[index].def.id {
+            "SCREEN_DU_NDL" => Some(crate::mapdata::terrain::types::Side::Left),
+            "SCREEN_DU_NDR" => Some(crate::mapdata::terrain::types::Side::Right),
+            _ => None,
+        };
+        if let Some(side) = side {
+            let generation = crate::wxr::layer(side).or_else(|| crate::mapdata::plugin::terrain_layer(side)).map(|l| l.2);
+            generation.hash(&mut h);
+        }
+        for b in &self.screens[index].brightness {
+            b.to_bits().hash(&mut h);
+        }
+        screen_breaker_open(self.screens[index].def.id).hash(&mut h);
+        self.screen_cursor(index).hash(&mut h);
+        (pending, h.finish())
+    }
+
+    fn request_redraws(&mut self) {
+        let Some(api) = self.api else { return };
+        let Some(needs_drawing) = api.needs_drawing else { return };
+        let route = crate::cds_reconf::route();
+        let now = std::time::Instant::now();
+        for index in 0..self.screens.len() {
+            let handle = self.screens[index].handle;
+            if handle.is_null() {
+                continue;
+            }
+            let (pending, key) = self.redraw_needed(index, &route);
+            let s = &mut self.screens[index];
+            let stale = s.redrawn_at.is_none_or(|t| now - t > std::time::Duration::from_secs(1));
+            if pending || stale || key != s.redraw_key {
+                s.redraw_key = key;
+                s.redrawn_at = Some(now);
+                unsafe { needs_drawing(handle) };
+            }
+        }
     }
 
     /// See [`set_bridge`].
@@ -1463,9 +1538,7 @@ pub fn start(xplm: &'static Xplm) {
             bezel_height: h,
             screen_offset_x: 0,
             screen_offset_y: 0,
-            // Drawn every frame: replaying the cached batches is cheap, and
-            // brightness changes need no bookkeeping.
-            draw_on_demand: 0,
+            draw_on_demand: c_int::from(api.needs_drawing.is_some()),
             bezel_draw: None,
             draw: Some(draw_callback),
             bezel_click: None,

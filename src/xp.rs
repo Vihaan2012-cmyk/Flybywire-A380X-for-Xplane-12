@@ -1035,6 +1035,7 @@ pub struct AvionicsApi {
     /// XPLMHasAvionicsKeyboardFocus: whether the device's popup currently
     /// holds keyboard focus.
     pub has_keyboard_focus: unsafe extern "C" fn(AvionicsId) -> c_int,
+    pub needs_drawing: Option<unsafe extern "C" fn(AvionicsId)>,
 }
 
 impl AvionicsApi {
@@ -1092,6 +1093,7 @@ impl Xplm {
                 has_keyboard_focus: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(AvionicsId) -> c_int>(
                     Self::xplm_symbol("XPLMHasAvionicsKeyboardFocus")?,
                 ),
+                needs_drawing: Self::xplm_symbol("XPLMAvionicsNeedsDrawing").map(|p| std::mem::transmute::<*mut c_void, unsafe extern "C" fn(AvionicsId)>(p)),
             })
         }
     }
