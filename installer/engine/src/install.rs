@@ -483,66 +483,12 @@ fn work(a: &Answers, ctx: &Ctx) -> Result<String, String> {
 
     std::fs::create_dir_all(&work_root).map_err(|e| e.to_string())?;
     let converter_files: Vec<&ReleaseFile> = latest.files.iter().filter(|f| f.component == "converter" && a.converter.is_some()).collect();
-    let total: u64 = (todo.iter().flat_map(|e| e.files.iter()).filter(|f| wanted(f)).map(|f| f.size).sum::<u64>() + converter_files.iter().map(|f| f.size).sum::<u64>()).max(1);
-    let mut done = 0u64;
-    for entry in todo {
-        let dir = work_root.join(&entry.version);
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        for f in entry.files.iter().filter(|f| wanted(f)) {
-            let legacy = work_root.join(&f.name);
-            if legacy.is_file() && !dir.join(&f.name).exists() {
-                let _ = std::fs::rename(&legacy, dir.join(&f.name));
-            }
-            ctx.status(format!("Downloading {} ({})...", f.name, entry.version));
-            download(&f.url, &dir.join(&f.name), f, ctx, &mut done, total)?;
+    match plan_merged(todo, ctx) {
+        Ok(merged) => install_merged(a, ctx, todo, merged, &aircraft, &work_root, wipe, &converter_files, &latest.version)?,
+        Err(e) => {
+            ctx.log(format!("Installing release by release ({e})"));
+            install_sequential(a, ctx, todo, &aircraft, &work_root, wipe, &converter_files)?;
         }
-    }
-    for f in &converter_files {
-        ctx.status(format!("Downloading {}...", f.name));
-        download(&f.url, &work_root.join(&f.name), f, ctx, &mut done, total)?;
-    }
-
-    if xplane_running() {
-        ctx.status("Downloaded. Close X-Plane to finish installing...");
-        while xplane_running() {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        }
-    }
-
-    if wipe {
-        ctx.status("Removing the old install and every trace of it...");
-        let local = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
-        for p in wipe_traces(&a.xplane, local.as_deref(), &std::env::temp_dir(), &work_root)? {
-            ctx.log(format!("Removed {}", p.display()));
-        }
-    }
-
-    for (k, entry) in todo.iter().enumerate() {
-        ctx.status(format!("Installing {} {} ({} of {})...", if entry.kind == "patch" { "update" } else { "base" }, entry.version, k + 1, todo.len()));
-        ctx.send(Msg::Progress(k as f64 / todo.len() as f64));
-        let dir = work_root.join(&entry.version);
-        let release = dir.join("release");
-        let _ = std::fs::remove_dir_all(&release);
-        for f in entry.files.iter().filter(|f| wanted(f)) {
-            unzip(&dir.join(&f.name), &release)?;
-        }
-        if entry.kind == "patch" {
-            for rel in &entry.deleted {
-                match inside(&aircraft, rel) {
-                    Some(p) => match std::fs::remove_file(&p) {
-                        Ok(()) => ctx.log(format!("Removed {rel}")),
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(format!("could not remove {}: {e}", p.display())),
-                    },
-                    None => ctx.log(format!("Skipped a deletion outside the aircraft: {rel}")),
-                }
-            }
-        }
-        let steps: Steps = serde_json::from_str(&std::fs::read_to_string(release.join("install.json")).map_err(|e| format!("install.json: {e}"))?)
-            .map_err(|e| format!("install.json: {e}"))?;
-        run_steps(a, ctx, &steps, &release, &aircraft, &work_root)?;
-        std::fs::write(aircraft.join(VERSION_FILE), &entry.version).map_err(|e| e.to_string())?;
-        ctx.log(format!("{} {} installed", if entry.kind == "patch" { "Update" } else { "Base" }, entry.version));
     }
 
     if let Some(dir) = &a.converter {
@@ -570,6 +516,246 @@ fn work(a: &Answers, ctx: &Ctx) -> Result<String, String> {
         (Some(v), true) => format!("Removed {v} and installed {} into {}", latest.version, aircraft.display()),
         (None, _) => format!("Installed {} into {}", latest.version, aircraft.display()),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_sequential(a: &Answers, ctx: &Ctx, todo: &[ChainEntry], aircraft: &Path, work_root: &Path, wipe: bool, converter_files: &[&ReleaseFile]) -> Result<(), String> {
+    let total: u64 = (todo.iter().flat_map(|e| e.files.iter()).filter(|f| wanted(f)).map(|f| f.size).sum::<u64>() + converter_files.iter().map(|f| f.size).sum::<u64>()).max(1);
+    let mut done = 0u64;
+    for entry in todo {
+        let dir = work_root.join(&entry.version);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        for f in entry.files.iter().filter(|f| wanted(f)) {
+            let legacy = work_root.join(&f.name);
+            if legacy.is_file() && !dir.join(&f.name).exists() {
+                let _ = std::fs::rename(&legacy, dir.join(&f.name));
+            }
+            ctx.status(format!("Downloading {} ({})...", f.name, entry.version));
+            download(&f.url, &dir.join(&f.name), f, ctx, &mut done, total)?;
+        }
+    }
+    for f in converter_files {
+        ctx.status(format!("Downloading {}...", f.name));
+        download(&f.url, &work_root.join(&f.name), f, ctx, &mut done, total)?;
+    }
+
+    wait_for_xplane(ctx);
+
+    if wipe {
+        wipe_install(a, ctx, work_root)?;
+    }
+
+    for (k, entry) in todo.iter().enumerate() {
+        ctx.status(format!("Installing {} {} ({} of {})...", if entry.kind == "patch" { "update" } else { "base" }, entry.version, k + 1, todo.len()));
+        ctx.send(Msg::Progress(k as f64 / todo.len() as f64));
+        let dir = work_root.join(&entry.version);
+        let release = dir.join("release");
+        let _ = std::fs::remove_dir_all(&release);
+        for f in entry.files.iter().filter(|f| wanted(f)) {
+            unzip(&dir.join(&f.name), &release)?;
+        }
+        if entry.kind == "patch" {
+            for rel in &entry.deleted {
+                match inside(aircraft, rel) {
+                    Some(p) => match std::fs::remove_file(&p) {
+                        Ok(()) => ctx.log(format!("Removed {rel}")),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(format!("could not remove {}: {e}", p.display())),
+                    },
+                    None => ctx.log(format!("Skipped a deletion outside the aircraft: {rel}")),
+                }
+            }
+        }
+        let steps: Steps = serde_json::from_str(&std::fs::read_to_string(release.join("install.json")).map_err(|e| format!("install.json: {e}"))?)
+            .map_err(|e| format!("install.json: {e}"))?;
+        run_steps(a, ctx, &steps, &release, aircraft, work_root)?;
+        std::fs::write(aircraft.join(VERSION_FILE), &entry.version).map_err(|e| e.to_string())?;
+        ctx.log(format!("{} {} installed", if entry.kind == "patch" { "Update" } else { "Base" }, entry.version));
+    }
+    Ok(())
+}
+
+fn wait_for_xplane(ctx: &Ctx) {
+    if xplane_running() {
+        ctx.status("Downloaded. Close X-Plane to finish installing...");
+        while xplane_running() {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+}
+
+fn wipe_install(a: &Answers, ctx: &Ctx, work_root: &Path) -> Result<(), String> {
+    ctx.status("Removing the old install and every trace of it...");
+    let local = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
+    for p in wipe_traces(&a.xplane, local.as_deref(), &std::env::temp_dir(), work_root)? {
+        ctx.log(format!("Removed {}", p.display()));
+    }
+    Ok(())
+}
+
+fn remove_deleted(aircraft: &Path, deleted: &[String], ctx: &Ctx) -> Result<(), String> {
+    for rel in deleted {
+        match inside(aircraft, rel) {
+            Some(p) => match std::fs::remove_file(&p) {
+                Ok(()) => ctx.log(format!("Removed {rel}")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("could not remove {}: {e}", p.display())),
+            },
+            None => ctx.log(format!("Skipped a deletion outside the aircraft: {rel}")),
+        }
+    }
+    Ok(())
+}
+
+struct MergedPlan {
+    parts: Vec<Vec<(ReleaseFile, Vec<crate::chain::Member>)>>,
+    merge: crate::chain::Merge,
+}
+
+fn plan_merged(todo: &[ChainEntry], ctx: &Ctx) -> Result<MergedPlan, String> {
+    ctx.status("Reading what each release holds...");
+    let mut parts = Vec::new();
+    for entry in todo {
+        let mut here = Vec::new();
+        for f in entry.files.iter().filter(|f| wanted(f)) {
+            let list = crate::chain::members(f.size, &|s, e| crate::chain::http_range(&f.url, s, e)).map_err(|e| format!("{}: {e}", f.name))?;
+            here.push((f.clone(), list));
+        }
+        parts.push(here);
+    }
+    let contents: Vec<crate::chain::EntryContents> = todo
+        .iter()
+        .zip(&parts)
+        .map(|(e, here)| crate::chain::EntryContents { members: here.iter().flat_map(|(_, l)| l.iter().map(|m| m.name.clone())).collect(), deleted: e.deleted.clone() })
+        .collect();
+    let merge = crate::chain::merge(&contents);
+    Ok(MergedPlan { parts, merge })
+}
+
+fn member_path(release: &Path, steps_dir: &Path, k: usize, name: &str) -> Option<PathBuf> {
+    if name == crate::chain::STEPS {
+        return Some(steps_dir.join(format!("{k:04}.json")));
+    }
+    let rel = Path::new(name);
+    if name.ends_with('/') || rel.as_os_str().is_empty() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+        return None;
+    }
+    Some(release.join(rel))
+}
+
+fn write_file(path: &Path, body: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, body).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn extract_kept(path: &Path, keep: &std::collections::HashSet<String>, release: &Path, steps_dir: &Path, k: usize) -> Result<(), String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", path.display()))?;
+    for i in 0..zip.len() {
+        let mut member = zip.by_index(i).map_err(|e| e.to_string())?;
+        let name = member.name().replace('\\', "/");
+        if !keep.contains(&name) {
+            continue;
+        }
+        let Some(out) = member_path(release, steps_dir, k, &name) else { continue };
+        let mut body = Vec::new();
+        member.read_to_end(&mut body).map_err(|e| format!("{name}: {e}"))?;
+        write_file(&out, &body)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_merged(a: &Answers, ctx: &Ctx, todo: &[ChainEntry], plan: MergedPlan, aircraft: &Path, work_root: &Path, wipe: bool, converter_files: &[&ReleaseFile], version: &str) -> Result<(), String> {
+    let release = work_root.join("merged");
+    let steps_dir = work_root.join("steps");
+    let _ = std::fs::remove_dir_all(&release);
+    let _ = std::fs::remove_dir_all(&steps_dir);
+    std::fs::create_dir_all(&release).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&steps_dir).map_err(|e| e.to_string())?;
+    let needed = |keep: &std::collections::HashSet<String>, list: &[crate::chain::Member]| -> u64 { list.iter().filter(|m| keep.contains(&m.name)).map(|m| m.end - m.offset).sum() };
+    let mut total: u64 = converter_files.iter().map(|f| f.size).sum();
+    for (k, here) in plan.parts.iter().enumerate() {
+        for (f, list) in here {
+            let n = needed(&plan.merge.keep[k], list);
+            total += if n * 2 >= f.size { f.size } else { n };
+        }
+    }
+    let total = total.max(1);
+    let mut done = 0u64;
+    let mut skipped = 0u64;
+    for (k, (entry, here)) in todo.iter().zip(&plan.parts).enumerate() {
+        let keep = &plan.merge.keep[k];
+        let dir = work_root.join(&entry.version);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        for (f, list) in here {
+            let n = needed(keep, list);
+            if n * 2 >= f.size {
+                ctx.status(format!("Downloading {} ({})...", f.name, entry.version));
+                let path = dir.join(&f.name);
+                download(&f.url, &path, f, ctx, &mut done, total)?;
+                extract_kept(&path, keep, &release, &steps_dir, k)?;
+            } else {
+                let wanted_here: Vec<&crate::chain::Member> = list.iter().filter(|m| keep.contains(&m.name)).collect();
+                ctx.status(format!("Fetching {} of {} files from {} ({})...", wanted_here.len(), list.len(), f.name, entry.version));
+                let ranged = (|| -> Result<u64, String> {
+                    let mut got = 0;
+                    for m in &wanted_here {
+                        let Some(out) = member_path(&release, &steps_dir, k, &m.name) else { continue };
+                        let span = crate::chain::http_range(&f.url, m.offset, m.end)?;
+                        write_file(&out, &crate::chain::extract(&span, m)?)?;
+                        got += m.end - m.offset;
+                    }
+                    Ok(got)
+                })();
+                match ranged {
+                    Ok(got) => {
+                        skipped += f.size - n;
+                        done += got;
+                        ctx.send(Msg::Progress(done as f64 / total as f64));
+                    }
+                    Err(e) => {
+                        ctx.log(format!("{}: {e}; downloading it whole", f.name));
+                        let path = dir.join(&f.name);
+                        let grown = total.max(done + f.size);
+                        download(&f.url, &path, f, ctx, &mut done, grown)?;
+                        extract_kept(&path, keep, &release, &steps_dir, k)?;
+                    }
+                }
+            }
+        }
+    }
+    if skipped > 0 {
+        ctx.log(format!("Skipped {:.0} MB that newer releases replace", skipped as f64 / 1_048_576.0));
+    }
+    for f in converter_files {
+        ctx.status(format!("Downloading {}...", f.name));
+        download(&f.url, &work_root.join(&f.name), f, ctx, &mut done, total)?;
+    }
+    wait_for_xplane(ctx);
+    if wipe {
+        wipe_install(a, ctx, work_root)?;
+    }
+    ctx.status(format!("Installing {version}..."));
+    remove_deleted(aircraft, &plan.merge.delete, ctx)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut steps = Vec::new();
+    for k in 0..todo.len() {
+        let Ok(text) = std::fs::read_to_string(steps_dir.join(format!("{k:04}.json"))) else { continue };
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("install.json: {e}"))?;
+        for s in v.get("steps").and_then(|s| s.as_array()).cloned().unwrap_or_default() {
+            if seen.insert(s.to_string()) {
+                steps.push(s);
+            }
+        }
+    }
+    let steps: Steps = serde_json::from_value(serde_json::json!({ "steps": steps })).map_err(|e| format!("install.json: {e}"))?;
+    run_steps(a, ctx, &steps, &release, aircraft, work_root)?;
+    std::fs::write(aircraft.join(VERSION_FILE), version).map_err(|e| e.to_string())?;
+    ctx.log(format!("{version} installed from {} release(s), the newest copy of each file", todo.len()));
+    Ok(())
 }
 
 fn run_steps(a: &Answers, ctx: &Ctx, steps: &Steps, release: &Path, aircraft: &Path, work_dir: &Path) -> Result<(), String> {

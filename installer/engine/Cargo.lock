@@ -7,6 +7,8 @@ name = "a380x-xp-engine"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "crc32fast",
+ "flate2",
  "image",
  "serde",
  "serde_json",
