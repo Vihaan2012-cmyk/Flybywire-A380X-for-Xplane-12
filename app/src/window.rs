@@ -75,6 +75,25 @@ fn force_cpu_rendering() -> bool {
     }
 }
 
+fn extra_switches() -> Vec<(String, Option<String>)> {
+    let Some(xp_root) = xp_root_arg(std::env::args()) else { return Vec::new() };
+    let text = std::fs::read_to_string(fbw_a380_systems::settings_files::app_settings_path(&xp_root)).unwrap_or_default();
+    let value = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
+    parse_switches(value.get("chromiumSwitches").and_then(|v| v.as_str()).unwrap_or_default())
+}
+
+fn parse_switches(text: &str) -> Vec<(String, Option<String>)> {
+    text.split_whitespace()
+        .map(|s| {
+            let s = s.trim_start_matches('-');
+            match s.split_once('=') {
+                Some((k, v)) => (k.to_string(), Some(v.to_string())),
+                None => (s.to_string(), None),
+            }
+        })
+        .collect()
+}
+
 /// The `--xp-root=` value from a process's own arguments, exactly how
 /// `main.rs` parses it for `Shared::xplane_root` -- split out so
 /// `force_cpu_rendering` can be tested without a real process command line.
@@ -115,6 +134,19 @@ mod tests {
         assert!(gpu.contains(&"disable-direct-composition"), "offscreen views never present through DirectComposition, and setting it up crashed the GPU process");
         assert!(!gpu.iter().any(|s| s.starts_with("disable-gpu")), "the GPU path must not switch the GPU off");
         assert_eq!(gpu_mode_switches(true), &["disable-gpu", "disable-gpu-compositing"], "the safe-mode setting still forces software rendering");
+    }
+
+    #[test]
+    fn extra_chromium_switches_parse_with_or_without_values() {
+        assert_eq!(
+            parse_switches("--force-gpu-mem-available-mb=256 gpu-rasterization-msaa-sample-count=0  --disable-gpu-rasterization"),
+            vec![
+                ("force-gpu-mem-available-mb".to_string(), Some("256".to_string())),
+                ("gpu-rasterization-msaa-sample-count".to_string(), Some("0".to_string())),
+                ("disable-gpu-rasterization".to_string(), None),
+            ]
+        );
+        assert!(parse_switches("").is_empty());
     }
 
     #[test]
@@ -175,6 +207,12 @@ wrap_app! {
                     // renders once it is up. Only meaningful when the GPU is
                     // drawing at all, hence the `else`.
                     cl.append_switch_with_value(Some(&CefString::from("use-angle")), Some(&CefString::from("d3d11")));
+                }
+                for (name, value) in extra_switches() {
+                    match value {
+                        Some(v) => cl.append_switch_with_value(Some(&CefString::from(name.as_str())), Some(&CefString::from(v.as_str()))),
+                        None => cl.append_switch(Some(&CefString::from(name.as_str()))),
+                    }
                 }
                 // Diagnostics only, never set by the plugin: Chromium's
                 // DevTools protocol on this local port, to inspect a view.
