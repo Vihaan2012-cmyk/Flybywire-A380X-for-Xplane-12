@@ -53,6 +53,27 @@ fn wanted_from_settings() -> Vec<(String, f32)> {
         .unwrap_or_default()
 }
 
+fn is_int(d: DataRef) -> bool {
+    let types = crate::xp::data_ref_types(d);
+    types & crate::xp::DATA_TYPE_INT != 0 && types & crate::xp::DATA_TYPE_FLOAT == 0
+}
+
+fn read(xplm: &Xplm, d: DataRef) -> f32 {
+    if is_int(d) {
+        xplm.get_i(d) as f32
+    } else {
+        xplm.get_f(d)
+    }
+}
+
+fn write(xplm: &Xplm, d: DataRef, value: f32) {
+    if is_int(d) {
+        xplm.set_i(d, value.round() as std::ffi::c_int);
+    } else {
+        xplm.set_f(d, value);
+    }
+}
+
 impl Tweaks {
     fn dataref(&mut self, xplm: &Xplm, name: &str) -> Option<DataRef> {
         *self.refs.entry(name.to_owned()).or_insert_with(|| xplm.find(name))
@@ -76,7 +97,7 @@ impl Tweaks {
         let originals: Vec<(String, f32)> = self.originals.drain().collect();
         for (name, value) in originals {
             if let Some(d) = self.dataref(xplm, &name) {
-                xplm.set_f(d, value);
+                write(xplm, d, value);
             }
         }
     }
@@ -109,9 +130,9 @@ impl Tweaks {
         for (name, value) in wanted {
             let Some(d) = self.dataref(xplm, &name) else { continue };
             if !self.originals.contains_key(&name) {
-                self.originals.insert(name.clone(), xplm.get_f(d));
+                self.originals.insert(name.clone(), read(xplm, d));
             }
-            xplm.set_f(d, value);
+            write(xplm, d, value);
         }
     }
 }
