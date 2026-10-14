@@ -392,7 +392,6 @@ pub struct Renderer {
     bridge_no_texture_warned: std::collections::HashSet<&'static str>,
     /// Built on first use; `Some(None)` once building it failed.
     sharpen: Option<Option<Sharpen>>,
-    overlay_buffer: c_uint,
 }
 
 /// Where in the target a region of the screen lands.
@@ -459,7 +458,6 @@ impl Renderer {
             target_multisampled: None,
             bridge_no_texture_warned: std::collections::HashSet::new(),
             sharpen: None,
-            overlay_buffer: 0,
         };
         if safe_mode {
             crate::log("display: xphfbw.displaySafeMode is on; skipping the multisampled framebuffer (no anti-aliasing, no clip paths)");
@@ -578,61 +576,6 @@ impl Renderer {
             }
         }
         self.atlas_texture = 0;
-    }
-
-    pub fn overlay_texture(&mut self, picture: &super::image::Picture) -> c_int {
-        unsafe {
-            let gl = &self.gl;
-            (gl.pixel_store)(GL_UNPACK_ALIGNMENT, 1);
-            let texture = self.new_texture();
-            (self.xp.bind_texture)(texture, 0);
-            for (level, (w, h, pixels)) in picture.levels.iter().enumerate() {
-                (gl.tex_image)(GL_TEXTURE_2D, level as c_int, GL_RGBA8, *w as c_int, *h as c_int, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.as_ptr().cast());
-            }
-            self.texture_parameters(GL_LINEAR_MIPMAP_LINEAR, picture.levels.len() as c_int);
-            check_upload_errors(gl, &mut self.gl_error_warned, "overlay texture upload");
-            texture
-        }
-    }
-
-    pub fn overlay_quad(&mut self, texture: c_int, rect: [f32; 4], uv: [f32; 4], rgba: [f32; 4]) {
-        let [l, b, r, t] = rect;
-        let [u0, v0, u1, v1] = uv;
-        let c = rgba.map(|x| (x.clamp(0., 1.) * 255.).round() as u8);
-        let v = |x: f32, y: f32, u: f32, w: f32| Vertex { x, y, u, v: w, rgba: c };
-        let verts = [v(l, b, u0, v1), v(r, b, u1, v1), v(r, t, u1, v0), v(l, b, u0, v1), v(r, t, u1, v0), v(l, t, u0, v0)];
-        unsafe {
-            let gl = &self.gl;
-            (gl.use_program)(0);
-            (gl.bind_vertex_array)(0);
-            if self.overlay_buffer == 0 {
-                (gl.gen_buffers)(1, &mut self.overlay_buffer);
-            }
-            (gl.bind_buffer)(GL_ARRAY_BUFFER, self.overlay_buffer);
-            (gl.buffer_data)(GL_ARRAY_BUFFER, std::mem::size_of_val(&verts) as isize, verts.as_ptr().cast(), GL_DYNAMIC_DRAW);
-            (self.xp.set_graphics_state)(0, 1, 0, 0, 1, 0, 0);
-            (gl.blend_func)(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            (gl.tex_env)(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-            (self.xp.bind_texture)(texture, 0);
-            let stride = std::mem::size_of::<Vertex>() as c_int;
-            (gl.enable_client_state)(GL_VERTEX_ARRAY);
-            (gl.enable_client_state)(GL_TEXTURE_COORD_ARRAY);
-            (gl.enable_client_state)(GL_COLOR_ARRAY);
-            (gl.vertex_pointer)(2, GL_FLOAT, stride, std::ptr::null());
-            (gl.tex_coord_pointer)(2, GL_FLOAT, stride, 8 as *const c_void);
-            (gl.color_pointer)(4, GL_UNSIGNED_BYTE, stride, 16 as *const c_void);
-            (gl.draw_arrays)(GL_TRIANGLES, 0, 6);
-            (gl.disable_client_state)(GL_COLOR_ARRAY);
-            (gl.disable_client_state)(GL_TEXTURE_COORD_ARRAY);
-            (gl.bind_buffer)(GL_ARRAY_BUFFER, 0);
-        }
-    }
-
-    pub fn overlay_release(&mut self, textures: &[c_int]) {
-        let ids: Vec<c_uint> = textures.iter().filter(|t| **t > 0).map(|t| *t as c_uint).collect();
-        if !ids.is_empty() {
-            unsafe { (self.gl.delete_textures)(ids.len() as c_int, ids.as_ptr()) };
-        }
     }
 
     fn new_texture(&self) -> c_int {

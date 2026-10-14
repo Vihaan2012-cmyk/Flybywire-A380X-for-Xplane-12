@@ -219,8 +219,6 @@ pub struct Displays {
     /// (published frame, upload count) at that moment.
     stats_at: Option<std::time::Instant>,
     stats_baseline: [(u64, u64); SCREENS.len()],
-    loading: Option<loading::Loading>,
-    loading_window: Option<xp::WindowId>,
 }
 
 // X-Plane's handles are only touched on its main thread.
@@ -500,8 +498,6 @@ impl Displays {
             bridge: None,
             upload_budget: UPLOAD_BUDGET_BYTES,
             efis_refs: None,
-            loading: None,
-            loading_window: None,
             stats_at: None,
             stats_baseline: [(0, 0); SCREENS.len()],
         }
@@ -549,21 +545,6 @@ impl Displays {
         }
     }
 
-    fn ensure_renderer(&mut self) {
-        let Some(api) = self.api else { return };
-        if self.renderer.is_none() {
-            let r = gl::Renderer::new(api);
-            match &r {
-                Ok(r) => log(&format!(
-                    "OpenGL ready, {}",
-                    if r.anti_aliased() { format!("{}x multisampling", gl::SAMPLES) } else { "without multisampling".into() }
-                )),
-                Err(e) => log(&format!("cannot draw: {e}")),
-            }
-            self.renderer = Some(r);
-        }
-    }
-
     fn loading_progress(&self) -> loading::Progress {
         let bridged: Vec<usize> = match self.bridge.as_ref() {
             Some(b) => (0..SCREENS.len()).filter(|i| b.screens.get(*i).is_some_and(|s| s.is_some())).collect(),
@@ -573,20 +554,6 @@ impl Displays {
             systems: self.bridge.is_some(),
             screens_up: bridged.iter().filter(|i| self.bridge_active(**i)).count(),
             screens: bridged.len().max(1),
-        }
-    }
-
-    fn draw_loading(&mut self, window: xp::WindowId) {
-        let Some(xplm) = self.xplm else { return };
-        self.ensure_renderer();
-        let progress = self.loading_progress();
-        let geometry = xplm.geometry(window);
-        let (Some(load), Some(Ok(renderer))) = (self.loading.as_mut(), self.renderer.as_mut()) else { return };
-        load.draw(renderer, geometry, &progress);
-        if load.finished {
-            load.release(renderer);
-            self.loading = None;
-            xplm.show(window, false);
         }
     }
 
@@ -1032,6 +999,7 @@ impl Displays {
     }
 
     fn mouse(&mut self, screen: usize, x: c_int, y: c_int, status: c_int, button: i32) {
+        self.redraw_now(screen);
         if status != xp::MOUSE_UP {
             self.screens[screen].track_pointer(x, y);
         }
@@ -1062,7 +1030,15 @@ impl Displays {
         self.dispatch_pointer(screen, kind, input_kind, x, y, button, 0.);
     }
 
+    fn redraw_now(&self, screen: usize) {
+        let handle = self.screens[screen].handle;
+        if let (Some(needs_drawing), false) = (self.api.and_then(|a| a.needs_drawing), handle.is_null()) {
+            unsafe { needs_drawing(handle) };
+        }
+    }
+
     fn cursor(&mut self, screen: usize, x: c_int, y: c_int) {
+        self.redraw_now(screen);
         let s = &mut self.screens[screen];
         s.track_pointer(x, y);
         if !s.pressed && s.hover != Some((x, y)) {
@@ -1396,6 +1372,10 @@ pub fn take_events() -> Vec<ScreenEvent> {
 
 /// Read each screen's potentiometers and buses. `read` gives a variable's
 /// value, or `None` if nothing has made the variable.
+pub fn loading_progress() -> Option<loading::Progress> {
+    DISPLAYS.try_lock().ok()?.as_ref().map(|d| d.loading_progress())
+}
+
 pub fn update_brightness(read: impl FnMut(&str) -> Option<f64>) {
     let _ = DISPLAYS.try_lock().map(|mut guard| guard.as_mut().map(|d| d.update_brightness(read)));
 }
@@ -1515,12 +1495,6 @@ pub fn start(xplm: &'static Xplm) {
         displays.api = Some(api);
         displays.fbo = xplm.find("sim/graphics/view/current_gl_fbo");
         displays.viewport = xplm.find("sim/graphics/view/viewport");
-        if displays.loading_window.is_none() {
-            if let Some(load) = crate::js_bridge::plugin_dir().and_then(|d| loading::Loading::new(d.join("loading"))) {
-                displays.loading = Some(load);
-                displays.loading_window = Some(xplm.overlay_window(loading_draw_callback, loading_mouse_callback, std::ptr::null_mut()));
-            }
-        }
         *guard = Some(displays);
     }
     // Made without holding the lock: X-Plane may call back straight away.
@@ -1615,9 +1589,6 @@ pub fn stop(xplm: &'static Xplm) {
     release_keyboard("the displays are shutting down");
     let taken = DISPLAYS.lock().ok().and_then(|mut g| g.take());
     let Some(mut d) = taken else { return };
-    if let Some(window) = d.loading_window.take() {
-        xplm.destroy_window(window);
-    }
     if let Some(api) = xplm.avionics() {
         for s in &d.screens {
             if !s.handle.is_null() {
@@ -1730,17 +1701,6 @@ unsafe extern "C" fn key_sniffer(key: c_char, flags: c_int, vkey: c_char, _refco
 
 fn screen_of(refcon: *mut c_void) -> usize {
     refcon as usize
-}
-
-unsafe extern "C" fn loading_draw_callback(window: xp::WindowId, _refcon: *mut c_void) {
-    let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.draw_loading(window)));
-}
-
-unsafe extern "C" fn loading_mouse_callback(_window: xp::WindowId, _x: c_int, _y: c_int, status: c_int, _refcon: *mut c_void) -> c_int {
-    if status == xp::MOUSE_DOWN {
-        let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.loading.as_mut().map(|l| l.dismiss())));
-    }
-    1
 }
 
 unsafe extern "C" fn draw_callback(refcon: *mut c_void) {

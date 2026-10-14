@@ -160,4 +160,18 @@ g.save(os.path.join(out_dir, 'bar_glow.png'))
 
 with open(os.path.join(out_dir, 'manifest.json'), 'w', encoding='utf-8') as f:
     json.dump(manifest, f, indent=1)
+
+
+def lua(v):
+    if isinstance(v, dict):
+        return '{' + ', '.join(f'[{lua(k)}] = {lua(x)}' for k, x in v.items()) + '}'
+    if isinstance(v, (list, tuple)):
+        return '{' + ', '.join(lua(x) for x in v) + '}'
+    if isinstance(v, str):
+        return json.dumps(v)
+    return repr(float(v))
+
+
+with open(os.path.join(out_dir, 'manifest.lua'), 'w', encoding='utf-8') as f:
+    f.write('return ' + lua(manifest) + chr(10))
 print(len(manifest['backgrounds']), 'backgrounds,', len(tips), 'tips,', len(manifest['sprites']), 'sprites')

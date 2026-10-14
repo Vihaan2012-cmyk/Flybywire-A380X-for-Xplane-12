@@ -2435,6 +2435,18 @@ impl Plugin {
                 vars.write(&id, host);
             }
             display::update_brightness(|name| vars.ids.get(name).copied().map(|id| vars.read(&id)));
+            if let Some(p) = display::loading_progress() {
+                for (name, value) in [
+                    ("A380X_LOADING_PERCENT", f64::from(p.percent())),
+                    ("A380X_LOADING_COMPLETE", f64::from(u8::from(p.complete()))),
+                    ("A380X_LOADING_SYSTEMS", f64::from(u8::from(p.systems))),
+                    ("A380X_LOADING_SCREENS_UP", p.screens_up as f64),
+                    ("A380X_LOADING_SCREENS", p.screens as f64),
+                ] {
+                    let id = vars.add(name.to_owned(), NAMED);
+                    vars.write(&id, value);
+                }
+            }
         }
         #[cfg(feature = "js")]
         wxr::tick(&self.vars, xplm, self.time);

@@ -464,31 +464,6 @@ impl Xplm {
         id
     }
 
-    pub fn overlay_window(&self, draw: DrawWindow, mouse: HandleMouse, refcon: *mut c_void) -> WindowId {
-        let (mut l, mut t, mut r, mut b) = (0, 0, 0, 0);
-        unsafe { (self.screen_bounds)(&mut l, &mut t, &mut r, &mut b) };
-        let mut spec = CreateWindow {
-            struct_size: std::mem::size_of::<CreateWindow>() as c_int,
-            left: l,
-            top: t,
-            right: r,
-            bottom: b,
-            visible: 1,
-            draw: Some(draw),
-            mouse_click: Some(mouse),
-            key: None,
-            cursor: None,
-            wheel: None,
-            refcon,
-            decoration: 0,
-            layer: 1,
-            mouse_right: None,
-        };
-        let id = unsafe { (self.create_window)(&mut spec) };
-        unsafe { (self.bring_to_front)(id) };
-        id
-    }
-
     pub fn set_title(&self, window: WindowId, title: &str) {
         if let Ok(t) = CString::new(title) {
             unsafe { (self.set_window_title)(window, t.as_ptr()) }
