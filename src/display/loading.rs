@@ -116,7 +116,9 @@ impl Loading {
     }
 
     pub fn dismiss(&mut self) {
-        self.closing_at.get_or_insert_with(Instant::now);
+        if self.started.is_some_and(|s| s.elapsed().as_secs_f32() > 1.5) {
+            self.closing_at.get_or_insert_with(Instant::now);
+        }
     }
 
     pub fn release(&mut self, renderer: &mut Renderer) {
