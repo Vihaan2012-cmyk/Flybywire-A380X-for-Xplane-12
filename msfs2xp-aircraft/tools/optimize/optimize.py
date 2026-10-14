@@ -1,6 +1,7 @@
 """Post-conversion optimisation of a converted A380: decal sheet repack,
 cabin-free object variants, small-part mesh simplification, texture sizing to
-what the pilot's eye resolves, and exterior objects hidden from the flight deck.
+what the pilot's eye resolves, exterior objects hidden from the flight deck, and
+each engine hidden when it separates.
 
 optimize.py <aircraft dir> [--dry-run]
 Each step records itself in objects/optimize_state.json and runs once.
@@ -105,6 +106,12 @@ if not state.get('exterior_hide'):
     print('exterior hidden from the flight deck:', len(hide))
     run(os.path.join(HERE, 'hide_exterior.py'), objects, *hide)
     done('exterior_hide')
+
+if not state.get('engine_separation'):
+    exterior = [n for n in sorted(loaded) if n.startswith('a380_exterior')]
+    print('engines hidden on separation')
+    run(os.path.join(HERE, 'engine_separation.py'), objects, *exterior)
+    done('engine_separation')
 
 if not state.get('texel_sizing'):
     print('texture sizing')
