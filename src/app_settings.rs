@@ -100,8 +100,8 @@ impl Default for AppSettings {
             cabin_visible: true,
             walkaround: false,
             display_sharpen: 0.6,
-            display_glow: 0.6,
-            display_line_weight: 0.45,
+            display_glow: 0.,
+            display_line_weight: 0.,
             display_sheen: 0.5,
             roll_steering: false,
         }
