@@ -111,19 +111,19 @@ for i, tip in enumerate(tips):
     c = canvas()
     d = ImageDraw.Draw(c)
     d.line([(cx - 40, top + 40), (cx - 40, LAYER_H - 60)], fill=(255, 255, 255, 50), width=2)
-    d.text((cx, top + 72), 'Did you know?', font=mono(40), fill=CYAN, anchor='ls')
-    y = top + 126
-    for line in textwrap.wrap(tip, 60):
-        d.text((cx, y), line, font=mono(32), fill=WHITE, anchor='ls')
-        y += 46
-    d.text((cx, y + 12), f'Tip {i + 1} of {len(tips)}', font=mono(24), fill=GREY, anchor='ls')
+    d.text((cx, top + 72), 'Did you know?', font=mono(30), fill=CYAN, anchor='ls')
+    y = top + 116
+    for line in textwrap.wrap(tip, 78):
+        d.text((cx, y), line, font=mono(24), fill=WHITE, anchor='ls')
+        y += 36
+    d.text((cx, y + 12), f'Tip {i + 1} of {len(tips)}', font=mono(20), fill=GREY, anchor='ls')
     name = f'tip_{i + 1:02d}'
     save_sprite(name, c, 0, 0)
     manifest['tips'].append(name)
 
 rx = DESIGN_W - 90
 c = canvas()
-ImageDraw.Draw(c).text((rx, top + 70), 'Loading', font=mono(30), fill=GREY, anchor='rs')
+ImageDraw.Draw(c).text((rx, top + 70), 'Loading', font=mono(24), fill=GREY, anchor='rs')
 save_sprite('loading', c, 0, 0)
 
 digit_font = fcu(92)
@@ -146,7 +146,7 @@ for row, label in enumerate(['Aircraft systems', 'Cockpit displays', 'Sound']):
         c = canvas()
         d = ImageDraw.Draw(c)
         d.text((rx, y), mark, font=check, fill=colour, anchor='rs')
-        d.text((rx - 34, y), label, font=mono(26), fill=colour, anchor='rs')
+        d.text((rx - 34, y), label, font=mono(22), fill=colour, anchor='rs')
         save_sprite(f'item_{row}_{state}', c, 0, 0)
 
 white = Image.new('RGBA', (4, 4), (255, 255, 255, 255))
