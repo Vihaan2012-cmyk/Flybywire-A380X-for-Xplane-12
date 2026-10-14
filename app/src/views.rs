@@ -603,6 +603,7 @@ pub struct PaintStats {
     /// painted width, painted height, block width, block height.
     pub last_mismatch: std::sync::atomic::AtomicU64,
     pub written: std::sync::atomic::AtomicU64,
+    pub gpu: std::sync::atomic::AtomicU64,
 }
 
 pub static PAINT_STATS: PaintStats = PaintStats {
@@ -613,6 +614,7 @@ pub static PAINT_STATS: PaintStats = PaintStats {
     size_mismatch: std::sync::atomic::AtomicU64::new(0),
     last_mismatch: std::sync::atomic::AtomicU64::new(0),
     written: std::sync::atomic::AtomicU64::new(0),
+    gpu: std::sync::atomic::AtomicU64::new(0),
 };
 
 /// The paint counters since the last call, for the periodic status line.
@@ -628,7 +630,8 @@ pub fn paint_summary() -> String {
     );
     let m = PAINT_STATS.last_mismatch.load(Ordering::Relaxed);
     let sizes = if mismatch > 0 { format!(" (last: painted {}x{}, block {}x{})", m >> 48, (m >> 32) & 0xFFFF, (m >> 16) & 0xFFFF, m & 0xFFFF) } else { String::new() };
-    format!("paint: {calls} on_paint, {written} written, {mismatch} size mismatch{sizes}, {no_block} without a screen block, {not_view} popup, {empty} empty")
+    let gpu = take(&PAINT_STATS.gpu);
+    format!("paint: {calls} on_paint, {written} written ({gpu} as shared GPU textures), {mismatch} size mismatch{sizes}, {no_block} without a screen block, {not_view} popup, {empty} empty")
 }
 
 wrap_render_handler! {
@@ -788,9 +791,12 @@ wrap_render_handler! {
             let g = &*g;
             let Some(out) = g.out.as_ref() else { return };
             if out.copy(Some(&src), g.popup.as_ref().map(|(p, x, y)| (p, *x, *y))) {
-                h.gpu_generation.store(out.generation, Ordering::Release);
+                if h.gpu_generation.swap(out.generation, Ordering::Release) != out.generation {
+                    crate::logging::log(&format!("views: {w}x{ht} screen now painted through shared GPU texture {}", block.gpu_texture_name(out.generation)));
+                }
                 h.publish(&[[0, 0, w, ht]]);
                 PAINT_STATS.written.fetch_add(1, Ordering::Relaxed);
+                PAINT_STATS.gpu.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
