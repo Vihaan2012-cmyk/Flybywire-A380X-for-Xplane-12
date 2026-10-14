@@ -505,12 +505,13 @@ fn spawn_efb_view(tag: &str, fps: i32) -> Option<Browser> {
     let (dw, dh) = device_size(EFB_SCREEN, EFB_WIDTH, EFB_HEIGHT);
     let block = ScreenBlock::open(tag, EFB_SCREEN, dw, dh)?;
     let screen = Some(Rc::new(block));
-    let render_handler = ViewPaint::new(EFB_WIDTH as i32, EFB_HEIGHT as i32, EFB_SUPERSAMPLE as f32, screen, Rc::default(), None, Some(Rc::default()));
+    let shared = crate::window::shared_textures();
+    let render_handler = ViewPaint::new(EFB_WIDTH as i32, EFB_HEIGHT as i32, EFB_SUPERSAMPLE as f32, screen, Rc::default(), None, shared.then(Rc::default));
     let url = format!("http://127.0.0.1:{port}/");
     let load_handler = ViewLoad::new(EFB_SCREEN.to_string(), "EFB".to_string(), url.clone());
     let mut client = ViewClient::new(render_handler, load_handler);
     let mut window_info = WindowInfo::default().set_as_windowless(unsafe { std::mem::zeroed() });
-    window_info.shared_texture_enabled = 1;
+    window_info.shared_texture_enabled = shared as i32;
     let browser_settings = BrowserSettings { windowless_frame_rate: fps.max(1), background_color: 0, ..Default::default() };
     let browser = browser_host_create_browser_sync(Some(&window_info), Some(&mut client), Some(&CefString::from(url.as_str())), Some(&browser_settings), None, None)?;
     focus(&browser);
@@ -533,7 +534,7 @@ fn spawn_view(tag: &str, def: &ViewDef, fps: i32) -> Option<Browser> {
     };
     let layered = LAYERS.with(|l| l.borrow().get(&def.screen.to_ascii_uppercase()).cloned()).map(|stack| (stack, def.layer as usize));
     let scale = if def.screen.is_empty() { 1.0 } else { supersample(&def.screen) as f32 };
-    let gpu = screen.is_some().then(Rc::default);
+    let gpu = (screen.is_some() && crate::window::shared_textures()).then(Rc::default);
     let shared = gpu.is_some();
     let render_handler = ViewPaint::new(width, height, scale, screen, Rc::default(), layered, gpu);
     let url = gauge_url(def);

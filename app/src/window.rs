@@ -75,11 +75,18 @@ fn force_cpu_rendering() -> bool {
     }
 }
 
-fn extra_switches() -> Vec<(String, Option<String>)> {
-    let Some(xp_root) = xp_root_arg(std::env::args()) else { return Vec::new() };
+fn app_settings_json() -> serde_json::Value {
+    let Some(xp_root) = xp_root_arg(std::env::args()) else { return serde_json::Value::Null };
     let text = std::fs::read_to_string(fbw_a380_systems::settings_files::app_settings_path(&xp_root)).unwrap_or_default();
-    let value = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
-    parse_switches(value.get("chromiumSwitches").and_then(|v| v.as_str()).unwrap_or_default())
+    serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default()
+}
+
+fn extra_switches() -> Vec<(String, Option<String>)> {
+    parse_switches(app_settings_json().get("chromiumSwitches").and_then(|v| v.as_str()).unwrap_or_default())
+}
+
+pub fn shared_textures() -> bool {
+    app_settings_json().get("sharedTextures").and_then(|v| v.as_bool()).unwrap_or(true)
 }
 
 fn parse_switches(text: &str) -> Vec<(String, Option<String>)> {
