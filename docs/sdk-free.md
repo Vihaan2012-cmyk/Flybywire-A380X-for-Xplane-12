@@ -27,7 +27,8 @@ Goal: the shipped X-Plane instruments contain no msfs-sdk code, names or pattern
 - [x] 4b fixes: pub -> send only on calls (a field named pub broke the RMP); GameStateProvider/Instrument renamed to GameStateWatch/GaugeCore (GameState and Gauge are sim globals; the class shadowed the enum and delayed the FMS).
 - [x] 5 FMS offline (src/js/msfs/fms_offline.rs, test fms_offline_flight_plan): EGLL-KJFK from a canned OFP, 13 idents; golden and new identical.
 - [x] 6 installed 2026-10-13 22:3x (guard passed, 0 maps, 0 SDK names, all 137 shipped files byte-identical to the tested build); XPHFBW harness: 21/21 displays load and draw in CEF. Test defaults point at the installed aircraft, never the MSFS build. A380 repo commit 4050042 (xp-kit replaces xp-avionics, hook, notices) not pushed: push with the release.
-- [ ] Our own fork files are still SDK-shaped source (built through the transform like FlyByWire's). Converting them in the repo is optional.
+- [x] Our own fork files (15 OIT files + 4 rewritten ARINC bus files) written against xp-kit in source: fork e3554e0, A380 repo d69eda6; build output byte-identical, fuzz seed 1 identical.
+- [x] Offline ND draws the route (63d9f6c): the test hosts held E:SIMULATION TIME still and the ND canvas map redraws on simTime. Both test hosts now advance E:SIMULATION TIME/E:ABSOLUTE TIME; fuzz seed 1 rerun identical with the clock moving (20539 writes). Golden traces regenerated.
 
 ## Notes
 - Build (new): cd E:/fbw-int/fbw-aircraft-ts; XP_KIT=E:/fbw-int/xp-kit/dist XP_RELEASE=1 NODE_OPTIONS=--max-old-space-size=8192, XP_AVIONICS unset; node E:/fbw-int/xp-avionics/tools/run-clean.cjs on systems-host/build.js, extras-host/build.js, then mach build --config fbw-a380x/mach.config.js --work-in-config-dir. Output overwrites fbw-a380x/out/.../html_ui (golden is frozen separately).
