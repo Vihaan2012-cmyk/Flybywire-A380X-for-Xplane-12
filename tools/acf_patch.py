@@ -1,9 +1,12 @@
 import argparse
 import hashlib
+import re
 import sys
 from pathlib import Path
 
 MAGIC = 'XP-ACF-PATCH 1'
+TRIVIAL = re.compile(r'^(-?[01](\.0+)?|-?0\.0+|)$')
+OWN = ('_obja/',)
 
 
 def properties(text: str) -> dict[str, str]:
@@ -29,7 +32,7 @@ def make(acf: Path, template: Path) -> str:
             raise ValueError(f'{acf}: a line starts with "="')
         if line.startswith('P '):
             key, _, value = line[2:].partition(' ')
-            if base.get(key) == value:
+            if base.get(key) == value and not TRIVIAL.match(value) and not key.startswith(OWN):
                 out.append(f'={key} {check(value)}')
                 referenced += 1
                 continue

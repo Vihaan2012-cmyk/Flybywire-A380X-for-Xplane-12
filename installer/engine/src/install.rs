@@ -965,27 +965,49 @@ fn build_acf(template: &Path, patch: &Path, out: &Path) -> Result<usize, String>
         return Err(format!("{} is not an .acf patch", patch.display()));
     }
     lines.next();
+    let check = |value: &str| {
+        let raw: Vec<u8> = value.chars().map(|c| c as u32 as u8).collect();
+        hex(&Sha256::digest(&raw))[..8].to_ascii_lowercase()
+    };
+    let mut by_check: Option<std::collections::HashMap<String, &str>> = None;
     let mut text = String::with_capacity(base_text.len() / 4);
     let mut differing = 0;
-    for (i, line) in lines.enumerate() {
-        if i > 0 {
-            text.push('\n');
-        }
-        match line.strip_prefix('=') {
+    let mut first = true;
+    for line in lines {
+        let line = match line.strip_prefix('=') {
             Some(rest) => {
                 let (key, expected) = rest.split_once(' ').unwrap_or((rest, ""));
-                let value = base.get(key).ok_or_else(|| format!("{} has no {key}", template.display()))?;
-                let raw: Vec<u8> = value.chars().map(|c| c as u32 as u8).collect();
-                if !hex(&Sha256::digest(&raw))[..8].eq_ignore_ascii_case(expected) {
-                    differing += 1;
+                let value = match base.get(key) {
+                    Some(value) => {
+                        if !check(value).eq_ignore_ascii_case(expected) {
+                            differing += 1;
+                        }
+                        Some(*value)
+                    }
+                    None => {
+                        differing += 1;
+                        let known = by_check.get_or_insert_with(|| {
+                            let mut m = std::collections::HashMap::new();
+                            for v in ["", "0", "1", "-1", "0.000000000", "1.000000000", "-1.000000000", "-0.000000000"].into_iter().chain(base.values().copied()) {
+                                m.entry(check(v)).or_insert(v);
+                            }
+                            m
+                        });
+                        known.get(&expected.to_ascii_lowercase()).copied()
+                    }
+                };
+                match value {
+                    Some(value) => format!("P {key} {value}"),
+                    None => continue,
                 }
-                text.push_str("P ");
-                text.push_str(key);
-                text.push(' ');
-                text.push_str(value);
             }
-            None => text.push_str(line),
+            None => line.to_owned(),
+        };
+        if !first {
+            text.push('\n');
         }
+        first = false;
+        text.push_str(&line);
     }
     let bytes: Vec<u8> = text.chars().map(|c| c as u32 as u8).collect();
     std::fs::write(out, bytes).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -1484,6 +1506,26 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "I\n1200 Version\nP a 1\nP b 5\nP c 3\nP d 9\n");
         std::fs::write(&template, "I\n1200 Version\nP a 1\nP b 2\nP c 4\n").unwrap();
         assert_eq!(build_acf(&template, &patch, &out).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_key_missing_from_an_older_template_is_recovered_by_its_check_or_dropped() {
+        let dir = std::env::temp_dir().join("fbw-acf-patch-missing-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let template = dir.join("template.acf");
+        let patch = dir.join("aircraft.acfpatch");
+        let out = dir.join("aircraft.acf");
+        std::fs::write(&template, "I\n1200 Version\nP a 7\nP z 0\n").unwrap();
+        let patch_text = format!(
+            "{ACF_PATCH_MAGIC}\nTEMPLATE x\nI\n1200 Version\n=a {}\n=gone {}\n=lost {}\n=missing {}\nP d 9\n",
+            short("7"),
+            short("-1"),
+            short("7"),
+            short("unknowable")
+        );
+        std::fs::write(&patch, patch_text).unwrap();
+        assert_eq!(build_acf(&template, &patch, &out).unwrap(), 3);
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "I\n1200 Version\nP a 7\nP gone -1\nP lost 7\nP d 9\n");
     }
 
     #[test]
