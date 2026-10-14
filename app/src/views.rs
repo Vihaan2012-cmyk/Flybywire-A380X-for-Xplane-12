@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use cef::*;
 use fbw_a380_systems::xphfbw_bridge::{Input, InputKind, ScreenBlock, Session, MAX_DIRTY_RECTS};
 use fbw_a380_systems::xphfbw_bridge_views::{view_list, ViewDef};
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
 /// Shared with the plugin (xphfbw_bridge_views), so both number screens alike.
 use fbw_a380_systems::xphfbw_bridge_views::{device_size, supersample, EFB_HEIGHT, EFB_SCREEN, EFB_SUPERSAMPLE, EFB_WIDTH, SCREEN_ORDER};
@@ -59,6 +60,22 @@ struct LayerStack {
     layers: Vec<Vec<u8>>,
     composed: Vec<u8>,
     width: usize,
+    gpu: GpuStack,
+}
+
+#[derive(Default)]
+struct GpuStack {
+    layers: Vec<Option<ID3D11Texture2D>>,
+    popups: Vec<Option<(ID3D11Texture2D, i32, i32)>>,
+    out: Option<crate::gpu_share::SharedOut>,
+    staging: Option<ID3D11Texture2D>,
+}
+
+fn gpu_topmost(layers: &[Option<ID3D11Texture2D>], x: f32, y: f32) -> usize {
+    if x < 0. || y < 0. {
+        return 0;
+    }
+    (1..layers.len()).rev().find(|&l| layers[l].as_ref().is_some_and(|t| crate::gpu_share::alpha_at(t, x as u32, y as u32) > 0)).unwrap_or(0)
 }
 
 #[derive(Default, Clone, Copy)]
@@ -516,7 +533,7 @@ fn spawn_view(tag: &str, def: &ViewDef, fps: i32) -> Option<Browser> {
     };
     let layered = LAYERS.with(|l| l.borrow().get(&def.screen.to_ascii_uppercase()).cloned()).map(|stack| (stack, def.layer as usize));
     let scale = if def.screen.is_empty() { 1.0 } else { supersample(&def.screen) as f32 };
-    let gpu = (screen.is_some() && layered.is_none()).then(Rc::default);
+    let gpu = screen.is_some().then(Rc::default);
     let shared = gpu.is_some();
     let render_handler = ViewPaint::new(width, height, scale, screen, Rc::default(), layered, gpu);
     let url = gauge_url(def);
@@ -671,6 +688,11 @@ wrap_render_handler! {
             if let Some(gpu) = &self.gpu {
                 gpu.borrow_mut().popup = None;
             }
+            if let Some((stack, layer)) = &self.layered {
+                if let Some(p) = stack.borrow_mut().gpu.popups.get_mut(*layer) {
+                    *p = None;
+                }
+            }
             if let Some(host) = browser.and_then(|b| b.host()) {
                 host.invalidate(PaintElementType::VIEW);
             }
@@ -753,7 +775,19 @@ wrap_render_handler! {
             if type_ == PaintElementType::POPUP {
                 PAINT_STATS.not_view.fetch_add(1, Ordering::Relaxed);
                 let Some(rect) = self.popup.borrow().rect.clone() else { return };
-                g.popup = crate::gpu_share::duplicate(&src).map(|t| (t, rect.x, rect.y));
+                let popup = crate::gpu_share::duplicate(&src).map(|t| (t, rect.x, rect.y));
+                if let Some((stack, layer)) = &self.layered {
+                    {
+                        let mut s = stack.borrow_mut();
+                        if s.gpu.popups.len() <= *layer {
+                            s.gpu.popups.resize(*layer + 1, None);
+                        }
+                        s.gpu.popups[*layer] = popup;
+                    }
+                    paint_gpu_layer(block, stack, *layer, None);
+                    return;
+                }
+                g.popup = popup;
                 let g = &*g;
                 if let (Some(out), Some((p, x, y))) = (g.out.as_ref(), g.popup.as_ref()) {
                     if out.copy(None, Some((p, *x, *y))) {
@@ -768,6 +802,10 @@ wrap_render_handler! {
             let (w, ht) = crate::gpu_share::size(&src);
             if h.width.load(Ordering::Relaxed) != w || h.height.load(Ordering::Relaxed) != ht {
                 PAINT_STATS.size_mismatch.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            if let Some((stack, layer)) = &self.layered {
+                paint_gpu_layer(block, stack, *layer, Some(&src));
                 return;
             }
             if h.gpu_refused.load(Ordering::Relaxed) != 0 {
@@ -800,6 +838,48 @@ wrap_render_handler! {
             }
         }
     }
+}
+
+fn paint_gpu_layer(block: &ScreenBlock, stack: &RefCell<LayerStack>, layer: usize, src: Option<&ID3D11Texture2D>) {
+    let h = block.header();
+    let mut s = stack.borrow_mut();
+    let GpuStack { layers, popups, out, staging } = &mut s.gpu;
+    if layers.len() <= layer {
+        layers.resize(layer + 1, None);
+    }
+    if let Some(src) = src {
+        if !crate::gpu_share::store(&mut layers[layer], src) {
+            return;
+        }
+    }
+    let (w, ht) = (h.width.load(Ordering::Relaxed), h.height.load(Ordering::Relaxed));
+    if out.as_ref().is_none_or(|o| (o.width, o.height) != (w, ht)) {
+        *out = crate::gpu_share::SharedOut::create(|generation| block.gpu_texture_name(generation), w, ht);
+        if out.is_none() {
+            crate::logging::log("views: could not make a shared texture for a layered screen");
+            return;
+        }
+    }
+    let Some(out) = out.as_ref() else { return };
+    let pasted: Vec<_> = popups.iter().flatten().map(|(p, x, y)| (p, *x, *y)).collect();
+    if !out.compose(layers, &pasted) {
+        return;
+    }
+    if h.gpu_refused.load(Ordering::Relaxed) != 0 {
+        h.writing.store(1, Ordering::Relaxed);
+        if out.readback(staging, block.pixels()) {
+            h.publish(&[[0, 0, w, ht]]);
+            PAINT_STATS.written.fetch_add(1, Ordering::Relaxed);
+        }
+        h.writing.store(0, Ordering::Relaxed);
+        return;
+    }
+    if h.gpu_generation.swap(out.generation, Ordering::Release) != out.generation {
+        crate::logging::log(&format!("views: {w}x{ht} layered screen now painted through shared GPU texture {}", block.gpu_texture_name(out.generation)));
+    }
+    h.publish(&[[0, 0, w, ht]]);
+    PAINT_STATS.written.fetch_add(1, Ordering::Relaxed);
+    PAINT_STATS.gpu.fetch_add(1, Ordering::Relaxed);
 }
 
 #[derive(Default)]
@@ -1196,7 +1276,11 @@ fn route_layer(screen: usize, input: &Input) -> usize {
         LAYERS.with(|l| {
             l.borrow().get(&id).map_or(0, |stack| {
                 let stack = stack.borrow();
-                topmost_opaque(&stack.layers, stack.width, input.x, input.y)
+                if stack.gpu.layers.iter().any(Option::is_some) {
+                    gpu_topmost(&stack.gpu.layers, input.x, input.y)
+                } else {
+                    topmost_opaque(&stack.layers, stack.width, input.x, input.y)
+                }
             })
         })
     };
