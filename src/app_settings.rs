@@ -84,6 +84,7 @@ pub struct AppSettings {
     pub display_line_weight: f64,
     pub display_sheen: f64,
     pub roll_steering: bool,
+    pub buffet: bool,
 }
 
 impl Default for AppSettings {
@@ -104,6 +105,7 @@ impl Default for AppSettings {
             display_line_weight: 0.,
             display_sheen: 0.5,
             roll_steering: false,
+            buffet: true,
         }
     }
 }
@@ -147,6 +149,7 @@ fn parse(map: &Map<String, Value>) -> AppSettings {
         display_line_weight: as_f64(map, "displayLineWeight", defaults.display_line_weight).clamp(0.0, 1.0),
         display_sheen: as_f64(map, "displaySheen", defaults.display_sheen).clamp(0.0, 1.0),
         roll_steering: as_bool(map, "rollSteering", defaults.roll_steering),
+        buffet: as_bool(map, "buffet", defaults.buffet),
     }
 }
 
