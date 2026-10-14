@@ -1,4 +1,12 @@
-import { ComponentProps, ConsumerSubject, DisplayComponent, EventBus, FSComponent, VNode } from '@microsoft/msfs-sdk';
+import {
+  ComponentProps,
+  ConsumerSubject,
+  DisplayComponent,
+  EventBus,
+  FSComponent,
+  MappedSubject,
+  VNode,
+} from '@microsoft/msfs-sdk';
 import { HdgDisplay } from './HdgDisplay';
 import { SpdDisplay } from './SpdDisplay';
 import { VsDisplay } from './VsDisplay';
@@ -12,7 +20,11 @@ interface AfsDisplayProps extends ComponentProps {
 export class AfsDisplay extends DisplayComponent<AfsDisplayProps> {
   private sub = this.props.bus.getSubscriber<FcuSimvars>();
 
-  private afsCpActive = ConsumerSubject.create(this.sub.on('afsDisplayActive'), false);
+  private afsCpActive = MappedSubject.create(
+    ([active, backup]) => active && !backup,
+    ConsumerSubject.create(this.sub.on('afsDisplayActive'), false),
+    ConsumerSubject.create(this.sub.on('afsBackupActive'), false),
+  );
 
   public render(): VNode {
     return (

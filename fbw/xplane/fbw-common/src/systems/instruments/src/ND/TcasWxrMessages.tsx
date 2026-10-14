@@ -16,6 +16,16 @@ import { EfisNdMode, TcasWxrMessage } from '@flybywiresim/fbw-sdk';
 import { Layer } from '../MsfsAvionicsCommon/Layer';
 import { GenericTcasEvents } from './types/GenericTcasEvents';
 
+export interface NdWxrMessage {
+  text: string;
+  className: string;
+  secondLine?: string;
+}
+
+export interface NdWxrMessageEvents {
+  ndWxrMessage: NdWxrMessage | null;
+}
+
 export interface TcasWXMessagesProps {
   bus: EventBus;
   mode: Subscribable<EfisNdMode>;
@@ -33,6 +43,10 @@ export class TcasWxrMessages extends DisplayComponent<TcasWXMessagesProps> {
   private readonly rightMessage = Subject.create<TcasWxrMessage | undefined>(undefined);
 
   private textClassSub = Subject.create('');
+
+  private readonly rightTextClass = Subject.create('');
+
+  private readonly rightSecondLine = Subject.create('');
 
   private rectClassSub = Subject.create('');
 
@@ -82,7 +96,16 @@ export class TcasWxrMessages extends DisplayComponent<TcasWXMessagesProps> {
   onAfterRender(node: VNode) {
     super.onAfterRender(node);
 
-    const sub = this.props.bus.getSubscriber<GenericTcasEvents>();
+    const sub = this.props.bus.getSubscriber<GenericTcasEvents & NdWxrMessageEvents>();
+
+    sub
+      .on('ndWxrMessage')
+      .whenChanged()
+      .handle((message) => {
+        this.rightMessage.set(message ? { text: message.text } : undefined);
+        this.rightTextClass.set(message ? `${message.className} TcasMessage` : '');
+        this.rightSecondLine.set(message?.secondLine ?? '');
+      });
 
     sub
       .on('tcasTaOnly')
@@ -143,8 +166,12 @@ export class TcasWxrMessages extends DisplayComponent<TcasWXMessagesProps> {
           {this.leftMessage.map((it) => it?.text ?? '')}
         </text>
 
-        <text x={425} y={25} class={this.textClassSub} text-anchor="end" font-size={27}>
+        <text x={425} y={25} class={this.rightTextClass} text-anchor="end" font-size={27}>
           {this.rightMessage.map((it) => it?.text ?? '')}
+        </text>
+
+        <text x={425} y={55} class={this.rightTextClass} text-anchor="end" font-size={27}>
+          {this.rightSecondLine}
         </text>
       </Layer>
     );

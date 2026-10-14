@@ -60,6 +60,7 @@ import './style.scss';
 import './oans-style.scss';
 import { VerticalDisplay } from './VerticalDisplay/VerticalDisplay';
 import { InternalKccuKeyEvent } from '../MFD/shared/MFDSimvarPublisher';
+import { WxrNdMessagePublisher } from './WxrNdMessagePublisher';
 
 declare type MousePosition = {
   x: number;
@@ -116,6 +117,8 @@ class NDInstrument implements FsInstrument {
   private readonly aesuPublisher: AesuBusPublisher;
 
   private readonly fcuEfisCpBusPublisher: FcuEfisCpBusPublisher;
+
+  private readonly wxrNdMessagePublisher: WxrNdMessagePublisher;
 
   private readonly clock: Clock;
 
@@ -187,6 +190,7 @@ class NDInstrument implements FsInstrument {
     this.resetPanelPublisher = new ResetPanelSimvarPublisher(this.bus);
     this.aesuPublisher = new AesuBusPublisher(this.bus);
     this.fcuEfisCpBusPublisher = new FcuEfisCpBusPublisher(this.bus);
+    this.wxrNdMessagePublisher = new WxrNdMessagePublisher(this.bus, side);
 
     this.adirsValueProvider = new AdirsValueProvider(this.bus, this.simVarPublisher, side);
     this.simplaneValueProvider = new SimplaneValueProvider(this.bus);

@@ -38,6 +38,27 @@ export type MfdSimvars = {
   terr2Failed: boolean;
   gpws1Failed: boolean;
   gpws2Failed: boolean;
+  wxr1Failed: boolean;
+  wxr2Failed: boolean;
+  wxrOff: boolean;
+  wxrPwsOff: boolean;
+  wxrTurbOff: boolean;
+  baroStdL: boolean;
+  baroStdR: boolean;
+  wxrElevnTiltL: number;
+  wxrElevnFtL: number;
+  wxrTiltDegL: number;
+  wxrGainManL: boolean;
+  wxrGainPctL: number;
+  wxrModeMapL: boolean;
+  wxrVdOffL: boolean;
+  wxrElevnTiltR: number;
+  wxrElevnFtR: number;
+  wxrTiltDegR: number;
+  wxrGainManR: boolean;
+  wxrGainPctR: number;
+  wxrModeMapR: boolean;
+  wxrVdOffR: boolean;
 };
 
 export type InternalKccuKeyEvent = {
@@ -82,6 +103,27 @@ export enum MfdVars {
   terr2Failed = 'L:A32NX_TERR_2_FAILED',
   gpws1Failed = 'L:A32NX_GPWS_1_FAILED',
   gpws2Failed = 'L:A32NX_GPWS_2_FAILED',
+  wxr1Failed = 'L:A32NX_WXR_1_FAILED',
+  wxr2Failed = 'L:A32NX_WXR_2_FAILED',
+  wxrOff = 'L:A380X_WXR_OFF',
+  wxrPwsOff = 'L:A380X_WXR_PWS_OFF',
+  wxrTurbOff = 'L:A380X_WXR_TURB_OFF',
+  baroStdL = 'L:A32NX_FCU_EFIS_L_DISPLAY_BARO_IS_STD',
+  baroStdR = 'L:A32NX_FCU_EFIS_R_DISPLAY_BARO_IS_STD',
+  wxrElevnTiltL = 'L:A380X_WXR_L_ELEVN_TILT',
+  wxrElevnFtL = 'L:A380X_WXR_L_ELEVN_FT',
+  wxrTiltDegL = 'L:A380X_WXR_L_TILT_DEG',
+  wxrGainManL = 'L:A380X_WXR_L_GAIN_MAN',
+  wxrGainPctL = 'L:A380X_WXR_L_GAIN_PCT',
+  wxrModeMapL = 'L:A380X_WXR_L_MODE_MAP',
+  wxrVdOffL = 'L:A380X_WXR_L_VD_OFF',
+  wxrElevnTiltR = 'L:A380X_WXR_R_ELEVN_TILT',
+  wxrElevnFtR = 'L:A380X_WXR_R_ELEVN_FT',
+  wxrTiltDegR = 'L:A380X_WXR_R_TILT_DEG',
+  wxrGainManR = 'L:A380X_WXR_R_GAIN_MAN',
+  wxrGainPctR = 'L:A380X_WXR_R_GAIN_PCT',
+  wxrModeMapR = 'L:A380X_WXR_R_MODE_MAP',
+  wxrVdOffR = 'L:A380X_WXR_R_VD_OFF',
 }
 
 /** A publisher to poll and publish nav/com simvars. */
@@ -122,6 +164,27 @@ export class MfdSimvarPublisher extends SimVarPublisher<MfdSimvars> {
     ['terr2Failed', { name: MfdVars.terr2Failed, type: SimVarValueType.Bool }],
     ['gpws1Failed', { name: MfdVars.gpws1Failed, type: SimVarValueType.Bool }],
     ['gpws2Failed', { name: MfdVars.gpws2Failed, type: SimVarValueType.Bool }],
+    ['wxr1Failed', { name: MfdVars.wxr1Failed, type: SimVarValueType.Bool }],
+    ['wxr2Failed', { name: MfdVars.wxr2Failed, type: SimVarValueType.Bool }],
+    ['wxrOff', { name: MfdVars.wxrOff, type: SimVarValueType.Bool }],
+    ['wxrPwsOff', { name: MfdVars.wxrPwsOff, type: SimVarValueType.Bool }],
+    ['wxrTurbOff', { name: MfdVars.wxrTurbOff, type: SimVarValueType.Bool }],
+    ['baroStdL', { name: MfdVars.baroStdL, type: SimVarValueType.Bool }],
+    ['baroStdR', { name: MfdVars.baroStdR, type: SimVarValueType.Bool }],
+    ['wxrElevnTiltL', { name: MfdVars.wxrElevnTiltL, type: SimVarValueType.Number }],
+    ['wxrElevnFtL', { name: MfdVars.wxrElevnFtL, type: SimVarValueType.Number }],
+    ['wxrTiltDegL', { name: MfdVars.wxrTiltDegL, type: SimVarValueType.Number }],
+    ['wxrGainManL', { name: MfdVars.wxrGainManL, type: SimVarValueType.Bool }],
+    ['wxrGainPctL', { name: MfdVars.wxrGainPctL, type: SimVarValueType.Number }],
+    ['wxrModeMapL', { name: MfdVars.wxrModeMapL, type: SimVarValueType.Bool }],
+    ['wxrVdOffL', { name: MfdVars.wxrVdOffL, type: SimVarValueType.Bool }],
+    ['wxrElevnTiltR', { name: MfdVars.wxrElevnTiltR, type: SimVarValueType.Number }],
+    ['wxrElevnFtR', { name: MfdVars.wxrElevnFtR, type: SimVarValueType.Number }],
+    ['wxrTiltDegR', { name: MfdVars.wxrTiltDegR, type: SimVarValueType.Number }],
+    ['wxrGainManR', { name: MfdVars.wxrGainManR, type: SimVarValueType.Bool }],
+    ['wxrGainPctR', { name: MfdVars.wxrGainPctR, type: SimVarValueType.Number }],
+    ['wxrModeMapR', { name: MfdVars.wxrModeMapR, type: SimVarValueType.Bool }],
+    ['wxrVdOffR', { name: MfdVars.wxrVdOffR, type: SimVarValueType.Bool }],
   ]);
 
   public constructor(bus: EventBus) {

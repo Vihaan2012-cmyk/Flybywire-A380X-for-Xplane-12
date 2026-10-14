@@ -1,0 +1,116 @@
+@import "../../../MsfsAvionicsCommon/definitions.scss";
+
+.mfd-fcubkup-canvas {
+  position: relative;
+  width: 768px;
+  height: 780px;
+}
+
+.mfd-fcubkup-lines {
+  position: absolute;
+  left: 0;
+  top: 0;
+
+  polyline,
+  rect {
+    fill: none;
+    stroke: $display-white;
+    stroke-width: 2;
+  }
+}
+
+.mfd-fcubkup-item {
+  position: absolute;
+}
+
+.mfd-fcubkup-label {
+  position: absolute;
+  text-align: center;
+  font-family: "FBW-Display-EIS-A380-SlashedZero", monospace;
+  font-size: 24px;
+  color: $display-white;
+}
+
+.mfd-fcubkup-stack {
+  position: absolute;
+  top: 370px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mfd-fcubkup-window {
+  position: absolute;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background-color: $display-background;
+  border: 2px inset $display-light-grey;
+  font-family: "FBW-Display-EIS-A380-SlashedZero", monospace;
+  color: $display-cyan;
+  cursor: ns-resize;
+}
+
+.mfd-fcubkup-window-value {
+  font-size: 32px;
+}
+
+.mfd-fcubkup-window-unit {
+  font-size: 20px;
+}
+
+.mfd-fcubkup-light-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.mfd-fcubkup-light {
+  width: 76px;
+  height: 84px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0 6px 0;
+  box-sizing: border-box;
+  background-color: $display-mfd-darker-grey;
+  border: 2px outset $display-light-grey;
+  font-family: "FBW-Display-EIS-A380-SlashedZero", monospace;
+  color: $display-white;
+  font-size: 22px;
+}
+
+.mfd-fcubkup-light.wide {
+  width: 96px;
+  height: 56px;
+}
+
+.mfd-fcubkup-light:active {
+  border-style: inset;
+}
+
+.mfd-fcubkup-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 70%;
+
+  div {
+    height: 5px;
+    background-color: #3a3a3a;
+  }
+}
+
+.mfd-fcubkup-bars.on div {
+  background-color: $display-green;
+}
+
+.mfd-fcubkup-light-caption {
+  margin-top: 6px;
+  font-family: "FBW-Display-EIS-A380-SlashedZero", monospace;
+  font-size: 22px;
+  color: $display-white;
+}

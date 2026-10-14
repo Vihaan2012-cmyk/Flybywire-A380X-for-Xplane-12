@@ -1,4 +1,12 @@
-import { ComponentProps, ConsumerSubject, DisplayComponent, EventBus, FSComponent, VNode } from '@microsoft/msfs-sdk';
+import {
+  ComponentProps,
+  ConsumerSubject,
+  DisplayComponent,
+  EventBus,
+  FSComponent,
+  MappedSubject,
+  VNode,
+} from '@microsoft/msfs-sdk';
 import { BaroRefDisplay } from './BaroRefDisplay';
 import { NdDataDisplay } from './NdDataDisplay';
 import { FcuSimvars } from '../Publishers/FcuSimvarPublisher';
@@ -11,9 +19,10 @@ interface EisDisplayProps extends ComponentProps {
 export class EisDisplay extends DisplayComponent<EisDisplayProps> {
   private readonly sub = this.props.bus.getSubscriber<FcuSimvars>();
 
-  private efisCpActive = ConsumerSubject.create(
-    this.sub.on(`eisDisplay${this.props.isCaptSide ? 'Left' : 'Right'}Active`),
-    false,
+  private efisCpActive = MappedSubject.create(
+    ([active, backup]) => active && !backup,
+    ConsumerSubject.create(this.sub.on(`eisDisplay${this.props.isCaptSide ? 'Left' : 'Right'}Active`), false),
+    ConsumerSubject.create(this.sub.on(this.props.isCaptSide ? 'eisLeftBackupActive' : 'eisRightBackupActive'), false),
   );
 
   public render(): VNode {

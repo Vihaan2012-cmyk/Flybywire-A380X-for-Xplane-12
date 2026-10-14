@@ -6,6 +6,9 @@ export interface FcuSimvars {
   eisDisplayLeftActive: boolean;
   eisDisplayRightActive: boolean;
   afsDisplayActive: boolean;
+  afsBackupActive: boolean;
+  eisLeftBackupActive: boolean;
+  eisRightBackupActive: boolean;
 
   eisDisplayLeftBaroIsInhg: boolean;
   eisDisplayLeftBaroIsStd: boolean;
@@ -40,6 +43,9 @@ export enum FcuVars {
   eisDisplayLeftActive = 'L:A32NX_FCU_EFIS_L_CP_ACTIVE',
   eisDisplayRightActive = 'L:A32NX_FCU_EFIS_R_CP_ACTIVE',
   afsDisplayActive = 'L:A32NX_FCU_AFS_CP_ACTIVE',
+  afsBackupActive = 'L:A380X_FCU_BKUP_AFS_ACTIVE',
+  eisLeftBackupActive = 'L:A380X_FCU_BKUP_EFIS_L_ACTIVE',
+  eisRightBackupActive = 'L:A380X_FCU_BKUP_EFIS_R_ACTIVE',
 
   eisDisplayLeftBaroIsInhg = 'L:A32NX_FCU_EFIS_L_DISPLAY_BARO_IS_INHG',
   eisDisplayLeftBaroIsStd = 'L:A32NX_FCU_EFIS_L_DISPLAY_BARO_IS_STD',
@@ -75,6 +81,9 @@ export class FCUSimvarPublisher extends SimVarPublisher<FcuSimvars> {
     ['eisDisplayLeftActive', { name: FcuVars.eisDisplayLeftActive, type: SimVarValueType.Bool }],
     ['eisDisplayRightActive', { name: FcuVars.eisDisplayRightActive, type: SimVarValueType.Bool }],
     ['afsDisplayActive', { name: FcuVars.afsDisplayActive, type: SimVarValueType.Bool }],
+    ['afsBackupActive', { name: FcuVars.afsBackupActive, type: SimVarValueType.Bool }],
+    ['eisLeftBackupActive', { name: FcuVars.eisLeftBackupActive, type: SimVarValueType.Bool }],
+    ['eisRightBackupActive', { name: FcuVars.eisRightBackupActive, type: SimVarValueType.Bool }],
 
     ['eisDisplayLeftBaroIsInhg', { name: FcuVars.eisDisplayLeftBaroIsInhg, type: SimVarValueType.Bool }],
     ['eisDisplayLeftBaroIsStd', { name: FcuVars.eisDisplayLeftBaroIsStd, type: SimVarValueType.Bool }],

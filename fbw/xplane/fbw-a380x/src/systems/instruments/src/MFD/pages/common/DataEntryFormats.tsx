@@ -1976,3 +1976,71 @@ export class FuelPenaltyPercentFormat implements DataEntryFormat<number> {
     return numberInput;
   }
 }
+
+export class WxrTiltFormat implements DataEntryFormat<number> {
+  public readonly placeholder = '---.-';
+
+  public readonly maxDigits = 5;
+
+  public readonly unit = '°';
+
+  private readonly requiredFormat = '+/-XX.X';
+
+  private readonly minValue = -15;
+
+  private readonly maxValue = 15;
+
+  public format(value: number | null) {
+    if (value === null || value === undefined) {
+      return [this.placeholder, null, this.unit] as FieldFormatTuple;
+    }
+    return [`${value >= 0 ? '+' : '-'}${Math.abs(value).toFixed(1)}`, null, this.unit] as FieldFormatTuple;
+  }
+
+  public async parse(input: string) {
+    if (input === '') {
+      return null;
+    }
+
+    const nbr = Number(input);
+    if (Number.isNaN(nbr)) {
+      throw getFormattedFormatError(this.requiredFormat, this.unit);
+    }
+    if (nbr < this.minValue || nbr > this.maxValue) {
+      throw getFormattedEntryOutOfRangeError('-15.0', '+15.0', this.unit);
+    }
+    return Math.round(nbr * 4) / 4;
+  }
+}
+
+export class WxrGainFormat implements DataEntryFormat<number> {
+  public readonly placeholder = '---';
+
+  public readonly maxDigits = 3;
+
+  public readonly unit = '%';
+
+  private readonly requiredFormat = 'XXX';
+
+  public format(value: number | null) {
+    if (value === null || value === undefined) {
+      return [this.placeholder, null, this.unit] as FieldFormatTuple;
+    }
+    return [value.toFixed(0), null, this.unit] as FieldFormatTuple;
+  }
+
+  public async parse(input: string) {
+    if (input === '') {
+      return null;
+    }
+
+    const nbr = Number(input);
+    if (Number.isNaN(nbr) || !Number.isInteger(nbr)) {
+      throw getFormattedFormatError(this.requiredFormat, this.unit);
+    }
+    if (nbr < 0 || nbr > 100) {
+      throw getFormattedEntryOutOfRangeError('0', '100', this.unit);
+    }
+    return nbr;
+  }
+}

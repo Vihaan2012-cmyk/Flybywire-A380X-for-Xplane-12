@@ -36,6 +36,8 @@ import { MfdSurvControls } from './pages/SURV/MfdSurvControls';
 import { MfdFmsFplnFixInfo } from './pages/FMS/F-PLN/MfdFmsFplnFixInfo';
 import { MfdFmsPositionMonitor } from './pages/FMS/POSITION/MfdFmsPositionMonitor';
 import { MfdSurvStatusSwitching } from './pages/SURV/MfdSurvStatusSwitching';
+import { MfdFcuBkupAfs } from './pages/FCUBKUP/MfdFcuBkupAfs';
+import { MfdFcuBkupEfis } from './pages/FCUBKUP/MfdFcuBkupEfis';
 import { MfdFmsDataAirport } from './pages/FMS/DATA/MfdFmsDataAirport';
 import { AtcDatalinkSystem } from './ATCCOM/AtcDatalinkSystem';
 import {
@@ -273,6 +275,26 @@ export function pageForUrl(
       return (
         <MfdSurvStatusSwitching
           pageTitle="STATUS & SWITCHING"
+          bus={bus}
+          mfd={mfd}
+          fmcService={fmcService}
+          flightPlanInterface={fmcService.master.flightPlanInterface}
+        />
+      );
+    case 'fcubkup/afs':
+      return (
+        <MfdFcuBkupAfs
+          pageTitle="AFS CP"
+          bus={bus}
+          mfd={mfd}
+          fmcService={fmcService}
+          flightPlanInterface={fmcService.master.flightPlanInterface}
+        />
+      );
+    case 'fcubkup/efis':
+      return (
+        <MfdFcuBkupEfis
+          pageTitle="EFIS CP"
           bus={bus}
           mfd={mfd}
           fmcService={fmcService}
