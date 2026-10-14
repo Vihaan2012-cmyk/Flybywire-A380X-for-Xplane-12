@@ -49,7 +49,7 @@ pub const EFB_HEIGHT: u32 = 1000;
 /// `scale` (device texels over CSS size) maps them back.
 pub const EFB_SUPERSAMPLE: u32 = 1;
 
-pub const SCREEN_SUPERSAMPLE: f64 = 2.0;
+pub const SCREEN_SUPERSAMPLE: f64 = 1.5;
 
 const NATIVE_SCREENS: &[&str] = &["FCU", "SCREEN_DU_RMP_1", "SCREEN_DU_RMP_2", "SCREEN_DU_RMP_3", "Clock", "BAT", "RTPI", "SCREEN_OIT_LEFT", "SCREEN_OIT_RIGHT"];
 
