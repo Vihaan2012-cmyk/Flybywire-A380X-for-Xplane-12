@@ -75,6 +75,11 @@
   .ef-live { font-family: Consolas, monospace; font-size: 14px; margin: 8px 0 4px; }
   .ef-axis { position: relative; height: 10px; border: 1px solid var(--line); margin-bottom: 10px; }
   .ef-axis-mark { position: absolute; top: -3px; width: 3px; height: 14px; background: var(--accent); }
+  .select-list { position: fixed; z-index: 1000; overflow-y: auto; background: var(--field); border: 2px solid #d0d0d0; box-shadow: 0 6px 18px rgba(0,0,0,.5); }
+  .select-item { padding: 8px 10px; cursor: pointer; }
+  .select-item:hover { background: #3a3a3a; }
+  .select-item.on { color: var(--accent); }
+  .select-item.off { color: var(--text-dim); cursor: default; }
   .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 18px; }
   .apply { display: flex; justify-content: center; margin-top: 18px; }
   button {
@@ -2167,6 +2172,43 @@ document.addEventListener('pointerup', () => { pointer.down = false; pointer.unt
     }
     drag = null;
   }, true);
+})();
+
+(() => {
+  let open = null;
+  const close = () => { if (open) { open.list.remove(); open = null; } };
+  document.addEventListener('mousedown', (ev) => {
+    if (open && open.list.contains(ev.target)) return;
+    const select = ev.target.closest('select');
+    close();
+    if (!select || select.disabled || ev.button !== 0) return;
+    ev.preventDefault();
+    select.focus();
+    const box = select.getBoundingClientRect();
+    const list = el('div', { class: 'select-list no-drag-scroll' });
+    for (const option of select.options) {
+      const item = el('div', { class: 'select-item' + (option.selected ? ' on' : '') + (option.disabled ? ' off' : ''), text: option.textContent });
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        if (option.disabled) return;
+        close();
+        if (select.value !== option.value) {
+          select.value = option.value;
+          select.dispatchEvent(new Event('input', { bubbles: true }));
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+      list.append(item);
+    }
+    document.body.append(list);
+    const below = window.innerHeight - box.bottom;
+    const height = Math.min(list.scrollHeight, Math.max(below, box.top) - 8);
+    list.style.cssText = `left:${box.left}px;width:${box.width}px;max-height:${height}px;` + (below >= height || below >= box.top ? `top:${box.bottom}px` : `top:${box.top - height}px`);
+    list.querySelector('.on')?.scrollIntoView({ block: 'nearest' });
+    open = { list, select };
+  }, true);
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); }, true);
+  document.addEventListener('scroll', (ev) => { if (open && !open.list.contains(ev.target)) close(); }, true);
 })();
 
 function studyInteracting(content) {

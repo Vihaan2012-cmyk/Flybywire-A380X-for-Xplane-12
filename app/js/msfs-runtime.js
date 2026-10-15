@@ -136,6 +136,19 @@
     }
     return null;
   };
+  if (/\/MFD\//i.test(location.pathname)) {
+    let reported = null;
+    const report = () => {
+      const a = document.activeElement;
+      const cls = String((a && (a.className && a.className.baseVal !== undefined ? a.className.baseVal : a.className)) || '');
+      const typing = !!a && a !== document.body && (a.isContentEditable || /^(INPUT|TEXTAREA)$/.test(a.tagName) || /input-field/.test(cls));
+      if (typing === reported) return;
+      reported = typing;
+      nativeFetch(`${PLUGIN}/keyboard/mfd`, { method: 'POST', body: typing ? '1' : '0' }).catch(() => { reported = null; });
+    };
+    document.addEventListener('focusin', report, true);
+    document.addEventListener('focusout', () => setTimeout(report, 0), true);
+  }
   const weather = (u) => u.host === 'api.flybywiresim.com' && /^\/(metar|taf)\/[A-Za-z0-9]{4}$/.test(u.pathname);
   window.fetch = async (resource, init) => {
     const u = parse(typeof resource === 'string' ? resource : resource && resource.url !== undefined ? resource.url : String(resource));

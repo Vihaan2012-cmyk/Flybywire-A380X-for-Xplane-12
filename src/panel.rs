@@ -114,6 +114,11 @@ fn serve(mut stream: TcpStream) -> std::io::Result<()> {
         crate::display::set_efb_text_focus(body.trim() == "1");
         return reply(&mut stream, 200, "application/json", b"{}");
     }
+    #[cfg(feature = "js")]
+    if path == "/keyboard/mfd" {
+        crate::display::set_mfd_text_focus(body.trim() == "1");
+        return reply(&mut stream, 200, "application/json", b"{}");
+    }
 
     if path.starts_with("/diag/") {
         let (status, text) = diag_route(path, &body);

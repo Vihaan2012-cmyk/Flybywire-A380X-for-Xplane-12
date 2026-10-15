@@ -1638,6 +1638,7 @@ pub fn stop(xplm: &'static Xplm) {
 static COCKPIT_KEYBOARD: AtomicIsize = AtomicIsize::new(-1);
 
 static EFB_TEXT_FOCUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static MFD_TEXT_FOCUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub const BREAKER_SCREENS: [(&str, &str); 5] =
     [("SCREEN_DU_PFDL", "capt-pfd-du"), ("SCREEN_DU_NDL", "capt-nd-du"), ("SCREEN_DU_EWD", "capt-ewd-du"), ("SCREEN_DU_PFDR", "fo-pfd-du"), ("SCREEN_DU_NDR", "fo-nd-du")];
@@ -1662,8 +1663,19 @@ pub fn set_efb_text_focus(focused: bool) {
     }
 }
 
-fn efb_ignores_keys(screen: isize) -> bool {
-    screen >= 0 && SCREENS.get(screen as usize).is_some_and(|d| d.id == EFB_SCREEN) && !EFB_TEXT_FOCUS.load(Ordering::Relaxed)
+pub fn set_mfd_text_focus(focused: bool) {
+    if MFD_TEXT_FOCUS.swap(focused, Ordering::Relaxed) != focused {
+        log(&format!("MFD: a text field {} focus", if focused { "has" } else { "lost" }));
+    }
+}
+
+fn screen_ignores_keys(screen: isize) -> bool {
+    let Some(def) = (screen >= 0).then(|| SCREENS.get(screen as usize)).flatten() else { return false };
+    match def.id {
+        EFB_SCREEN => !EFB_TEXT_FOCUS.load(Ordering::Relaxed),
+        "SCREEN_DU_MFD" => !MFD_TEXT_FOCUS.load(Ordering::Relaxed),
+        _ => false,
+    }
 }
 
 /// Typing goes back to X-Plane. `why` is logged, so the user can always
@@ -1710,7 +1722,7 @@ unsafe extern "C" fn key_sniffer(key: c_char, flags: c_int, vkey: c_char, _refco
         }
         return PASS_ON;
     }
-    if !typed_into_cockpit(ch, vkey, flags) || efb_ignores_keys(screen) {
+    if !typed_into_cockpit(ch, vkey, flags) || screen_ignores_keys(screen) {
         return PASS_ON;
     }
     if flags & xp::KEY_DOWN_FLAG == 0 {

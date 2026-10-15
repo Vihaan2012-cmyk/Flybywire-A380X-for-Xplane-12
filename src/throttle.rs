@@ -16,7 +16,52 @@
 //! dragged in the cockpit sets the angle directly, as FlyByWire's drag code
 //! does, and X-Plane's throttle follows it.
 
-use crate::xp::{DataRef, Xplm};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+use crate::xp::{CommandRef, DataRef, Xplm};
+
+static REVERSE_TOGGLED: AtomicU8 = AtomicU8::new(0);
+static REVERSE_HELD: AtomicU8 = AtomicU8::new(0);
+const HOLD: usize = 0x100;
+
+unsafe extern "C" fn reverse_command(_: CommandRef, phase: std::ffi::c_int, refcon: *mut std::ffi::c_void) -> std::ffi::c_int {
+    let code = refcon as usize;
+    let mask = (code & 0xff) as u8;
+    if code & HOLD != 0 {
+        match phase {
+            0 => {
+                REVERSE_HELD.fetch_or(mask, Ordering::Relaxed);
+            }
+            2 => {
+                REVERSE_HELD.fetch_and(!mask, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    } else if phase == 0 {
+        REVERSE_TOGGLED.fetch_xor(mask, Ordering::Relaxed);
+    }
+    0
+}
+
+fn reverse_commands() -> Vec<(String, usize)> {
+    let mut out = vec![("sim/engines/thrust_reverse_toggle".to_string(), 0x0f), ("sim/engines/thrust_reverse_hold".to_string(), HOLD | 0x0f)];
+    for n in 1..=4 {
+        out.push((format!("sim/engines/thrust_reverse_toggle_{n}"), 1 << (n - 1)));
+        out.push((format!("sim/engines/thrust_reverse_hold_{n}"), HOLD | 1 << (n - 1)));
+    }
+    out
+}
+
+/// The thrust lever angle with X-Plane's reverser command engaged: the
+/// lever's forward travel runs from reverse idle to full reverse on an
+/// engine with a reverser, and an engine without one stays at idle.
+pub fn reverse_angle(forward: f64, has_reverser: bool) -> f64 {
+    if has_reverser {
+        TLA_REVERSE_IDLE + (forward.max(0.) / TLA_TOGA).min(1.) * (TLA_REVERSE - TLA_REVERSE_IDLE)
+    } else {
+        TLA_IDLE
+    }
+}
 
 /// FlyByWire's default detent configuration (ThrottleAxisMapping.h).
 pub const REV_LO: f64 = -1.00;
@@ -399,6 +444,7 @@ pub struct Throttles {
     joy_avail: Option<DataRef>,
     joy_value: Option<DataRef>,
     calibrated: Option<LookupTable>,
+    reverse_handlers: Vec<(CommandRef, usize)>,
     calibration: Calibration,
     generation: u64,
     hardware_levers: [bool; 4],
@@ -421,6 +467,18 @@ impl Throttles {
             joy_avail: xplm.find("sim/joystick/joy_mapped_axis_avail"),
             joy_value: xplm.find("sim/joystick/joy_mapped_axis_value"),
             calibrated: None,
+            reverse_handlers: {
+                REVERSE_TOGGLED.store(0, Ordering::Relaxed);
+                REVERSE_HELD.store(0, Ordering::Relaxed);
+                reverse_commands()
+                    .into_iter()
+                    .filter_map(|(name, code)| {
+                        let command = crate::xp::find_command(&name)?;
+                        crate::xp::add_command_handler(command, reverse_command, true, code as *mut std::ffi::c_void);
+                        Some((command, code))
+                    })
+                    .collect()
+            },
             calibration: Calibration::default(),
             generation: u64::MAX,
             hardware_levers: [false; 4],
@@ -462,6 +520,7 @@ impl Throttles {
             ratio = spread_two_levers(ratio, self.hardware_levers);
         }
         let raw = raw_levers(&raw_axes[AXIS_THROTTLE_1..], self.hardware_levers);
+        let reverse = REVERSE_TOGGLED.load(Ordering::Relaxed) | REVERSE_HELD.load(Ordering::Relaxed);
 
         // The cockpit's datarefs belong to the cockpit plugin, which may load
         // after this one; look for missing ones about once a second.
@@ -491,6 +550,7 @@ impl Throttles {
                 }
             }
 
+            let dragged = angle.is_some();
             let (axis, tla) = match angle {
                 Some(a) => {
                     let axis = axis_for_angle(a);
@@ -516,6 +576,12 @@ impl Throttles {
                     }
                 },
             };
+            let (axis, tla) = if !dragged && reverse & (1 << i) != 0 {
+                let r = reverse_angle(tla, HAS_REVERSER[i]);
+                (axis_for_angle(r), r)
+            } else {
+                (axis, tla)
+            };
             let position = self.lever_table.get(tla);
             out.axis[i] = axis;
             out.angle[i] = tla;
@@ -533,6 +599,14 @@ impl Throttles {
             s.angle = out.angle;
         });
         out
+    }
+}
+
+impl Drop for Throttles {
+    fn drop(&mut self) {
+        for (command, code) in self.reverse_handlers.drain(..) {
+            crate::xp::remove_command_handler(command, reverse_command, true, code as *mut std::ffi::c_void);
+        }
     }
 }
 
@@ -700,5 +774,13 @@ mod tests {
         assert_eq!(raw_levers(&v, [true, false, false, false]), [a; 4]);
         assert_eq!(raw_levers(&v, [true, true, false, false]), [a, a, b, b]);
         assert_eq!(raw_levers(&v, [false; 4]), [None; 4]);
+    }
+
+    #[test]
+    fn x_planes_reverse_command_turns_the_forward_travel_into_reverse() {
+        assert!(close(reverse_angle(TLA_IDLE, true), TLA_REVERSE_IDLE));
+        assert!(close(reverse_angle(TLA_TOGA, true), TLA_REVERSE));
+        assert!(close(reverse_angle(TLA_TOGA, false), TLA_IDLE), "the outer engines have no reverser and stay at idle");
+        assert!(reverse_angle(22.5, true) < TLA_REVERSE_IDLE);
     }
 }
