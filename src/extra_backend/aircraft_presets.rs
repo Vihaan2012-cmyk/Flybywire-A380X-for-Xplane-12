@@ -74,6 +74,7 @@ pub struct AircraftPresets {
     on_ground: VariableIdentifier,
 
     current_procedure_id: i64,
+    pub cold_and_dark_loaded: bool,
     current_procedure: Vec<ProcedureStep>,
     loading_is_active: bool,
     /// Milliseconds.
@@ -135,6 +136,7 @@ impl AircraftPresets {
             is_ready: named(vars, "IS_READY"),
             on_ground: vars.get("SIM ON GROUND".to_string()),
             current_procedure_id: 0,
+            cold_and_dark_loaded: false,
             current_procedure: Vec::new(),
             loading_is_active: false,
             current_loading_time: 0.,
@@ -455,6 +457,9 @@ impl AircraftPresets {
     /// cpp:273-280.
     fn finish_loading<V: SimulatorReaderWriter>(&mut self, vars: &mut V) {
         logged(&format!("AircraftPresets:update() Aircraft Preset {} loading finished or cancelled!", self.current_procedure_id));
+        if self.current_procedure_id == 1 {
+            self.cold_and_dark_loaded = true;
+        }
         vars.write(&self.load_request, 0.);
         vars.write(&self.progress, 0.);
         // An expedited load leaves `quick_mode` at 1 here (set earlier this

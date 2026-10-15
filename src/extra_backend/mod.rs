@@ -115,7 +115,7 @@ pub struct ExtraBackend {
     xplane: Xplane,
     lighting: lighting_presets::LightingPresets,
     pushback: pushback::Pushback,
-    presets: aircraft_presets::AircraftPresets,
+    pub presets: aircraft_presets::AircraftPresets,
 }
 
 impl ExtraBackend {

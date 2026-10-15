@@ -2344,6 +2344,17 @@ impl Plugin {
         // [slot tick-after-systems: extra_backend] After the systems, before the
         // scripts, in panel.cfg's gauge order (VCockpit21-23).
         self.extra_backend.update(&mut self.vars, delta, self.time);
+        if std::mem::take(&mut self.extra_backend.presets.cold_and_dark_loaded) {
+            let masters_off = (1..=4).all(|n| {
+                let id = self.vars.get(format!("GENERAL ENG STARTER:{n}"));
+                self.vars.read(&id) == 0.
+            });
+            let on_ground = xplm.find("sim/flightmodel/failures/onground_any").is_some_and(|d| xplm.get_i(d) != 0);
+            if masters_off && on_ground {
+                self.engine_commands.spawn_stopped();
+                log("aircraft preset cold and dark: engines stopped");
+            }
+        }
         crate::perf::lap("tick-after-systems: sensors");
         // [slot tick-after-systems: sensors]
         // [slot tick-after-systems: mapdata] The EGPWC's outputs to the terrain
