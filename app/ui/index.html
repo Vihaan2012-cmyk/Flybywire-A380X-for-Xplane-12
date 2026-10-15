@@ -60,6 +60,7 @@
   .field { margin: 12px 0 4px; }
   .field .label { display: block; margin-bottom: 6px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 18px; }
   .apply { display: flex; justify-content: center; margin-top: 18px; }
   button {
     font: 600 14px "Segoe UI", system-ui, sans-serif; color: var(--text); background: transparent;
@@ -2940,7 +2941,7 @@ const AIRCRAFT_PRESETS = [
   [4, 'Ready for Taxi', 'FlyByWire preset 4'],
   [5, 'Ready for Takeoff', 'FlyByWire preset 5'],
 ];
-const loadsheet = { page: null, timer: null };
+const loadsheet = { page: null, timer: null, quick: { pax: 0, freightKg: 0, fuelKg: 0, paxWeightKg: 84, bagWeightKg: 20, bags: null } };
 
 // The aeroplane drawn from above, with what is loaded into it.
 //
@@ -3211,10 +3212,49 @@ async function loadsheetOnShow() {
     act('Instant', 'BOARDING_RATE', 0, 'Boarding set to instant'),
     act('Real time', 'BOARDING_RATE', 2, 'Boarding set to real time'),
   );
+  const q = loadsheet.quick;
+  const field = (label, key, max, step) => {
+    const input = el('input', { type: 'number', min: '0', max: String(max), step: String(step) });
+    input.value = q[key];
+    input.addEventListener('change', () => { const v = Math.max(0, Math.min(max, Math.round(Number(input.value) || 0))); if (key === 'pax' && v !== q.pax) q.bags = null; q[key] = v; input.value = v; });
+    return [el('div', { class: 'field' }, el('span', { class: 'label', text: label }), input), input];
+  };
+  const [paxField, paxInput] = field('Passengers (max ' + page.seats + ')', 'pax', page.seats, 1);
+  const [cargoField, cargoInput] = field('Cargo kg, besides bags', 'freightKg', 51400, 100);
+  const [fuelField, fuelInput] = field('Block fuel kg', 'fuelKg', 260000, 500);
+  const quickSaid = el('span', { class: 'label dim' });
+  const fromOfp = el('button', { type: 'button', text: 'Fill from SimBrief' });
+  fromOfp.addEventListener('click', () => {
+    if (!loadsheet.ofp) { quickSaid.textContent = 'Fetch your OFP on the Flight plan tab first.'; return; }
+    Object.assign(q, loadsheet.ofp);
+    paxInput.value = q.pax; cargoInput.value = q.freightKg; fuelInput.value = q.fuelKg;
+    quickSaid.textContent = 'Filled from the SimBrief OFP.';
+  });
+  const go = (label, start, said) => {
+    const b = el('button', { type: 'button', text: label });
+    b.addEventListener('click', async () => {
+      for (const i of [paxInput, cargoInput, fuelInput]) i.dispatchEvent(new Event('change'));
+      const r = await studyPost('/study/action', {
+        kind: 'loadSimbrief', start,
+        pax: q.pax, bags: q.bags ?? q.pax, paxWeightKg: q.paxWeightKg, bagWeightKg: q.bagWeightKg,
+        freightKg: q.freightKg, blockFuelKg: q.fuelKg,
+      });
+      quickSaid.textContent = r.ok === false ? 'Not loaded: ' + (r.error || r.message || 'the plugin refused it') : said;
+    });
+    return b;
+  };
+  const quick = el('div', { class: 'box' },
+    el('div', { class: 'grid3' }, paxField, cargoField, fuelField),
+    el('div', { class: 'row' },
+      go('Load now', 'instant', 'Loaded: passengers, cargo and fuel are aboard.'),
+      go('Board in real time', 'realTime', 'Boarding and refuelling in real time. Open the doors to board.'),
+      fromOfp),
+    quickSaid);
   const summary = el('div', { class: 'box' });
   const plan = el('div', { class: 'box' });
   const body = el('div');
-  content.replaceChildren(buttons, summary, plan, body);
+  const more = el('details', {}, el('summary', { class: 'label dim', text: 'Boarding controls and every station' }), buttons, body);
+  content.replaceChildren(quick, summary, plan, more);
   const names = collectNames(page)
     .concat((page.zones || []).map((z) => z.name))
     .concat((page.holds || []).map((h) => h.name))
@@ -3235,7 +3275,7 @@ async function loadsheetOnShow() {
       let text;
       if (!data.ticks) text = 'The aircraft is not loaded yet. Figures appear once the A380X is running.';
       else if (live) text = Math.round(pax) + ' of ' + page.seats + ' passengers, ' + Math.round(cargo) + ' kg of cargo, ' + Math.round(fuel * 3.03907) + ' kg of fuel. The balance is live: X-Plane is flying this loadsheet.';
-      else text = 'No loadsheet: nobody is aboard yet. For a SimBrief OFP, fetch it on the Flight plan tab, press Load passengers, cargo and fuel, then Board and Refuel here.';
+      else text = 'Nobody is aboard yet. Enter passengers, cargo and fuel above and press Load now.';
       summary.replaceChildren(el('span', { class: 'label' + (live ? '' : ' dim'), text }));
       plan.replaceChildren(drawLoadsheetDiagram(page, vars));
       body.innerHTML = '';
@@ -3529,7 +3569,15 @@ function renderFlightPlan(ofp) {
   }
   c.append(el('div', { class: 'box' }, table));
   const kg = (x) => (unit === 'lbs' ? Number(x) * 0.45359237 : Number(x));
-  const load = el('button', { type: 'button', text: 'Load passengers, cargo and fuel' });
+  loadsheet.ofp = {
+    pax: Number(w.pax_count_actual ?? w.pax_count) || 0,
+    bags: Number(w.bag_count_actual ?? w.bag_count) || 0,
+    paxWeightKg: Math.round(kg(w.pax_weight)) || 84,
+    bagWeightKg: Math.round(kg(w.bag_weight)) || 20,
+    freightKg: Math.round(kg(w.freight_added)) || 0,
+    fuelKg: Math.round(kg(f.plan_ramp)) || 0,
+  };
+  const load = el('button', { type: 'button', text: 'Load passengers, cargo and fuel now' });
   const loaded = el('span', { class: 'label dim', style: 'margin-left:8px' });
   load.addEventListener('click', async () => {
     const body = {
@@ -3541,10 +3589,11 @@ function renderFlightPlan(ofp) {
       freightKg: kg(w.freight_added) || 0,
       blockFuelKg: kg(f.plan_ramp) || 0,
     };
+    body.start = 'instant';
     const r = await studyPost('/study/action', body);
     loaded.textContent = r.ok === false
       ? `Not loaded: ${r.error || r.message || 'the plugin refused it'}`
-      : `Set: ${body.pax} passengers, ${body.bags} bags, ${Math.round(body.freightKg)} kg freight, ${Math.round(body.blockFuelKg)} kg fuel. Board and refuel on the Loadsheet tab.`;
+      : `Loaded: ${body.pax} passengers, ${body.bags} bags, ${Math.round(body.freightKg)} kg freight, ${Math.round(body.blockFuelKg)} kg fuel.`;
   });
   c.append(el('div', { class: 'row', style: 'margin-top:6px' }, load, loaded));
   c.append(el('div', { class: 'label dim', style: 'margin-top:4px', text: 'The route goes into the FMS with INIT > CPNY F-PLN REQUEST on the MFD.' }));

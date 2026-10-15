@@ -124,6 +124,13 @@ pub struct OfpLoad {
     pub bag_weight_kg: f64,
     pub freight_kg: f64,
     pub block_fuel_kg: f64,
+    pub start: Option<LoadStart>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadStart {
+    Instant,
+    RealTime,
 }
 
 static OFP_LOAD: std::sync::Mutex<Option<OfpLoad>> = std::sync::Mutex::new(None);
@@ -972,7 +979,7 @@ impl Efb {
             };
 
         self.update_ground(vars, xplm, doors, on_ground, attached, groundspeed_ms * KT_PER_MS, delta);
-        self.update_payload(vars, doors, on_ground, running[0] != 0 || running[3] != 0, delta);
+        self.update_payload(vars, doors, on_ground, running[0] != 0 || running[3] != 0, running[..4].iter().any(|&r| r != 0), delta);
         self.update_refuel(vars, on_ground, running[..4].iter().any(|&r| r != 0));
         self.update_pushback(vars, attached);
         self.update_other(vars);
@@ -1122,9 +1129,9 @@ impl Efb {
         }
     }
 
-    fn apply_ofp_load(&mut self, vars: &mut Vars, editable: bool) {
+    fn apply_ofp_load(&mut self, vars: &mut Vars, editable: bool, engine_running: bool, on_ground: bool) {
         let Some(load) = take_ofp_load() else { return };
-        if !editable {
+        if !editable && load.start.is_none() {
             crate::log("SimBrief OFP not loaded: payload entries are locked while boarding");
             return;
         }
@@ -1138,11 +1145,22 @@ impl Efb {
             "SimBrief OFP loaded: {pax} passengers, {} bags, {:.0} kg freight, {:.0} kg block fuel",
             load.bags, load.freight_kg, load.block_fuel_kg
         ));
+        let Some(start) = load.start else { return };
+        let (boarding_rate, refuel_rate) = match start {
+            LoadStart::Instant => (0., REFUEL_INSTANT),
+            LoadStart::RealTime if !engine_running && on_ground => (2., 0.),
+            LoadStart::RealTime => (0., REFUEL_INSTANT),
+        };
+        self.set_setting(vars, Self::setting_index("CONFIG_BOARDING_RATE"), boarding_rate);
+        self.set_setting(vars, Self::setting_index("REFUEL_RATE_SETTING"), refuel_rate);
+        vars.write(&self.ids.boarding_started, 1.);
+        vars.write(&self.ids.refuel_started, 1.);
     }
 
-    fn update_payload(&mut self, vars: &mut Vars, doors: &Doors, on_ground: bool, eng_1_or_4: bool, delta: f64) {
+    fn update_payload(&mut self, vars: &mut Vars, doors: &Doors, on_ground: bool, eng_1_or_4: bool, engine_running: bool, delta: f64) {
         let started = vars.read(&self.ids.boarding_started) != 0.;
-        self.apply_ofp_load(vars, !started);
+        self.apply_ofp_load(vars, !started, engine_running, on_ground);
+        let started = vars.read(&self.ids.boarding_started) != 0.;
         let pl = &self.payload;
         let (pax_target, cargo_target, zfw_target, gw_target) =
             (published::take(pl.pax_target), published::take(pl.cargo_target), published::take(pl.zfw_target), published::take(pl.gw_target));

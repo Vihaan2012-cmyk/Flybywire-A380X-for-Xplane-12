@@ -130,7 +130,7 @@ pub fn draw(cv: &mut Canvas, scroll: c_int) -> c_int {
     let summary = if live {
         format!("{:.0} passengers and {:.0} t of cargo. The balance is live: X-Plane is flying this loadsheet.", pax, cargo_kg / 1000.0)
     } else {
-        "No loadsheet: nobody is aboard yet. For a SimBrief OFP, fetch it on the EFB's Flight plan tab, press Load passengers, cargo and fuel, then Board and Refuel.".to_owned()
+        "Nobody is aboard yet. Enter passengers, cargo and fuel on the EFB's Loadsheet tab and press Load now.".to_owned()
     };
     cv.text_px(l + 10, t - lh - 2, p::INK_LIGHT, FONT_BASIC, &summary);
 

@@ -1127,6 +1127,12 @@ pub(crate) fn apply_action(body: &str) -> Result<(), String> {
                 bag_weight_kg: n("bagWeightKg")?,
                 freight_kg: n("freightKg")?,
                 block_fuel_kg: n("blockFuelKg")?,
+                start: match v.get("start").and_then(Value::as_str) {
+                    None => None,
+                    Some("instant") => Some(crate::efb::LoadStart::Instant),
+                    Some("realTime") => Some(crate::efb::LoadStart::RealTime),
+                    Some(other) => return Err(format!("unknown start {other}")),
+                },
             });
         }
         "setPresetExpedite" => {
@@ -1411,8 +1417,12 @@ mod tests {
         assert!(apply_action(full).is_ok());
         assert_eq!(
             crate::efb::take_ofp_load(),
-            Some(crate::efb::OfpLoad { pax: 412, bags: 400, pax_weight_kg: 84., bag_weight_kg: 20., freight_kg: 6500., block_fuel_kg: 180400. })
+            Some(crate::efb::OfpLoad { pax: 412, bags: 400, pax_weight_kg: 84., bag_weight_kg: 20., freight_kg: 6500., block_fuel_kg: 180400., start: None })
         );
+        let quick = r#"{"kind":"loadSimbrief","pax":300,"bags":300,"paxWeightKg":84,"bagWeightKg":20,"freightKg":0,"blockFuelKg":90000,"start":"instant"}"#;
+        assert!(apply_action(quick).is_ok());
+        assert_eq!(crate::efb::take_ofp_load().and_then(|l| l.start), Some(crate::efb::LoadStart::Instant));
+        assert!(apply_action(&quick.replace("instant", "soon")).is_err());
     }
 
     /// The cross-feed valve pushbuttons need no new action kind: the
