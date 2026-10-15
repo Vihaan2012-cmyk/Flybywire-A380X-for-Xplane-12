@@ -175,9 +175,9 @@ fn apply_scalar(xplm: &Xplm, dataref: Option<DataRef>, gate: &mut GatedSwitch, p
 
 fn apply_scalar_adopting(xplm: &Xplm, dataref: Option<DataRef>, gate: &mut GatedSwitch, powered: bool, cockpit_wrote: bool) {
     let Some(d) = dataref else { return };
-    let raw = xplm.get_f(d) as f64;
+    let raw = xplm.get_i(d) as f64;
     let out = gate.step_adopting(raw, powered, cockpit_wrote);
-    xplm.set_f(d, out as f32);
+    xplm.set_i(d, out.round() as i32);
 }
 
 static COMMANDS: std::sync::Mutex<Vec<(String, Option<usize>, f64)>> = std::sync::Mutex::new(Vec::new());
@@ -584,7 +584,7 @@ impl Lights {
             let wrote = group.cockpit_wrote(vars, &commands);
             let powered = group_powered(vars, circuits, group);
             match (auto, dataref) {
-                (Some(on), Some(d)) => xplm.set_f(d, group.gate.step_auto(powered, on) as f32),
+                (Some(on), Some(d)) => xplm.set_i(d, group.gate.step_auto(powered, on).round() as i32),
                 _ => apply_scalar_adopting(xplm, dataref, &mut group.gate, powered, wrote),
             }
         }
