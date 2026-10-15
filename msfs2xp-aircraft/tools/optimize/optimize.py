@@ -107,6 +107,48 @@ if not state.get('exterior_hide'):
     run(os.path.join(HERE, 'hide_exterior.py'), objects, *hide)
     done('exterior_hide')
 
+def full_cabin_dir():
+    stored = os.path.join(objects, 'cabin_on')
+    return stored if os.path.isdir(stored) and any(f.endswith('.obj') for f in os.listdir(stored)) else objects
+
+
+def add_objects(names, internal):
+    for f in os.listdir(aircraft):
+        if not f.endswith('.acf'):
+            continue
+        path = os.path.join(aircraft, f)
+        lines = open(path, encoding='latin-1').read().split('\n')
+        listed = {l.split()[2] for l in lines if re.match(r'^P _obja/\d+/_v10_att_file_stl ', l)}
+        count_at = next(i for i, l in enumerate(lines) if l.startswith('P _obja/count '))
+        count = int(lines[count_at].split()[2])
+        last = max(i for i, l in enumerate(lines) if l.startswith('P _obja/'))
+        new = []
+        for name in names:
+            if name in listed:
+                continue
+            fields = {'_obj_flags': '13', '_v10_att_body': '-1', '_v10_att_file_stl': name, '_v10_att_gear': '-1', '_v10_att_phi_ref': '0.000000000', '_v10_att_psi_ref': '0.000000000', '_v10_att_the_ref': '0.000000000', '_v10_att_wing': '-1', '_v10_att_x_acf_prt_ref': '0.000000000', '_v10_att_y_acf_prt_ref': '0.000000000', '_v10_att_z_acf_prt_ref': '0.000000000', '_v10_is_internal': '1' if internal else '0', '_v10_steers_with_gear': '0'}
+            new += [f'P _obja/{count}/{k} {v}' for k, v in fields.items()]
+            count += 1
+        if new and not dry:
+            lines[count_at] = f'P _obja/count {count}'
+            lines[last + 1:last + 1] = new
+            open(path, 'w', encoding='latin-1', newline='').write('\n'.join(lines))
+        print(f'  {f}: {len(new) // 13} objects added')
+
+
+if not state.get('cabin_ife'):
+    print('cabin IFE screens')
+    run(os.path.join(HERE, 'ife_screens.py'), full_cabin_dir(), objects)
+    add_objects(sorted(f for f in os.listdir(objects) if f.startswith('a380_cabin_ife_') and f.endswith('.obj')), True)
+    done('cabin_ife')
+
+if not state.get('cabin_mood'):
+    print('cabin mood lighting')
+    run(os.path.join(HERE, 'cabin_mood.py'), full_cabin_dir(), objects, DDSTOOL)
+    add_objects(sorted(f for f in os.listdir(objects) if f.startswith('a380_cabin_mood_') and f.endswith('.obj')), False)
+    add_objects(['a380_cabin_lights.obj'], True)
+    done('cabin_mood')
+
 if not state.get('engine_separation'):
     exterior = [n for n in sorted(loaded) if n.startswith('a380_exterior')]
     print('engines hidden on separation')

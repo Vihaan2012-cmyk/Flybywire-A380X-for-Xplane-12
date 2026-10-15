@@ -1,0 +1,25 @@
+{
+  "stars": true,
+  "scenes": {
+    "boarding": { "color": "warm", "level": 0.9 },
+    "taxi": { "color": "blue", "level": 0.25 },
+    "takeoff": { "color": "blue", "level": 0.15 },
+    "climb": { "color": "warm", "level": 0.5 },
+    "cruise": { "color": "white", "level": 0.7 },
+    "meal": { "color": "warm", "level": 0.9 },
+    "night": { "color": "night", "level": 0.8 },
+    "sunrise": { "color": "amber", "level": 0.5 },
+    "descent": { "color": "warm", "level": 0.5 },
+    "landing": { "color": "blue", "level": 0.15 },
+    "arrival": { "color": "white", "level": 0.9 }
+  },
+  "ife": {
+    "airline": "",
+    "welcome": "Welcome aboard",
+    "background": "#0b1626",
+    "accent": "#c9a45c",
+    "text": "#ffffff",
+    "land": "#1f3b2c",
+    "sea": "#0d2340"
+  }
+}

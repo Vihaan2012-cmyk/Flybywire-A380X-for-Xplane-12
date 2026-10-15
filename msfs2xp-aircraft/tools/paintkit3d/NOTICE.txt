@@ -1,0 +1,12 @@
+A380 for X-Plane 12 - 3D paint kit
+
+The aircraft model and textures are FlyByWire Simulations' A380X assets,
+licensed CC BY-NC 4.0 (https://creativecommons.org/licenses/by-nc/4.0/):
+free to use and share for non-commercial purposes, with credit to
+FlyByWire Simulations. Liveries you paint with this kit are yours.
+
+The scripts in scripts/ are free software under the GNU GPL v3, like the
+aircraft (https://github.com/Vihaan2012-cmyk/Flybywire-A380X-for-Xplane-12).
+
+Not affiliated with or endorsed by FlyByWire Simulations, Laminar Research,
+Airbus or any airline. Airline names and logos are their owners' trademarks.
