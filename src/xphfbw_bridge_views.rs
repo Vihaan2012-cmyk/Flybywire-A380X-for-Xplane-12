@@ -63,8 +63,19 @@ pub fn supersample(screen_id: &str) -> f64 {
     } else if STANDBY_SCREENS.iter().any(|s| s.eq_ignore_ascii_case(screen_id)) {
         1.5
     } else {
-        SCREEN_SUPERSAMPLE
+        screen_supersample()
     }
+}
+
+fn screen_supersample() -> f64 {
+    static SCALE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        std::env::var("FBW_SCREEN_SUPERSAMPLE")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| (0.5..=2.0).contains(v))
+            .unwrap_or(SCREEN_SUPERSAMPLE)
+    })
 }
 
 /// A screen's device size in texels: its CSS size times its supersampling.
@@ -202,7 +213,7 @@ mod tests {
         let Some(root) = std::env::var_os("FBW_HTML_UI") else { return };
         for p in source_patches() {
             let text = std::fs::read_to_string(std::path::Path::new(&root).join(p.path.trim_start_matches('/'))).unwrap();
-            assert_eq!(text.matches(p.find.as_str()).count(), 1, "{}", p.path);
+            assert_eq!(crate::source_patch::count(&text, &p.find), 1, "{}", p.path);
         }
     }
 

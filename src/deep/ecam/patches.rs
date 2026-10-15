@@ -185,7 +185,7 @@ mod tests {
         for p in source_patches(&sample_alerts()) {
             let file = root.join(p.path.trim_start_matches('/'));
             let text = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
-            assert_eq!(text.matches(p.find.as_str()).count(), 1, "{} ({}): anchor must occur exactly once", p.path, p.reason);
+            assert_eq!(crate::source_patch::count(&text, &p.find), 1, "{} ({}): anchor must occur exactly once", p.path, p.reason);
         }
     }
 

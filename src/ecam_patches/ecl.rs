@@ -215,7 +215,7 @@ mod tests {
                 Ok(t) => t,
                 Err(e) => panic!("{}: {e}", file.display()),
             };
-            let found = text.matches(patch.find.as_str()).count();
+            let found = crate::source_patch::count(&text, &patch.find);
             assert_eq!(found, 1, "{}: the patch ({}) matches {found} times, not once", patch.path, patch.reason);
         }
     }

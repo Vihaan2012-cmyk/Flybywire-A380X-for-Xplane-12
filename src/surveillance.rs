@@ -398,7 +398,7 @@ mod tests {
         let Some(root) = std::env::var_os("FBW_HTML_UI") else { return };
         for p in source_patches() {
             let text = std::fs::read_to_string(std::path::Path::new(&root).join(p.path.trim_start_matches('/'))).unwrap();
-            assert_eq!(text.matches(p.find.as_str()).count(), 1, "{}", p.path);
+            assert_eq!(crate::source_patch::count(&text, &p.find), 1, "{}", p.path);
         }
     }
 
