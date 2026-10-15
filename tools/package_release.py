@@ -94,7 +94,7 @@ INSTALLER_OWNED = {"fbw_xp_installed_version.txt", "FlyByWire A380X Updater.exe"
 # Never in the release either: the converter's own notes, dev pages and test
 # fixtures, source maps, logs, backups, and the user's own X-Plane state.
 DEV_FILES = {"README.txt", "cockpit_bindings.txt", "plugins/fbw_a380_systems/XPHFBW/ui/harness.html"}
-DEV_DIRS = ("Output/", "html_ui/Pages/VCockpit/Instruments/A380X/EFB/", "plugins/fbw_a380_systems/XPHFBW/ui/test/", "plugins/fbw_a380_systems/XPHFBW/js/test/")
+DEV_DIRS = ("Output/", "html_ui/Pages/VCockpit/Instruments/A380X/IFE/theme/", "html_ui/Pages/VCockpit/Instruments/A380X/EFB/", "plugins/fbw_a380_systems/XPHFBW/ui/test/", "plugins/fbw_a380_systems/XPHFBW/js/test/")
 BACKUP = re.compile(r"\.(before|with|bak|orig|old)\b|\.(map|log|tmp|pdb)$|~$|_prefs\.txt$", re.I)
 
 PATCH_INSTALL = {"aircraft": AIRCRAFT_IN_XPLANE, "steps": [TAKEOVER, {"kind": "copy", "from": "aircraft", "to": ""}, *FROM_XPLANE]}
