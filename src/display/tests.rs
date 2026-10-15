@@ -918,3 +918,15 @@ fn real_captured_stream_draws_its_vector_geometry() {
     println!("real-captured-pfd: {lit} non-background pixels of {}", w * h);
     assert!(lit > 2000, "only {lit} non-background pixels in the whole captured PFD frame -- geometry did not draw offline either");
 }
+
+#[test]
+fn right_clicks_on_screens_without_a_keyboard_go_to_x_planes_mouse_look() {
+    use super::{right_click_is_ours, HAS_KEYBOARD, SCREENS};
+    let mut ours: Vec<&str> = (0..SCREENS.len()).filter(|&i| right_click_is_ours(i)).map(|i| SCREENS[i].id).collect();
+    let mut keyboard = HAS_KEYBOARD.to_vec();
+    ours.sort();
+    keyboard.sort();
+    assert_eq!(ours, keyboard);
+    let pfd = SCREENS.iter().position(|s| s.id == "SCREEN_DU_PFDL").unwrap();
+    assert!(!right_click_is_ours(pfd));
+}

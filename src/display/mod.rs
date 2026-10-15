@@ -1744,15 +1744,22 @@ unsafe extern "C" fn touch_callback(x: c_int, y: c_int, status: c_int, refcon: *
 
 unsafe extern "C" fn right_touch_callback(x: c_int, y: c_int, status: c_int, refcon: *mut c_void) -> c_int {
     let index = screen_of(refcon);
+    if !right_click_is_ours(index) {
+        return 0;
+    }
     // The keyboard gesture (toggle_keyboard's doc comment): only a screen
     // that takes keystrokes, only on the initial press, and it does not also
     // forward as a click.
-    if status == xp::MOUSE_DOWN && SCREENS.get(index).is_some_and(|d| HAS_KEYBOARD.contains(&d.id)) {
+    if status == xp::MOUSE_DOWN {
         let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.toggle_keyboard(index)));
         return 1;
     }
     let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.mouse(index, x, y, status, 2)));
     1
+}
+
+pub(crate) fn right_click_is_ours(index: usize) -> bool {
+    SCREENS.get(index).is_some_and(|d| HAS_KEYBOARD.contains(&d.id))
 }
 
 unsafe extern "C" fn scroll_callback(x: c_int, y: c_int, wheel: c_int, clicks: c_int, refcon: *mut c_void) -> c_int {
