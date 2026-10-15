@@ -921,6 +921,7 @@ impl Displays {
                 }
             }
             if let Some(bridge) = &self.bridge {
+                let delta = if input_kind == InputKind::Wheel { bridge_wheel_clicks(delta) } else { delta };
                 let record = Input { screen: screen as u32, kind: input_kind, x: cx as f32, y: cy as f32, delta: delta as f32 };
                 bridge.session.input.push(&record.encode());
             }
@@ -1763,6 +1764,10 @@ unsafe extern "C" fn right_touch_callback(x: c_int, y: c_int, status: c_int, ref
     }
     let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.mouse(index, x, y, status, 2)));
     1
+}
+
+pub(crate) fn bridge_wheel_clicks(dom_delta_y: f64) -> f64 {
+    -dom_delta_y / 100.
 }
 
 pub(crate) fn toggle_allowed(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {

@@ -1135,6 +1135,19 @@ pub(crate) fn apply_action(body: &str) -> Result<(), String> {
                 },
             });
         }
+        "efbSet" => {
+            let name = v.get("name").and_then(Value::as_str).ok_or("missing \"name\"")?;
+            let value = v.get("value").and_then(Value::as_f64).ok_or("missing \"value\"")?;
+            crate::published::write_named(&format!("fbw/efb/{}", name.trim_start_matches("fbw/efb/")), value)?;
+        }
+        "efbPress" => {
+            let name = v.get("name").and_then(Value::as_str).ok_or("missing \"name\"")?;
+            crate::published::press_named(&format!("fbw/efb/{}", name.trim_start_matches("fbw/efb/")))?;
+        }
+        "throttleCalibration" => {
+            let calibration = v.get("calibration").ok_or("missing \"calibration\"")?;
+            crate::throttle::save_calibration(calibration)?;
+        }
         "setPresetExpedite" => {
             let on = v.get("on").and_then(Value::as_bool).ok_or("missing \"on\"")?;
             queue_write("AIRCRAFT_PRESET_LOAD_EXPEDITE", if on { 1. } else { 0. });

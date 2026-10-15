@@ -174,6 +174,171 @@ pub fn angle_for_lever_3d(position: f64) -> f64 {
     0.
 }
 
+pub const DETENT_NAMES: [&str; 6] = ["Reverse", "Reverse idle", "Idle", "CLB", "FLX/MCT", "TOGA"];
+const DETENT_TLA: [f64; 6] = [TLA_REVERSE, TLA_REVERSE_IDLE, TLA_IDLE, TLA_CLIMB, TLA_FLEX_MCT, TLA_TOGA];
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Detent {
+    pub center: f64,
+    pub band: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Calibration {
+    pub enabled: bool,
+    pub reverse_on_axis: bool,
+    pub detents: [Detent; 6],
+}
+
+const CALIBRATION_DEFAULT: Calibration = Calibration {
+    enabled: false,
+    reverse_on_axis: true,
+    detents: [
+        Detent { center: (REV_LO + REV_HI) / 2., band: (REV_HI - REV_LO) / 2. },
+        Detent { center: (REV_IDLE_LO + REV_IDLE_HI) / 2., band: (REV_IDLE_HI - REV_IDLE_LO) / 2. },
+        Detent { center: (IDLE_LO + IDLE_HI) / 2., band: (IDLE_HI - IDLE_LO) / 2. },
+        Detent { center: (CLB_LO + CLB_HI) / 2., band: (CLB_HI - CLB_LO) / 2. },
+        Detent { center: (FLX_LO + FLX_HI) / 2., band: (FLX_HI - FLX_LO) / 2. },
+        Detent { center: (TOGA_LO + TOGA_HI) / 2., band: (TOGA_HI - TOGA_LO) / 2. },
+    ],
+};
+
+impl Default for Calibration {
+    fn default() -> Self {
+        CALIBRATION_DEFAULT
+    }
+}
+
+impl Calibration {
+    fn inverted(&self) -> bool {
+        self.detents[5].center < self.detents[2].center
+    }
+
+    pub fn axis(&self, raw: f64) -> f64 {
+        let a = raw * 2. - 1.;
+        if self.inverted() {
+            -a
+        } else {
+            a
+        }
+    }
+
+    pub fn table(&self) -> Result<LookupTable, String> {
+        let sign = if self.inverted() { -1. } else { 1. };
+        let first = if self.reverse_on_axis { 0 } else { 2 };
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        for i in first..6 {
+            let d = self.detents[i];
+            if !(d.center.is_finite() && d.band.is_finite()) || d.band < 0. || d.band > 0.5 {
+                return Err(format!("{}: band must be between 0 and 0.5", DETENT_NAMES[i]));
+            }
+            let c = d.center * sign;
+            let (mut lo, hi) = (c - d.band, c + d.band);
+            if i == first {
+                lo = -1.;
+            }
+            if let Some(&(prev, _)) = points.last() {
+                if lo <= prev {
+                    return Err(format!("{} overlaps {}: set the detents in lever order", DETENT_NAMES[i], DETENT_NAMES[i - 1]));
+                }
+            }
+            points.push((lo, DETENT_TLA[i]));
+            points.push((hi.max(lo), DETENT_TLA[i]));
+        }
+        if let Some(last) = points.last_mut() {
+            last.0 = last.0.max(1.);
+        }
+        Ok(LookupTable::new(points, DETENT_TLA[first], TLA_TOGA))
+    }
+
+    fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "enabled": self.enabled,
+            "reverseOnAxis": self.reverse_on_axis,
+            "detents": self.detents.iter().map(|d| serde_json::json!({ "center": d.center, "band": d.band })).collect::<Vec<_>>(),
+        })
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Result<Self, String> {
+        let mut c = Self::default();
+        if let Some(b) = v.get("enabled").and_then(serde_json::Value::as_bool) {
+            c.enabled = b;
+        }
+        if let Some(b) = v.get("reverseOnAxis").and_then(serde_json::Value::as_bool) {
+            c.reverse_on_axis = b;
+        }
+        if let Some(list) = v.get("detents").and_then(serde_json::Value::as_array) {
+            if list.len() != 6 {
+                return Err("six detents expected".into());
+            }
+            for (d, j) in c.detents.iter_mut().zip(list) {
+                let f = |k: &str| j.get(k).and_then(serde_json::Value::as_f64).ok_or(format!("detent {k} missing"));
+                *d = Detent { center: f("center")?, band: f("band")? };
+            }
+        }
+        c.table()?;
+        Ok(c)
+    }
+}
+
+struct Shared {
+    calibration: Calibration,
+    generation: u64,
+    raw: [Option<f64>; 4],
+    angle: [f64; 4],
+}
+
+static SHARED: std::sync::Mutex<Shared> = std::sync::Mutex::new(Shared { calibration: CALIBRATION_DEFAULT, generation: 0, raw: [None; 4], angle: [0.; 4] });
+
+fn shared<R>(f: impl FnOnce(&mut Shared) -> R) -> R {
+    f(&mut SHARED.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+fn calibration_path() -> Option<std::path::PathBuf> {
+    crate::xp::system_path().map(|root| root.join("Output").join("preferences").join("fbw_a380x_throttle.json"))
+}
+
+pub fn load_calibration() {
+    let Some(path) = calibration_path() else { return };
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    match serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string()).and_then(|v| Calibration::from_json(&v)) {
+        Ok(c) => shared(|s| {
+            s.calibration = c;
+            s.generation += 1;
+        }),
+        Err(e) => crate::log(&format!("throttle: {} ignored: {e}", path.display())),
+    }
+}
+
+pub fn save_calibration(v: &serde_json::Value) -> Result<(), String> {
+    let c = Calibration::from_json(v)?;
+    if let Some(path) = calibration_path() {
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&c.to_json()).unwrap_or_default()).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    }
+    shared(|s| {
+        s.calibration = c;
+        s.generation += 1;
+    });
+    Ok(())
+}
+
+pub fn state_json() -> String {
+    shared(|s| {
+        let c = s.calibration;
+        serde_json::json!({
+            "calibration": c.to_json(),
+            "defaults": Calibration::default().to_json(),
+            "names": DETENT_NAMES,
+            "raw": s.raw,
+            "axis": s.raw.map(|r| r.map(|r| c.axis(r))),
+            "angle": s.angle,
+        })
+        .to_string()
+    })
+}
+
 /// A cockpit dataref another plugin owns, looked for until it exists.
 pub(crate) struct Cockpit {
     name: &'static str,
@@ -232,6 +397,10 @@ pub struct Throttles {
     lever_table: LookupTable,
     xplane_throttle: Option<DataRef>,
     joy_avail: Option<DataRef>,
+    joy_value: Option<DataRef>,
+    calibrated: Option<LookupTable>,
+    calibration: Calibration,
+    generation: u64,
     hardware_levers: [bool; 4],
     levers: [Cockpit; 4],
     reversers: [Cockpit; 2],
@@ -244,11 +413,16 @@ pub const HAS_REVERSER: [bool; 4] = [false, true, true, false];
 
 impl Throttles {
     pub fn new(xplm: &Xplm) -> Self {
+        load_calibration();
         Self {
             table: thrust_lever_angle_table(),
             lever_table: lever_3d_table(),
             xplane_throttle: xplm.find("sim/cockpit2/engine/actuators/throttle_jet_rev_ratio"),
             joy_avail: xplm.find("sim/joystick/joy_mapped_axis_avail"),
+            joy_value: xplm.find("sim/joystick/joy_mapped_axis_value"),
+            calibrated: None,
+            calibration: Calibration::default(),
+            generation: u64::MAX,
             hardware_levers: [false; 4],
             levers: [
                 Cockpit::new("fbw/cockpit/throttle_lever_1"),
@@ -271,12 +445,23 @@ impl Throttles {
         if let Some(d) = self.xplane_throttle {
             xplm.get_vf(d, &mut ratio);
         }
+        let (generation, calibration) = shared(|s| (s.generation, s.calibration));
+        if generation != self.generation {
+            self.generation = generation;
+            self.calibration = calibration;
+            self.calibrated = calibration.table().ok();
+        }
+        let mut raw_axes = [0f32; AXIS_THROTTLE_1 + 4];
+        if let Some(d) = self.joy_value {
+            xplm.get_vf(d, &mut raw_axes);
+        }
         if let Some(d) = self.joy_avail {
             let mut avail = [0 as std::os::raw::c_int; AXIS_THROTTLE_1 + 4];
             xplm.get_vi(d, &mut avail);
             crate::latch_axes(&mut self.hardware_levers, &avail[AXIS_THROTTLE_1..]);
             ratio = spread_two_levers(ratio, self.hardware_levers);
         }
+        let raw = raw_levers(&raw_axes[AXIS_THROTTLE_1..], self.hardware_levers);
 
         // The cockpit's datarefs belong to the cockpit plugin, which may load
         // after this one; look for missing ones about once a second.
@@ -319,11 +504,17 @@ impl Throttles {
                     }
                     (axis, tla)
                 }
-                None => {
-                    let r = if HAS_REVERSER[i] { ratio[i] as f64 } else { (ratio[i] as f64).max(0.) };
-                    let axis = axis_for_xplane(r);
-                    (axis, angle_for_axis(&self.table, axis, HAS_REVERSER[i]))
-                }
+                None => match (&self.calibrated, raw[i]) {
+                    (Some(table), Some(r)) if self.calibration.enabled && (self.calibration.reverse_on_axis || ratio[i] >= -0.01 || !HAS_REVERSER[i]) => {
+                        let axis = self.calibration.axis(r);
+                        (axis, angle_for_axis(table, axis, HAS_REVERSER[i]))
+                    }
+                    _ => {
+                        let r = if HAS_REVERSER[i] { ratio[i] as f64 } else { (ratio[i] as f64).max(0.) };
+                        let axis = axis_for_xplane(r);
+                        (axis, angle_for_axis(&self.table, axis, HAS_REVERSER[i]))
+                    }
+                },
             };
             let position = self.lever_table.get(tla);
             out.axis[i] = axis;
@@ -337,6 +528,10 @@ impl Throttles {
                 self.reversers[r].write(xplm, reverse as f32);
             }
         }
+        shared(|s| {
+            s.raw = raw;
+            s.angle = out.angle;
+        });
         out
     }
 }
@@ -348,6 +543,17 @@ pub fn spread_two_levers(ratio: [f32; 4], hardware_levers: [bool; 4]) -> [f32; 4
         [true, true, false, false] => [ratio[0], ratio[0], ratio[1], ratio[1]],
         _ => ratio,
     }
+}
+
+pub fn raw_levers(values: &[f32], hardware: [bool; 4]) -> [Option<f64>; 4] {
+    let source: [Option<usize>; 4] = match hardware {
+        [true, true, false, false] => [Some(0), Some(0), Some(1), Some(1)],
+        _ => {
+            let first = hardware.iter().position(|&h| h);
+            std::array::from_fn(|i| if hardware[i] { Some(i) } else { first })
+        }
+    };
+    source.map(|s| s.and_then(|j| values.get(j)).map(|&v| v as f64))
 }
 
 fn reverser_slot(engine: usize) -> Option<usize> {
@@ -442,5 +648,57 @@ mod tests {
         for angle in [0.0, 12.0, 25.0, 30.0, 35.0, 45.0] {
             assert!((angle_for_lever_3d(l.get(angle)) - angle).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn the_default_calibration_is_flybywires_table() {
+        let c = Calibration { enabled: true, ..Calibration::default() };
+        let t = c.table().unwrap();
+        for raw in [0.0, 0.1, 0.25, 0.4, 0.5, 0.7, 0.75, 0.9, 1.0] {
+            let a = c.axis(raw);
+            assert!(close(t.get(a), thrust_lever_angle_table().get(a)), "raw {raw}");
+        }
+    }
+
+    #[test]
+    fn a_calibrated_axis_puts_each_detent_where_the_pilot_set_it() {
+        let mut c = Calibration { enabled: true, reverse_on_axis: false, ..Calibration::default() };
+        for (i, center) in [(2, 0.1), (3, 0.5), (4, 0.7), (5, 0.95)] {
+            c.detents[i] = Detent { center: center * 2. - 1., band: 0.02 };
+        }
+        let t = c.table().unwrap();
+        assert!(close(t.get(c.axis(0.0)), TLA_IDLE), "fully back is idle without reverse on the axis");
+        assert!(close(t.get(c.axis(0.5)), TLA_CLIMB));
+        assert!(close(t.get(c.axis(0.7)), TLA_FLEX_MCT));
+        assert!(close(t.get(c.axis(1.0)), TLA_TOGA));
+    }
+
+    #[test]
+    fn an_axis_that_runs_backwards_is_calibrated_too() {
+        let mut c = Calibration { enabled: true, reverse_on_axis: false, ..Calibration::default() };
+        for (i, raw) in [(2, 0.9), (3, 0.5), (4, 0.3), (5, 0.02)] {
+            c.detents[i] = Detent { center: raw * 2. - 1., band: 0.02 };
+        }
+        let t = c.table().unwrap();
+        assert!(close(t.get(c.axis(0.5)), TLA_CLIMB));
+        assert!(close(t.get(c.axis(0.0)), TLA_TOGA));
+    }
+
+    #[test]
+    fn overlapping_detents_are_refused() {
+        let mut c = Calibration::default();
+        c.detents[3] = Detent { center: -0.5, band: 0.05 };
+        assert!(c.table().is_err());
+        let json = serde_json::json!({ "enabled": true, "reverseOnAxis": true, "detents": c.detents.iter().map(|d| serde_json::json!({"center": d.center, "band": d.band})).collect::<Vec<_>>() });
+        assert!(Calibration::from_json(&json).is_err());
+    }
+
+    #[test]
+    fn levers_without_an_axis_follow_the_first_one() {
+        let v = [0.2, 0.8, 0.0, 0.0];
+        let (a, b) = (Some(0.2f32 as f64), Some(0.8f32 as f64));
+        assert_eq!(raw_levers(&v, [true, false, false, false]), [a; 4]);
+        assert_eq!(raw_levers(&v, [true, true, false, false]), [a, a, b, b]);
+        assert_eq!(raw_levers(&v, [false; 4]), [None; 4]);
     }
 }

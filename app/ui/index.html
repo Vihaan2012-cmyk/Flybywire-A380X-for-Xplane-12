@@ -60,6 +60,21 @@
   .field { margin: 12px 0 4px; }
   .field .label { display: block; margin-bottom: 6px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+  .ef-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 18px; }
+  .ef-box { margin-bottom: 14px; padding: 10px 14px 12px; }
+  .ef-row { display: grid; grid-template-columns: 180px 130px auto 1fr; align-items: center; gap: 10px; margin: 6px 0; }
+  .ef-row input[type=range] { grid-column: 2 / span 3; }
+  .ef-detent { grid-template-columns: 140px 110px 14px 100px auto; }
+  .ef-unit, .ef-now { color: var(--text-dim); font-size: 14px; }
+  .ef-choice { grid-column: 2 / span 3; display: flex; gap: 6px; }
+  .ef-choice button.on, button.on { border-color: var(--accent); color: var(--accent); }
+  .ef-cg { color: var(--text-dim); font-size: 14px; margin: 4px 0 6px; white-space: pre; }
+  .ef-stations { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 18px; margin-top: 8px; font-size: 14px; }
+  .ef-station { display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 2px 0; }
+  .ef-said { min-height: 20px; margin: 0 0 8px; }
+  .ef-live { font-family: Consolas, monospace; font-size: 14px; margin: 8px 0 4px; }
+  .ef-axis { position: relative; height: 10px; border: 1px solid var(--line); margin-bottom: 10px; }
+  .ef-axis-mark { position: absolute; top: -3px; width: 3px; height: 14px; background: var(--accent); }
   .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 18px; }
   .apply { display: flex; justify-content: center; margin-top: 18px; }
   button {
@@ -314,7 +329,8 @@
   <button type="button" class="tab-btn" data-tab="flightplan">Flight Plan</button>
   <button type="button" class="tab-btn" data-tab="ground">Ground Services</button>
   <button type="button" class="tab-btn" data-tab="charts">Charts</button>
-  <button type="button" class="tab-btn" data-tab="loadsheet">Loadsheet</button>
+  <button type="button" class="tab-btn" data-tab="loadsheet">Payload &amp; Fuel</button>
+  <button type="button" class="tab-btn" data-tab="throttle">Throttle</button>
   <button type="button" class="tab-btn" data-tab="settings">Settings</button>
   <button type="button" class="tab-btn" data-tab="status">Status</button>
   <button type="button" class="tab-btn" data-tab="support">Support</button>
@@ -430,6 +446,9 @@
 <div class="tab-panel" id="tab-loadsheet">
   <div class="box study-offline preview-banner" hidden><span class="label dim">Preview: X-Plane is not running. Live values appear once the A380X is loaded.</span></div>
   <div class="page-main" id="loadsheet-content"></div>
+</div>
+<div class="tab-panel" id="tab-throttle">
+  <div class="page-main" id="throttle-content"></div>
 </div>
 
 <div class="tab-panel" id="tab-settings">
@@ -986,6 +1005,7 @@ for (const btn of $all('.tab-btn')) {
     if (btn.dataset.tab === 'charts') chartsOnShow();
     if (btn.dataset.tab === 'diagnostics') diagOnShow();
     if (btn.dataset.tab === 'loadsheet') loadsheetOnShow();
+    if (btn.dataset.tab === 'throttle') throttleOnShow();
   });
 }
 
@@ -2116,6 +2136,39 @@ const pointer = { down: false, until: 0 };
 document.addEventListener('pointerdown', () => { pointer.down = true; }, true);
 document.addEventListener('pointerup', () => { pointer.down = false; pointer.until = performance.now() + 300; }, true);
 
+(() => {
+  let drag = null;
+  const scroller = (start) => {
+    for (let e = start; e && e !== document.documentElement; e = e.parentElement) {
+      if (/(auto|scroll)/.test(getComputedStyle(e).overflowY) && e.scrollHeight > e.clientHeight + 2) return e;
+    }
+    return null;
+  };
+  document.addEventListener('mousedown', (ev) => {
+    drag = null;
+    if (ev.button !== 0 || ev.target.closest('input, select, textarea, button, a, label, .no-drag-scroll')) return;
+    const box = scroller(ev.target);
+    if (box) drag = { box, y: ev.clientY, top: box.scrollTop, moved: false };
+  }, true);
+  document.addEventListener('mousemove', (ev) => {
+    if (!drag) return;
+    const dy = ev.clientY - drag.y;
+    if (!drag.moved && Math.abs(dy) < 8) return;
+    drag.moved = true;
+    window.getSelection()?.removeAllRanges();
+    drag.box.scrollTop = drag.top - dy;
+    ev.preventDefault();
+  }, true);
+  document.addEventListener('mouseup', () => {
+    if (drag?.moved) {
+      const swallow = (e) => { e.stopPropagation(); e.preventDefault(); };
+      window.addEventListener('click', swallow, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener('click', swallow, true), 0);
+    }
+    drag = null;
+  }, true);
+})();
+
 function studyInteracting(content) {
   if (pointer.down || performance.now() < pointer.until) return true;
   const a = document.activeElement;
@@ -3184,6 +3237,59 @@ function drawLoadsheetDiagram(page, vars) {
   return el('div', { class: 'loadsheet-diagram' }, wrap, cabin);
 }
 
+async function efbState() {
+  if (FIXTURE || study.preview) return {};
+  try {
+    const r = await fetch(PLUGIN_ORIGIN + '/efb/state');
+    return (await r.json()).values || {};
+  } catch {
+    return {};
+  }
+}
+const efbSet = (name, value) => studyPost('/study/action', { kind: 'efbSet', name, value });
+const efbPress = (name) => studyPost('/study/action', { kind: 'efbPress', name });
+
+function efbField(label, unit, onCommit, opts = {}) {
+  const input = el('input', { type: 'number', step: String(opts.step || 1), min: String(opts.min ?? 0) });
+  if (opts.max !== undefined) input.max = String(opts.max);
+  const now = el('span', { class: 'ef-now' });
+  input.addEventListener('change', () => {
+    const v = Number(input.value);
+    if (Number.isFinite(v)) onCommit(v);
+    input.blur();
+  });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.dispatchEvent(new Event('change')); });
+  const row = el('div', { class: 'ef-row' }, el('span', { class: 'label', text: label }), input, el('span', { class: 'ef-unit', text: unit }), now);
+  return {
+    row,
+    show(target, current, digits = 0) {
+      if (document.activeElement !== input && Number.isFinite(target)) input.value = Number(target).toFixed(digits);
+      now.textContent = Number.isFinite(current) ? 'now ' + Number(current).toLocaleString('en-US', { maximumFractionDigits: digits }) : '';
+    },
+  };
+}
+
+function efbChoice(options, onPick) {
+  const wrap = el('div', { class: 'ef-choice' });
+  const buttons = options.map(([value, text]) => {
+    const b = el('button', { type: 'button', class: 'small', text });
+    b.addEventListener('click', () => onPick(value));
+    wrap.append(b);
+    return [value, b];
+  });
+  return {
+    wrap,
+    show(current, enabled = () => true) {
+      for (const [value, b] of buttons) {
+        b.classList.toggle('on', Math.round(current) === value);
+        b.disabled = !enabled(value);
+      }
+    },
+  };
+}
+
+const minutes = (s) => (s > 0 ? (s >= 60 ? Math.round(s / 60) + ' min' : Math.round(s) + ' s') : '');
+
 async function loadsheetOnShow() {
   const content = document.getElementById('loadsheet-content');
   if (!loadsheet.page) {
@@ -3199,66 +3305,62 @@ async function loadsheetOnShow() {
     content.replaceChildren(el('div', { class: 'box', text: 'The plugin did not offer a loadsheet page.' }));
     return;
   }
-  const act = (label, name, value, said) => {
-    const b = el('button', { type: 'button', class: 'small', text: label });
-    b.addEventListener('click', async () => {
-      const r = await studyPost('/study/action', { kind: 'writeVariable', name, value });
-      if (r.ok !== false) show(said);
-    });
-    return b;
-  };
-  const buttons = el('div', { class: 'row' },
-    act('Board', 'BOARDING_STARTED_BY_USR', 1, 'Boarding'),
-    act('Refuel', 'REFUEL_STARTED_BY_USR', 1, 'Refuelling'),
-    act('Stop', 'BOARDING_STARTED_BY_USR', 0, 'Boarding stopped'),
-    act('Instant', 'BOARDING_RATE', 0, 'Boarding set to instant'),
-    act('Real time', 'BOARDING_RATE', 2, 'Boarding set to real time'),
-  );
-  const q = loadsheet.quick;
-  const field = (label, key, max, step) => {
-    const input = el('input', { type: 'number', min: '0', max: String(max), step: String(step) });
-    input.value = q[key];
-    input.addEventListener('change', () => { const v = Math.max(0, Math.min(max, Math.round(Number(input.value) || 0))); if (key === 'pax' && v !== q.pax) q.bags = null; q[key] = v; input.value = v; });
-    return [el('div', { class: 'field' }, el('span', { class: 'label', text: label }), input), input];
-  };
-  const [paxField, paxInput] = field('Passengers (max ' + page.seats + ')', 'pax', page.seats, 1);
-  const [cargoField, cargoInput] = field('Cargo kg, besides bags', 'freightKg', 51400, 100);
-  const [fuelField, fuelInput] = field('Block fuel kg', 'fuelKg', 260000, 500);
-  const quickSaid = el('span', { class: 'label dim' });
-  const fromOfp = el('button', { type: 'button', text: 'Fill from SimBrief' });
-  fromOfp.addEventListener('click', () => {
-    if (!loadsheet.ofp) { quickSaid.textContent = 'Fetch your OFP on the Flight plan tab first.'; return; }
-    Object.assign(q, loadsheet.ofp);
-    paxInput.value = q.pax; cargoInput.value = q.freightKg; fuelInput.value = q.fuelKg;
-    quickSaid.textContent = 'Filled from the SimBrief OFP.';
+  const said = el('div', { class: 'label dim ef-said' });
+  const tell = (r, ok) => { said.textContent = r && r.ok === false ? 'Not done: ' + (r.message || r.error || 'refused') : ok || ''; };
+
+  const pax = efbField('Passengers', 'pax', async (v) => tell(await efbSet('payload/pax_target', Math.round(v))), { max: page.seats });
+  const cargo = efbField('Cargo', 'kg', async (v) => tell(await efbSet('payload/cargo_target_kg', v)), { step: 100, max: 51400 });
+  const zfw = efbField('ZFW', 'kg', async (v) => tell(await efbSet('payload/zfw_target_kg', v)), { step: 100 });
+  const gw = efbField('GW', 'kg', async (v) => tell(await efbSet('payload/gw_target_kg', v)), { step: 100 });
+  const paxWt = efbField('Weight per passenger', 'kg', async (v) => tell(await efbSet('payload/pax_weight_kg', v)), { min: 10, max: 250 });
+  const bagWt = efbField('Weight per bag', 'kg', async (v) => tell(await efbSet('payload/bag_weight_kg', v)), { min: 1, max: 250 });
+  const cg = el('div', { class: 'ef-cg' });
+  const boardRate = efbChoice([[0, 'Instant'], [1, 'Fast'], [2, 'Real']], async (v) => tell(await efbSet('payload/boarding_rate', v)));
+  const board = el('button', { type: 'button', text: 'Board' });
+  board.addEventListener('click', async () => tell(await efbSet('payload/boarding_started', loadsheet.boarding ? 0 : 1)));
+  const deboard = el('button', { type: 'button', text: 'Deboard' });
+  deboard.addEventListener('click', async () => tell(await efbPress('payload/deboard'), 'Deboarding'));
+  const simbrief = el('button', { type: 'button', text: 'Import SimBrief' });
+  simbrief.addEventListener('click', async () => {
+    const o = loadsheet.ofp;
+    if (!o) { said.textContent = 'Fetch your OFP on the Flight Plan tab first.'; return; }
+    tell(await studyPost('/study/action', { kind: 'loadSimbrief', pax: o.pax, bags: o.bags, paxWeightKg: o.paxWeightKg, bagWeightKg: o.bagWeightKg, freightKg: o.freightKg, blockFuelKg: o.fuelKg }),
+      'SimBrief payload and fuel set. Press Board and Start refuel.');
   });
-  const go = (label, start, said) => {
-    const b = el('button', { type: 'button', text: label });
-    b.addEventListener('click', async () => {
-      for (const i of [paxInput, cargoInput, fuelInput]) i.dispatchEvent(new Event('change'));
-      const r = await studyPost('/study/action', {
-        kind: 'loadSimbrief', start,
-        pax: q.pax, bags: q.bags ?? q.pax, paxWeightKg: q.paxWeightKg, bagWeightKg: q.bagWeightKg,
-        freightKg: q.freightKg, blockFuelKg: q.fuelKg,
-      });
-      quickSaid.textContent = r.ok === false ? 'Not loaded: ' + (r.error || r.message || 'the plugin refused it') : said;
-    });
-    return b;
-  };
-  const quick = el('div', { class: 'box' },
-    el('div', { class: 'grid3' }, paxField, cargoField, fuelField),
-    el('div', { class: 'row' },
-      go('Load now', 'instant', 'Loaded: passengers, cargo and fuel are aboard.'),
-      go('Board in real time', 'realTime', 'Boarding and refuelling in real time. Open the doors to board.'),
-      fromOfp),
-    quickSaid);
-  const summary = el('div', { class: 'box' });
+  const boardEta = el('span', { class: 'label dim' });
+  const holds = (page.holds || []).map((h, i) => {
+    const key = ['fwd', 'aft', 'bulk'][i];
+    return efbField(h.label + ' hold', 'kg', async (v) => tell(await efbSet(`payload/cargo/${key}/kg_desired`, v)), { step: 100, max: h.maxKg });
+  });
+  const stations = el('div', { class: 'ef-stations' });
+
+  const fuelTarget = efbField('Fuel target', 'kg', async (v) => tell(await efbSet('refuel/target_kg', v)), { step: 500, max: 259755 });
+  const fuelSlider = el('input', { type: 'range', min: '0', max: '100', step: '1' });
+  fuelSlider.addEventListener('change', async () => tell(await efbSet('refuel/target_percent', Number(fuelSlider.value))));
+  const fuelRate = efbChoice([[0, 'Real'], [1, 'Fast'], [2, 'Instant']], async (v) => tell(await efbSet('refuel/rate', v)));
+  const refuel = el('button', { type: 'button', text: 'Start refuel' });
+  refuel.addEventListener('click', async () => tell(await efbPress('refuel/start_stop')));
+  const fuelInfo = el('span', { class: 'label dim' });
+
+  const payloadBox = el('div', { class: 'box ef-box' },
+    el('div', { class: 'section-title', text: 'Payload' }),
+    pax.row, cargo.row, zfw.row, gw.row, cg,
+    el('div', { class: 'ef-row' }, el('span', { class: 'label', text: 'Boarding rate' }), boardRate.wrap),
+    el('div', { class: 'row' }, board, deboard, simbrief, boardEta));
+  const detailBox = el('div', { class: 'box ef-box' },
+    el('div', { class: 'section-title', text: 'Cabin and holds' }),
+    paxWt.row, bagWt.row, ...holds.map((h) => h.row), stations);
+  const fuelBox = el('div', { class: 'box ef-box' },
+    el('div', { class: 'section-title', text: 'Fuel' }),
+    fuelTarget.row, el('div', { class: 'ef-row' }, el('span', { class: 'label', text: 'Target' }), fuelSlider),
+    el('div', { class: 'ef-row' }, el('span', { class: 'label', text: 'Refuel rate' }), fuelRate.wrap),
+    el('div', { class: 'row' }, refuel, fuelInfo));
   const plan = el('div', { class: 'box' });
-  const body = el('div');
-  const more = el('details', {}, el('summary', { class: 'label dim', text: 'Boarding controls and every station' }), buttons, body);
-  content.replaceChildren(quick, summary, plan, more);
-  const names = collectNames(page)
-    .concat((page.zones || []).map((z) => z.name))
+  content.replaceChildren(
+    el('div', { class: 'ef-grid' }, el('div', {}, payloadBox, fuelBox), el('div', {}, detailBox)),
+    said, plan);
+
+  const names = (page.zones || []).map((z) => z.name)
     .concat((page.holds || []).map((h) => h.name))
     .concat((page.tanks || []).map((t) => t.name));
   if (loadsheet.timer) clearInterval(loadsheet.timer);
@@ -3267,29 +3369,124 @@ async function loadsheetOnShow() {
     if (busy || !document.getElementById('tab-loadsheet').classList.contains('active')) return;
     busy = true;
     try {
-      const q = names.length ? '?names=' + names.map(encodeURIComponent).join(',') : '';
-      const data = await studyGet('/vars' + q);
-      const vars = data.vars || {};
-      const pax = (page.zones || []).reduce((a, z) => a + (vars[z.name] || 0), 0);
-      const cargo = (page.holds || []).reduce((a, h) => a + (vars[h.name] || 0), 0);
-      const fuel = (page.tanks || []).reduce((a, t) => a + (vars[t.name] || 0), 0);
-      const live = pax > 0 || cargo > 0;
-      let text;
-      if (!data.ticks) text = 'The aircraft is not loaded yet. Figures appear once the A380X is running.';
-      else if (live) text = Math.round(pax) + ' of ' + page.seats + ' passengers, ' + Math.round(cargo) + ' kg of cargo, ' + Math.round(fuel * 3.03907) + ' kg of fuel. The balance is live: X-Plane is flying this loadsheet.';
-      else text = 'Nobody is aboard yet. Enter passengers, cargo and fuel above and press Load now.';
-      summary.replaceChildren(el('span', { class: 'label' + (live ? '' : ' dim'), text }));
-      plan.replaceChildren(drawLoadsheetDiagram(page, vars));
-      body.innerHTML = '';
-      renderGroups(body, page.groups, vars);
+      const [s, data] = await Promise.all([efbState(), studyGet('/vars' + (names.length ? '?names=' + names.map(encodeURIComponent).join(',') : ''))]);
+      const v = (k) => (Object.prototype.hasOwnProperty.call(s, k) ? s[k] : NaN);
+      pax.show(v('payload/pax_desired'), v('payload/pax'));
+      cargo.show(v('payload/cargo_desired_kg'), v('payload/cargo_kg'));
+      zfw.show(v('wb/zfw_desired_kg'), v('wb/zfw_kg'));
+      gw.show(v('wb/gw_desired_kg'), v('wb/gw_kg'));
+      paxWt.show(v('payload/pax_weight_kg'));
+      bagWt.show(v('payload/bag_weight_kg'));
+      holds.forEach((h, i) => { const k = ['fwd', 'aft', 'bulk'][i]; h.show(v(`payload/cargo/${k}/kg_desired`), v(`payload/cargo/${k}/kg`)); });
+      const pct = (x) => (Number.isFinite(x) ? x.toFixed(1) + ' %MAC' : '--');
+      cg.textContent = `ZFW CG ${pct(v('wb/zfw_cg_mac_desired'))} (now ${pct(v('wb/zfw_cg_mac'))})   GW CG ${pct(v('wb/gw_cg_mac_desired'))} (now ${pct(v('wb/gw_cg_mac'))})`;
+      boardRate.show(v('payload/boarding_rate'));
+      loadsheet.boarding = v('payload/boarding_started') === 1;
+      board.textContent = loadsheet.boarding ? 'Stop boarding' : 'Board';
+      board.classList.toggle('on', loadsheet.boarding);
+      const eta = minutes(v('payload/boarding_eta_s'));
+      boardEta.textContent = loadsheet.boarding ? (eta ? 'About ' + eta + ' left' : 'Boarding') : (eta ? 'Boarding takes about ' + eta : '');
+      stations.replaceChildren(...(page.zones || []).map((z, i) => el('div', { class: 'ef-station' },
+        el('span', { text: z.label }), el('span', { text: `${Math.round(v(`payload/station/${i + 1}/pax`)) || 0} / ${Math.round(v(`payload/station/${i + 1}/pax_desired`)) || 0}` }))));
+      fuelTarget.show(v('refuel/target_kg'), v('refuel/total_kg'));
+      if (document.activeElement !== fuelSlider && Number.isFinite(v('refuel/target_percent'))) fuelSlider.value = String(Math.round(v('refuel/target_percent')));
+      fuelRate.show(v('refuel/rate'));
+      const refuelling = v('refuel/started') === 1;
+      refuel.textContent = refuelling ? 'Stop refuel' : 'Start refuel';
+      refuel.classList.toggle('on', refuelling);
+      refuel.disabled = !refuelling && v('refuel/allowed') === 0;
+      fuelInfo.textContent = refuel.disabled ? 'Engines running or airborne: only Instant refuels' : (refuelling && minutes(v('refuel/eta_s')) ? 'About ' + minutes(v('refuel/eta_s')) + ' left' : '');
+      if (data && data.vars) plan.replaceChildren(drawLoadsheetDiagram(page, data.vars));
     } catch {
-      // Left as it was: a dropped poll should not blank the page.
     } finally {
       busy = false;
     }
   };
   await poll();
   loadsheet.timer = setInterval(poll, 500);
+}
+
+const throttle = { timer: null, draft: null };
+
+async function throttleOnShow() {
+  const content = document.getElementById('throttle-content');
+  const get = async () => {
+    try {
+      return await (await fetch(PLUGIN_ORIGIN + '/throttle/state')).json();
+    } catch {
+      return null;
+    }
+  };
+  const first = await get();
+  if (!first) {
+    content.replaceChildren(el('div', { class: 'box', text: 'Start X-Plane with the A380X to calibrate the throttle.' }));
+    return;
+  }
+  throttle.draft = JSON.parse(JSON.stringify(first.calibration));
+  const d = throttle.draft;
+  const said = el('div', { class: 'label dim ef-said' });
+  const enabled = el('input', { type: 'checkbox' });
+  enabled.checked = d.enabled;
+  enabled.addEventListener('change', () => { d.enabled = enabled.checked; });
+  const reverse = el('input', { type: 'checkbox' });
+  reverse.checked = d.reverseOnAxis;
+  reverse.addEventListener('change', () => { d.reverseOnAxis = reverse.checked; drawRows(); });
+  const live = el('div', { class: 'ef-live' });
+  const bar = el('div', { class: 'ef-axis' }, el('div', { class: 'ef-axis-mark' }));
+  const rows = el('div');
+  let lastAxis = null;
+  const drawRows = () => {
+    rows.replaceChildren(...first.names.map((name, i) => {
+      if (!d.reverseOnAxis && i < 2) return el('span');
+      const det = d.detents[i];
+      const center = el('input', { type: 'number', step: '0.01', min: '-1', max: '1' });
+      center.value = det.center.toFixed(3);
+      center.addEventListener('change', () => { det.center = Number(center.value); });
+      const band = el('input', { type: 'number', step: '0.01', min: '0', max: '0.5' });
+      band.value = det.band.toFixed(3);
+      band.addEventListener('change', () => { det.band = Number(band.value); });
+      const set = el('button', { type: 'button', class: 'small', text: 'Set from throttle' });
+      set.addEventListener('click', () => {
+        if (lastAxis === null) { said.textContent = 'No throttle axis is assigned in X-Plane.'; return; }
+        det.center = lastAxis;
+        center.value = lastAxis.toFixed(3);
+        said.textContent = name + ' set to ' + lastAxis.toFixed(3) + '. Save to use it.';
+      });
+      return el('div', { class: 'ef-row ef-detent' }, el('span', { class: 'label', text: name }), center, el('span', { class: 'ef-unit', text: '±' }), band, set);
+    }));
+  };
+  drawRows();
+  const save = el('button', { type: 'button', text: 'Save and apply' });
+  save.addEventListener('click', async () => {
+    const r = await studyPost('/study/action', { kind: 'throttleCalibration', calibration: d });
+    said.textContent = r.ok === false ? 'Not saved: ' + (r.message || r.error) : 'Saved. The levers now follow this calibration.';
+  });
+  const defaults = el('button', { type: 'button', text: 'Reset to defaults' });
+  defaults.addEventListener('click', () => {
+    const e = d.enabled;
+    Object.assign(d, JSON.parse(JSON.stringify(first.defaults)), { enabled: e });
+    reverse.checked = d.reverseOnAxis;
+    drawRows();
+    said.textContent = 'Defaults loaded. Save to use them.';
+  });
+  content.replaceChildren(
+    el('div', { class: 'box ef-box' },
+      el('div', { class: 'section-title', text: 'Throttle calibration' }),
+      el('div', { class: 'label dim', text: 'Move the lever to each detent and press Set from throttle, then Save and apply. Values are the axis position from -1 to 1 and the width of the detent either side.' }),
+      el('label', { class: 'row' }, enabled, el('span', { class: 'label', text: 'Use this calibration' })),
+      el('label', { class: 'row' }, reverse, el('span', { class: 'label', text: 'Reverser on axis' })),
+      live, bar, rows,
+      el('div', { class: 'row' }, save, defaults), said));
+  if (throttle.timer) clearInterval(throttle.timer);
+  throttle.timer = setInterval(async () => {
+    if (!document.getElementById('tab-throttle').classList.contains('active')) return;
+    const s = await get();
+    if (!s) return;
+    const axis = (s.raw || []).map((r) => (r === null ? null : r * 2 - 1));
+    lastAxis = axis.find((a) => a !== null) ?? null;
+    live.textContent = 'Axis ' + axis.map((a, i) => `${i + 1}: ${a === null ? '--' : a.toFixed(3)}`).join('   ') + '     TLA ' + (s.angle || []).map((a) => a.toFixed(1) + '°').join(' ');
+    bar.firstChild.style.left = lastAxis === null ? '0%' : ((lastAxis + 1) / 2) * 100 + '%';
+  }, 200);
 }
 
 async function groundOnShow() {

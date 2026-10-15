@@ -135,6 +135,8 @@ fn serve(mut stream: TcpStream) -> std::io::Result<()> {
 
     match path {
         "/vars" => reply(&mut stream, 200, "application/json", variables_as_json(names_filter(query)).as_bytes()),
+        "/efb/state" => reply(&mut stream, 200, "application/json", efb_state_json().as_bytes()),
+        "/throttle/state" => reply(&mut stream, 200, "application/json", crate::throttle::state_json().as_bytes()),
         "/study/pages" => reply(&mut stream, 200, "application/json", crate::study::web::pages_json().as_bytes()),
         "/study/failures" => reply(&mut stream, 200, "application/json", crate::study::web::failures_json().as_bytes()),
         "/study/breakers" => reply(&mut stream, 200, "application/json", crate::study::web::breakers_json().as_bytes()),
@@ -311,6 +313,14 @@ fn reply_headers(stream: &mut TcpStream, status: u16, kind: &str, body: &[u8]) -
 /// The snapshot as JSON: the simulation's clock, and every variable by name
 /// (or, with `only`, just the names asked for — a Study tab page's own
 /// fields, polled at a few Hz instead of the whole ~5,000-variable set).
+fn efb_state_json() -> String {
+    let values: serde_json::Map<String, serde_json::Value> = crate::published::numbers_named("fbw/efb/")
+        .into_iter()
+        .map(|(name, v, _)| (name.trim_start_matches("fbw/efb/").to_string(), serde_json::json!(if v.is_finite() { v } else { 0. })))
+        .collect();
+    serde_json::json!({ "values": values }).to_string()
+}
+
 fn variables_as_json(only: Option<Vec<String>>) -> String {
     // Copy under the lock and format after it, so a browser asking for the
     // variables never holds up the flight loop.

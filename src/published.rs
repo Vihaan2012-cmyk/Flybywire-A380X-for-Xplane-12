@@ -31,6 +31,7 @@ enum Content {
 }
 
 struct Slot {
+    name: String,
     content: Content,
     writable: bool,
     /// Set by a write from X-Plane, taken by the module.
@@ -40,9 +41,10 @@ struct Slot {
 struct State {
     slots: Vec<Slot>,
     presses: Vec<u32>,
+    command_names: Vec<String>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { slots: Vec::new(), presses: Vec::new() });
+static STATE: Mutex<State> = Mutex::new(State { slots: Vec::new(), presses: Vec::new(), command_names: Vec::new() });
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     STATE.lock().ok().map(|mut s| f(&mut s))
@@ -156,6 +158,46 @@ pub fn press(command: Command) {
             *p += 1;
         }
     });
+}
+
+pub fn numbers_named(prefix: &str) -> Vec<(String, f64, bool)> {
+    with_state(|s| {
+        let mut out: std::collections::BTreeMap<String, (f64, bool)> = std::collections::BTreeMap::new();
+        for slot in s.slots.iter().filter(|slot| slot.name.starts_with(prefix)) {
+            if let Content::Number(n) = slot.content {
+                out.insert(slot.name.clone(), (n, slot.writable));
+            }
+        }
+        out.into_iter().map(|(k, (v, w))| (k, v, w)).collect()
+    })
+    .unwrap_or_default()
+}
+
+pub fn write_named(name: &str, v: f64) -> Result<(), String> {
+    if !v.is_finite() {
+        return Err(format!("{name}: not a number"));
+    }
+    with_state(|s| {
+        let slot = s.slots.iter_mut().rev().find(|slot| slot.name == name).ok_or(format!("no {name}"))?;
+        match (slot.writable, &mut slot.content) {
+            (true, Content::Number(n)) => {
+                *n = v;
+                slot.written = true;
+                Ok(())
+            }
+            _ => Err(format!("{name} cannot be written")),
+        }
+    })
+    .unwrap_or_else(|| Err("busy".into()))
+}
+
+pub fn press_named(name: &str) -> Result<(), String> {
+    with_state(|s| {
+        let i = s.command_names.iter().rposition(|n| n == name).ok_or(format!("no command {name}"))?;
+        s.presses[i] += 1;
+        Ok(())
+    })
+    .unwrap_or_else(|| Err("busy".into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +323,7 @@ impl Published {
             Content::Text(_) => xp::DATA_TYPE_DATA,
         };
         let index = with_state(|s| {
-            s.slots.push(Slot { content, writable, written: false });
+            s.slots.push(Slot { name: name.to_string(), content, writable, written: false });
             s.slots.len() - 1
         })
         .unwrap_or(usize::MAX);
@@ -327,6 +369,7 @@ impl Published {
     pub fn command(&mut self, name: &str, description: &str) -> Command {
         let index = with_state(|s| {
             s.presses.push(0);
+            s.command_names.push(name.to_string());
             s.presses.len() - 1
         })
         .unwrap_or(usize::MAX);
@@ -342,6 +385,7 @@ impl Published {
     pub fn intercept(&mut self, name: &str) -> Command {
         let index = with_state(|s| {
             s.presses.push(0);
+            s.command_names.push(name.to_string());
             s.presses.len() - 1
         })
         .unwrap_or(usize::MAX);

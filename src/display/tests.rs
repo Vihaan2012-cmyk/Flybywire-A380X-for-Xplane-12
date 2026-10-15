@@ -940,3 +940,10 @@ fn a_second_right_press_from_the_new_popup_does_not_close_it() {
     assert!(!toggle_allowed(Some(t), t + Duration::from_millis(20)));
     assert!(toggle_allowed(Some(t), t + Duration::from_millis(600)));
 }
+
+#[test]
+fn a_wheel_click_reaches_xphfbw_as_one_click_in_the_same_direction() {
+    use super::bridge_wheel_clicks;
+    assert_eq!(bridge_wheel_clicks(-100.), 1.);
+    assert_eq!(bridge_wheel_clicks(200.), -2.);
+}
