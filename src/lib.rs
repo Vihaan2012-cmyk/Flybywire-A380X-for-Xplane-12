@@ -2982,6 +2982,7 @@ fn start_xphfbw<V: VariableRegistry + SimulatorReaderWriter>(
         if let Some(dir) = &aircraft_dir {
             cmd.arg(format!("--aircraft={}", dir.display()));
         }
+        cmd.env(crate::xphfbw_bridge_views::SCREEN_SUPERSAMPLE_ENV, crate::xphfbw_bridge_views::screen_supersample().to_string());
         cmd.creation_flags(CREATE_NO_WINDOW).spawn().map(Some).map_err(|e| format!("cannot start {}: {e}", exe.display()))
     });
     if result.is_ok() {

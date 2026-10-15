@@ -87,6 +87,7 @@ pub struct AppSettings {
     pub buffet: bool,
     pub cabin_scene: u8,
     pub cabin_brightness: f64,
+    pub display_scale: f64,
 }
 
 impl Default for AppSettings {
@@ -110,6 +111,7 @@ impl Default for AppSettings {
             buffet: true,
             cabin_scene: 0,
             cabin_brightness: 1.0,
+            display_scale: crate::xphfbw_bridge_views::SCREEN_SUPERSAMPLE,
         }
     }
 }
@@ -156,6 +158,7 @@ fn parse(map: &Map<String, Value>) -> AppSettings {
         buffet: as_bool(map, "buffet", defaults.buffet),
         cabin_scene: as_f64(map, "cabinScene", defaults.cabin_scene as f64).clamp(0.0, 11.0) as u8,
         cabin_brightness: as_f64(map, "cabinBrightness", defaults.cabin_brightness).clamp(0.0, 1.0),
+        display_scale: as_f64(map, "displayScale", defaults.display_scale).clamp(1.0, 1.5),
     }
 }
 

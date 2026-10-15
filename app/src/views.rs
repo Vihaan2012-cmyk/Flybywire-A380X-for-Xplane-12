@@ -1117,9 +1117,11 @@ const GOVERNOR_PERIOD_MS: i64 = 1000;
 /// gets half of it.
 const SMOOTH_SCREENS: &[&str] = &["SCREEN_DU_PFDL", "SCREEN_DU_PFDR", "SCREEN_ISIS_1"];
 
-fn governed_rates(_sim_fps: f64, cap: i32) -> (i32, i32) {
+fn governed_rates(sim_fps: f64, cap: i32) -> (i32, i32) {
     let cap = cap.clamp(1, 60);
-    (cap, (cap / 2).max(1))
+    let shown = if sim_fps.is_finite() && sim_fps > 0. { ((sim_fps * 1.1).ceil() as i32).clamp(10, 60) } else { cap };
+    let smooth = shown.min(cap);
+    (smooth, (smooth / 2).max(10).min(smooth))
 }
 
 /// Whether a new rate is worth setting: a 1-2 fps wobble in X-Plane's frame
@@ -1455,11 +1457,13 @@ mod governor_tests {
     use super::*;
 
     #[test]
-    fn flight_instruments_render_at_the_cap_and_the_rest_at_half() {
-        assert_eq!(governed_rates(17., 60), (60, 30));
+    fn views_render_no_faster_than_x_plane_shows_them() {
+        assert_eq!(governed_rates(23., 60), (26, 13));
+        assert_eq!(governed_rates(17., 60), (19, 10));
         assert_eq!(governed_rates(90., 60), (60, 30));
         assert_eq!(governed_rates(0., 30), (30, 15));
-        assert_eq!(governed_rates(40., 120), (60, 30));
+        assert_eq!(governed_rates(40., 30), (30, 15));
+        assert_eq!(governed_rates(5., 60), (10, 10));
     }
 
     #[test]

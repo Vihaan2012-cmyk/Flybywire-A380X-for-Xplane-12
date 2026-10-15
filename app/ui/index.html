@@ -479,6 +479,8 @@
           <select data-key="xphfbw.displayFps"><option value="60">60</option><option value="30">30</option><option value="20">20</option></select></div>
         <div class="field"><span class="label">EFB brightness</span>
           <input type="range" min="20" max="100" step="5" data-key="xphfbw.efbBrightness"></div>
+        <div class="field"><span class="label">Screen resolution<span class="help" title="How sharply the cockpit screens are drawn. Each step down costs less graphics card time for every screen update. Applies after restarting X-Plane.">?</span></span>
+          <select data-key="xphfbw.displayScale"><option value="1.5">Sharp (1.5x)</option><option value="1.25">Balanced (1.25x)</option><option value="1">Fast (1x)</option></select></div>
         <div class="field"><span class="label">DMC self test (s)</span>
           <input type="number" min="0" max="60" data-key="CONFIG_SELF_TEST_TIME"></div>
         <div class="field"><span class="label">Initial baro unit</span>
@@ -820,7 +822,7 @@ const DEFAULTS = {
   ACARS_PROVIDER: 'NONE', CONFIG_HOPPIE_USERID: '', CONFIG_SAI_LOGON_KEY: '',
   CONFIG_ONLINE_FEATURES_STATUS: 'DISABLED', CONFIG_SIMBRIDGE_ENABLED: 'AUTO ON', CONFIG_SIMBRIDGE_REMOTE: 'local',
   CONFIG_SIMBRIDGE_PORT: '8380', CONFIG_SIMBRIDGE_IP: 'localhost', CONFIG_OVERRIDE_SIMBRIEF_USERID: '', CONFIG_AUTO_SIMBRIEF_IMPORT: 'DISABLED',
-  'xphfbw.displaySafeMode': false, 'xphfbw.forceCpuRendering': false, 'xphfbw.displayFps': '60', 'xphfbw.efbBrightness': '100',
+  'xphfbw.displaySafeMode': false, 'xphfbw.forceCpuRendering': false, 'xphfbw.displayFps': '60', 'xphfbw.displayScale': '1.5', 'xphfbw.efbBrightness': '100',
   CONFIG_SELF_TEST_TIME: '12', CONFIG_INIT_BARO_UNIT: 'AUTO', CONFIG_MCDU_KB_TIMEOUT: '60',
   ISIS_BARO_UNIT_INHG: '0', ISIS_METRIC_ALTITUDE: '0', LATLON_EXT_FMT: '0', CONFIG_A380X_SHOW_ECL_SOFTKEYS: '0', FO_SYNC_EFIS_ENABLED: '0',
   EFB_PREFERRED_WEIGHT_UNIT: 'kg', CONFIG_ALIGN_TIME: 'REAL', CONFIG_BOARDING_RATE: 'REAL', REFUEL_RATE_SETTING: 'REAL',

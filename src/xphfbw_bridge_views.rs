@@ -67,13 +67,16 @@ pub fn supersample(screen_id: &str) -> f64 {
     }
 }
 
-fn screen_supersample() -> f64 {
+pub const SCREEN_SUPERSAMPLE_ENV: &str = "FBW_SCREEN_SUPERSAMPLE";
+
+pub fn screen_supersample() -> f64 {
     static SCALE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *SCALE.get_or_init(|| {
-        std::env::var("FBW_SCREEN_SUPERSAMPLE")
+        std::env::var(SCREEN_SUPERSAMPLE_ENV)
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|v| (0.5..=2.0).contains(v))
+            .or_else(|| crate::xp::system_path().map(|_| crate::app_settings::current().display_scale))
             .unwrap_or(SCREEN_SUPERSAMPLE)
     })
 }
