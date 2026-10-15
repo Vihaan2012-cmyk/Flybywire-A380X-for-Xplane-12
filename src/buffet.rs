@@ -12,15 +12,13 @@ const WING_AREA_M2: f64 = 845.0;
 const ALPHA_MAX_DEG: [f64; 6] = [11.0, 15.0, 15.0, 14.0, 13.4, 13.4];
 const STALL_ONSET_BELOW_DEG: f64 = 1.5;
 const STALL_FULL_ABOVE_DEG: f64 = 3.0;
-const MACH_BUFFET_CL: [(f64, f64); 7] = [(0.60, 1.10), (0.75, 0.88), (0.80, 0.82), (0.85, 0.73), (0.89, 0.60), (0.92, 0.42), (0.95, 0.20)];
+const MACH_BUFFET_FROM: f64 = 0.70;
+const MACH_BUFFET_CL: [(f64, f64); 7] = [(0.70, 0.95), (0.75, 0.88), (0.80, 0.82), (0.85, 0.73), (0.89, 0.60), (0.92, 0.42), (0.95, 0.20)];
 const MACH_BUFFET_SPAN_CL: f64 = 0.15;
 const Q_REF_PA: f64 = 15_000.0;
 const SPEEDBRAKE_SHARE: f64 = 0.35;
 const GEAR_SHARE: f64 = 0.3;
-const HEAD_Y_M: f64 = 0.018;
-const HEAD_X_M: f64 = 0.008;
 const HEAD_PITCH_DEG: f64 = 0.25;
-const HEAD_ROLL_DEG: f64 = 0.15;
 const FORCE_G: f64 = 0.03;
 const ATTACK_PER_S: f64 = 6.0;
 const DECAY_PER_S: f64 = 3.0;
@@ -57,6 +55,9 @@ pub fn buffet_onset_cl(mach: f64) -> f64 {
 }
 
 pub fn high_speed(mach: f64, cl: f64) -> f64 {
+    if mach < MACH_BUFFET_FROM {
+        return 0.0;
+    }
     let onset = buffet_onset_cl(mach);
     ramp(cl, onset, onset + MACH_BUFFET_SPAN_CL)
 }
@@ -89,14 +90,11 @@ struct Refs {
     tas: Option<DataRef>,
     rho: Option<DataRef>,
     mass: Option<DataRef>,
-    g_nrml: Option<DataRef>,
+    aero_lift: Option<DataRef>,
     gear: Option<DataRef>,
     paused: Option<DataRef>,
     external: Option<DataRef>,
-    head_x: Option<DataRef>,
-    head_y: Option<DataRef>,
     head_the: Option<DataRef>,
-    head_phi: Option<DataRef>,
     fnrml: Option<DataRef>,
 }
 
@@ -111,7 +109,7 @@ pub struct Buffet {
     ids: Option<Ids>,
     t: f64,
     intensity: f64,
-    applied: [f64; 4],
+    applied: [f64; 1],
 }
 
 impl Buffet {
@@ -126,14 +124,11 @@ impl Buffet {
                 tas: xplm.find("sim/flightmodel/position/true_airspeed"),
                 rho: xplm.find("sim/weather/rho"),
                 mass: xplm.find("sim/flightmodel/weight/m_total"),
-                g_nrml: xplm.find("sim/flightmodel/forces/g_nrml"),
+                aero_lift: xplm.find("sim/flightmodel/forces/fnrml_aero"),
                 gear: xplm.find("sim/flightmodel2/gear/deploy_ratio"),
                 paused: xplm.find("sim/time/paused"),
                 external: xplm.find("sim/graphics/view/view_is_external"),
-                head_x: xplm.find("sim/graphics/view/pilots_head_x"),
-                head_y: xplm.find("sim/graphics/view/pilots_head_y"),
                 head_the: xplm.find("sim/graphics/view/pilots_head_the"),
-                head_phi: xplm.find("sim/graphics/view/pilots_head_phi"),
                 fnrml: xplm.find("sim/flightmodel/forces/fnrml_plug_acf"),
             }
         });
@@ -147,7 +142,7 @@ impl Buffet {
         }
         let tas = f(r.tas);
         let q = 0.5 * f(r.rho) * tas * tas;
-        let cl = if q > 500.0 { f(r.g_nrml) * f(r.mass) * 9.80665 / (q * WING_AREA_M2) } else { 0.0 };
+        let cl = if q > 500.0 { f(r.aero_lift) / (q * WING_AREA_M2) } else { 0.0 };
         let mut gear_deploy = [0f32; 5];
         if let Some(d) = r.gear {
             xplm.get_vf(d, &mut gear_deploy);
@@ -169,7 +164,7 @@ impl Buffet {
         self.t += delta;
 
         let inside = r.external.is_some_and(|d| xplm.get_i(d) == 0);
-        let heads = [(r.head_x, HEAD_X_M, 0.0), (r.head_y, HEAD_Y_M, 3.1), (r.head_the, HEAD_PITCH_DEG, 5.9), (r.head_phi, HEAD_ROLL_DEG, 8.3)];
+        let heads = [(r.head_the, HEAD_PITCH_DEG, 5.9)];
         for (k, (d, amplitude, seed)) in heads.into_iter().enumerate() {
             let Some(d) = d else { continue };
             let want = if inside { amplitude * self.intensity * noise(self.t, seed) } else { 0.0 };
@@ -210,6 +205,14 @@ mod tests {
         assert!(high_speed(0.85, cl * 1.3) < 0.3);
         assert!(high_speed(0.85, cl * 1.6) > 0.9);
         assert!(high_speed(0.95, cl) > 0.9);
+    }
+
+    #[test]
+    fn low_speed_flight_and_the_ground_roll_never_mach_buffet() {
+        assert_eq!(high_speed(0.18, 6.0), 0.0, "take-off roll");
+        assert_eq!(high_speed(0.21, 1.4), 0.0, "heavy approach, flaps out");
+        assert_eq!(high_speed(0.69, 1.2), 0.0);
+        assert!(high_speed(0.72, 1.2) > 0.9);
     }
 
     #[test]
