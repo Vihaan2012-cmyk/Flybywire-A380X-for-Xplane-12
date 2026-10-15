@@ -847,6 +847,23 @@ pub fn register_accessor(name: &CString, types: c_int, writable: bool, a: &Acces
     (!d.is_null()).then_some(d)
 }
 
+static OWNED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+pub fn register_owned_accessor(name: &CString, types: c_int, writable: bool, a: &Accessors, refcon: *mut c_void) -> Option<DataRef> {
+    let d = register_accessor(name, types, writable, a, refcon)?;
+    if let Ok(mut owned) = OWNED.lock() {
+        owned.push(d as usize);
+    }
+    Some(d)
+}
+
+pub fn unregister_owned() {
+    let owned = OWNED.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default();
+    for d in owned {
+        unregister_accessor(d as DataRef);
+    }
+}
+
 pub fn unregister_accessor(dataref: DataRef) {
     if let Some(f) = Xplm::xplm_symbol("XPLMUnregisterDataAccessor") {
         let f = unsafe { std::mem::transmute::<*mut c_void, UnregisterAccessorFn>(f) };

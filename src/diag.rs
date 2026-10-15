@@ -1338,7 +1338,7 @@ static ACTIVE_NAME: OnceLock<std::ffi::CString> = OnceLock::new();
 pub fn register_commands(xplm: &Xplm) {
     let name = ACTIVE_NAME.get_or_init(|| std::ffi::CString::new("fbw/diag/active").unwrap_or_default());
     let accessors = crate::xp::Accessors { get_i: Some(active_dataref), set_i: None, get_f: None, set_f: None, get_d: None, set_d: None, get_b: None, set_b: None, get_vf: None };
-    let _ = crate::xp::register_accessor(name, crate::xp::DATA_TYPE_INT, false, &accessors, std::ptr::null_mut());
+    let _ = crate::xp::register_owned_accessor(name, crate::xp::DATA_TYPE_INT, false, &accessors, std::ptr::null_mut());
     for (i, (name, description)) in [
         ("fbw/diag/mark", "FlyByWire diagnostics: capture (screenshot, screens and every value)"),
         ("fbw/diag/photo_tour", "FlyByWire diagnostics: photo tour of the aircraft"),

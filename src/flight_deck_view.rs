@@ -39,7 +39,7 @@ impl FlightDeckView {
             self.registered = true;
             let name = NAME.get_or_init(|| std::ffi::CString::new("fbw/anim/eye_in_flight_deck").unwrap_or_default());
             let accessors = crate::xp::Accessors { get_f: Some(get), ..Default::default() };
-            let _ = crate::xp::register_accessor(name, crate::xp::DATA_TYPE_FLOAT, false, &accessors, std::ptr::null_mut());
+            let _ = crate::xp::register_owned_accessor(name, crate::xp::DATA_TYPE_FLOAT, false, &accessors, std::ptr::null_mut());
         }
         let external = *self.external.get_or_insert_with(|| xplm.find("sim/graphics/view/view_is_external"));
         let head = *self.head_z.get_or_insert_with(|| xplm.find("sim/graphics/view/pilots_head_z"));

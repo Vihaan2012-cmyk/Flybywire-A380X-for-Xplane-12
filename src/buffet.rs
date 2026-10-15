@@ -117,7 +117,7 @@ impl Buffet {
         let r = self.refs.get_or_insert_with(|| {
             let name = NAME.get_or_init(|| std::ffi::CString::new("fbw/anim/buffet").unwrap_or_default());
             let accessors = crate::xp::Accessors { get_f: Some(get), ..Default::default() };
-            let _ = crate::xp::register_accessor(name, crate::xp::DATA_TYPE_FLOAT, false, &accessors, std::ptr::null_mut());
+            let _ = crate::xp::register_owned_accessor(name, crate::xp::DATA_TYPE_FLOAT, false, &accessors, std::ptr::null_mut());
             Refs {
                 alpha: xplm.find("sim/flightmodel2/misc/AoA_angle_degrees"),
                 mach: xplm.find("sim/flightmodel/misc/machno"),

@@ -3185,6 +3185,7 @@ pub unsafe extern "C" fn XPluginEnable() -> c_int {
 pub unsafe extern "C" fn XPluginDisable() {
     diag::finish();
     panel::stop();
+    xp::unregister_owned();
     let xplm = &raw const XPLM;
     if let Some(xplm) = (*xplm).as_ref() {
         xplm.unregister_loop(flight_loop);

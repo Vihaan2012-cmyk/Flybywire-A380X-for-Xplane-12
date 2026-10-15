@@ -344,7 +344,7 @@ impl CabinMood {
             let names = NAMES.get_or_init(|| DATAREFS.iter().map(|n| std::ffi::CString::new(*n).unwrap_or_default()).collect());
             let accessors = crate::xp::Accessors { get_f: Some(get), ..Default::default() };
             for (i, name) in names.iter().enumerate() {
-                let _ = crate::xp::register_accessor(name, crate::xp::DATA_TYPE_FLOAT, false, &accessors, i as *mut std::ffi::c_void);
+                let _ = crate::xp::register_owned_accessor(name, crate::xp::DATA_TYPE_FLOAT, false, &accessors, i as *mut std::ffi::c_void);
             }
         }
         let r = self.refs.get_or_insert_with(|| Refs {
