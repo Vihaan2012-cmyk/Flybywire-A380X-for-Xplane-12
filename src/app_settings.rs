@@ -88,6 +88,7 @@ pub struct AppSettings {
     pub cabin_scene: u8,
     pub cabin_brightness: f64,
     pub display_scale: f64,
+    pub screens_on_integrated_gpu: bool,
 }
 
 impl Default for AppSettings {
@@ -112,6 +113,7 @@ impl Default for AppSettings {
             cabin_scene: 0,
             cabin_brightness: 1.0,
             display_scale: crate::xphfbw_bridge_views::SCREEN_SUPERSAMPLE,
+            screens_on_integrated_gpu: false,
         }
     }
 }
@@ -159,6 +161,7 @@ fn parse(map: &Map<String, Value>) -> AppSettings {
         cabin_scene: as_f64(map, "cabinScene", defaults.cabin_scene as f64).clamp(0.0, 11.0) as u8,
         cabin_brightness: as_f64(map, "cabinBrightness", defaults.cabin_brightness).clamp(0.0, 1.0),
         display_scale: as_f64(map, "displayScale", defaults.display_scale).clamp(1.0, 1.5),
+        screens_on_integrated_gpu: map.get("displayGpu").and_then(Value::as_str) == Some("integrated"),
     }
 }
 

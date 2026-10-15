@@ -2958,6 +2958,23 @@ fn start_systems(start_state: StartState, vars: &mut Vars) -> remote::Systems {
 /// generates so [`session_tag`] can hand it to whoever creates the js-bridge
 /// session with it.
 #[cfg(feature = "js")]
+fn set_gpu_preference(exe: &std::path::Path, integrated: bool) {
+    use std::os::windows::process::CommandExt;
+    const KEY: &str = r"HKCU\Software\Microsoft\DirectX\UserGpuPreferences";
+    let path = exe.to_string_lossy().replace('/', "\\");
+    let mut reg = std::process::Command::new("reg");
+    if integrated {
+        reg.args(["add", KEY, "/v", &path, "/t", "REG_SZ", "/d", "GpuPreference=1;", "/f"]);
+    } else {
+        reg.args(["delete", KEY, "/v", &path, "/f"]);
+    }
+    let ok = reg.creation_flags(0x0800_0000).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    if integrated || ok {
+        log(&format!("XPHFBW: screens drawn on the {} ({})", if integrated { "integrated graphics" } else { "graphics card" }, if ok { "set" } else { "could not set" }));
+    }
+}
+
+#[cfg(feature = "js")]
 fn start_xphfbw<V: VariableRegistry + SimulatorReaderWriter>(
     exe: &std::path::Path,
     xp_root: Option<&std::path::Path>,
@@ -2982,6 +2999,7 @@ fn start_xphfbw<V: VariableRegistry + SimulatorReaderWriter>(
         if let Some(dir) = &aircraft_dir {
             cmd.arg(format!("--aircraft={}", dir.display()));
         }
+        set_gpu_preference(&exe, crate::app_settings::current().screens_on_integrated_gpu);
         cmd.env(crate::xphfbw_bridge_views::SCREEN_SUPERSAMPLE_ENV, crate::xphfbw_bridge_views::screen_supersample().to_string());
         cmd.creation_flags(CREATE_NO_WINDOW).spawn().map(Some).map_err(|e| format!("cannot start {}: {e}", exe.display()))
     });

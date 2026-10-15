@@ -86,7 +86,8 @@ fn extra_switches() -> Vec<(String, Option<String>)> {
 }
 
 pub fn shared_textures() -> bool {
-    app_settings_json().get("sharedTextures").and_then(|v| v.as_bool()).unwrap_or(false)
+    let settings = app_settings_json();
+    settings.get("displayGpu").and_then(|v| v.as_str()) != Some("integrated") && settings.get("sharedTextures").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 fn parse_switches(text: &str) -> Vec<(String, Option<String>)> {
