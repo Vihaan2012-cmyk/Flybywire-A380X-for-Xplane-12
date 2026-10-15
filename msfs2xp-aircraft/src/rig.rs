@@ -1486,19 +1486,10 @@ pub fn main_lua(title: &str, rigs: &[&Rig], sim: Option<&SimState>) -> String {
          \x20 if not c then return end\n\
          \x20 if v ~= 0 then sasl.commandBegin(c) else sasl.commandEnd(c) end\n\
          end\n\
-         -- Array-element datarefs (\"name[index]\", e.g. generic_lights_switch[2])\n\
-         -- are NOT understood by globalPropertyf(): it looks up the literal\n\
-         -- bracketed string as the dataref name, which never matches a real\n\
-         -- one, so the lookup silently fails and XGET/XSET on it become\n\
-         -- permanent no-ops (W130, following on from W13/W110). globalProperty()\n\
-         -- (auto-typed) parses the \"[n]\" suffix itself\n\
-         -- (initProperties.lua's own `string.match(name, '(.+)%[(%d+)%]$')`)\n\
-         -- and binds that one array element, so route bracketed names there;\n\
-         -- every other name keeps the typed float accessor unchanged.\n\
          local function xref(n)\n\
          \x20 local p = XREF[n]\n\
          \x20 if p == nil then\n\
-         \x20 \x20 if string.find(n, \"%[%d+%]$\") then p = globalProperty(n) or false else p = globalPropertyf(n) or false end\n\
+         \x20 \x20 p = globalProperty(n) or false\n\
          \x20 \x20 XREF[n] = p\n\
          \x20 end\n\
          \x20 return p\n\
@@ -1975,14 +1966,10 @@ mod tests {
 
     #[test]
     fn xref_resolves_bracketed_array_element_datarefs() {
-        // W130: globalPropertyf() cannot resolve "dataref[n]" (it looks the
-        // literal bracketed string up as a whole dataref name and always
-        // fails), so xref() must route those names through the auto-typed
-        // globalProperty(), which does parse the "[n]" suffix.
         let lua = main_lua("A380X", &[], None);
         assert!(
-            lua.contains("string.find(n, \"%[%d+%]$\") then p = globalProperty(n)"),
-            "xref() must detect a bracketed array-element name and resolve it with globalProperty(), not globalPropertyf()"
+            lua.contains("  if p == nil then\n    p = globalProperty(n) or false\n"),
+            "xref() resolves every X-Plane dataref with the typed globalProperty(): array elements and int switches alike"
         );
         assert!(
             !lua.contains("local function xref(n) local p = XREF[n] if p == nil then p = globalPropertyf(n) or false XREF[n] = p end return p end"),

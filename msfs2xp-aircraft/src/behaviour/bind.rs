@@ -596,9 +596,10 @@ fn control_of(l: &Leaf) -> Option<Control> {
                 format!("1 (>{pos}) 1 (>A:LIGHT LOGO)"),
                 format!("2 (>{pos}) 0 (>A:LIGHT LOGO)"),
             ];
+            let look = if inverted(l) { format!("2 ({pos}) - 100 *") } else { format!("({pos}) 100 *") };
             Some(mk(
                 Ok(Action::States { codes, current: format!("({pos})"), knob: false, horizontal: false, momentary: None }),
-                Look::Code { code: format!("({pos}) 100 *"), length: 200.0 },
+                Look::Code { code: look, length: 200.0 },
             ))
         }
         // EXT LT NOSE TAXI/TO: FBW's own FBW_Anim_Interactions wrapper
@@ -634,7 +635,7 @@ fn control_of(l: &Leaf) -> Option<Control> {
                 _ => "A:LIGHT LANDING:2",
             };
             let codes = vec![format!("0 (>{var})"), format!("1 (>{var})")];
-            let look = if get(l, "INVERT_ANIM").is_some_and(|v| v.eq_ignore_ascii_case("true")) { format!("1 ({var}) - 100 *") } else { format!("({var}) 100 *") };
+            let look = if inverted(l) { format!("1 ({var}) - 100 *") } else { format!("({var}) 100 *") };
             Some(mk(
                 Ok(Action::States { codes, current: format!("({var})"), knob: false, horizontal: false, momentary: None }),
                 Look::Code { code: look, length: 100.0 },
@@ -646,6 +647,10 @@ fn control_of(l: &Leaf) -> Option<Control> {
         }
         _ => None,
     }
+}
+
+fn inverted(l: &Leaf) -> bool {
+    get(l, "INVERT_ANIM").is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
 }
 
 /// Anim-only calls, for a control's looks when its interaction gives none.
