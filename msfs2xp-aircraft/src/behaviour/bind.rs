@@ -343,7 +343,7 @@ fn control_of(l: &Leaf) -> Option<Control> {
         .unwrap_or_else(|| anim.clone());
     let mk = |action: Result<Action, String>, look: Look| Control { anim: anim.clone(), node: node.clone(), template: t.to_string(), chain: l.chain.clone(), action, look };
     let code = |k: &str| nonempty(l, k).map(str::to_string);
-    let anim_code = || code("ANIM_CODE").map(|c| Look::Code { code: c, length: num(l, "ANIM_LENGTH").unwrap_or(100.0) }).unwrap_or(Look::None);
+    let anim_code = || code("ANIM_CODE").map(|c| Look::Code { code: anim_code_fed_back(l, &c), length: num(l, "ANIM_LENGTH").unwrap_or(100.0) }).unwrap_or(Look::None);
     let click = |press: Option<String>, release: Option<String>| match press.or_else(|| release.clone()) {
         Some(p) => Ok(Action::Click { press: guarded(l, p), release }),
         None => Err("no click code".to_string()),
@@ -653,12 +653,25 @@ fn inverted(l: &Leaf) -> bool {
     get(l, "INVERT_ANIM").is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
 }
 
+fn anim_code_fed_back(l: &Leaf, code: &str) -> String {
+    if !code.contains("O:AnimCode") {
+        return code.to_string();
+    }
+    let body = match (nonempty(l, "FAILURE"), nonempty(l, "FAILURE_CODE")) {
+        (Some(working), Some(failed)) => {
+            format!("{} if{{ {code} }} els{{ {failed} }}", working.replace("A:CIRCUIT ON:", "A:CIRCUIT SWITCH ON:"))
+        }
+        _ => code.to_string(),
+    };
+    format!("{body} (>O:AnimCode) (O:AnimCode)")
+}
+
 /// Anim-only calls, for a control's looks when its interaction gives none.
 fn look_of(l: &Leaf) -> Option<(String, Look)> {
     match l.template.as_str() {
         "ASOBO_GT_Anim_Code" | "ASOBO_GT_Anim" => {
             let anim = nonempty(l, "ANIM_NAME")?.to_string();
-            let code = nonempty(l, "ANIM_CODE")?.to_string();
+            let code = anim_code_fed_back(l, nonempty(l, "ANIM_CODE")?);
             Some((anim, Look::Code { code, length: num(l, "ANIM_LENGTH").unwrap_or(100.0) }))
         }
         _ => None,

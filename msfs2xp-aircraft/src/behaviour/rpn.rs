@@ -139,6 +139,8 @@ pub fn unit_scale(kind: &str, name: &str, unit: &str) -> f64 {
     let n = name.trim().to_ascii_uppercase();
     if kind == "A" && n.starts_with("LIGHT POTENTIOMETER") && u == "percent" {
         100.0
+    } else if kind == "A" && n.starts_with("CIRCUIT POWER SETTING") && u == "percent over 100" {
+        0.01
     } else {
         1.0
     }

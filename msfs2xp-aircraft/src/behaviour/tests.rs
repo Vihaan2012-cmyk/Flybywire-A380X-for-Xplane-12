@@ -420,6 +420,11 @@ fn wiper_blade_animation_becomes_a_mirror_of_the_knobs_power_setting() {
     // mirror instead of being dropped.
     let (_, lua) = r.mirrors.iter().find(|(a, _)| a == "handling_wiper_left").unwrap_or_else(|| panic!("no mirror for the wiper blade: {:?}", r.mirrors));
     assert!(lua.contains("\"fbw/CIRCUIT_POWER_SETTING_141\""), "{lua}");
+{lua}
+LUA-END");
+    assert!(lua.contains("\"fbw/CIRCUIT_SWITCH_ON_141\""), "the blade parks through FAILURE_CODE with the circuit off: {lua}");
+    assert!(lua.contains("LV[\"handling_wiper_left/O:AnimCode\"] ="), "the sweep position carries over to the next frame: {lua}");
+    assert!(lua.contains("rd(\"fbw/CIRCUIT_POWER_SETTING_141\") * 0.01"), "the knob stores percent, the blade reads percent over 100: {lua}");
 }
 
 /// Run a bound control's MSFS code on a state, as the Lua does.
