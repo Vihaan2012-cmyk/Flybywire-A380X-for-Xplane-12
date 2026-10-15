@@ -930,3 +930,13 @@ fn right_clicks_on_screens_without_a_keyboard_go_to_x_planes_mouse_look() {
     let pfd = SCREENS.iter().position(|s| s.id == "SCREEN_DU_PFDL").unwrap();
     assert!(!right_click_is_ours(pfd));
 }
+
+#[test]
+fn a_second_right_press_from_the_new_popup_does_not_close_it() {
+    use super::toggle_allowed;
+    use std::time::{Duration, Instant};
+    let t = Instant::now();
+    assert!(toggle_allowed(None, t));
+    assert!(!toggle_allowed(Some(t), t + Duration::from_millis(20)));
+    assert!(toggle_allowed(Some(t), t + Duration::from_millis(600)));
+}

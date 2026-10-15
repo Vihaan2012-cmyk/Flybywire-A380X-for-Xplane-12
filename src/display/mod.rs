@@ -88,6 +88,7 @@ struct Screen {
     redraw_key: u64,
     redrawn_at: Option<std::time::Instant>,
     window: popout::Watch,
+    toggled_at: Option<std::time::Instant>,
 }
 
 impl Screen {
@@ -484,6 +485,7 @@ impl Displays {
                 redraw_key: 0,
                 redrawn_at: None,
                 window: popout::Watch::default(),
+                toggled_at: None,
             })
             .collect();
         Self {
@@ -990,6 +992,11 @@ impl Displays {
             return;
         }
         let id = self.screens[index].def.id;
+        let now = std::time::Instant::now();
+        if !toggle_allowed(self.screens[index].toggled_at, now) {
+            return;
+        }
+        self.screens[index].toggled_at = Some(now);
         unsafe {
             if (api.has_keyboard_focus)(handle) != 0 {
                 api.release_keyboard_focus(handle);
@@ -1756,6 +1763,10 @@ unsafe extern "C" fn right_touch_callback(x: c_int, y: c_int, status: c_int, ref
     }
     let _ = std::panic::catch_unwind(|| with_from_callback(|d| d.mouse(index, x, y, status, 2)));
     1
+}
+
+pub(crate) fn toggle_allowed(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    last.is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_millis(400))
 }
 
 pub(crate) fn right_click_is_ours(index: usize) -> bool {
