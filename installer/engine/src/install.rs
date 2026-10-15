@@ -322,6 +322,31 @@ pub const FULL_TEXTURES: u32 = 4096;
 pub const PACK_4K: &str = "textures-4k";
 pub const PACK_8K: &str = "textures-8k";
 
+pub fn pack_files(repo: &str, latest: &Release, component: &str, fetch: impl Fn(&str) -> Result<String, String>) -> Result<Vec<ReleaseFile>, String> {
+    let own: Vec<ReleaseFile> = latest.files.iter().filter(|f| f.component == component).cloned().collect();
+    if !own.is_empty() {
+        return Ok(own);
+    }
+    for entry in latest.chain.iter().rev().filter(|e| e.version != latest.version) {
+        let url = format!("https://github.com/{repo}/releases/download/v{}/manifest.json", entry.version);
+        let Ok(text) = fetch(&url) else { continue };
+        let Ok(manifest) = serde_json::from_str::<Manifest>(&text) else { continue };
+        let found: Vec<ReleaseFile> = manifest
+            .files
+            .into_iter()
+            .filter(|f| f.component == component)
+            .map(|mut f| {
+                f.url = format!("https://github.com/{repo}/releases/download/v{}/{}", entry.version, f.name);
+                f
+            })
+            .collect();
+        if !found.is_empty() {
+            return Ok(found);
+        }
+    }
+    Ok(Vec::new())
+}
+
 pub fn packs_for(textures: u32) -> &'static [&'static str] {
     match textures {
         t if t > FULL_TEXTURES => &[PACK_4K, PACK_8K],
@@ -454,11 +479,10 @@ fn work(a: &Answers, ctx: &Ctx) -> Result<String, String> {
     let (mut wipe, mut first) = plan(&latest.chain, before.as_deref(), a.clean);
     let aircraft = a.xplane.join(AIRCRAFT_DIR);
     let work_root = std::env::temp_dir().join(format!("fbw-a380x-xp-{}", latest.version));
-    let pack: Vec<ReleaseFile> = packs_for(textures)
-        .iter()
-        .flat_map(|component| latest.files.iter().filter(move |f| f.component == *component))
-        .cloned()
-        .collect();
+    let mut pack: Vec<ReleaseFile> = Vec::new();
+    for component in packs_for(textures) {
+        pack.extend(pack_files(&a.repo, &latest, component, |url| github_get(url)?.into_string().map_err(|e| e.to_string()))?);
+    }
     if textures > FULL_TEXTURES && !pack.iter().any(|f| f.component == PACK_8K) {
         return Err("This release has no 8K texture pack yet. Choose the 4K or 2K version.".into());
     }
@@ -1490,6 +1514,28 @@ mod tests {
 
     fn short(v: &str) -> String {
         hex(&Sha256::digest(v.as_bytes()))[..8].to_string()
+    }
+
+    #[test]
+    fn a_patch_release_takes_its_texture_packs_from_the_newest_release_that_has_them() {
+        let file = |name: &str, component: &str| ReleaseFile { name: name.into(), size: 1, sha256: "ab".into(), component: component.into(), url: String::new() };
+        let entry = |v: &str| ChainEntry { version: v.into(), kind: "patch".into(), files: vec![file("a.zip", "aircraft")], deleted: Vec::new() };
+        let latest = Release { version: "0.0.4".into(), notes: String::new(), files: vec![file("p.zip", "aircraft")], chain: vec![entry("0.0.1"), entry("0.0.2"), entry("0.0.4")] };
+        let fetched = std::cell::RefCell::new(Vec::new());
+        let fetch = |url: &str| {
+            fetched.borrow_mut().push(url.to_owned());
+            if url.contains("/v0.0.1/") {
+                Ok(r#"{"version":"0.0.1","files":[{"name":"t8-part1.zip","size":5,"sha256":"cd","component":"textures-8k"},{"name":"t4-part1.zip","size":5,"sha256":"ef","component":"textures-4k"}]}"#.to_owned())
+            } else {
+                Ok(r#"{"version":"0.0.2","files":[{"name":"p.zip","size":5,"sha256":"cd","component":"aircraft"}]}"#.to_owned())
+            }
+        };
+        let packs = pack_files("me/repo", &latest, PACK_8K, fetch).unwrap();
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].url, "https://github.com/me/repo/releases/download/v0.0.1/t8-part1.zip");
+        assert_eq!(*fetched.borrow(), ["https://github.com/me/repo/releases/download/v0.0.2/manifest.json", "https://github.com/me/repo/releases/download/v0.0.1/manifest.json"]);
+        let own = Release { files: vec![file("x.zip", PACK_4K)], ..latest };
+        assert_eq!(pack_files("me/repo", &own, PACK_4K, |_| Err("no".into())).unwrap()[0].name, "x.zip");
     }
 
     #[test]

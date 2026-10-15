@@ -169,12 +169,20 @@ PART_LIMIT = 250 * 1024 * 1024
 
 
 def files_to_ship(src: Path):
+    stored = src / "objects" / "cabin_on"
+    stripped = src / "objects" / "cabin_off"
+    cabin = {p.name for p in stripped.iterdir()} if stripped.is_dir() else set()
     for dirpath, _, files in os.walk(src):
         for name in sorted(files):
             path = Path(dirpath) / name
             rel = path.relative_to(src).as_posix()
-            if not excluded(rel):
-                yield path, f"aircraft/{rel}"
+            if excluded(rel):
+                continue
+            if name in cabin and rel == f"objects/cabin_on/{name}":
+                continue
+            if name in cabin and rel == f"objects/{name}" and (stored / name).exists():
+                path = stored / name
+            yield path, f"aircraft/{rel}"
 
 
 def tree_of(src: Path, extra: dict[str, bytes]) -> dict:
