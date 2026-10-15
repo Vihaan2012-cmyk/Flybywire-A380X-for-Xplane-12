@@ -65,6 +65,14 @@ cp "$PANEL/panel.cfg" "$PANEL/panel.xml" "$AIRCRAFT/panel/"
 # ISIS 2 is our Standby Navigation Display (html_ui/, copied after FlyByWire's).
 sed -i 's|^;htmlgauge00=A380X/ISISlegacy/isislegacy.html, 0,0,512,512|htmlgauge00=A380X/SND/snd.html, 0,0,512,512|' "$AIRCRAFT/panel/panel.cfg"
 grep -q '^htmlgauge00=A380X/SND/snd.html' "$AIRCRAFT/panel/panel.cfg" || { echo "install.sh: FAIL: panel.cfg has no ISIS 2 line to point at the SND" >&2; exit 1; }
+grep -q 'A380X/IFE/ife.html' "$AIRCRAFT/panel/panel.cfg" || printf '
+[VCockpit25]
+size_mm=512,256
+pixel_size=512,256
+texture=$SCREEN_IFE
+
+htmlgauge00=A380X/IFE/ife.html, 0,0,512,256
+' >> "$AIRCRAFT/panel/panel.cfg"
 if [ ! -d "$BASE_BUILD" ]; then
   echo "install.sh: FAIL: FlyByWire's built instruments not found at $BASE_BUILD -- build them first (docs/js-build.md: npm run build-a380x:instruments) before installing." >&2
   exit 1

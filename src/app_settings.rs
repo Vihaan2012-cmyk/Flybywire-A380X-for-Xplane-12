@@ -85,6 +85,8 @@ pub struct AppSettings {
     pub display_sheen: f64,
     pub roll_steering: bool,
     pub buffet: bool,
+    pub cabin_scene: u8,
+    pub cabin_brightness: f64,
 }
 
 impl Default for AppSettings {
@@ -106,6 +108,8 @@ impl Default for AppSettings {
             display_sheen: 0.5,
             roll_steering: false,
             buffet: true,
+            cabin_scene: 0,
+            cabin_brightness: 1.0,
         }
     }
 }
@@ -150,6 +154,8 @@ fn parse(map: &Map<String, Value>) -> AppSettings {
         display_sheen: as_f64(map, "displaySheen", defaults.display_sheen).clamp(0.0, 1.0),
         roll_steering: as_bool(map, "rollSteering", defaults.roll_steering),
         buffet: as_bool(map, "buffet", defaults.buffet),
+        cabin_scene: as_f64(map, "cabinScene", defaults.cabin_scene as f64).clamp(0.0, 11.0) as u8,
+        cabin_brightness: as_f64(map, "cabinBrightness", defaults.cabin_brightness).clamp(0.0, 1.0),
     }
 }
 

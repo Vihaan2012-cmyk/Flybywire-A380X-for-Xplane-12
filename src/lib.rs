@@ -69,6 +69,7 @@ mod lights;
 // low-pressure caution and mask deployment.
 mod oxygen;
 mod buffet;
+mod cabin_mood;
 mod cabin_option;
 mod flight_deck_view;
 mod panel;
@@ -1148,6 +1149,7 @@ struct Plugin {
     oxygen: oxygen::Oxygen,
     // [slot fields: cabin option] The EFB's "Passenger cabin" switch.
     buffet: buffet::Buffet,
+    cabin_mood: cabin_mood::CabinMood,
     cabin_option: cabin_option::CabinOption,
     flight_deck_view: flight_deck_view::FlightDeckView,
     // [slot fields: flight_controls] X-Plane's control surfaces, driven by
@@ -1748,6 +1750,7 @@ impl Plugin {
             // [slot init: oxygen]
             oxygen,
             buffet: buffet::Buffet::default(),
+            cabin_mood: cabin_mood::CabinMood::default(),
             cabin_option: cabin_option::CabinOption::default(),
             flight_deck_view: flight_deck_view::FlightDeckView::default(),
             // [slot init: flight_controls]
@@ -2324,6 +2327,7 @@ impl Plugin {
             self.apply_deep_xp_consequences();
         }
         self.buffet.update(&mut self.vars, xplm, delta, crate::app_settings::current().buffet);
+        self.cabin_mood.update(&mut self.vars, xplm, delta);
         crate::perf::lap("tick-after-systems: correctness");
         // [slot tick-after-systems: correctness] FlyByWire's post-tick aspects.
         self.correctness.after_previous_tick(&mut self.vars);

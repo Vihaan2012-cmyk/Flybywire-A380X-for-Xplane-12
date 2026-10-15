@@ -121,6 +121,7 @@ pub static SCREENS: &[ScreenDef] = &[
         dimming: &[full(1333, 1000, 79, &[AC_ESS, DC_ESS_IN_FLIGHT, DC1])],
     },
     ScreenDef { id: "SCREEN_ISIS_2", title: "A380X ISIS 2", width: 512, height: 512, dimming: &[] },
+    ScreenDef { id: "SCREEN_IFE", title: "A380X cabin IFE", width: 512, height: 256, dimming: &[] },
 ];
 
 /// A screen by the id a stream names it with: case and a leading `$` do
@@ -165,7 +166,7 @@ mod tests {
         let want = [
             "BAT", "Clock", "FCU", "RTPI", "SCREEN_DU_EWD", "SCREEN_DU_MFD", "SCREEN_DU_NDL", "SCREEN_DU_NDR", "SCREEN_DU_PFDL",
             "SCREEN_DU_PFDR", "SCREEN_DU_RMP_1", "SCREEN_DU_RMP_2", "SCREEN_DU_RMP_3", "SCREEN_DU_SD", "SCREEN_EFB", "SCREEN_ISIS_1",
-            "SCREEN_ISIS_2", "SCREEN_OIT_LEFT", "SCREEN_OIT_RIGHT",
+            "SCREEN_IFE", "SCREEN_ISIS_2", "SCREEN_OIT_LEFT", "SCREEN_OIT_RIGHT",
         ];
         assert_eq!(ids, want);
         for s in SCREENS {

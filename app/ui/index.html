@@ -526,6 +526,10 @@
       <label class="row"><input type="checkbox" data-key="REALISTIC_TILLER_ENABLED" data-bool="1,0"><span class="label">Realistic tiller</span></label>
       <label class="row"><input type="checkbox" data-key="xphfbw.rollSteering"><span class="label">Roll steers on the ground</span><span class="help" title="For sticks without a twist grip or rudder pedals: on the ground, moving the stick left or right also moves the rudder and the nosewheel, as the pedals would. It fades out over two seconds after lift-off and back in after touchdown. A twist grip or pedals still work alongside it.">?</span></label>
       <label class="row"><input type="checkbox" data-key="xphfbw.buffet"><span class="label">Buffet</span><span class="help" title="Shake the view and the airframe in stall, high-speed (Mach) buffet, and with the speedbrakes or landing gear out at speed.">?</span></label>
+      <div class="grid2">
+        <div class="field"><span class="label">Cabin lighting</span><select data-key="xphfbw.cabinScene"><option value="0">Automatic</option><option value="1">Boarding</option><option value="2">Taxi</option><option value="3">Takeoff</option><option value="4">Climb</option><option value="5">Cruise</option><option value="6">Meal</option><option value="7">Night</option><option value="8">Sunrise</option><option value="9">Descent</option><option value="10">Landing</option><option value="11">Arrival</option></select></div>
+        <div class="field"><span class="label">Cabin brightness</span><input type="range" min="0" max="1" step="0.05" data-key="xphfbw.cabinBrightness"></div>
+      </div>
       <label class="row"><input type="checkbox" data-key="PUSHBACK_USE_CONTROLLER_INPUT" data-bool="1,0"><span class="label">Pushback with controller input</span></label>
       <label class="row"><input type="checkbox" data-key="RMP_VHF_SPACING_25KHZ" data-bool="1,0"><span class="label">RMP 25 kHz spacing</span></label>
       <label class="row"><input type="checkbox" data-key="RADIO_RECEIVER_USAGE_ENABLED" data-bool="1,0"><span class="label">Radio receiver usage</span></label>
@@ -826,7 +830,7 @@ const DEFAULTS = {
   SOUND_ANNOUNCEMENTS_ENABLED: '1', SOUND_PTU_AUDIBLE_COCKPIT: '0', SOUND_INTERIOR_ENGINE: '0', SOUND_INTERIOR_WIND: '0', SOUND_EXTERIOR_MASTER: '0', SOUND_LEVEL_MASTER: '100', SOUND_LEVEL_ENGINES: '100', SOUND_LEVEL_AIRFRAME: '100', SOUND_LEVEL_WEATHER: '100', SOUND_LEVEL_COCKPIT: '100', SOUND_LEVEL_ATC: '0', SOUND_LEVEL_CABIN: '100', SOUND_LEVEL_FBW: '100',
   'xphfbw.systemsOutOfProcess': true, 'xphfbw.coldStartGroundPower': true, 'xphfbw.randomFailures': false, 'xphfbw.failureRate': '1',
   'xphfbw.persistence': true, 'xphfbw.stateDumps': true, 'xphfbw.stateDumpFrames': '200', 'xphfbw.stateDumpKeep': '60',
-  'xphfbw.cabinVisible': true, 'xphfbw.walkaround': false, 'xphfbw.rollSteering': false, 'xphfbw.buffet': true,
+  'xphfbw.cabinVisible': true, 'xphfbw.walkaround': false, 'xphfbw.rollSteering': false, 'xphfbw.buffet': true, 'xphfbw.cabinScene': '0', 'xphfbw.cabinBrightness': '1',
 };
 
 let settings = {};

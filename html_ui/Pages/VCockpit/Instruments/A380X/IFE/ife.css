@@ -1,0 +1,9 @@
+#IFE_ROOT,
+#IFE_CANVAS {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 512px;
+  height: 256px;
+  background: #000000;
+}

@@ -80,5 +80,9 @@ supported by FlyByWire Simulations, Microsoft, Laminar Research or Airbus.
    The loading screen backgrounds (plugins/fbw_a380_systems/loading) are
    screenshots by a3fatty, used with permission.
 
-11. Trademarks
+11. Map data
+   The cabin IFE moving map draws land outlines from Natural Earth
+   (naturalearthdata.com), which is in the public domain.
+
+12. Trademarks
    Airbus and A380 are Airbus trademarks, used only to identify the aircraft.
