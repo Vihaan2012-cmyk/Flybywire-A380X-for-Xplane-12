@@ -844,8 +844,8 @@ fn bound_manip(b: &bind::Binding, san: &str, tip: &str) -> String {
             let (lo, hi) = (v0.min(*v1), v0.max(*v1));
             let (kind, cursor) = match (knob, horizontal) {
                 (true, _) => ("axis_knob", "rotate_medium"),
-                (false, true) => ("axis_switch_left_right", "hand"),
-                (false, false) => ("axis_switch_up_down", "hand"),
+                (false, true) => ("axis_switch_left_right", "left_right"),
+                (false, false) => ("axis_switch_up_down", "up_down"),
             };
             format!("ATTR_manip_{kind} {cursor} {} {} {s} {s} {dref} {tip}\nATTR_manip_wheel {s}", n(lo), n(hi), s = n(*step))
         }
@@ -857,8 +857,8 @@ fn bound_manip(b: &bind::Binding, san: &str, tip: &str) -> String {
         Click::Script(sc) if sc.repeat.is_some() && sc.up.is_some() => {
             let (kind, cursor) = match (sc.knob, sc.horizontal) {
                 (true, _) => ("axis_knob", "rotate_medium"),
-                (false, true) => ("axis_switch_left_right", "hand"),
-                (false, false) => ("axis_switch_up_down", "hand"),
+                (false, true) => ("axis_switch_left_right", "left_right"),
+                (false, false) => ("axis_switch_up_down", "up_down"),
             };
             format!("ATTR_manip_{kind} {cursor} -1 1 1 1 fbw/cockpit/{san}_hold {tip}\nATTR_manip_wheel 0.5")
         }
@@ -866,8 +866,8 @@ fn bound_manip(b: &bind::Binding, san: &str, tip: &str) -> String {
             if sc.up.is_some() {
                 let (kind, cursor) = match (sc.knob, sc.horizontal) {
                     (true, _) => ("command_knob", "rotate_medium"),
-                    (false, true) => ("command_switch_left_right", "hand"),
-                    (false, false) => ("command_switch_up_down", "hand"),
+                    (false, true) => ("command_switch_left_right", "left_right"),
+                    (false, false) => ("command_switch_up_down", "up_down"),
                 };
                 format!("ATTR_manip_{kind} {cursor} fbw/cockpit/{san}_up fbw/cockpit/{san}_down {tip}")
             } else {
