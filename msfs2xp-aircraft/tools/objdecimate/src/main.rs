@@ -83,6 +83,7 @@ fn decimate(obj: &Obj, levels: &[Level]) -> (Vec<u32>, Vec<String>) {
     for lv in levels {
         commands.push(format!("ATTR_LOD {} {}", lv.near, lv.far));
         let (mut before, mut after) = (0usize, 0usize);
+        let (mut worst, mut weighted) = (0f32, 0f64);
         for line in &obj.commands {
             let t = line.trim_start();
             if t.starts_with("ATTR_LOD") {
@@ -111,17 +112,21 @@ fn decimate(obj: &Obj, levels: &[Level]) -> (Vec<u32>, Vec<String>) {
             };
             before += count / 3;
             after += simplified.len() / 3;
+            worst = worst.max(error);
+            weighted += error as f64 * (count / 3) as f64;
             let indent = &line[..line.len() - t.len()];
             commands.push(format!("{indent}TRIS {} {}", new_indices.len(), simplified.len()));
             new_indices.extend_from_slice(&simplified);
         }
         eprintln!(
-            "LOD {}-{} m, {} {} m: {before} -> {after} triangles ({:.1}%)",
+            "LOD {}-{} m, {} {} m: {before} -> {after} triangles ({:.1}%), error max {:.4} m, mean {:.4} m",
             lv.near,
             lv.far,
             lv.mode,
             lv.max_error,
-            100. * after as f64 / before.max(1) as f64
+            100. * after as f64 / before.max(1) as f64,
+            worst,
+            weighted / before.max(1) as f64
         );
     }
     (new_indices, commands)
