@@ -31,7 +31,7 @@
   'use strict';
 
   const coherentFlex = document.createElement('style');
-  coherentFlex.textContent = 'html { color: #fff; } *, *::before, *::after { min-height: 0; }';
+  coherentFlex.textContent = 'html { color: #fff; } *, *::before, *::after { min-height: 0; box-sizing: border-box; }';
   (document.head || document.documentElement).appendChild(coherentFlex);
 
   const native = window.__xphfbw;
@@ -91,6 +91,21 @@
   // variables unset. Nothing else of a real `process` (argv, platform,
   // version, ...) is provided or should be added here.
   window.process = { env: {} };
+
+  if (!window.KeyCode) {
+    const codes = { KEY_BACK_SPACE: 8, KEY_TAB: 9, KEY_ENTER: 13, KEY_RETURN: 13, KEY_SHIFT: 16, KEY_CONTROL: 17, KEY_ALT: 18, KEY_ESCAPE: 27, KEY_SPACE: 32, KEY_PAGE_UP: 33, KEY_PAGE_DOWN: 34, KEY_END: 35, KEY_HOME: 36, KEY_LEFT: 37, KEY_UP: 38, KEY_RIGHT: 39, KEY_DOWN: 40, KEY_INSERT: 45, KEY_DELETE: 46 };
+    for (let i = 0; i <= 9; i++) {
+      codes[`KEY_${i}`] = 48 + i;
+      codes[`KEY_NUMPAD${i}`] = 96 + i;
+    }
+    for (let i = 0; i < 26; i++) {
+      codes[`KEY_${String.fromCharCode(65 + i)}`] = 65 + i;
+    }
+    for (let i = 1; i <= 12; i++) {
+      codes[`KEY_F${i}`] = 111 + i;
+    }
+    window.KeyCode = Object.freeze(codes);
+  }
 
   // Coherent GT draws no scrollbars and a cockpit screen never scrolls;
   // Chromium would draw one down the edge of any page taller than its view.
