@@ -84,5 +84,12 @@ supported by FlyByWire Simulations, Microsoft, Laminar Research or Airbus.
    The cabin IFE moving map draws land outlines from Natural Earth
    (naturalearthdata.com), which is in the public domain.
 
-12. Trademarks
+12. openSAM
+   The aircraft bundles its own copy of openSAM (https://github.com/hotbso/openSAM)
+   as an aircraft-scoped plugin (plugins/openSAM), configured to dock this
+   aircraft's three doors. openSAM is GNU Lesser General Public License
+   v2.1; this copy is modified for three-door jetway assignment. Source
+   for the modified copy: vendor/openSAM-a380x-fork in this repository.
+
+13. Trademarks
    Airbus and A380 are Airbus trademarks, used only to identify the aircraft.

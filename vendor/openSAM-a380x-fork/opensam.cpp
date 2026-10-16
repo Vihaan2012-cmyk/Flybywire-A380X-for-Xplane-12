@@ -1,0 +1,955 @@
+//
+//    openSAM: manage DGS and jetways for X Plane
+//
+//    Copyright (C) 2024, 2025, 2026  Holger Teutsch
+//
+//    This library is free software; you can redistribute it and/or
+//    modify it under the terms of the GNU Lesser General Public
+//    License as published by the Free Software Foundation; either
+//    version 2.1 of the License, or (at your option) any later version.
+//
+//    This library is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+//    Lesser General Public License for more details.
+//
+//    You should have received a copy of the GNU Lesser General Public
+//    License along with this library; if not, write to the Free Software
+//    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
+//    USA
+//
+
+#include <cstdio>
+#include <cstring>
+#include <cassert>
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <fstream>
+#include <filesystem>
+
+#include "XPLMPlugin.h"
+#include "XPLMProcessing.h"
+#include "XPLMDataAccess.h"
+#include "XPLMMenus.h"
+
+#include "opensam.h"
+#include "samjw.h"
+#include "jwctrl.h"
+#include "os_anim.h"
+#include "plane.h"
+#include "my_plane.h"
+#include "mpadapter.h"
+#include "os_airport.h"
+#include "autodgs_airport.h"
+#include "dgs/plane.h"
+#include "sam1_dgs.h"
+#include "scenery.h"
+#include "simbrief.h"
+#include "time_code_block.h"
+#include "flat_earth_math.h"
+#include "seasons.h"
+#include "ui.h"
+#include "adgs_editor.h"
+#include "jw_editor.h"
+#include "http_get.h"
+#include "log_msg.h"
+
+#include "version.h"
+
+namespace fem = flat_earth_math;
+
+//
+// C++ style:
+// This code loosely follows Google's style: https://google.github.io/styleguide/cppguide.html
+//
+//------------------------------------------------------------------------------------
+//
+// On the various coordinate systems and angles:
+//
+// Objects are drawn in a +x east , -z true north, +y up system (OpenGL standard).
+// Headings (hdgt) are measured from -z (=true north) right turning.
+//
+// Imagine looking from below to the sky you have the more traditional 'math' view
+// +x right, +z up, angles left turning from the +x axis to the +z axis.
+//
+// So if alpha is a 'math' angle we have
+//
+// hdgt = 90° + alpha.
+//
+// If we have a coordinate system that is rotated by an angle of psi we have
+//
+// hdgt\rot = hdgt - psi
+//
+// When it comes to object rotations or longitudes we use relative angles in (-180, +180]
+// This is done by RA().
+//
+// So first of all we rotate and shift everything into the 'plane' frame i.e.
+// acf nose pointing up to -z, door at (0, some z, some y), jetways to the left somewhere at -x and some z.
+//
+// These values are kept in the "active_jw" object.
+//
+// Then we do our math in the plane frame and transform everything back to the jetway frame
+// to get the rotation angles.
+//
+// The datarefs for jetway animation are:
+//  rotation1       tunnel relative to the placed object
+//  rotation2       cabin relative to the tunnel
+//  rotation3       tunnel relative to horizontal (= x-z) plane
+//  wheelrotatec    wheel base relative to tunnel around the y-axis
+//  wheelrotater    right wheel
+//  wheelrotatel    left wheel
+//  wheel           delta height in m of tunnel over wheelbase relative to horizontal plane.
+//
+// Likewise for DGS we xform everything into the stand frame and go from there.
+//
+///
+
+const char* log_msg_prefix = "opensam: ";
+
+// no multiplayer processing if y_agl > limit
+constexpr float kMultiPlayerHeightLimit = 1000.0f;
+
+std::string xp_dir;
+std::string sys_cfg_dir;    // <base_dir>/cfg
+std::string user_cfg_dir;   // <xp_dir>/Output/openSAM
+std::string tmp_dir;
+
+static std::string pref_path;
+
+static XPLMMenuID os_menu;
+static int toggle_mp_item;
+static const char* toggle_mp_support_txt = "Toggle Multiplayer Support";
+
+static int airport_loaded;
+static int sam_library_installed;   // int, is served to a dataref accessor, 0 or 1
+
+XPLMDataRef draw_object_x_dr, draw_object_y_dr, draw_object_z_dr, draw_object_psi_dr,
+    total_running_time_sec_dr, vr_enabled_dr, plane_x_dr, plane_y_dr, plane_z_dr, plane_elevation_dr,
+    plane_true_psi_dr, parkbrake_dr, sin_wave_dr, acf_icao_dr, acf_cg_y_dr, acf_cg_z_dr, acf_gear_z_dr,
+    eng_running_dr, beacon_dr, is_helicopter_dr;
+
+static XPLMDataRef lat_ref_dr, lon_ref_dr;
+XPLMCommandRef toggle_jetway_cmdr, activate_cmdr, toggle_ui_cmdr;
+
+static float lat_ref{-1000}, lon_ref{-1000};
+unsigned int ref_gen{1};
+
+static int pref_auto_mode;
+
+float now;             // current timestamp
+std::string base_dir;  // base directory of openSAM
+
+static std::unique_ptr<MpAdapter> mp_adapter;
+
+unsigned long long stat_jw_acc_called, stat_anim_acc_called,
+    stat_auto_drf_called, stat_jw_cache_hit, stat_sc_last;
+
+// 'emulate' a connection status dataref for XP12's jetway, toggled by intercepting XP12's standard cmd
+static bool xp12_jw_connected;
+static float xp12_jw_connected_ts;
+
+XPLMProbeInfo_t probeinfo;
+XPLMProbeRef probe_ref;
+static fem::LLPos plane_pos, plane_pos_prev;
+
+bool error_disabled;
+static bool delayed_init_done;
+
+static float FlightLoopCb(float inElapsedSinceLastCall, [[maybe_unused]] float inElapsedTimeSinceLastFlightLoop, [[maybe_unused]] int inCounter,
+                          [[maybe_unused]] void* inRefcon);
+
+static XPLMCreateFlightLoop_t flight_loop_ctx = {sizeof(XPLMCreateFlightLoop_t),
+                                                 xplm_FlightLoop_Phase_BeforeFlightModel, FlightLoopCb, nullptr};
+
+static XPLMFlightLoopID flight_loop_id;
+
+static bool pending_plane_loaded_cb = false;  // delayed init
+
+void SavePrefs() {
+    FILE* f = fopen(pref_path.c_str(), "w");
+    if (NULL == f)
+        return;
+    pref_auto_mode = my_plane->auto_mode();
+
+    // encode southern hemisphere with negative season
+    int s = Seasons::nh ? Seasons::season : -Seasons::season;
+    fprintf(f, "%d,%d,%d,%d,%d,%d,%d,%d", Seasons::auto_season, s, pref_auto_mode, default_vdgs_type, ui_left, ui_top,
+            ui_right, ui_bottom);
+    fclose(f);
+
+    LogMsg(
+        "Saving prefs auto_season: %d, season: %d, auto_select_jws: %d, default_vdgs_type: %d, ui:(%d, %d, %d, %d)",
+        Seasons::auto_season, s, pref_auto_mode, default_vdgs_type, ui_left, ui_top, ui_right, ui_bottom);
+}
+
+static void LoadPrefs() {
+    // set some reasonable default values in case there is no pref file
+    Seasons::nh = 1;
+    Seasons::auto_season = 1;
+    Seasons::season = 1;
+    pref_auto_mode = 1;
+
+    FILE* f = fopen(pref_path.c_str(), "r");
+    if (NULL == f)
+        return;
+
+    [[maybe_unused]] int n = fscanf(f, "%i,%i,%i,%i,%i,%i,%i,%i", &Seasons::auto_season, &Seasons::season,
+                                    &pref_auto_mode, &default_vdgs_type, &ui_left, &ui_top, &ui_right, &ui_bottom);
+    LogMsg(
+        "From prefs: auto_season: %d, seasons: %d, auto_select_jws: %d, default_vdgs_type: %d, ui:(%d, %d, %d, %d)",
+        Seasons::auto_season, Seasons::season, pref_auto_mode, default_vdgs_type, ui_left, ui_top, ui_right, ui_bottom);
+
+    fclose(f);
+
+    if (Seasons::season < 0) {
+        Seasons::nh = 0;
+        Seasons::season = -Seasons::season;
+    }
+}
+
+// check for shift of reference frame
+void CheckRefFrameShift() {
+    // check for shift of reference frame
+    float lat_r = XPLMGetDataf(lat_ref_dr);
+    float lon_r = XPLMGetDataf(lon_ref_dr);
+
+    if (lat_r != lat_ref || lon_r != lon_ref) {
+        lat_ref = lat_r;
+        lon_ref = lon_r;
+        ref_gen++;
+        LogMsg("reference frame shift");
+    }
+}
+
+// Accessor for the "opensam/SAM_Library_installed" dataref
+static int SamLibInstalledAcc([[maybe_unused]] void* ref) {
+    return sam_library_installed;
+}
+
+//------------------------------------------------------------------------------------
+void LoadAndActivateAirport() {
+    LogMsg("plane is now on the ground, trying to identify airport and stand");
+
+    const dgs::AptAirport* arpt = dgs::AptAirport::LocateAirport(plane_pos);
+    if (arpt == nullptr) {
+        LogMsg("airport could not be identified at %0.8f,%0.8f", plane_pos.lat, plane_pos.lon);
+        os_arpt = nullptr;
+        adgs_arpt = nullptr;
+    } else {
+        LogMsg("now on airport: %s", arpt->icao_.c_str());
+        if (arpt->is_opensam_) {
+            if (os_arpt == nullptr || os_arpt->name() != arpt->icao_) {  // don't reload same
+                os_arpt = std::make_unique<OsAirport>(*arpt);
+                if (os_arpt) {
+                    LogMsg("airport %s loaded successfully with openSAM personality", os_arpt->name().c_str());
+                    os_arpt->SetArrival();
+                }
+            }
+        } else {                                                             // AutoDGS
+            if (adgs_arpt == nullptr || adgs_arpt->name() != arpt->icao_) {  // don't reload same
+                adgs_arpt = std::make_unique<AdgsAirport>(*arpt);
+            }
+            if (adgs_arpt) {
+                LogMsg("airport %s loaded successfully with AutoDGS personality", adgs_arpt->name().c_str());
+                adgs_arpt->SetArrival();
+            }
+        }
+    }
+}
+
+static int CmdActivateCb([[maybe_unused]] XPLMCommandRef cmdr, XPLMCommandPhase phase, [[maybe_unused]] void* ref) {
+    if (error_disabled || xplm_CommandBegin != phase)
+        return 0;
+
+    LogMsg("cmd manually_activate");
+
+    if (!my_plane->on_ground()) {
+        LogMsg("plane is not on the ground, can't activate");
+        return 0;
+    }
+
+    // There is a multitude of possible and timing related interactions between teleportation and on_ground signals
+    // First try to set Arrival on an already active airport
+    if (os_arpt) {
+        os_arpt->SetArrival();
+        return 0;
+    }
+
+    if (adgs_arpt) {
+        adgs_arpt->SetArrival();
+        return 0;
+    }
+
+    // .. then try to activate one
+    LoadAndActivateAirport();
+    return 0;
+}
+
+static int CmdToggleUICb([[maybe_unused]] XPLMCommandRef cmdr, XPLMCommandPhase phase, [[maybe_unused]] void* ref) {
+    if (error_disabled || xplm_CommandBegin != phase)
+        return 0;
+
+    LogMsg("cmd ToggleUI");
+
+    if (ui)
+        ui = nullptr;
+    else
+        CreateUi();
+
+    return 0;
+}
+
+// multiplayer activation
+static int CmdToggleMpCb([[maybe_unused]] XPLMCommandRef cmdr, XPLMCommandPhase phase, [[maybe_unused]] void* ref) {
+    if (error_disabled || xplm_CommandBegin != phase)
+        return 0;
+
+    LogMsg("cmd toggle_mp");
+    if (mp_adapter) {
+        mp_adapter = nullptr;
+    } else {
+        mp_adapter = MpAdapter_factory();
+    }
+
+    if (mp_adapter) {
+        std::string menu_txt{toggle_mp_support_txt};
+        menu_txt += " (";
+        menu_txt += mp_adapter->personality();
+        menu_txt += ")";
+        XPLMSetMenuItemName(os_menu, toggle_mp_item, menu_txt.c_str(), 0);
+    } else
+        XPLMSetMenuItemName(os_menu, toggle_mp_item, toggle_mp_support_txt, 0);
+
+    XPLMCheckMenuItem(os_menu, toggle_mp_item, mp_adapter ? xplm_Menu_Checked : xplm_Menu_Unchecked);
+    return 0;
+}
+
+static float FlightLoopCb(float inElapsedSinceLastCall,
+                          [[maybe_unused]] float inElapsedTimeSinceLastFlightLoop, [[maybe_unused]] int inCounter,
+                          [[maybe_unused]] void* inRefcon) {
+    static float jw_next_ts, dgs_next_ts, anim_next_ts, mp_update_next_ts;
+    static bool on_ground_prev = false;
+
+    if (error_disabled)
+        return 0;
+
+    try {
+        if (!delayed_init_done) {
+            delayed_init_done = true;
+            Ofp::Initialize();     // wait until the sbh plugin is loaded, then check for its availability
+        }
+
+        if (pending_plane_loaded_cb) {
+            pending_plane_loaded_cb = false;
+            my_plane->PlaneLoadedCb();
+        }
+
+        if (ui && !ui->GetVisible()) { // close if user closed it manually
+            LogMsg("UI window was closed by user, destroying");
+            ui = nullptr;
+        }
+
+        if (editor && !editor->GetVisible()) { // close if user closed it manually
+            LogMsg("ADGS Editor window was closed by user, destroying");
+            editor = nullptr;
+        }
+
+        if (jw_editor && !jw_editor->GetVisible()) { // close if user closed it manually
+            LogMsg("Jetway Configurator window was closed by user, destroying");
+            jw_editor = nullptr;
+        }
+
+        now = XPLMGetDataf(total_running_time_sec_dr);
+
+        plane_pos_prev = plane_pos;
+        plane_pos = fem::LLPos(my_plane->lat(), my_plane->lon());;
+
+        // if we go 3 * supersonic it's a teleportation, e.g. a ToLiss situation reload
+        if (fem::len(plane_pos - plane_pos_prev) > inElapsedSinceLastCall * 3.0f * 340.0f) {
+            LogMsg("teleportation detected, resetting airport");
+            if (mp_adapter)
+                mp_adapter->Reset();
+            os_arpt = nullptr;
+            adgs_arpt = nullptr;
+            on_ground_prev = false;  // to trigger airport identification on next loop
+            return 5.0f; // let the dust settle
+        }
+
+        //LogMsg("FlightLoopCb called, now: %0.2f, on_ground_prev: %d", now, on_ground_prev);
+        my_plane->Update();
+        bool on_ground = my_plane->on_ground();
+        //LogMsg("on_ground: %d", on_ground);
+
+        // check for transition
+        if (on_ground != on_ground_prev) {
+            if (on_ground)
+                LoadAndActivateAirport();
+            else {  // airborne
+                os_arpt = nullptr;
+                adgs_arpt = nullptr;
+            }
+        }
+
+        on_ground_prev = on_ground;
+
+       if (os_arpt  == nullptr && adgs_arpt == nullptr)
+            return 1.0f;  // no airport, nothing to do
+
+        if (editor) {
+            // poor man's window manager for the editor window
+            if (!editor->GetVisible()) { // destroy if user closed it manually
+                LogMsg("editor window was closed by user, destroying");
+                editor = nullptr;
+                return 1.0f;
+            }
+
+            if (editor_active)
+                return 1.0f;
+        }
+
+        assert(os_arpt == nullptr || adgs_arpt == nullptr);  // can't be both
+
+        // TODO: what if one of these values is not updated below due to if?
+        float jw_loop_delay = jw_next_ts - now;
+        float dgs_loop_delay = dgs_next_ts - now;
+        float anim_loop_delay = anim_next_ts - now;
+        float mp_update_delay = mp_update_next_ts - now;
+
+        float my_y_agl = my_plane->y_agl();
+        if (my_y_agl < kMultiPlayerHeightLimit && mp_adapter && mp_update_delay <= 0.0f)
+            mp_update_next_ts = now + mp_adapter->update();
+
+        if (!my_plane->is_helicopter_) {
+            if (jw_loop_delay <= 0.0f) {
+                jw_loop_delay = my_plane->JwStateMachine();
+                if (my_y_agl < kMultiPlayerHeightLimit && mp_adapter)
+                    jw_loop_delay = std::min(jw_loop_delay, mp_adapter->JwStateMachine());
+
+                jw_next_ts = now + jw_loop_delay;
+            }
+
+            if (os_arpt) {
+                if (dgs_loop_delay <= 0.0f) {
+                    dgs_loop_delay = os_arpt->StateMachine();
+                    dgs_next_ts = now + dgs_loop_delay;
+                }
+            }
+
+            if (adgs_arpt) {
+                if (dgs_loop_delay <= 0.0f) {
+                    dgs_loop_delay = adgs_arpt->StateMachine();
+                    dgs_next_ts = now + dgs_loop_delay;
+                }
+            }
+        }
+
+        if (anim_loop_delay <= 0.0f) {
+            anim_loop_delay = AnimStateMachine();
+            anim_next_ts = now + anim_loop_delay;
+        }
+        // LogMsg("jw_loop_delay: %0.2f", jw_loop_delay);
+        float delay = std::min(anim_loop_delay, std::min(jw_loop_delay, dgs_loop_delay));
+        if (delay <= 0.0f)  // negative is # of frames, 0 is stop
+            delay = -1.0f;
+
+        return delay;
+    } catch (const std::exception& e) {
+        LogMsg("FlightLoopCb caught exception: %s, openSAM disabled", e.what());
+        error_disabled = true;
+        return 0;
+    }
+}
+
+// dock/undock command
+static int CmdDockJwCb([[maybe_unused]] XPLMCommandRef cmdr, XPLMCommandPhase phase, void* ref) {
+    if (error_disabled || xplm_CommandBegin != phase)
+        return 0;
+
+    LogMsg("CmdDockJwCb called");
+
+    if (os_arpt) {
+        if (ref == NULL)
+            my_plane->RequestDock();
+        else if (ref == (void*)1)
+            my_plane->RequestUndock();
+        else if (ref == (void*)2)
+            my_plane->RequestToggle();
+        return 0;
+    }
+
+    // try to emulate the above with XP12's toggle command
+    if (adgs_arpt && adgs_arpt->active_stand_has_xp12_jw()) {
+        LogMsg("trying to emulate dock/undock with XP12's toggle command");
+        if (ref == NULL && !xp12_jw_connected)
+            XPLMCommandOnce(toggle_jetway_cmdr);
+        else if (ref == (void*)1 && xp12_jw_connected)
+            XPLMCommandOnce(toggle_jetway_cmdr);
+        else if (ref == (void*)2)
+            XPLMCommandOnce(toggle_jetway_cmdr);
+    }
+    return 0;
+}
+
+// intercept XP12's standard cmd, it's a toggle, sigh...
+static int CmdXp12ToggleJwCb([[maybe_unused]] XPLMCommandRef cmdr, XPLMCommandPhase phase, [[maybe_unused]] void* ref) {
+    if (error_disabled)
+        return 0;
+
+    if (xplm_CommandBegin != phase)
+        return 1;
+
+    LogMsg("CmdXp12ToggleJwCb called");
+    bool has_xp12_jw{false};
+    if (os_arpt) {
+        has_xp12_jw = os_arpt->active_stand_has_xp12_jw();
+        my_plane->RequestToggle();
+    } else if (adgs_arpt)
+        has_xp12_jw = adgs_arpt->active_stand_has_xp12_jw();
+
+    // best effort to track the XP12 jetway connection status
+    if (has_xp12_jw) {
+        xp12_jw_connected = !xp12_jw_connected;
+        xp12_jw_connected_ts = now;
+        LogMsg("xp12_jw_connected now: %d", xp12_jw_connected);
+    }
+
+    // always pass on to X-Plane. If there isn't a jetway XP will just ignore it.
+    return 1;
+}
+
+static int AdgsCmdCycleDgsCb([[maybe_unused]] XPLMCommandRef cmdr, XPLMCommandPhase phase, [[maybe_unused]] void* ref) {
+    if (error_disabled || xplm_CommandBegin != phase)
+        return 0;
+
+    if (adgs_arpt)
+        adgs_arpt->CycleDgsType();
+    return 0;
+}
+
+static int AdgsCmdMoveDgsCloserCb([[maybe_unused]] XPLMCommandRef cmdr, XPLMCommandPhase phase, [[maybe_unused]] void* ref) {
+    if (error_disabled || xplm_CommandBegin != phase)
+        return 0;
+
+    if (adgs_arpt)
+        adgs_arpt->DgsMoveCloser();
+    return 0;
+}
+
+static int DgsEditorCmdCb([[maybe_unused]] XPLMCommandRef cmdr, XPLMCommandPhase phase, [[maybe_unused]] void* ref) {
+    if (error_disabled || xplm_CommandBegin != phase)
+        return 0;
+
+    if (editor)
+        editor = nullptr;
+    else
+        CreateEditor();
+    return 0;
+}
+
+static int JwEditorCmdCb([[maybe_unused]] XPLMCommandRef cmdr, XPLMCommandPhase phase, [[maybe_unused]] void* ref) {
+    if (error_disabled || xplm_CommandBegin != phase)
+        return 0;
+
+    if (jw_editor)
+        jw_editor = nullptr;
+    else
+        CreateJwEditor();
+    return 0;
+}
+
+static void LoadDoorInfo(const std::string& fn, std::unordered_map<std::string, DoorInfo>& di_map) {
+    std::ifstream f(fn);
+    if (!f.is_open())
+        throw std::runtime_error("Error loading " + fn);
+
+    LogMsg("Building door_info_map from %s", fn.c_str());
+
+    std::string line;
+    line.reserve(100);
+
+    while (std::getline(f, line)) {
+        if (line.empty())
+            continue;
+
+        if (line.back() == '\r')
+            line.pop_back();
+
+        if (line.empty() || line[0] == '#')
+            continue;
+
+        char icao[5];
+        int d;
+        float x, y, z;
+        if (5 == sscanf(line.c_str(), "%4s %d %f %f %f", icao, &d, &x, &y, &z)) {
+            if (d < 1 || d > kMaxDoor) {
+                LogMsg("invalid entry: '%s'", line.c_str());
+                continue;
+            }
+
+            char c = d + '0';
+            DoorInfo d{x, y, z};
+            di_map[std::string(icao) + c] = d;
+        }
+    }
+
+    LogMsg("%d mappings loaded", (int)di_map.size());
+}
+
+static void LoadAcfGenericType(const std::string& fn) {
+    std::ifstream f(fn);
+    if (!f.is_open())
+        throw std::runtime_error("Error loading " + fn);
+
+    LogMsg("Building acf_generic_type_map from %s", fn.c_str());
+
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty())
+            continue;
+
+        if (line.back() == '\r')
+            line.pop_back();
+
+        if (line.empty() || line[0] == '#')
+            continue;
+
+        char code[5];
+        char icao[5];
+        if (2 == sscanf(line.c_str(), "%4s %4s", code, icao))
+            acf_generic_type_map[std::string(code)] = std::string(icao);
+
+    }
+
+    LogMsg("%d mappings loaded", (int)acf_generic_type_map.size());
+}
+
+// emulate the status for XP12 jetways, called by the "opensam/jetway/status" dataref accessor
+//
+// opensam/jetway/status dataref
+//  0 = no jetway
+//  1 = can dock
+//  2 = docked
+// -1 = can't dock or in transit
+std::tuple<int, int> GetXP12JwStatus() {    // -> (count, status)
+    int count = 0;
+    int status = -1;
+
+    if (adgs_arpt)
+        count = adgs_arpt->active_stand_has_xp12_jw() ? 1 : 0;
+    else if (os_arpt)
+        count = os_arpt->active_stand_has_xp12_jw() ? 1 : 0;
+
+    if (count > 0) {
+        status = 1;
+        if (xp12_jw_connected) {
+            status = -1;  // assume not docked yet
+            if (now > xp12_jw_connected_ts + 15.0f)  // needs some time to drive the jw
+                status = 2;  // docked
+        }
+    }
+
+    return std::make_tuple(count, status);
+}
+
+// =========================== plugin entry points ===============================================
+PLUGIN_API int XPluginStart(char* out_name, char* out_sig, char* out_desc) {
+    LogMsg("Startup " VERSION);
+
+    strcpy(out_name, "openSAM " VERSION);
+    strcpy(out_sig, "openSAM.hotbso");
+    strcpy(out_desc, "A plugin that emulates SAM");
+
+    // Always use Unix-native paths on the Mac!
+    XPLMEnableFeature("XPLM_USE_NATIVE_PATHS", 1);
+    XPLMEnableFeature("XPLM_USE_NATIVE_WIDGET_WINDOWS", 1);
+
+    probeinfo.structSize = sizeof(XPLMProbeInfo_t);
+
+    char buffer[2048];
+    XPLMGetSystemPath(buffer);
+    xp_dir = std::string(buffer);
+
+    // set pref path
+    XPLMGetPrefsPath(buffer);
+    XPLMExtractFileAndPath(buffer);
+    pref_path = std::string(buffer) + "/openSAM.prf";
+
+    // set plugin's base dir
+    base_dir = xp_dir + "Resources/plugins/openSAM/";
+    sys_cfg_dir = base_dir + "cfg/";
+    user_cfg_dir = xp_dir + "Output/openSAM/";
+    tmp_dir = "Output/openSAM/tmp/";
+    pref_path = user_cfg_dir + "prefs.prf";
+    std::string res_dir = base_dir + "resources/";
+
+    if (!HttpGetInitialize())
+        return 0;
+
+    try {
+        // create tmp dir and verify it's writeable
+        // all later errors for io here will throw
+        std::filesystem::create_directories(tmp_dir);
+        std::ofstream tst(tmp_dir + "test.txt");
+        if (!tst) {
+            LogMsg("Failed to create test file in '%s'", tmp_dir.c_str());
+            return 0;
+        }
+
+        tst.close();
+        if (!std::filesystem::remove(tmp_dir + "test.txt")) {
+            LogMsg("Failed to delete test file in '%s'", tmp_dir.c_str());
+            return 0;
+        }
+    } catch (const std::exception& ex) {
+        LogMsg("Failed to create or write to tmp dir '%s': %s", tmp_dir.c_str(), ex.what());
+        return 0;
+    }
+
+    int max_sam_stands;
+
+    // collect all config and *.xml files
+    try {
+        LoadDoorInfo(base_dir + "csl_door_position.txt", csl_door_info_map);
+        LoadAcfGenericType(base_dir + "acf_generic_type.txt");
+
+        TimeCodeBlock tc("Scenery Collection");
+        SceneryPacks scp(xp_dir);
+        if (scp.openSAM_Library_path.empty())
+            LogMsg("WARNING: openSAM_Library not found!");
+
+        sam_library_installed = !scp.SAM_Library_path.empty();
+
+        Scenery::CollectSceneries(scp, max_sam_stands);
+        LogMsg("%d sceneries with sam jetways found", (int)Scenery::sceneries_.size());
+        int n_stands = 0;
+        if (!dgs::AptAirport::ParseAptDat(xp_dir + "/Global Scenery/Global Airports/Earth nav data/apt.dat",
+                                          /* ignore */ false, /* filter_autodgs */ true, n_stands, false)) {
+            LogMsg("WARNING: global apt.dat could not be parsed, no DGS support!");
+            return 0;
+        } else {
+            LogMsg("%d stands with DGS found in global apt.dat", n_stands);
+        }
+
+        dgs::AptAirport::LoadingFinished();
+
+        SamJw::SoundInit();
+    } catch (const std::exception& ex) {
+        LogMsg("fatal error: '%s', bye!", ex.what());
+        return 0;  // bye
+    }
+
+    plane_x_dr = XPLMFindDataRef("sim/flightmodel/position/local_x");
+    plane_y_dr = XPLMFindDataRef("sim/flightmodel/position/local_y");
+    plane_z_dr = XPLMFindDataRef("sim/flightmodel/position/local_z");
+    plane_elevation_dr = XPLMFindDataRef("sim/flightmodel/position/elevation");
+    plane_true_psi_dr = XPLMFindDataRef("sim/flightmodel2/position/true_psi");
+    parkbrake_dr = XPLMFindDataRef("sim/flightmodel/controls/parkbrake");
+
+    lat_ref_dr = XPLMFindDataRef("sim/flightmodel/position/lat_ref");
+    lon_ref_dr = XPLMFindDataRef("sim/flightmodel/position/lon_ref");
+
+    draw_object_x_dr = XPLMFindDataRef("sim/graphics/animation/draw_object_x");
+    draw_object_y_dr = XPLMFindDataRef("sim/graphics/animation/draw_object_y");
+    draw_object_z_dr = XPLMFindDataRef("sim/graphics/animation/draw_object_z");
+    draw_object_psi_dr = XPLMFindDataRef("sim/graphics/animation/draw_object_psi");
+
+    total_running_time_sec_dr = XPLMFindDataRef("sim/time/total_running_time_sec");
+    vr_enabled_dr = XPLMFindDataRef("sim/graphics/VR/enabled");
+    sin_wave_dr = XPLMFindDataRef("sim/graphics/animation/sin_wave_2");
+
+    acf_icao_dr = XPLMFindDataRef("sim/aircraft/view/acf_ICAO");
+    eng_running_dr = XPLMFindDataRef("sim/flightmodel/engine/ENGN_running");
+    beacon_dr = XPLMFindDataRef("sim/cockpit2/switches/beacon_on");
+    acf_cg_y_dr = XPLMFindDataRef("sim/aircraft/weight/acf_cgY_original");
+    acf_cg_z_dr = XPLMFindDataRef("sim/aircraft/weight/acf_cgZ_original");
+    acf_gear_z_dr = XPLMFindDataRef("sim/aircraft/parts/acf_gear_znodef");
+    is_helicopter_dr = XPLMFindDataRef("sim/aircraft2/metadata/is_helicopter");
+
+    LoadPrefs();
+    if (!dgs::Initialize(res_dir)) {
+        LogMsg("Failed to initialize dgs library");
+        return 0;
+    }
+
+    // If commands or dataref accessors are already registered it's too late to
+    // fail XPluginStart as the dll gets unloaded and X-Plane crashes.
+    // So from here on we are doomed to succeed.
+
+    XPLMRegisterDataAccessor("opensam/SAM_Library_installed", xplmType_Int, 0, SamLibInstalledAcc, NULL, NULL, NULL,
+                             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
+    Seasons::InitDataRefs();
+
+    // Create my_plane early. Accessors don't check whether my_plane is initialized.
+    my_plane = std::make_shared<MyPlane>();
+    dgs::plane = std::dynamic_pointer_cast<dgs::Plane>(my_plane);
+
+    dgs::InitSam1Legacy();
+    create_api_drefs();
+
+    try {
+        my_plane->AutoModeSet(pref_auto_mode);
+        SamJw::Init(max_sam_stands);
+        JwCtrl::Init();
+        OsAirport::Init();
+        AnimInit();
+    } catch (const std::exception& e) {
+        LogMsg("fatal error during initialization: '%s', bye!", e.what());
+        error_disabled = true;
+        return 1;  // bye
+    }
+
+    ImgWindowIni();
+
+    // own commands
+    XPLMCommandRef activate_cmdr = XPLMCreateCommand("openSAM/activate", "Set mode to ARRIVAL");
+    XPLMRegisterCommandHandler(activate_cmdr, CmdActivateCb, 0, NULL);
+
+    XPLMCommandRef toggle_ui_cmdr = XPLMCreateCommand("openSAM/ToggleUI", "Toggle UI");
+    XPLMRegisterCommandHandler(toggle_ui_cmdr, CmdToggleUICb, 0, NULL);
+
+    XPLMCommandRef dock_cmdr = XPLMCreateCommand("openSAM/dock_jwy", "Dock jetway");
+    XPLMRegisterCommandHandler(dock_cmdr, CmdDockJwCb, 0, (void*)0);
+
+    XPLMCommandRef undock_cmdr = XPLMCreateCommand("openSAM/undock_jwy", "Undock jetway");
+    XPLMRegisterCommandHandler(undock_cmdr, CmdDockJwCb, 0, (void*)1);
+
+    XPLMCommandRef toggle_cmdr = XPLMCreateCommand("openSAM/toggle_jwy", "Toggle jetway");
+    XPLMRegisterCommandHandler(toggle_cmdr, CmdDockJwCb, 0, (void*)2);
+
+    XPLMCommandRef toggle_mp_cmdr = XPLMCreateCommand("openSAM/toggle_multiplayer", "Toggle Multiplayer Support");
+    XPLMRegisterCommandHandler(toggle_mp_cmdr, CmdToggleMpCb, 0, NULL);
+
+    XPLMCommandRef toggle_dgs_editor_cmdr = XPLMCreateCommand("openSAM/toggle_dgs_editor", "Toggle DGS Editor");
+    XPLMRegisterCommandHandler(toggle_dgs_editor_cmdr, DgsEditorCmdCb, 0, NULL);
+
+    XPLMCommandRef toggle_jw_editor_cmdr =
+        XPLMCreateCommand("openSAM/toggle_jw_editor", "Toggle Jetway Editor");
+    XPLMRegisterCommandHandler(toggle_jw_editor_cmdr, JwEditorCmdCb, 0, NULL);
+
+    // AutoDGS mode
+    XPLMCommandRef cycle_dgs_cmdr = XPLMCreateCommand("openSAM/cycle_dgs", "Cycle DGS between Marshaller, VDGS");
+    XPLMRegisterCommandHandler(cycle_dgs_cmdr, AdgsCmdCycleDgsCb, 0, NULL);
+
+    XPLMCommandRef move_dgs_closer_cmdr = XPLMCreateCommand("openSAM/move_dgs_closer", "Move DGS closer by 2m");
+    XPLMRegisterCommandHandler(move_dgs_closer_cmdr, AdgsCmdMoveDgsCloserCb, 0, NULL);
+
+    // augment XP12's standard cmd
+    toggle_jetway_cmdr = XPLMFindCommand("sim/ground_ops/jetway");
+    if (toggle_jetway_cmdr)
+        XPLMRegisterCommandHandler(toggle_jetway_cmdr, CmdXp12ToggleJwCb, 1, NULL);
+
+    // build menues
+    XPLMMenuID menu = XPLMFindPluginsMenu();
+    os_menu = XPLMCreateMenu("openSAM", menu, XPLMAppendMenuItem(menu, "openSAM", NULL, 0), NULL, NULL);
+    // openSAM
+    XPLMAppendMenuItemWithCommand(os_menu, "Dock Jetway", dock_cmdr);
+    XPLMAppendMenuItemWithCommand(os_menu, "Undock Jetway", undock_cmdr);
+    XPLMAppendMenuItemWithCommand(os_menu, "Toggle UI", toggle_ui_cmdr);
+    XPLMAppendMenuSeparator(os_menu);
+
+    XPLMAppendMenuItemWithCommand(os_menu, "Set mode to ARRIVAL", activate_cmdr);
+
+    XPLMAppendMenuSeparator(os_menu);
+
+    toggle_mp_item = XPLMAppendMenuItemWithCommand(os_menu, toggle_mp_support_txt, toggle_mp_cmdr);
+
+    XPLMAppendMenuSeparator(os_menu);
+    XPLMAppendMenuItemWithCommand(os_menu, "Cycle DGS", cycle_dgs_cmdr);
+    XPLMAppendMenuItemWithCommand(os_menu, "Move DGS closer by 2m", move_dgs_closer_cmdr);
+
+    XPLMAppendMenuSeparator(os_menu);
+
+     XPLMMenuID tools_menu = XPLMCreateMenu("Tools", os_menu, XPLMAppendMenuItem(os_menu, "Tools", NULL, 0), NULL, NULL);
+
+    XPLMAppendMenuItemWithCommand(tools_menu, "Toggle DGS Editor", toggle_dgs_editor_cmdr);
+    XPLMAppendMenuItemWithCommand(tools_menu, "Toggle Jetway Editor", toggle_jw_editor_cmdr);
+
+    flight_loop_id = XPLMCreateFlightLoop(&flight_loop_ctx);
+    return 1;
+}
+
+PLUGIN_API void XPluginStop(void) {
+    // be a good SDK citizen
+    // destroy everything that might call SDK functions. Even LogMsg() is a wrapper around a SDK call.
+    mp_adapter = nullptr;
+    os_arpt = nullptr;
+    adgs_arpt = nullptr;
+    dgs::Finalize();
+    dgs::plane = nullptr;
+    my_plane = nullptr;
+    ImgWindowFini();
+    SamJw::Finalize();
+
+    if (!error_disabled) {
+        // and finally clean the tmp directory
+        // be paranoid and use the full path
+        std::string clean_dir = xp_dir + tmp_dir;
+        try {
+            auto n = std::filesystem::remove_all(clean_dir);
+            LogMsg("cleaned tmp dir '%s', %d files removed", clean_dir.c_str(), (int)n);
+        } catch (const std::exception& ex) { LogMsg("Failed to clean tmp dir '%s': %s", clean_dir.c_str(), ex.what()); }
+    }
+
+    HttpGetFinalize();
+    LogMsg("plugin stopped");
+}
+
+PLUGIN_API void XPluginDisable(void) {
+    if (probe_ref) {
+        XPLMDestroyProbe(probe_ref);
+        probe_ref = NULL;
+    }
+
+    SavePrefs();
+    ui = nullptr;
+
+    LogMsg("acc called:           %9llu", stat_jw_acc_called);
+    LogMsg("sc last match:        %9llu", stat_sc_last);
+    LogMsg("stat_jw_cache_hit     %9llu", stat_jw_cache_hit);
+    LogMsg("cache hit rate:       %9.2f %%", 100.0f * stat_jw_cache_hit / (stat_jw_acc_called + 1));
+    LogMsg("stat_anim_acc_called: %9llu", stat_anim_acc_called);
+    LogMsg("stat_auto_drf_called: %9llu", stat_auto_drf_called);
+    LogMsg("plugin disabled");
+}
+
+PLUGIN_API int XPluginEnable(void) {
+    if (error_disabled)  // once and for all
+        return 0;
+
+    probe_ref = XPLMCreateProbe(xplm_ProbeY);
+    if (NULL == probe_ref) {
+        LogMsg("Can't create terrain probe");
+        return 0;
+    }
+    stat_jw_acc_called = stat_anim_acc_called = stat_auto_drf_called = stat_jw_cache_hit = stat_sc_last = 0;
+
+    LogMsg("plugin enabled");
+    return 1;
+}
+
+PLUGIN_API void XPluginReceiveMessage([[maybe_unused]] XPLMPluginID in_from, long in_msg, void* in_param) {
+    if (error_disabled)
+        return;
+
+    // my plane loaded
+    if (in_msg == XPLM_MSG_PLANE_LOADED && in_param == 0) {
+        LogMsg("plane loaded, resetting airport");
+        os_arpt = nullptr;
+        adgs_arpt = nullptr;
+        XPLMScheduleFlightLoop(flight_loop_id, 0, 0);
+        pending_plane_loaded_cb = true;
+        XPLMScheduleFlightLoop(flight_loop_id, 15.0, 1);  // let the dust settle
+        return;
+    }
+
+    // Everything before XPLM_MSG_AIRPORT_LOADED has bogus datarefs.
+    //   Anyway it's too late for the current scenery.
+    if ((in_msg == XPLM_MSG_AIRPORT_LOADED) || (airport_loaded && (in_msg == XPLM_MSG_SCENERY_LOADED))) {
+        airport_loaded = 1;
+        Seasons::nh = (my_plane->lat() >= 0.0);
+        Seasons::SetAuto();
+        return;
+    }
+}

@@ -1,0 +1,203 @@
+//
+//    openSAM: open source SAM emulator for X Plane
+//
+//    Copyright (C) 2025, 2026  Holger Teutsch
+//
+//    This library is free software; you can redistribute it and/or
+//    modify it under the terms of the GNU Lesser General Public
+//    License as published by the Free Software Foundation; either
+//    version 2.1 of the License, or (at your option) any later version.
+//
+//    This library is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+//    Lesser General Public License for more details.
+//
+//    You should have received a copy of the GNU Lesser General Public
+//    License along with this library; if not, write to the Free Software
+//    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
+//    USA
+//
+
+#include <cassert>
+#include <numbers>
+#include <cmath>
+
+#include "opensam.h"
+#include "my_plane.h"
+#include "mpadapter_lt.h"
+#include "log_msg.h"
+
+static constexpr float kD2R = std::numbers::pi/180.0;
+
+constexpr int kSpawnPerRun = 10;     // new Planes per update run
+constexpr float kDefaultWait = 3.0;  // s
+
+class MpPlane_lt : public OsPlane {
+    std::string flight_id_;
+
+    float scan_mp_planes();
+
+   public:
+    MpPlane_lt(const std::string& flight_id, const std::string& icao, float x, float y, float z, float psi);
+    ~MpPlane_lt() override {
+    }
+
+    void update(bool beacon);
+
+    bool auto_mode() const override {
+        return true;
+    }
+    bool dock_requested() override {
+        return true;
+    }
+};
+
+MpPlane_lt::MpPlane_lt(const std::string& flight_id, const std::string& icao, float x, float y, float z, float psi) {
+    flight_id_ = flight_id;
+
+    on_ground_ = true;  // otherwise we were not here
+    parkbrake_set_ = true;
+
+    LogMsg("pid=%d, constructing MpPlane %s/%s", id_, flight_id_.c_str(), icao.c_str());
+
+    door_info_.clear();
+    // first an optional translation to a generic icao code
+    auto it = acf_generic_type_map.find(icao);
+    if (it != acf_generic_type_map.end())
+        icao_ = it->second;
+    else
+        icao_ = icao;
+
+    auto door_it = csl_door_info_map.find(icao_ + '1');
+    if (door_it != csl_door_info_map.end()) {
+        door_info_.push_back(door_it->second);
+
+        x_ = x;
+        z_ = z;
+        psi_ = psi;
+
+        // refine y for ground level
+        if (xplm_ProbeHitTerrain != XPLMProbeTerrainXYZ(probe_ref, x, y, z, &probeinfo)) {
+            LogMsg("terrain probe failed???");
+        }
+        y_ = probeinfo.locationY;
+
+        LogMsg("pid=%d, icao: %s, found door 1 in door_info_map: x: %0.2f, y: %0.2f, z: %0.2f", id_, icao_.c_str(),
+               door_info_[0].x, door_info_[0].y, door_info_[0].z);
+    } else {
+        LogMsg("pid=%d, %s: door 1 is not defined in door_info_map, deactivating slot", id_, icao_.c_str());
+        state_ = kDisabled;
+        return;
+    }
+
+    // door 2 +3 are optional
+    auto it2 = csl_door_info_map.find(icao_ + '2');
+    if (it2 != csl_door_info_map.end())
+        door_info_.push_back(it2->second);
+
+    auto it3 = csl_door_info_map.find(icao_ + '3');
+    if (it3 != csl_door_info_map.end())
+        door_info_.push_back(it3->second);
+
+    state_ = kIdle;
+}
+
+void MpPlane_lt::update(bool beacon) {
+    if (state_ == kDisabled)
+        return;
+
+    beacon_on_ = beacon;
+
+    // Jetways are only dockable if they were rendered once.
+    // As they come in view over time we just retry a docking attempt if the plane is stuck
+    // in CANT_DOCK.
+    if (!beacon_on_ && state_ == kCantDock && now > state_change_ts_ + 60.0f)
+        state_ = kParked;
+
+    LogMsg("MP update: pid=%02d, icao: %s, id: %s, beacon: %d, parkbrake_set: %d, state: %s", id_, icao_.c_str(),
+           flight_id_.c_str(), beacon_on_, parkbrake_set_, state_str_[state_]);
+}
+
+//==============  MpAdapter_lt ========================================
+bool MpAdapter_lt::probe() {
+    return (LTAPIConnect::isLTAvail() && LTAPIConnect::doesLTDisplayAc());
+}
+
+MpAdapter_lt::MpAdapter_lt() {
+    LogMsg("MpAdapter_lt constructor");
+}
+
+MpAdapter_lt::~MpAdapter_lt() {
+    LogMsg("MpAdapter_lt destructor");
+}
+
+// static
+float MpAdapter_lt::update() {
+    float my_lat = my_plane->lat();
+    float my_lon = my_plane->lon();
+    float my_cos_lat = cosf(my_lat * kD2R);
+
+    lt_connect_.UpdateAcList();
+    const MapLTAPIAircraft& lt_planes = lt_connect_.getAcMap();
+
+    int spawn_remain = kSpawnPerRun;
+    for (auto& mltp : lt_planes) {
+        const LTAPIAircraft& lt_plane = *mltp.second;
+
+        // filter, optimize for reject, order cheap to expensive
+        if (!(lt_plane.isOnGnd() && lt_plane.isVisible()))
+            continue;
+
+        LTAPIAircraft::LTFlightPhase flight_phase = lt_plane.getPhase();
+        if (flight_phase != LTAPIAircraft::FPH_PARKED && flight_phase != LTAPIAircraft::FPH_TAXI)
+            continue;
+
+        const std::string& flight_id = lt_plane.getRegistration();
+        if (flight_id.size() == 0)  // likely a ground vehicle
+            continue;
+
+        if (std::hypot((lt_plane.getLon() - my_lon) * my_cos_lat, lt_plane.getLat() - my_lat) * kLat2M > kMpMaxDist)
+            continue;
+
+        // LogMsg("LT lat/lon: %0.2f, %0.2f", lt_plane.getLat(), lt_plane.getLon());
+        double x, y, z;
+        lt_plane.getLocalCoord(x, y, z);
+        float psi = lt_plane.getHeading();  // TODO: mag to true adjustment
+
+        const std::string& icao = lt_plane.getModelIcao();
+        const std::string& key = lt_plane.getKey();
+
+        auto it = mp_planes_.find(key);
+        if (it != mp_planes_.end()) {
+            MpPlane_lt* mp_plane = static_cast<MpPlane_lt*>(it->second.get());
+            mp_plane->update(lt_plane.getLights().beacon);
+        } else {
+            // new creation only in parked state
+            if (flight_phase == LTAPIAircraft::FPH_PARKED) {
+                if (--spawn_remain < 0)
+                    break;
+                mp_planes_.emplace(key, new MpPlane_lt(flight_id, icao, x, y, z, psi));
+            }
+        }
+        // LogMsg("LT: %d, %s, %s %0.2f, %0.2f, %0.2f",
+        //         flight_phase, flight_id.c_str(), icao.c_str(), x, y, z);
+    }
+
+    // loop over mp_planes and delete the ones that are no longer in drefs
+    for (auto it = mp_planes_.begin(); it != mp_planes_.end(); ) {
+        const std::string& key = it->first;
+        OsPlane& plane = *(it->second);
+
+        if (!lt_planes.contains(key)) {
+            LogMsg("pid=%02d key: %s not longer exists, deleted", plane.id_, key.c_str());
+            it = mp_planes_.erase(it);
+        } else
+            ++it;
+    }
+
+
+    if (!mp_planes_.empty())
+        LogMsg("------------------ MP active planes found: %d -----------------", (int)mp_planes_.size());
+    return kDefaultWait;
+}

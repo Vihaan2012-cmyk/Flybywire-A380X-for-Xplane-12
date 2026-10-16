@@ -1,0 +1,177 @@
+//
+//    openSAM: manage DGS X Plane
+//
+//    Copyright (C) 2026 Holger Teutsch
+//
+//    This library is free software; you can redistribute it and/or
+//    modify it under the terms of the GNU Lesser General Public
+//    License as published by the Free Software Foundation; either
+//    version 2.1 of the License, or (at your option) any later version.
+//
+//    This library is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+//    Lesser General Public License for more details.
+//
+//    You should have received a copy of the GNU Lesser General Public
+//    License along with this library; if not, write to the Free Software
+//    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
+//    USA
+//
+
+#pragma once
+
+#include <numbers>
+#include <stdexcept>
+
+#include "XPLMScenery.h"
+#include "XPLMInstance.h"
+
+#include "dgs.h"
+
+namespace dgs {
+
+static constexpr float kD2R = std::numbers::pi_v<float>/180.0f;
+
+extern XPLMDataRef ground_speed_dr;
+
+
+enum DgsDref {
+    DGS_DR_STATUS,
+    DGS_DR_LR,
+    DGS_DR_TRACK,
+    DGS_DR_XTRACK,
+    DGS_DR_DISTANCE,
+    DGS_DR_DISTANCE_0,   // if distance < 10: full meters digit
+    DGS_DR_DISTANCE_01,  // first decimal digit
+    DGS_DR_ICAO_0,
+    DGS_DR_ICAO_1,
+    DGS_DR_ICAO_2,
+    DGS_DR_ICAO_3,
+
+    DGS_DR_R1_SCROLL,
+    DGS_DR_R1C0,  // top row (=1), char #
+    DGS_DR_R1C1,
+    DGS_DR_R1C2,
+    DGS_DR_R1C3,
+    DGS_DR_R1C4,
+    DGS_DR_R1C5,
+
+    DGS_DR_BOARDING,    // boarding state 0/1
+    DGS_DR_PAXNO_0,     // 3 digits
+    DGS_DR_PAXNO_1,
+    DGS_DR_PAXNO_2,
+
+    DGS_DR_DEBOARDING,  // deboarding state 0/1
+
+    DGS_DR_UTC_M0,           // time UTC in minutes, full minutes digit
+    DGS_DR_UTC_M1,           // time UTC in minutes, first decimal digit
+    DGS_DR_UTC_H0,           // time UTC in hours, full hours digit
+    DGS_DR_UTC_H1,           // time UTC in hours, first decimal digit
+
+    DGS_DR_VDGS_BRIGHTNESS,  // brightness for VDGS, 0-1
+    DGS_DR_BLINK,            // for blinking (e.g. left/right), 0/1
+    DGS_DR_MOVE,             // moves from 0 to 1, e.g for lead in
+    DGS_DR_STATUS_1,         // implementation specific status, e.g. for Safedock_X parked with eq status
+    DGS_DR_CHK,              // chocks status for parked plane, 0/1
+    DGS_DR_GPU,              // gpu status for parked plane, 0/1
+    DGS_DR_PCA,              // pca status for parked plane, 0/1
+    DGS_DR_PBB,              // pbb status for parked plane, 0
+    DGS_DR_NUM               // # of drefs
+};
+
+// the standard status values for guidance
+enum DgsGuidanceStatus {
+    kDgsGstIdle,        // idle, no plane, or plane far away
+    kDgsGstIdentified,  // plane id, e.g. for VDGS, or "this way" for Marshaller
+    kDgsGstStop,        // stop position
+    kDgsGstOk,          // ok position
+    kDgsGstTooFar       // too far
+};
+
+struct GuidanceParams {
+    DgsGuidanceStatus status;
+    int track, lr;
+    float xtrack, distance;
+    float ref_x, ref_z; // raw values of plane's ref point to stand
+};
+
+static constexpr int kR1Nchar = 6;
+
+extern const char *dgs_dlist_dr[];
+
+class ScrollTxt {
+    std::string txt_;           // text to scroll
+    int char_pos_;              // next char to enter on the right
+    int dr_scroll_;             // dref value for scroll ctrl
+    char chars_[kR1Nchar]{};    // chars currently visible
+
+public:
+    ScrollTxt(const std::string& txt);
+    void Tick(float *drefs);
+};
+
+// Helper class to manage an XPLMInstanceRef
+class ObjInstance {
+    static int active_instances_;  // count of active instances, for logging only
+    XPLMInstanceRef inst_ref_;
+
+   public:
+    ObjInstance(const ObjInstance&) = delete;
+    ObjInstance& operator=(const ObjInstance&) = delete;
+
+    ObjInstance(XPLMObjectRef obj_ref, const char** datarefs) {
+        inst_ref_ = XPLMCreateInstance(obj_ref, datarefs);
+        // unexpected, hopefully the flight loop will gracefully set to error_disabled
+        if (inst_ref_ == nullptr)
+            throw std::runtime_error("XPLMCreateInstance failed");
+        ++active_instances_;
+    }
+
+    ObjInstance(ObjInstance&& other) noexcept : inst_ref_(other.inst_ref_) { other.inst_ref_ = nullptr; }
+
+    ~ObjInstance() {
+        XPLMDestroyInstance(inst_ref_);
+        --active_instances_;
+    }
+
+    XPLMInstanceRef GetRef() const { return inst_ref_; }
+
+    static int ActiveInstances() { return active_instances_; }
+
+    void SetPosition(const XPLMDrawInfo_t* drawinfo, float* drefs) const noexcept {
+        if (inst_ref_)
+            XPLMInstanceSetPosition(inst_ref_, drawinfo, drefs);
+    }
+};
+
+using ObjInstRef = std::unique_ptr<ObjInstance>;
+
+static inline ObjInstRef CreateInstance(XPLMObjectRef obj_ref, const char** datarefs) {
+    return std::make_unique<ObjInstance>(obj_ref, datarefs);
+}
+
+// Helper to trim whitespace
+static inline void trim(std::string& s) {
+    s.erase(0, s.find_first_not_of(" \t\r\n"));
+    s.erase(s.find_last_not_of(" \t\r\n") + 1);
+}
+
+// A stand name can be anything between "1" and "Gate A 40 (Class C, Terminal 3)".
+// We try to extract the net name "A 40" in the latter case.
+extern std::string ExtractDisplayName(const std::string& stand_name, int max_len);
+
+extern XPLMDataRef zulu_time_minutes_dr, zulu_time_hours_dr;
+
+// get relative brightness for VDGS, [0,1], based on the EV100 dataref
+extern float VDGSBrightness() noexcept;
+
+// fill the UTC datarefs, and for VDGS also the brightness dataref
+extern void DGSFillUTCBrightness(float *drefs) noexcept;
+extern void DGSFillEqStatus(float *drefs, const EqStatus& eq_status) noexcept;
+
+extern bool InitMarshaller(const std::string& obj_dir);
+extern bool InitSafedock_T2_24(const std::string& obj_dir);
+extern bool InitSafedock_X(const std::string& obj_dir);
+
+} // namespace dgs

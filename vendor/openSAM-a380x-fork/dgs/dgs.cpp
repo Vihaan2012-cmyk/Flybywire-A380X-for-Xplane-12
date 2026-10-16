@@ -1,0 +1,252 @@
+//
+//    AutoDGS / openSAM: ManageVDGS
+//
+//    Copyright (C) 2026 Holger Teutsch
+//
+//    This library is free software; you can redistribute it and/or
+//    modify it under the terms of the GNU Lesser General Public
+//    License as published by the Free Software Foundation; either
+//    version 2.1 of the License, or (at your option) any later version.
+//
+//    This library is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+//    Lesser General Public License for more details.
+//
+//    You should have received a copy of the GNU Lesser General Public
+//    License along with this library; if not, write to the Free Software
+//    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
+//    USA
+//
+
+#include <cmath>
+#include <algorithm>
+#include <fstream>
+#include <filesystem>
+#include <thread>
+#include <chrono>
+
+#include "XPLMDataAccess.h"
+
+#include "log_msg.h"
+#include "dgs.h"
+#include "dgs_impl.h"
+#include "dyn_display.h"
+#include "airline_logo.h"
+
+namespace dgs {
+
+static constexpr float kMinBrightness = 0.02;  // relative to 1
+
+XPLMDataRef ground_speed_dr;
+
+#ifndef DREF_PREFIX
+#error "DREF_PREFIX must be defined when compiling dgs.cpp"
+#endif
+
+// keep exactly the same order as in enum _DGS_DREF
+const char *dgs_dlist_dr[] = {
+    DREF_PREFIX "/dgs/status",
+    DREF_PREFIX "/dgs/lr",
+    DREF_PREFIX "/dgs/track",
+    DREF_PREFIX "/dgs/xtrack",
+    DREF_PREFIX "/dgs/distance",
+    DREF_PREFIX "/dgs/distance_0",
+    DREF_PREFIX "/dgs/distance_01",
+    DREF_PREFIX "/dgs/icao_0",
+    DREF_PREFIX "/dgs/icao_1",
+    DREF_PREFIX "/dgs/icao_2",
+    DREF_PREFIX "/dgs/icao_3",
+    DREF_PREFIX "/dgs/r1_scroll",
+    DREF_PREFIX "/dgs/r1c0",
+    DREF_PREFIX "/dgs/r1c1",
+    DREF_PREFIX "/dgs/r1c2",
+    DREF_PREFIX "/dgs/r1c3",
+    DREF_PREFIX "/dgs/r1c4",
+    DREF_PREFIX "/dgs/r1c5",
+    DREF_PREFIX "/dgs/boarding",
+    DREF_PREFIX "/dgs/paxno_0",
+    DREF_PREFIX "/dgs/paxno_1",
+    DREF_PREFIX "/dgs/paxno_2",
+    DREF_PREFIX "/dgs/deboarding",
+    DREF_PREFIX "/dgs/time_utc_m0",
+    DREF_PREFIX "/dgs/time_utc_m1",
+    DREF_PREFIX "/dgs/time_utc_h0",
+    DREF_PREFIX "/dgs/time_utc_h1",
+    DREF_PREFIX "/dgs/vdgs_brightness",
+    DREF_PREFIX "/dgs/blink",
+    DREF_PREFIX "/dgs/move",
+    DREF_PREFIX "/dgs/status_1",
+    DREF_PREFIX "/dgs/chk",
+    DREF_PREFIX "/dgs/gpu",
+    DREF_PREFIX "/dgs/pca",
+    DREF_PREFIX "/dgs/pbb",
+    NULL
+};
+
+DGS::~DGS() {}; // required sytax for pure virtual destructor
+int ObjInstance::active_instances_ = 0;  // initialize static member
+
+//------------------------------------------------------------------------------------
+ScrollTxt::ScrollTxt(const std::string& txt) {
+    txt_ = txt;
+    dr_scroll_ = 10;  // right most
+    chars_[kR1Nchar - 1] = txt_[0];
+    char_pos_ = 0;
+}
+
+void ScrollTxt::Tick(float* drefs) {
+    if (txt_.size() == 0)
+        return;
+
+    dr_scroll_ -= 2;
+    if (dr_scroll_ < 0) {
+        dr_scroll_ = 10;
+        char_pos_++;
+        if (char_pos_ >= (int)txt_.size())
+            char_pos_ = 0;
+
+        for (int i = 1; i < kR1Nchar; i++)
+            chars_[i - 1] = chars_[i];
+        chars_[kR1Nchar - 1] = txt_[char_pos_];
+    }
+
+    drefs[DGS_DR_R1_SCROLL] = dr_scroll_;
+    for (int i = 0; i < kR1Nchar; i++)
+        drefs[DGS_DR_R1C0 + i] = chars_[i];
+};
+
+// A stand name can be anything between "1" and "Gate A 40 (Class C, Terminal 3)".
+// We try to extract the net name "A 40" in the latter case.
+std::string ExtractDisplayName(const std::string& name, int max_len) {
+    std::string dn = name;
+
+    if (name.starts_with("Stand"))
+        dn = name.substr(5);
+    else if (name.starts_with("Gate"))
+        dn = name.substr(4);
+    else if (name.starts_with("Ramp"))
+        dn = name.substr(4);
+    else
+        dn = name;
+
+    trim(dn);  // trim leading and trailing whitespace
+
+    // delete stuff following and including a "({,;"
+    if ((int)dn.length() > max_len) {
+        const auto i = dn.find_first_of("({,;");
+        if (i != std::string::npos)
+            dn.resize(i);
+    }
+
+    trim(dn);  // trim leading and trailing whitespace
+
+    if ((int)dn.length() > max_len)
+        dn.clear();  // give up
+
+    return dn;
+}
+
+//------------------------------------------------------------------------------------
+
+// Dummy dataref accessor
+static float DummyDgsFloat([[maybe_unused]] void* ref) {
+    return 0.0f;
+}
+
+static bool ev100_probed = false;
+static XPLMDataRef ev100_mtr_dr, zulu_time_sec_dr, percent_lights_dr;
+XPLMDataRef zulu_time_minutes_dr, zulu_time_hours_dr;
+std::string dyn_display_obj_dir;
+
+bool Initialize(const std::string& res_dir) {
+    zulu_time_sec_dr = XPLMFindDataRef("sim/cockpit2/clock_timer/zulu_time_seconds");
+    zulu_time_minutes_dr = XPLMFindDataRef("sim/cockpit2/clock_timer/zulu_time_minutes");
+    zulu_time_hours_dr = XPLMFindDataRef("sim/cockpit2/clock_timer/zulu_time_hours");
+    percent_lights_dr = XPLMFindDataRef("sim/cockpit2/lights/percent_lights_on");
+    ground_speed_dr = XPLMFindDataRef("sim/flightmodel/position/groundspeed");
+
+    // register datarefs
+    for (int i = 0; i < DGS_DR_NUM; i++)
+        XPLMRegisterDataAccessor(dgs_dlist_dr[i], xplmType_Float, 0, NULL, NULL, DummyDgsFloat, NULL, NULL, NULL, NULL,
+                                NULL, NULL, NULL, NULL, NULL, NULL, 0);
+
+    if (!InitMarshaller(res_dir) || !InitSafedock_T2_24(res_dir) || !InitSafedock_X(res_dir)) {
+        LogMsg("init failure: Can't load DGS objects");
+        return false;
+    }
+
+    return true;
+}
+
+void Finalize() {
+    // wait for any async logo download to finish before we finalize the dyn_display
+    while (logo::CheckAsyncDownload()) {
+        LogMsg("... waiting for logo async download to finish");
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+
+    DynDisplay::Finalize();
+}
+
+float VDGSBrightness() noexcept {
+    // private datarefs are usually intialized late, so we probe here when we actually need it for the first time
+    if (!ev100_probed) {
+        ev100_mtr_dr = XPLMFindDataRef("sim/private/controls/photometric/ev100");
+        if (ev100_mtr_dr)
+            LogMsg("ev100 dataref mapped");
+        else
+            LogMsg("ev100 dataref not found, using percent_lights_on as fallback for brightness");
+
+        ev100_probed = true;
+    }
+
+    if (ev100_mtr_dr) {
+        // nits = 2^(ev100 - 3)
+        // = exp(ln(2) *(ev100 -3))
+        // as we have a additional and unknown function that blends albedo + lit texture
+        // we use exp(a * (ev100 -b))
+        // it looks like ev100 > 9 albedo already dominates
+        static constexpr float a = 0.7f;
+        static constexpr float b = 3.0f;
+        static constexpr float kMaxNits = 8000.0f;    // defined in the .obj file
+        float ev100 = XPLMGetDataf(ev100_mtr_dr);
+        float nits = std::exp(a * (ev100 - b));
+        float vdgs_brightness = std::clamp(nits / kMaxNits, kMinBrightness, 1.0f);
+        // LogMsg("ev100: %0.2f, raw nits: %0.2f, vdgs_brightness: %0.2f, vdgs nits: %0.2f", ev100, nits, vdgs_brightness, vdgs_brightness * kMaxNits);
+        return vdgs_brightness;
+    } else {
+        // fallback: use percent_lights_on
+        return kMinBrightness + (1.0f - kMinBrightness) * std::pow(1.0f - XPLMGetDataf(percent_lights_dr), 6.0f);
+    }
+}
+
+void DGSFillUTCBrightness(float* drefs) noexcept{
+    // a poor man's cache
+    static int zm, zh, zs_prev = -1;
+    static float vdgs_brightness;
+
+    int zs = XPLMGetDatai(zulu_time_sec_dr);
+    if (zs != zs_prev) {
+        zs_prev = zs;
+        zm = XPLMGetDatai(zulu_time_minutes_dr);
+        zh = XPLMGetDatai(zulu_time_hours_dr);
+
+         vdgs_brightness = VDGSBrightness();
+    }
+
+    drefs[DGS_DR_UTC_M0] = zm % 10;
+    drefs[DGS_DR_UTC_M1] = zm / 10;
+    drefs[DGS_DR_UTC_H0] = zh % 10;
+    drefs[DGS_DR_UTC_H1] = zh / 10;
+    drefs[DGS_DR_VDGS_BRIGHTNESS] = vdgs_brightness;
+}
+
+void DGSFillEqStatus(float* drefs, const EqStatus& eq_status) noexcept{
+    drefs[DGS_DR_CHK] = eq_status.chocks;
+    drefs[DGS_DR_GPU] = eq_status.gpu;
+    drefs[DGS_DR_PCA] = eq_status.pca;
+    drefs[DGS_DR_PBB] = eq_status.pbb;
+}
+
+} // namespace dgs

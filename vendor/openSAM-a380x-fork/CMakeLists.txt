@@ -1,0 +1,173 @@
+cmake_minimum_required(VERSION 3.20)
+project(openSAM LANGUAGES CXX C)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# ==============================================================================
+# Configurable paths
+# ==============================================================================
+set(SDK "${CMAKE_CURRENT_SOURCE_DIR}/../SDK" CACHE PATH "X-Plane SDK root")
+
+# ==============================================================================
+# Version header generation (mirrors Makefile.common logic)
+# ==============================================================================
+find_package(Git)
+set(OPENSAM_COMMIT "unknown")
+if(GIT_FOUND)
+    execute_process(COMMAND ${GIT_EXECUTABLE} log -1 --pretty=format:%h
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE OPENSAM_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
+set(VERSION_SHORT "unknown")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/version.mak")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/version.mak" _ver_mak)
+    if(_ver_mak MATCHES "VERSION=([^\r\n]+)")
+        set(VERSION_SHORT "${CMAKE_MATCH_1}")
+    endif()
+endif()
+set(VERSION_L "${VERSION_SHORT} ${OPENSAM_COMMIT}")
+set(_vh "${CMAKE_CURRENT_SOURCE_DIR}/version.h")
+set(_vh_content "// generated file!\n#define VERSION \"${VERSION_L}\"\n#define VERSION_SHORT \"${VERSION_SHORT}\"\n")
+if(EXISTS "${_vh}")
+    file(READ "${_vh}" _vh_existing)
+    if(NOT _vh_existing STREQUAL _vh_content)
+        file(WRITE "${_vh}" "${_vh_content}")
+    endif()
+else()
+    file(WRITE "${_vh}" "${_vh_content}")
+endif()
+
+
+SET(IMGUI_SRCS
+    third-party/imgui/imgui.cpp
+    third-party/imgui/imgui_draw.cpp
+    third-party/imgui/imgui_widgets.cpp
+    third-party/imgui/imgui_tables.cpp
+    third-party/imgui/misc/cpp/imgui_stdlib.cpp
+    ImgWindow/ImgWindow.cpp
+    ImgWindow/ImgFontAtlas.cpp
+)
+
+# ==============================================================================
+# Sources
+# ==============================================================================
+add_library(openSAM SHARED opensam.cpp autodgs_airport.cpp adgs_api.cpp seasons.cpp simbrief.cpp
+    os_airport.cpp samjw.cpp jwctrl.cpp os_anim.cpp scenery.cpp read_wav.cpp
+    os_plane.cpp my_plane.cpp
+    mpadapter.cpp mpadapter_xpilot.cpp mpadapter_tgxp.cpp mpadapter_lt.cpp mpadapter_vat.cpp
+    dgs/apt_airport.cpp dgs/dgs.cpp dgs/plane.cpp dgs/airport.cpp dgs/marshaller.cpp
+    dgs/safedock_t2_24.cpp dgs/safedock_x.cpp dgs/dyn_display.cpp dgs/airline_logo.cpp
+    sam1_dgs.cpp
+    ui.cpp adgs_editor.cpp jw_editor.cpp
+    http_get.cpp simbrief.cpp log_msg.cpp
+    ${IMGUI_SRCS}
+    third-party/spng.c
+    third-party/pugixml-1.16/src/pugixml.cpp
+    third-party/LTAPI.cpp)
+set_target_properties(openSAM PROPERTIES PREFIX "" SUFFIX ".xpl")
+
+# ==============================================================================
+# Common compile settings
+# ==============================================================================
+target_include_directories(openSAM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/dgs
+    ${CMAKE_SOURCE_DIR}/ImgWindow
+    third-party/imgui
+    third-party/imgui/misc/cpp
+    third-party
+    third-party/stb
+    third-party/pugixml-1.16/src
+    ${SDK}/CHeaders/XPLM
+)
+
+target_compile_definitions(openSAM PRIVATE
+    SPNG_STATIC XPLM200 XPLM210 XPLM300 XPLM301 XPLM400
+    DREF_PREFIX="opensam" PUGIXML_NO_XPATH
+)
+
+target_compile_options(openSAM PRIVATE -O3)
+
+# ==============================================================================
+# Platform specifics
+# ==============================================================================
+if(WIN32)
+    # Makefile.mgw64
+    target_compile_definitions(openSAM PRIVATE WINDOWS WIN32 IBM=1)
+    target_compile_options(openSAM PRIVATE
+        -Wpedantic -Wextra -Wall -fdiagnostics-color -Wno-format-overflow -Wno-format-truncation
+    )
+    # -static causes multiple definition of std::type_info on MinGW when building
+    # a shared module; --allow-multiple-definition resolves it (matches Makefile behavior)
+    target_link_options(openSAM PRIVATE
+        -static-libgcc -static -Wl,--allow-multiple-definition
+    )
+    target_link_libraries(openSAM PRIVATE
+        ${SDK}/Libraries/Win/XPLM_64.lib
+        winhttp
+        pthread
+        opengl32
+        z
+    )
+    install(TARGETS openSAM RUNTIME DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/openSAM-pkg/openSAM/win_x64")
+
+elseif(APPLE)
+    # Makefile.mac64 (native macOS or osxcross)
+    set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "Universal binary")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "macOS deployment target")
+
+    target_compile_definitions(openSAM PRIVATE APL=1)
+    target_compile_options(openSAM PRIVATE
+        -Wall -fPIC -fno-stack-protector -fvisibility=hidden -ffast-math -Wno-deprecated-declarations
+    )
+    target_link_options(openSAM PRIVATE
+        -rdynamic -fvisibility=hidden
+        -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/linkscript.mac
+    )
+    find_library(XPLM_FW     XPLM     PATHS "${SDK}/Libraries/Mac" REQUIRED)
+    target_link_libraries(openSAM PRIVATE ${XPLM_FW} "-framework OpenGL" "-framework Carbon" curl z)
+    install(TARGETS openSAM LIBRARY DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/openSAM-pkg/openSAM/mac_x64")
+
+elseif(UNIX)
+    # Makefile.lin64
+    target_compile_definitions(openSAM PRIVATE LIN=1)
+    target_compile_options(openSAM PRIVATE
+        -Wall -Wextra -Wno-format-overflow -Wno-format-truncation
+        -fPIC -fno-stack-protector
+    )
+    target_link_options(openSAM PRIVATE -rdynamic -nodefaultlibs)
+    target_link_libraries(openSAM PRIVATE GL curl z)
+    install(TARGETS openSAM LIBRARY DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/openSAM-pkg/openSAM/lin_x64")
+endif()
+
+# ==============================================================================
+# scenery_test (all platforms, matching Makefile.mgw64 test target)
+# ==============================================================================
+if (WIN32)
+    option(BUILD_TESTS "Build scenery_test" ON)
+endif()
+
+if(BUILD_TESTS)
+    add_executable(scenery_test
+        scenery_test.cpp
+        scenery.cpp
+        dgs/apt_airport.cpp
+        third-party/pugixml-1.16/src/pugixml.cpp
+        log_msg.cpp
+    )
+    target_include_directories(scenery_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third-party/pugixml-1.16/src
+        ${SDK}/CHeaders/XPLM
+    )
+    target_compile_definitions(scenery_test PRIVATE
+        XPLM200 XPLM210 XPLM300 XPLM301 XPLM400
+        LOCAL_DEBUGSTRING
+        $<IF:$<BOOL:${WIN32}>,WINDOWS WIN32 IBM=1,>
+        $<IF:$<BOOL:${APPLE}>,APL=1,>
+        $<IF:$<AND:$<BOOL:${UNIX}>,$<NOT:$<BOOL:${APPLE}>>>,LIN=1,>
+    )
+    target_compile_options(scenery_test PRIVATE -Wall -Wno-format-overflow)
+endif()

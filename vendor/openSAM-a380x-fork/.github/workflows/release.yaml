@@ -1,0 +1,313 @@
+name: Build and Release Executables
+
+# if the tag contains -test- the build is pushed into the build-test branch
+# so skunkcrafts does not see it
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Pandoc
+        run: sudo apt-get update && sudo apt-get install -y pandoc
+
+      - name: Create Header
+        run: |
+          curl -L https://raw.githubusercontent.com/sindresorhus/github-markdown-css/main/github-markdown.css -o github.css
+          echo '<style>' > header.html
+          cat github.css >> header.html
+          # Force the styles onto the body tag directly
+          echo 'body { box-sizing: border-box; min-width: 300px; max-width: 980px; margin: 0 auto; padding: 45px; }' >> header.html
+          echo '@media (max-width: 767px) { body { padding: 15px; } }' >> header.html
+          echo '</style>' >> header.html
+          echo '<article class="markdown-body">' > before.html
+          echo '</article>' > after.html
+
+          pandoc README.md \
+            -f gfm \
+            -t html \
+            --embed-resources \
+            --standalone \
+            --include-in-header=header.html \
+            --include-before-body=before.html \
+            --include-after-body=after.html \
+            --metadata title="README" \
+            -o README.html
+
+      - name: Upload Documentation Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: documentation
+          path: README.html
+
+  build-linux-macos:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # use oldest possible ubuntu version in order to avoid compatibility errors with libc
+        os: [ubuntu-24.04, macos-15]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get XPlane SDK + xplib
+        shell: bash
+        run: |
+            SDK_VERSION=411
+            curl -L "https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK${SDK_VERSION}.zip" -o "XPSDK${SDK_VERSION}.zip"
+            unzip XPSDK${SDK_VERSION}.zip
+            mv SDK ../
+            git clone https://github.com/hotbso/xplib.git ../xplib
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build gcc-14 g++-14 libcurl4-gnutls-dev libgl-dev libopengl-dev libopengl0
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure and build
+        shell: bash
+        run: |
+          TAG=${GITHUB_REF##*/}
+          if [ -n "$TAG" ]; then
+            echo "VERSION=$TAG" > version.mak
+          fi
+          CMAKE_EXTRA_ARGS=""
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            export CC=gcc-14
+            export CXX=g++-14
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            CMAKE_EXTRA_ARGS='-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0'
+          fi
+          cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=OFF \
+            ${CMAKE_EXTRA_ARGS} \
+            -S . -B build
+          cmake --build build
+          cmake --install build
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            BIN_PATH=$(find openSAM-pkg/openSAM/mac_x64 -name "*.xpl" | head -n 1)
+            if [ -z "$BIN_PATH" ]; then
+              echo "No macOS plugin binary found in openSAM-pkg/openSAM/mac_x64"
+              exit 1
+            fi
+            LIPO_INFO=$(lipo -info "$BIN_PATH")
+            echo "$LIPO_INFO"
+            echo "$LIPO_INFO" | grep -q "x86_64"
+            echo "$LIPO_INFO" | grep -q "arm64"
+          fi
+          tar cvf binary.tar openSAM-pkg/openSAM/*_x64
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-${{ matrix.os }}
+          path: binary.tar
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            unzip
+            git
+
+      - uses: actions/checkout@v6
+
+      - name: Get XPlane SDK + xplib
+        shell: msys2 {0}
+        run: |
+            SDK_VERSION=411
+            curl -L "https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK${SDK_VERSION}.zip" -o "XPSDK${SDK_VERSION}.zip"
+            unzip XPSDK${SDK_VERSION}.zip
+            mv SDK ../
+            git clone https://github.com/hotbso/xplib.git ../xplib
+
+      - name: Build Windows binaries
+        shell: msys2 {0}
+        run: |
+            TAG=${GITHUB_REF##*/}
+            if [ -n "$TAG" ]; then
+              echo "VERSION=$TAG" > version.mak
+            fi
+            cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTS=OFF \
+              -S . -B build
+            cmake --build build
+            cmake --install build
+            tar cvf binary.tar openSAM-pkg/openSAM/*_x64
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-windows
+          path: binary.tar
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [docs, build-linux-macos, build-windows]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: setup crc32 tool
+        shell: bash
+        run: |
+            sudo apt-get update
+            sudo apt-get install -y libarchive-zip-perl
+            TAG=${GITHUB_REF##*/}
+            if [ ! -z "$TAG" ]; then
+              echo "VERSION=$TAG" > version.mak
+            fi
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./build
+
+      - name: List artifacts
+        shell: bash
+        run: |
+            pwd
+            ls -lR ./build
+
+      - name: Consolidate platform builds
+        shell: bash
+        run: |
+            pwd
+            for t in ./build/*/binary.tar
+            do
+              tar xvf $t
+            done
+            cp ./build/documentation/README.html openSAM-pkg/
+            cp ./build/documentation/README.html openSAM-pkg/openSAM/
+            cp ./build/documentation/README.html openSAM-pkg/openSAM_Library/
+
+      - name: Prepare Skunkcrafts Updater
+        shell: bash
+        run: |
+            # at this point version.mak should have the version number
+            source version.mak
+
+            OPENSAM_ARTIFACT=openSAM-pkg
+            RELEASE_FOLDER=release
+            OPENSAM_FOLDER=$RELEASE_FOLDER/openSAM
+            OPENSAM_LIBRARY_FOLDER=$RELEASE_FOLDER/openSAM_Library
+
+            mkdir -p ${OPENSAM_FOLDER}
+            mkdir -p ${OPENSAM_FOLDER}/lua
+            mkdir -p ${OPENSAM_LIBRARY_FOLDER}
+
+            echo "=============== RELEASE FOLDER  ==============="
+            cp ${OPENSAM_ARTIFACT}/LICENSE $RELEASE_FOLDER/.
+            cp ${OPENSAM_ARTIFACT}/README.html $RELEASE_FOLDER/.
+            cp ${OPENSAM_ARTIFACT}/MisterX-License.jpg $RELEASE_FOLDER/.
+
+            echo "=============== OPEN SAM ARTIFACT ==============="
+            rsync -av  ${OPENSAM_ARTIFACT}/openSAM/ ${OPENSAM_FOLDER}/
+            cp -r openSAM-pkg/lua/* ${OPENSAM_FOLDER}/lua
+            cp ${OPENSAM_ARTIFACT}/LICENSE ${OPENSAM_FOLDER}/.
+            cp ${OPENSAM_ARTIFACT}/README.html ${OPENSAM_FOLDER}/.
+            ls -l ${OPENSAM_FOLDER}
+            echo
+
+            echo "=============== OPEN SAM LIBRARY ARTIFACT ==============="
+            rsync -av  ${OPENSAM_ARTIFACT}/openSAM_Library/ ${OPENSAM_LIBRARY_FOLDER}/
+            cp ${OPENSAM_ARTIFACT}/LICENSE ${OPENSAM_LIBRARY_FOLDER}/.
+            cp ${OPENSAM_ARTIFACT}/README.html ${OPENSAM_LIBRARY_FOLDER}/.
+            ls -l ${OPENSAM_LIBRARY_FOLDER}
+
+            ## skunkcrafts for openSAM_Library
+            sed -e "s|@FOLDER_NAME@|${OPENSAM_LIBRARY_FOLDER}|g" \
+              -e "s|@VERSION@|${VERSION}|g" \
+              -e "s|@NAME@|Library|g" \
+              skunkcrafts_updater.cfg.template > "${OPENSAM_LIBRARY_FOLDER}/skunkcrafts_updater.cfg"
+            sed -e "s|@FOLDER_NAME@|${OPENSAM_LIBRARY_FOLDER}|g" \
+              -e "s|@VERSION@|${VERSION}|g" \
+              -e "s|@NAME@|Library|g" \
+              skunkcrafts_updater_beta.cfg.template > "${OPENSAM_LIBRARY_FOLDER}/skunkcrafts_updater_beta.cfg"
+            ## skunkcrafts for openSAM
+            sed -e "s|@FOLDER_NAME@|${OPENSAM_FOLDER}|g" \
+              -e "s|@VERSION@|${VERSION}|g" \
+              -e "s|@NAME@||g" \
+              skunkcrafts_updater.cfg.template > "${OPENSAM_FOLDER}/skunkcrafts_updater.cfg"
+            sed -e "s|@FOLDER_NAME@|${OPENSAM_FOLDER}|g" \
+              -e "s|@VERSION@|${VERSION}|g" \
+              -e "s|@NAME@||g" \
+              skunkcrafts_updater_beta.cfg.template > "${OPENSAM_FOLDER}/skunkcrafts_updater_beta.cfg"
+
+            find ${OPENSAM_FOLDER}/ -type f ! \( -name '*skunkcrafts_updater*' -o -path '*skunkcrafts_updater*' \) -print0 | while IFS= read -r -d '' file; do
+              checksum_hex=$(crc32 "$file")
+              # Convert hex checksum to uint32 decimal
+              checksum_decimal=$((16#${checksum_hex}))
+              # Remove "release/" prefix from $file
+              modified_file="${file#${OPENSAM_FOLDER}/}"
+              echo "$modified_file|$checksum_decimal" >> ${OPENSAM_FOLDER}/skunkcrafts_updater_whitelist.txt
+              # Get file size in bytes
+              filesize=$(stat -c%s "$file")
+              echo "$modified_file|$filesize" >> ${OPENSAM_FOLDER}/skunkcrafts_updater_sizeslist.txt
+            done
+
+            find ${OPENSAM_LIBRARY_FOLDER}/ -type f ! \( -name '*skunkcrafts_updater*' -o -path '*skunkcrafts_updater*' \) -print0 | while IFS= read -r -d '' file; do
+              checksum_hex=$(crc32 "$file")
+              # Convert hex checksum to uint32 decimal
+              checksum_decimal=$((16#$checksum_hex))
+              # Remove "release/" prefix from $file
+              modified_file="${file#${OPENSAM_LIBRARY_FOLDER}/}"
+              echo "$modified_file|$checksum_decimal" >> ${OPENSAM_LIBRARY_FOLDER}/skunkcrafts_updater_whitelist.txt
+              # Get file size in bytes
+              filesize=$(stat -c%s "$file")
+              echo "$modified_file|$filesize" >> ${OPENSAM_LIBRARY_FOLDER}/skunkcrafts_updater_sizeslist.txt
+            done
+
+            echo "00_README.txt" > ${OPENSAM_FOLDER}/skunkcrafts_updater_blacklist.txt
+            echo "00_README.txt" > ${OPENSAM_LIBRARY_FOLDER}/skunkcrafts_updater_blacklist.txt
+
+            (cd ${RELEASE_FOLDER} && 7z a "${{ github.workspace }}/openSAM-${VERSION}.zip" *)
+
+            TAG=${GITHUB_REF##*/}
+            TARGET_BRANCH="release"
+            if [[ $TAG == *"-test-"* ]]     # if TAG contains -test-
+            then
+                echo "This is a just a build test"
+                TARGET_BRANCH="build-test"
+            elif [[ $TAG == *"-"* ]]        # if TAG contains -
+            then
+                echo "This is a beta release"
+                TARGET_BRANCH="beta"
+            fi
+
+            git checkout -b ${TARGET_BRANCH}
+            git config --global user.email "release@opensam.com"
+            git config --global user.name "GH Release"
+            git add release/
+            # force add otherwise ignored directories
+            git add -f release/openSAM/*_x64/
+            git commit -m "new ${TARGET_BRANCH} - ${TAG}"
+            git push -f -u origin ${TARGET_BRANCH}
+
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            ${{ github.workspace }}/openSAM*.zip
+          prerelease: ${{ contains(github.ref_name, '-') }}
